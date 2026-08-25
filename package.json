@@ -1,0 +1,35 @@
+{
+  "name": "ox-commander",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "总指挥智能体：把项目需求拆解后并行下发给多个编码智能体（TraeCode/Claude Code/Codex/Gemini），经构建+测试多轮硬性验证后交付",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "dev:electron": "tsc -b tsconfig.electron.json && cross-env OX_DEV_SERVER=1 electron .",
+    "build": "tsc -b && vite build && tsc -b tsconfig.electron.json",
+    "start": "electron .",
+    "test": "vitest run",
+    "typecheck": "tsc -b && tsc -b tsconfig.electron.json"
+  },
+  "dependencies": {
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zustand": "^4.5.2"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.0",
+    "@typescript-eslint/eslint-plugin": "^8.67.0",
+    "@typescript-eslint/parser": "^8.67.0",
+    "@vitejs/plugin-react": "^4.3.1",
+    "cross-env": "^7.0.3",
+    "electron": "^33.2.0",
+    "eslint": "^9.30.0",
+    "typescript": "^5.5.3",
+    "vite": "^5.4.0",
+    "vitest": "^4.1.11"
+  }
+}

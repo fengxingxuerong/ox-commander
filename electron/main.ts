@@ -1,0 +1,37 @@
+import { app, BrowserWindow } from "electron";
+import path from "node:path";
+import { registerIpc, attachWindow } from "./ipc";
+
+function createWindow() {
+  const win = new BrowserWindow({
+    width: 1440,
+    height: 900,
+    title: "OxCommander",
+    webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  attachWindow(win);
+
+  if (process.env.OX_DEV_SERVER) {
+    win.loadURL("http://localhost:5173");
+  } else {
+    win.loadFile(path.join(__dirname, "../../dist/index.html"));
+  }
+}
+
+app.whenReady().then(() => {
+  registerIpc();
+  createWindow();
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});
+
+app.on("activate", () => {
+  if (BrowserWindow.getAllWindows().length === 0) createWindow();
+});

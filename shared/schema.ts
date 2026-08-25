@@ -1,0 +1,117 @@
+import type { PrdDocument, Task } from "./types";
+
+type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
+
+export class SchemaValidationError extends Error {
+  constructor(public issues: string[]) {
+    super(`schema validation failed: ${issues.join("; ")}`);
+    this.name = "SchemaValidationError";
+  }
+}
+
+function isObject(v: JsonValue | undefined): v is { [k: string]: JsonValue } {
+  return typeof v === "object" && v !== null && !Array.isArray(v);
+}
+
+function requireString(obj: Record<string, JsonValue>, key: string, issues: string[]): string {
+  const v = obj[key];
+  if (typeof v !== "string" || v.trim() === "") {
+    issues.push(`${key} must be a non-empty string`);
+    return "";
+  }
+  return v;
+}
+
+function requireStringArray(
+  obj: Record<string, JsonValue>,
+  key: string,
+  issues: string[],
+): string[] {
+  const v = obj[key];
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) {
+    issues.push(`${key} must be an array of strings`);
+    return [];
+  }
+  return v as string[];
+}
+
+export function parsePrd(raw: unknown): PrdDocument {
+  if (!isObject(raw as JsonValue)) throw new SchemaValidationError(["root must be an object"]);
+  const obj = raw as Record<string, JsonValue>;
+  const issues: string[] = [];
+  const goal = requireString(obj, "goal", issues);
+  const features = requireStringArray(obj, "features", issues);
+  const techStack = requireStringArray(obj, "techStack", issues);
+  const acceptanceCriteria = requireStringArray(obj, "acceptanceCriteria", issues);
+  if (issues.length) throw new SchemaValidationError(issues);
+  return { goal, features, techStack, acceptanceCriteria };
+}
+
+const VALID_ROLES = new Set([
+  "frontend-dev",
+  "backend-dev",
+  "fullstack-dev",
+  "test-writer",
+  "docs-writer",
+]);
+
+interface RawTaskLike {
+  id: string;
+  title: string;
+  description: string;
+  zone: string;
+  dependencies: string[];
+  suggestedRole: string;
+}
+
+function parseTask(raw: Record<string, JsonValue>, index: number, issues: string[]): RawTaskLike {
+  const prefix = `tasks[${index}]`;
+  const id = requireString(raw, "id", issues);
+  const title = requireString(raw, "title", issues);
+  const description = requireString(raw, "description", issues);
+  let zone = requireString(raw, "zone", issues);
+  if (zone.includes("..")) {
+    issues.push(`${prefix}.zone must not contain path traversal`);
+    zone = "";
+  }
+  const deps = requireStringArray(raw, "dependencies", issues);
+  const role = requireString(raw, "suggestedRole", issues);
+  if (!VALID_ROLES.has(role)) {
+    issues.push(`${prefix}.suggestedRole "${role}" is not a known role`);
+  }
+  return { id, title, description, zone, dependencies: deps, suggestedRole: role };
+}
+
+export function parseTaskList(raw: unknown): Task[] {
+  if (!isObject(raw as JsonValue)) throw new SchemaValidationError(["root must be an object"]);
+  const obj = raw as Record<string, JsonValue>;
+  const issues: string[] = [];
+  const rawTasks = obj.tasks;
+  if (!Array.isArray(rawTasks) || rawTasks.length === 0) {
+    throw new SchemaValidationError(["tasks must be a non-empty array"]);
+  }
+  const tasks = rawTasks.map((t, i) => {
+    if (!isObject(t)) {
+      issues.push(`tasks[${i}] must be an object`);
+      return {
+        id: "",
+        title: "",
+        description: "",
+        zone: "",
+        dependencies: [] as string[],
+        suggestedRole: "",
+      };
+    }
+    return parseTask(t, i, issues);
+  });
+  const ids = new Set(tasks.map((t) => t.id));
+  for (const t of tasks) {
+    for (const dep of t.dependencies) {
+      if (!ids.has(dep)) {
+        issues.push(`task "${t.id}" depends on unknown task "${dep}"`);
+      }
+    }
+  }
+  if (issues.length) throw new SchemaValidationError(issues);
+  return tasks.map((t) => ({ ...t, dependencies: [...new Set(t.dependencies)] }));
+}
