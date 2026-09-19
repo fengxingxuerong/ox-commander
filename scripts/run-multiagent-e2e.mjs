@@ -26,26 +26,6 @@ function loadDotEnv() {
 }
 loadDotEnv();
 
-const LOOMY_MANIFEST = {
-  id: "loomy",
-  displayName: "Loomy 工程师",
-  adapter: "http-bridge",
-  entry: { kind: "http", baseUrl: "http://127.0.0.1:8931" },
-  capabilities: {
-    protocolVersion: "ox-agent/2",
-    roles: ["backend-dev", "fullstack-dev"],
-    zoneGlobs: ["src/loomy", "src/loomy/**"],
-    supports: ["read", "edit", "create"],
-    artifactKinds: ["files"],
-    maxConcurrency: 1,
-    selfIsolated: false,
-  },
-  credential: { kind: "none" },
-  limits: { runDeadlineMs: 420_000, idleTimeoutMs: 120_000, maxStdoutBytes: 2_097_152 },
-  priority: 50,
-  enabled: true,
-};
-
 const WORKSPACE_SCRIPTS = {
   "build.js": [
     "const { execFileSync } = require('node:child_process');",
@@ -130,6 +110,30 @@ const HARD_REQUIREMENT = [
 
 const hard = process.argv.includes("--hard");
 const requirement = hard ? HARD_REQUIREMENT : SIMPLE_REQUIREMENT;
+
+// The manifest's zoneGlobs MUST track the requirement's reserved zone, or the
+// capability router will hard-exclude loomy from every task (verified live:
+// a declared-zones-don't-cover-task agent is silently filtered out).
+const LOOMY_ZONE = hard ? "src/calc" : "src/loomy";
+const LOOMY_MANIFEST = {
+  id: "loomy",
+  displayName: "Loomy 工程师",
+  adapter: "http-bridge",
+  entry: { kind: "http", baseUrl: "http://127.0.0.1:8931" },
+  capabilities: {
+    protocolVersion: "ox-agent/2",
+    roles: ["backend-dev", "fullstack-dev"],
+    zoneGlobs: [LOOMY_ZONE, `${LOOMY_ZONE}/**`],
+    supports: ["read", "edit", "create"],
+    artifactKinds: ["files"],
+    maxConcurrency: 1,
+    selfIsolated: false,
+  },
+  credential: { kind: "none" },
+  limits: { runDeadlineMs: 420_000, idleTimeoutMs: 120_000, maxStdoutBytes: 2_097_152 },
+  priority: 50,
+  enabled: true,
+};
 
 const spec = {
   requirement,
