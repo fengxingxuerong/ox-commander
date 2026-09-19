@@ -74,6 +74,20 @@ POST {baseUrl}{runsPath}/{id}/abort           → 2xx
 事件流采用**轮询**（`pollMs`，默认 500ms）而非 SSE，保持零依赖、易测试；
 事件 `kind` 取 `log` / `completed` / `failed` / `aborted`。
 
+### GUI 智能体（如 Marvis）怎么接
+
+没有 CLI 的桌面智能体走 **HTTP 桥接**：让它在本地起一个实现上面四个接口的小服务
+（参考 `scripts/loomy-bridge.mjs`，约 200 行），然后二选一注册：
+
+1. **运行时注册（推荐，不用重启）**：OxCommander → 设置 → 智能体池 → 粘贴 manifest JSON。
+2. **声明式注册**：把填好的 JSON 存为 `%APPDATA%\OxCommander\agents.d\marvis.json`，重启自动加载。
+
+模板见 `marvis.example.json`（`.example.json` 永远不会被加载，需去掉后缀）。
+需要按 Marvis 实际能力改的三处：`entry.baseUrl`（它的服务端口）、
+`capabilities.zoneGlobs`（允许它工作的目录）、`capabilities.roles`。
+注册后立刻在智能体池里点「🩺 健康检查」，显示「可达」即接入成功；
+之后能力路由会自动把命中其 zone/角色的任务派给它。
+
 ## 示例
 
 - `codex.example.json` — 子进程型（Codex CLI）

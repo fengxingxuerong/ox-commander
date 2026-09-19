@@ -105,14 +105,34 @@ const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ox-multiagent-"));
 ensureWorkspace(workspace);
 console.log("workspace:", workspace);
 
+const SIMPLE_REQUIREMENT = [
+  "做一个双模块演示工具：",
+  "① 在 src/app 模块实现 src/app/greet.js（CommonJS 导出 greet(name)，返回 '你好, ' + name + '!'）;",
+  "② 在 src/loomy 模块实现 src/loomy/math.js（CommonJS 导出 add(a,b) 与 mul(a,b)）;",
+  "③ 在 tests/ 下用 node:test 写测试：greet 至少 2 个用例、math 至少 4 个用例，测试文件放 tests/greet.test.js 与 tests/math.test.js。",
+  "禁止第三方依赖；禁止修改 package.json 与 ox-scripts 目录。",
+].join("\n");
+
+/**
+ * Hard mode (--hard): 6 tasks / 3 zones / cross-agent dependency — the src/calc
+ * zone is reserved for the loomy bridge agent, src/text goes to the builtin
+ * executor, and src/index.js + tests depend on BOTH modules, so any interface
+ * drift between the two agents surfaces in VERIFICATION.
+ */
+const HARD_REQUIREMENT = [
+  "做一个工具集合项目，接口契约必须严格遵守：",
+  "① 在 src/calc 模块实现 src/calc/calc.js：CommonJS 导出 { add, sub, mul, divide }；divide(a,b) 当 b===0 时必须 throw new Error('division by zero')，其余为标准四则运算。",
+  "② 在 src/text 模块实现 src/text/text.js：CommonJS 导出 { toKebab, toCamel }；toKebab('HelloWorldTest') === 'hello-world-test'；toCamel('hello-world-test') === 'helloWorldTest'。",
+  "③ 在 src 下实现 src/index.js：module.exports = { calc: require('./calc/calc'), text: require('./text/text') }，作为聚合入口（依赖①②完成后进行）。",
+  "④ 在 tests/ 下用 node:test 写测试：tests/calc.test.js 至少 6 个用例（必须覆盖 divide 除零抛错）、tests/text.test.js 至少 4 个用例、tests/index.test.js 至少 2 个用例验证聚合入口转发正确。",
+  "禁止第三方依赖；禁止修改 package.json 与 ox-scripts 目录。",
+].join("\n");
+
+const hard = process.argv.includes("--hard");
+const requirement = hard ? HARD_REQUIREMENT : SIMPLE_REQUIREMENT;
+
 const spec = {
-  requirement: [
-    "做一个双模块演示工具：",
-    "① 在 src/app 模块实现 src/app/greet.js（CommonJS 导出 greet(name)，返回 '你好, ' + name + '!'）;",
-    "② 在 src/loomy 模块实现 src/loomy/math.js（CommonJS 导出 add(a,b) 与 mul(a,b)）;",
-    "③ 在 tests/ 下用 node:test 写测试：greet 至少 2 个用例、math 至少 4 个用例，测试文件放 tests/greet.test.js 与 tests/math.test.js。",
-    "禁止第三方依赖；禁止修改 package.json 与 ox-scripts 目录。",
-  ].join("\n"),
+  requirement,
   projectRoot: workspace,
   agents: [LOOMY_MANIFEST],
   maxParallelRuns: 2,
