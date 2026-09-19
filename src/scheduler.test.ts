@@ -29,7 +29,6 @@ function adapterWith(id: string, ok: boolean, opts?: { probe?: boolean; dispatch
       opts?.handles?.push(handle);
       return handle;
     },
-    // eslint-disable-next-line require-yield
     async *collect(handle) {
       yield { kind: "log", text: `working on ${handle.taskId}`, timestamp: Date.now() };
       if (ok) {
@@ -147,7 +146,6 @@ describe("Scheduler.runBatch", () => {
           fs.writeFileSync(path.join(root, "rogue/x.js"), "x", "utf8");
           return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
         },
-        // eslint-disable-next-line require-yield
         async *collect() {
           yield { kind: "completed" as const, text: "done", timestamp: Date.now() };
         },
@@ -180,7 +178,6 @@ describe("Scheduler.runBatch", () => {
           fs.writeFileSync(path.join(root, "src/core/b.js"), "b", "utf8");
           return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
         },
-        // eslint-disable-next-line require-yield
         async *collect() {
           yield { kind: "completed" as const, text: "done", timestamp: Date.now() };
         },

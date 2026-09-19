@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import { AgentsPanel } from "../components/AgentsPanel";
 import { getProvider, PROVIDER_CATALOG, SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
@@ -61,8 +61,14 @@ export function SettingsPage() {
     setKeySecurity(security);
   }, []);
 
+  // The effect below intentionally re-runs only when the *provider selection*
+  // changes, not on every keystroke into the draft. A ref carries the latest
+  // draft into the effect without widening the dependency list.
+  const draftRef = useRef(draft);
+  draftRef.current = draft;
+
   useEffect(() => {
-    void refreshKeyStatus(draft).catch(() => setKeyStatus([]));
+    void refreshKeyStatus(draftRef.current).catch(() => setKeyStatus([]));
   }, [draft.llmProvider, draft.llmPool, refreshKeyStatus]);
 
   const patch = (p: Partial<ProjectSettings>) => setDraft((d) => ({ ...d, ...p }));

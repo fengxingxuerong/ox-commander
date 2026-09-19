@@ -1,3 +1,18 @@
+/**
+ * Real-API smoke tests. Gated: they only run when OX_SMOKE=1 AND
+ * SENSENOVA_API_KEY is set, so plain `npm test` never touches the network.
+ *
+ * SOP for 429 (`insufficient_quota` / "exceeds tpm/rpm limit"): the SenseNova
+ * keys share ONE account-level sliding window, and other long-running
+ * pipelines on this machine consume the same window. A 429 here means
+ * throttling, NOT a broken key. Wait ≥5 minutes, then retry only the failing
+ * test once:
+ *
+ *   OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts -t "<test name>"
+ *
+ * Verified 2026-09-19: a forced-JSON case that 429'd twice (100s cooldown was
+ * not enough) passed on the first attempt after a ~5 minute cooldown.
+ */
 import { describe, expect, it } from "vitest";
 import { OpenAiCompatibleClient, createSensenovaFailoverClient } from "../shared/http-clients";
 import { chatJson } from "../shared/llm-client";

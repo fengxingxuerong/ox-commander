@@ -83,9 +83,12 @@ export class SettingsStore {
   constructor(private file: string) {}
 
   load(): ProjectSettings {
-    if (!fs.existsSync(this.file)) return { ...DEFAULT_SETTINGS };
+    if (!fs.existsSync(this.file)) return structuredClone(DEFAULT_SETTINGS);
     const parsed = JSON.parse(stripBom(fs.readFileSync(this.file, "utf8"))) as Partial<ProjectSettings>;
-    return { ...DEFAULT_SETTINGS, ...parsed };
+    // Clone the defaults so nested arrays (verificationCommands / enabledAgents /
+    // llmPool) are never shared with DEFAULT_SETTINGS: a caller mutating the
+    // loaded settings in place must not be able to poison process-wide defaults.
+    return { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
   }
 
   save(settings: ProjectSettings): void {
