@@ -108,13 +108,30 @@ const HARD_REQUIREMENT = [
   "禁止第三方依赖；禁止修改 package.json 与 ox-scripts 目录。",
 ].join("\n");
 
+/**
+ * Real mode (--real): a genuinely usable deliverable — a CSV statistics CLI.
+ * The loomy agent owns src/core (CSV parser + stats engine), the builtin
+ * executor owns report/cli/tests; final acceptance runs the delivered CLI on
+ * a sample CSV. Contracts below are cross-agent: every signature is binding.
+ */
+const REAL_REQUIREMENT = [
+  "做一个真实可用的命令行工具 csvstat：读取 CSV 文件，输出每列的统计报告。接口契约必须逐字遵守：",
+  "① 在 src/core 模块实现 src/core/csv.js：CommonJS 导出 { parseCsv(text) }；text 为 CSV 字符串，返回 string[][]；支持双引号字段（字段内可含逗号与换行），双引号转义为单个双引号；\\r\\n 与 \\n 均视为行分隔；忽略末尾空行；中文字段原样保留。",
+  "② 在 src/core 模块实现 src/core/stats.js：CommonJS 导出 { columnStats(rows) }；rows 为 string[][]；按列返回统计对象数组，每列对象形如 { index, type, total, missing, min, max, mean, unique }；type 为 'number' 当且仅当该列存在非空值且所有非空值 trim 后可被 Number() 解析为有限数字，否则为 'string'；missing 为空字符串计数；数值列 min/max 为该列最小/最大数字、mean 为平均值保留 2 位小数；字符串列 min/max/mean 为 null、unique 为非空值去重计数；全空列 type 为 'string' 且 unique 为 0。",
+  "③ 在 src/report 模块实现 src/report/report.js：CommonJS 导出 { renderReport(rows) }；返回多行字符串，每列一行，格式：col{index}: type={type} total={total} missing={missing} min={min} max={max} mean={mean}（数值列）或 col{index}: type={type} total={total} missing={missing} unique={unique}（字符串列）。",
+  "④ 在 src 下实现 src/cli.js：CommonJS 导出 { run(argv) }；argv[2] 为 CSV 文件路径，读取文件并 console.log 输出 renderReport 结果；文件不存在或未给参数时 console.error 提示并设置 process.exitCode = 1；仅当 require.main === module 时才自动执行。",
+  "⑤ 在 tests/ 下用 node:test 写测试：tests/csv.test.js 至少 5 个用例（覆盖带引号逗号字段、双引号转义、CRLF、末尾空行、中文字段）；tests/stats.test.js 至少 5 个用例（覆盖数值列、混合列、全空列、missing 计数、unique 计数）；tests/cli.test.js 至少 2 个用例（正常路径输出包含 col0；文件不存在时 exitCode 为 1，通过临时写文件与 try/finally 清理）。",
+  "禁止第三方依赖；禁止修改 package.json 与 ox-scripts 目录。",
+].join("\n");
+
 const hard = process.argv.includes("--hard");
-const requirement = hard ? HARD_REQUIREMENT : SIMPLE_REQUIREMENT;
+const real = process.argv.includes("--real");
+const requirement = real ? REAL_REQUIREMENT : hard ? HARD_REQUIREMENT : SIMPLE_REQUIREMENT;
 
 // The manifest's zoneGlobs MUST track the requirement's reserved zone, or the
 // capability router will hard-exclude loomy from every task (verified live:
 // a declared-zones-don't-cover-task agent is silently filtered out).
-const LOOMY_ZONE = hard ? "src/calc" : "src/loomy";
+const LOOMY_ZONE = real ? "src/core" : hard ? "src/calc" : "src/loomy";
 const LOOMY_MANIFEST = {
   id: "loomy",
   displayName: "Loomy 工程师",
@@ -130,7 +147,7 @@ const LOOMY_MANIFEST = {
     selfIsolated: false,
   },
   credential: { kind: "none" },
-  limits: { runDeadlineMs: 420_000, idleTimeoutMs: 120_000, maxStdoutBytes: 2_097_152 },
+  limits: { runDeadlineMs: 420_000, idleTimeoutMs: 180_000, maxStdoutBytes: 2_097_152 },
   priority: 50,
   enabled: true,
 };
@@ -148,7 +165,7 @@ const res = spawnSync(process.execPath, [headless], {
   input: JSON.stringify(spec),
   encoding: "utf8",
   maxBuffer: 64 * 1024 * 1024,
-  timeout: 14 * 60_000,
+  timeout: 25 * 60_000,
 });
 
 const lines = (res.stdout ?? "").split(/\r?\n/).filter((l) => l.trim().startsWith("{"));

@@ -41,7 +41,9 @@ const FORBIDDEN_FILES = ["package.json", "package-lock.json", ".env"];
 
 const runs = new Map();
 let counter = 0;
-const pool = buildLlmPool();
+// Executor-grade timeout: the pool default (120s brain timeout) is too tight
+// for long contract prompts under 429 backoff pressure — live-run lesson.
+const pool = buildLlmPool({ timeoutMs: 300_000 });
 
 function emit(run, kind, text) {
   run.events.push({ kind, text });
@@ -82,17 +84,20 @@ async function doRun(run) {
   try {
     emit(run, "log", `接单: ${task.title}（zone=${task.zone}）`);
     const prompt = [
-      `你是「Loomy 工程师」，OxCommander 多智能体平台的外聘执行者。`,
-      `任务：${task.title}`,
-      `说明：${task.description}`,
+      "你是「Loomy 工程师」，OxCommander 多智能体平台的外聘执行者。",
+      `任务：${task.title ?? ""}`,
+      `说明：${task.description ?? ""}`,
       `你的专属目录（zone）：${task.zone}（项目根：${task.projectRoot}）`,
-      ``,
-      `硬性规则：`,
+      task.repairContext?.errorLogDigest
+        ? `上一轮失败根因（务必避免重蹈覆辙）：${task.repairContext.errorLogDigest}`
+        : "",
+      "",
+      "硬性规则：",
       `1. 只允许创建/修改 ${task.zone}/ 目录内的文件；禁止触碰 node_modules、.git、.env、package.json、ox-scripts。`,
-      `2. 用 CommonJS（module.exports），禁止任何第三方依赖。`,
-      `3. 输出必须是且仅是一个 JSON 对象（不要 markdown 围栏、不要解释文字）：`,
+      "2. 代码用 CommonJS（module.exports），禁止任何第三方依赖。",
+      "3. 输出必须是且仅是一个 JSON 对象（不要 markdown 围栏、不要解释文字）：",
       `{"files":[{"path":"${task.zone}/xxx.js","content":"文件完整内容"}],"summary":"一句话总结"}`,
-    ].join("\n");
+    ].filter(Boolean).join("\n");
 
     const deadline = task.deadlineMs ?? 420_000;
     const chat = pool.chat({
@@ -100,12 +105,25 @@ async function doRun(run) {
       temperature: 0,
       maxTokens: 8192,
     });
+    const effectiveDeadline = Math.min(deadline, 300_000);
     const timer = new Promise((_, rej) =>
-      setTimeout(() => rej(new Error(`Loomy 超过 ${Math.round(deadline / 1000)}s 未完成`)), deadline),
+      setTimeout(() => rej(new Error(`Loomy 超过 ${Math.round(effectiveDeadline / 1000)}s 未完成`)), effectiveDeadline),
     );
-    const res = await Promise.race([chat, timer]);
+    const started = Date.now();
+    // 心跳：平台按 idleTimeoutMs 判定桥是否卡死（无事件即 idle），
+    // 长推理期间必须定期上报进度，否则 120s 就会被看门狗收割。
+    const model = "（推理中）";
+    const heartbeat = setInterval(() => {
+      emit(run, "log", `思考中… ${Math.round((Date.now() - started) / 1000)}s ${model}`);
+    }, 20_000);
+    let res;
+    try {
+      res = await Promise.race([chat, timer]);
+    } finally {
+      clearInterval(heartbeat);
+    }
     if (run.abortFlag) throw new Error("已中止");
-    emit(run, "log", `思考完成（model=${res.model ?? "?"}），落盘中…`);
+    emit(run, "log", `思考完成（${((Date.now() - started) / 1000).toFixed(1)}s，model=${res.model ?? "?"}），落盘中…`);
 
     const parsed = extractJson(res.content ?? "");
     const files = Array.isArray(parsed.files) ? parsed.files : [];
