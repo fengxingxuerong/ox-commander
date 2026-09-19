@@ -2,6 +2,8 @@ import { useEffect } from "react";
 import { useApp } from "./store";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
+import { PrdReviewPage } from "./pages/PrdReviewPage";
+import { SettingsPage } from "./pages/SettingsPage";
 
 export function App() {
   const page = useApp((s) => s.page);
@@ -13,8 +15,16 @@ export function App() {
     return api_unsubscribe(handleEvent);
   }, [handleEvent, refreshProjects]);
 
-  if (page === "projects") return <ProjectsPage />;
-  return <BoardPage />;
+  switch (page) {
+    case "board":
+      return <BoardPage />;
+    case "prd-review":
+      return <PrdReviewPage />;
+    case "settings":
+      return <SettingsPage />;
+    default:
+      return <ProjectsPage />;
+  }
 }
 
 function api_unsubscribe(handler: (payload: Record<string, unknown>) => void): () => void {

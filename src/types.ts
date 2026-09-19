@@ -1,4 +1,32 @@
-import type { PrdDocument, Stage, TaskStatus, VerificationReport } from "../shared/types";
+import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
+import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
+
+/** Serializable agent summary shown in the settings panel (no credentials). */
+export interface AgentSummary {
+  id: string;
+  displayName: string;
+  adapter: AgentManifest["adapter"];
+  source: "builtin" | "declared" | "agents.d";
+  enabled: boolean;
+  /** True when capabilities were inferred from a v1 adapter. */
+  inferredLegacy: boolean;
+  priority: number;
+  capabilities: Required<AgentCapabilities>;
+  limits: AgentLimits;
+  credentialKind: string;
+}
+
+export interface AgentListResult {
+  agents: AgentSummary[];
+  manifestDir: string;
+  manifestErrors: Array<{ file: string; message: string }>;
+  skippedManifests: Array<{ id: string; reason: string }>;
+}
+
+export type AgentMutationResult =
+  | { ok: true; id: string; replaced?: boolean }
+  | { ok: true; drained: "drained" | "timeout" | "unsupported" }
+  | { ok: false; error: string };
 
 export interface TaskView {
   taskId: string;
@@ -6,26 +34,81 @@ export interface TaskView {
   zone: string;
   status: TaskStatus;
   attempts: number;
+  /** Failure digest from the most recent run; present when the last run failed. */
+  failureDigest?: string;
+  /** Which agent ran it last (P5 attribution). */
+  agentId?: string;
+  /** Coarse failure class from the last run, for grouping. */
+  errorClass?: string;
+  /** Duration of the last run. */
+  durationMs?: number;
 }
 
+/** Per-agent circuit state, as reported by the breaker. */
+export interface AgentCircuitStats {
+  state: "closed" | "open" | "half-open";
+  consecutiveFailures: number;
+  successes: number;
+  failures: number;
+  successRate?: number;
+  retryInMs: number;
+}
+
+export interface AuditRecordView {
+  ts: string;
+  phase: "run-start" | "run-end" | "batch-guard" | "agent-change" | "settings";
+  runId?: string;
+  taskId?: string;
+  agentId?: string;
+  zone?: string;
+  ok?: boolean;
+  durationMs?: number;
+  errorClass?: string;
+  changed?: number;
+  paths?: string[];
+  pathsTotal?: number;
+  detail?: string;
+}
+
+export interface EscalationView {
+  taskId: string;
+  summary: string;
+  resolved: boolean;
+}
+
+export type Page = "projects" | "board" | "prd-review" | "settings";
+
 export interface AppState {
-  page: "projects" | "board";
+  page: Page;
   projects: Array<{ id: string; name: string; stage: string; requirement: string }>;
   activeProjectId?: string;
   stage: Stage;
   logs: string[];
   tasks: Record<string, TaskView>;
   verification?: VerificationReport;
-  escalations: string[];
+  escalations: EscalationView[];
+  prd?: PrdDocument;
+  batches?: Task[][];
+  planning: boolean;
+  planningError?: string;
+  settings?: ProjectSettings;
   newProjectName: string;
   newRequirement: string;
 
-  setPage(page: "projects" | "board"): void;
+  setPage(page: Page): void;
   setNewProjectName(name: string): void;
   setNewRequirement(text: string): void;
   refreshProjects(): Promise<void>;
+  deleteProject(projectId: string): Promise<void>;
   createAndOpen(): Promise<void>;
-  startOrchestration(): Promise<void>;
+  runPlanning(): Promise<void>;
+  retryPlanning(): Promise<void>;
+  updatePrd(prd: PrdDocument): Promise<void>;
+  confirmAndExecute(): Promise<void>;
+  backToProjects(): void;
+  loadSettings(): Promise<void>;
+  saveSettings(settings: ProjectSettings): Promise<void>;
+  resolveEscalation(taskId: string, action: EscalationAction): Promise<void>;
   handleEvent(payload: Record<string, unknown>): void;
 }
 
@@ -34,13 +117,31 @@ declare global {
     oxCommander: {
       createProject(name: string, requirement: string): Promise<{ id: string }>;
       listProjects(): Promise<Array<{ id: string; name: string; stage: string; requirement: string }>>;
-      getSettings(): Promise<unknown>;
-      startOrchestration(projectId: string, projectRoot: string): Promise<void>;
+      openWorkspace(projectId: string): Promise<void>;
+      deleteProject(projectId: string): Promise<boolean>;
+      getSettings(): Promise<ProjectSettings>;
+      saveSettings(settings: ProjectSettings): Promise<boolean>;
+      getKeysStatus(envVars: string[]): Promise<Array<{ envVar: string; configured: boolean; source: "env" | "store" }>>;
+      getKeySecurity(): Promise<{ encryptedAtRest: boolean; plaintextCount: number }>;
+      saveKeys(entries: Array<{ envVar: string; value: string }>): Promise<number>;
+      testLlm(): Promise<{ ok: true; model: string } | { ok: false; error: string; status?: number }>;
+      runPlanning(projectId: string): Promise<{ prd: PrdDocument; batches: Task[][] }>;
+      updatePrd(projectId: string, prd: PrdDocument): Promise<{ prd: PrdDocument; batches: Task[][] }>;
+      startOrchestration(projectId: string): Promise<void>;
       cancel(): Promise<void>;
       pause(): Promise<void>;
       resume(): Promise<void>;
+      resolveEscalation(taskId: string, action: EscalationAction): Promise<boolean>;
+      listAgents(): Promise<AgentListResult>;
+      exampleManifest(): Promise<AgentManifest>;
+      registerAgent(manifest: unknown): Promise<AgentMutationResult>;
+      unregisterAgent(id: string, graceMs?: number): Promise<AgentMutationResult>;
+      toggleAgent(id: string, enabled: boolean): Promise<boolean>;
+      probeAgents(id?: string): Promise<Record<string, boolean>>;
+      getAgentStats(): Promise<{ circuits: Record<string, AgentCircuitStats> }>;
+      recentAudit(limit?: number): Promise<AuditRecordView[]>;
+      auditFiles(): Promise<string[]>;
       onEvent(handler: (payload: unknown) => void): () => void;
     };
-    __prdDraft?: PrdDocument;
   }
 }

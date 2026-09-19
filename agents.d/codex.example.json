@@ -1,0 +1,24 @@
+{
+  "id": "codex-cli",
+  "displayName": "Codex CLI",
+  "adapter": "cli",
+  "entry": {
+    "kind": "cli",
+    "command": "codex",
+    "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--prompt-file", "{{promptPath}}"],
+    "probeArgs": ["--version"]
+  },
+  "capabilities": {
+    "protocolVersion": "ox-agent/2",
+    "roles": ["backend-dev", "fullstack-dev", "test-writer"],
+    "zoneGlobs": ["src/**", "tests/**"],
+    "supports": ["read", "edit", "create", "run-test"],
+    "artifactKinds": ["files", "logs"],
+    "maxConcurrency": 2,
+    "selfIsolated": true
+  },
+  "credential": { "kind": "none" },
+  "limits": { "runDeadlineMs": 900000, "idleTimeoutMs": 120000, "maxStdoutBytes": 2097152 },
+  "priority": 10,
+  "enabled": true
+}

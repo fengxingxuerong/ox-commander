@@ -83,8 +83,9 @@ function parseTask(raw: Record<string, JsonValue>, index: number, issues: string
 }
 
 export function parseTaskList(raw: unknown): Task[] {
-  if (!isObject(raw as JsonValue)) throw new SchemaValidationError(["root must be an object"]);
-  const obj = raw as Record<string, JsonValue>;
+  // Models sometimes emit a bare task array instead of {"tasks": [...]}.
+  const obj: Record<string, JsonValue> = Array.isArray(raw) ? { tasks: raw } : (raw as Record<string, JsonValue>);
+  if (!isObject(obj as JsonValue)) throw new SchemaValidationError(["root must be an object or array"]);
   const issues: string[] = [];
   const rawTasks = obj.tasks;
   if (!Array.isArray(rawTasks) || rawTasks.length === 0) {

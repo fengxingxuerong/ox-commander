@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "module": "CommonJS",
+    "moduleResolution": "node",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "outDir": "dist-headless",
+    "rootDir": ".",
+    "sourceMap": true
+  },
+  "include": ["headless", "shared", "electron/engine", "electron/agents"]
+}

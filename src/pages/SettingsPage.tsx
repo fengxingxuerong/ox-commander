@@ -1,0 +1,352 @@
+import { useCallback, useEffect, useState } from "react";
+import { useApp } from "../store";
+import { AgentsPanel } from "../components/AgentsPanel";
+import { getProvider, PROVIDER_CATALOG, SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
+import { DEFAULT_SETTINGS, type ArbitrationMode, type ProjectSettings, type VerificationKind } from "../../shared/types";
+
+const KIND_LABELS: Record<VerificationKind, string> = {
+  build: "构建",
+  typecheck: "类型检查",
+  test: "测试",
+};
+
+interface KeyStatus {
+  envVar: string;
+  configured: boolean;
+  source: "env" | "store";
+}
+
+export function SettingsPage() {
+  const settings = useApp((s) => s.settings);
+  const loadSettings = useApp((s) => s.loadSettings);
+  const saveSettings = useApp((s) => s.saveSettings);
+  const setPage = useApp((s) => s.setPage);
+  const [draft, setDraft] = useState<ProjectSettings>(settings ?? DEFAULT_SETTINGS);
+  const [saving, setSaving] = useState(false);
+  const [keyStatus, setKeyStatus] = useState<KeyStatus[]>([]);
+  const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string>("");
+  const [keySecurity, setKeySecurity] = useState<{ encryptedAtRest: boolean; plaintextCount: number } | null>(null);
+
+  useEffect(() => {
+    void loadSettings();
+  }, [loadSettings]);
+
+  useEffect(() => {
+    if (settings) setDraft(settings);
+  }, [settings]);
+
+  const refreshKeyStatus = useCallback(async (current: ProjectSettings) => {
+    // Every provider in the pool needs a key input, not just the selected one —
+    // otherwise a pooled provider can only ever be configured via env vars.
+    const ids = [...new Set([current.llmProvider, ...(current.llmPool ?? [])])];
+    const vars = [
+      ...new Set(
+        ids.flatMap((id) => {
+          const p = getProvider(id);
+          return p.id === "sensenova" ? [...SENSENOVA_KEY_VARS] : p.apiKeyEnvVar ? [p.apiKeyEnvVar] : [];
+        }),
+      ),
+    ];
+    if (vars.length === 0) {
+      setKeyStatus([]);
+      return;
+    }
+    const [status, security] = await Promise.all([
+      window.oxCommander.getKeysStatus(vars),
+      window.oxCommander.getKeySecurity(),
+    ]);
+    setKeyStatus(status);
+    setKeySecurity(security);
+  }, []);
+
+  useEffect(() => {
+    void refreshKeyStatus(draft).catch(() => setKeyStatus([]));
+  }, [draft.llmProvider, draft.llmPool, refreshKeyStatus]);
+
+  const patch = (p: Partial<ProjectSettings>) => setDraft((d) => ({ ...d, ...p }));
+
+  const setCommand = (kind: VerificationKind, value: string) => {
+    const parts = value.trim().split(/\s+/).filter(Boolean);
+    const [command, ...args] = parts;
+    setDraft((d) => {
+      const others = d.verificationCommands.filter((c) => c.kind !== kind);
+      return command
+        ? { ...d, verificationCommands: [...others, { kind, command, args }] }
+        : { ...d, verificationCommands: others };
+    });
+  };
+
+  const commandFor = (kind: VerificationKind): string => {
+    const c = draft.verificationCommands.find((x) => x.kind === kind);
+    return c ? [c.command, ...c.args].join(" ") : "";
+  };
+
+  const toggleAgent = (id: string) => {
+    setDraft((d) => ({
+      ...d,
+      enabledAgents: d.enabledAgents.includes(id)
+        ? d.enabledAgents.filter((x) => x !== id)
+        : [...d.enabledAgents, id],
+    }));
+  };
+
+  const togglePoolMember = (id: string) => {
+    setDraft((d) => {
+      const pool = d.llmPool ?? [];
+      return { ...d, llmPool: pool.includes(id) ? pool.filter((x) => x !== id) : [...pool, id] };
+    });
+  };
+
+  const handleSaveKeys = async () => {
+    const entries = Object.entries(keyInputs)
+      .map(([envVar, value]) => ({ envVar, value }))
+      .filter((e) => e.value !== "");
+    if (entries.length === 0) return;
+    await window.oxCommander.saveKeys(entries);
+    setKeyInputs({});
+    await refreshKeyStatus(draft);
+  };
+
+  const clearKey = async (envVar: string) => {
+    await window.oxCommander.saveKeys([{ envVar, value: "" }]);
+    await refreshKeyStatus(draft);
+  };
+
+  const runTestLlm = async () => {
+    setTesting(true);
+    setTestResult("");
+    try {
+      const r = await window.oxCommander.testLlm();
+      setTestResult(r.ok ? `✅ 连接成功（模型：${r.model}）` : `❌ 失败：${r.error}`);
+    } catch (err) {
+      setTestResult(`❌ 失败：${(err as Error).message}`);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const provider = getProvider(draft.llmProvider);
+
+  return (
+    <div className="page">
+      <header className="page-header">
+        <button onClick={() => setPage("projects")}>← 返回</button>
+        <h1>设置</h1>
+      </header>
+
+      <section className="card">
+        <h2>LLM 提供商</h2>
+        <div className="form-row">
+          <label htmlFor="llm-provider">提供商</label>
+          <select
+            id="llm-provider"
+            value={draft.llmProvider}
+            onChange={(e) => patch({ llmProvider: e.target.value })}
+          >
+            {PROVIDER_CATALOG.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.displayName}（{p.defaultModel}）
+              </option>
+            ))}
+          </select>
+        </div>
+        {draft.llmProvider === "sensenova" && (
+          <p className="muted">
+            已启用 429 自动故障转移：每个 API Key 一组，组内轮换{" "}
+            {SENSENOVA_MODELS.join(" → ")}。
+          </p>
+        )}
+        <div className="btn-row">
+          <button disabled={testing} onClick={() => void runTestLlm()}>
+            {testing ? "测试中…" : "🔌 测试连接"}
+          </button>
+          {testResult && <span className={testResult.startsWith("✅") ? "ok-text" : "bad-text"}>{testResult}</span>}
+        </div>
+      </section>
+
+      <section className="card">
+        <h2>线路池（多 API 同时工作）</h2>
+        <p className="muted">
+          勾选的提供商共享 <strong>同一张</strong>故障转移表：某条线路 429/401 只冷却它自己，请求立刻落到下一条 ——
+          同 key 换模型 → 换 key → 换提供商，全程对调用方透明。
+        </p>
+        {PROVIDER_CATALOG.map((p) => (
+          <label key={p.id} className="agent-toggle">
+            <input
+              type="checkbox"
+              checked={(draft.llmPool ?? []).includes(p.id)}
+              onChange={() => togglePoolMember(p.id)}
+            />
+            {p.displayName}
+            <span className="muted"> · {p.defaultModel}</span>
+          </label>
+        ))}
+        <p className="muted">
+          商汤 = 3 密钥 × 4 模型 = <strong>12 条线路</strong>（deepseek-v4-flash / sensenova-6.8-flash-lite /
+          deepseek-v4-pro / glm-5.2）；AMD 端点实测只提供 MiniCPM5-2B（2B，作兜底）。
+          全部取消勾选则退回单一提供商模式。
+        </p>
+      </section>
+
+      <section className="card">
+        <h2>API Keys</h2>
+        {provider.id === "ollama" && <p className="muted">Ollama 为本地服务，无需密钥。</p>}
+        {keyStatus.map((k) => (
+          <div className="form-row key-row" key={k.envVar}>
+            <label htmlFor={`key-${k.envVar}`}>
+              {k.envVar}{" "}
+              <span className={`stage-chip ${k.configured ? "chip-ok" : "chip-missing"}`}>
+                {k.configured ? (k.source === "env" ? "环境变量" : "已保存") : "未配置"}
+              </span>
+            </label>
+            <div className="edit-row">
+              <input
+                id={`key-${k.envVar}`}
+                type="password"
+                placeholder={k.configured ? "••••••••（输入新值覆盖，留空不变）" : "粘贴 API Key"}
+                value={keyInputs[k.envVar] ?? ""}
+                onChange={(e) => setKeyInputs((m) => ({ ...m, [k.envVar]: e.target.value }))}
+              />
+              {k.configured && k.source === "store" && (
+                <button className="danger small" title="清除已保存的密钥" onClick={() => void clearKey(k.envVar)}>
+                  ✕
+                </button>
+              )}
+            </div>
+          </div>
+        ))}
+        {Object.keys(keyInputs).some((v) => keyInputs[v] !== "") && (
+          <button className="primary" onClick={() => void handleSaveKeys()}>
+            保存密钥
+          </button>
+        )}
+        <p className="muted">
+          密钥保存在应用数据目录（keys.json），不会进入代码仓库。
+          {keySecurity?.encryptedAtRest
+            ? " 已通过系统钥匙串加密存储。"
+            : " 当前系统钥匙串不可用，密钥以明文保存，请自行限制文件权限。"}
+          {keySecurity && keySecurity.plaintextCount > 0 && keySecurity.encryptedAtRest
+            ? ` 其中 ${keySecurity.plaintextCount} 条为旧版明文，重新保存后会自动加密。`
+            : ""}
+        </p>
+      </section>
+
+      <section className="card">
+        <h2>硬性验证命令</h2>
+        <p className="muted">留空表示跳过该项检查。</p>
+        {(Object.keys(KIND_LABELS) as VerificationKind[]).map((kind) => (
+          <div className="form-row" key={kind}>
+            <label htmlFor={`cmd-${kind}`}>{KIND_LABELS[kind]}</label>
+            <input
+              id={`cmd-${kind}`}
+              value={commandFor(kind)}
+              onChange={(e) => setCommand(kind, e.target.value)}
+              placeholder="npm run build"
+            />
+          </div>
+        ))}
+      </section>
+
+      <section className="card">
+        <h2>执行策略</h2>
+        <div className="form-row">
+          <label htmlFor="max-repair">最大重修轮数</label>
+          <input
+            id="max-repair"
+            type="number"
+            min={0}
+            max={10}
+            value={draft.maxRepairRounds}
+            onChange={(e) =>
+              patch({ maxRepairRounds: Math.max(0, Math.min(10, Number(e.target.value) || 0)) })
+            }
+          />
+        </div>
+        <div className="form-row">
+          <span>启用的智能体</span>
+          <div className="btn-row">
+            {["sensenova-api"].map((id) => (
+              <label key={id} className="agent-toggle">
+                <input
+                  type="checkbox"
+                  checked={draft.enabledAgents.includes(id)}
+                  onChange={() => toggleAgent(id)}
+                />
+                {id}
+              </label>
+            ))}
+          </div>
+          <p className="muted">SenseNova API 执行器：3 组密钥 × 3 个模型自动故障转移（429/5xx/超时自动切换）。</p>
+        </div>
+        <div className="form-row">
+          <label htmlFor="agent-router">
+            <input
+              id="agent-router"
+              type="checkbox"
+              checked={draft.agentRouter !== false}
+              onChange={(e) => patch({ agentRouter: e.target.checked })}
+            />
+            {" "}按能力分派任务（关闭后回到轮询分发）
+          </label>
+        </div>
+        <div className="form-row">
+          <label htmlFor="max-parallel">并行上限</label>
+          <input
+            id="max-parallel"
+            type="number"
+            min={0}
+            max={32}
+            value={draft.maxParallelRuns}
+            onChange={(e) =>
+              patch({ maxParallelRuns: Math.max(0, Math.min(32, Number(e.target.value) || 0)) })
+            }
+          />
+        </div>
+        <p className="muted">
+          同时运行的智能体数量上限（0 表示不限）。批内 zone 互斥只保证"不同目录可以并行"，
+          这个上限防止一个大批次把 API 配额打成 429。
+        </p>
+        <div className="form-row">
+          <label htmlFor="arbitration">zone 越权处置</label>
+          <select
+            id="arbitration"
+            value={draft.arbitration}
+            onChange={(e) => patch({ arbitration: e.target.value as ArbitrationMode })}
+          >
+            <option value="revert-batch">回滚越权改动（默认，最安全）</option>
+            <option value="quarantine">移入隔离区（保留现场证据）</option>
+            <option value="deny-all">保留文件但判失败</option>
+            <option value="report-only">仅记录日志</option>
+          </select>
+        </div>
+        <p className="muted">
+          智能体只应改动自己 zone 内的文件；越权改动默认会被回滚（内容备份在应用数据目录，不使用 git stash/checkout）。
+        </p>
+      </section>
+
+      <AgentsPanel />
+
+      <section className="card">
+        <button
+          className="primary"
+          disabled={saving || !settings}
+          onClick={() => void handleSave()}
+        >
+          {saving ? "保存中…" : "保存设置"}
+        </button>
+      </section>
+    </div>
+  );
+
+  async function handleSave() {
+    setSaving(true);
+    try {
+      await saveSettings(draft);
+      setPage("projects");
+    } finally {
+      setSaving(false);
+    }
+  }
+}

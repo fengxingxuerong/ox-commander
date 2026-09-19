@@ -87,13 +87,12 @@ export interface RunHandle {
   runId: string;
   agentId: string;
   taskId: string;
-  pid?: number;
 }
 
 export interface AgentMeta {
   id: string;
   name: string;
-  kind: "cli" | "ui";
+  kind: "api" | "ui";
 }
 
 export interface AgentAdapter {
@@ -114,11 +113,42 @@ export interface TaskPayload {
   repairContext?: { round: number; errorLogDigest: string };
 }
 
+/** User decision for an escalated (repair-exhausted) task. */
+export type EscalationAction = "skip" | "redispatch" | "abort";
+
+/**
+ * What to do when a batch touches files outside its declared zones.
+ * `report-only`/`deny-all` keep the historic behaviour (report and fail);
+ * `revert-batch` restores the workspace before failing; `quarantine` moves the
+ * offending files aside so the evidence survives.
+ */
+export type ArbitrationMode = "report-only" | "deny-all" | "revert-batch" | "quarantine";
+
 export interface ProjectSettings {
   maxRepairRounds: number;
   verificationCommands: VerificationCommand[];
   enabledAgents: string[];
   llmProvider: string;
+  /**
+   * Route tasks to agents by declared capability (role / zone / tags) instead of
+   * round-robin. Enabled by default; the pool stays on the legacy round-robin
+   * whenever no agent declares capabilities, so this is safe to leave on.
+   */
+  agentRouter: boolean;
+  /** Zone-violation handling; defaults to rolling the offending changes back. */
+  arbitration: ArbitrationMode;
+  /**
+   * Platform-wide ceiling on concurrently running agents. The pool may be wide,
+   * but the provider quota is not — a 10-task batch on a 3-key pool would
+   * otherwise stampede into 429s. `0` means unlimited.
+   */
+  maxParallelRuns: number;
+  /**
+   * Providers whose routes share one failover table, in preference order.
+   * SenseNova contributes 3 keys × 4 models = 12 routes; AMD adds one more.
+   * Empty ⇒ fall back to the single `llmProvider`.
+   */
+  llmPool: string[];
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {
@@ -128,6 +158,10 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
     { kind: "typecheck", command: "npm", args: ["run", "typecheck"] },
     { kind: "test", command: "npm", args: ["run", "test"] },
   ],
-  enabledAgents: ["claude-code"],
-  llmProvider: "deepseek",
+  enabledAgents: ["sensenova-api"],
+  llmProvider: "sensenova",
+  agentRouter: true,
+  arbitration: "revert-batch",
+  maxParallelRuns: 4,
+  llmPool: ["sensenova", "amd-radeon"],
 };

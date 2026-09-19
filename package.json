@@ -2,16 +2,17 @@
   "name": "ox-commander",
   "private": true,
   "version": "0.1.0",
-  "type": "module",
-  "description": "总指挥智能体：把项目需求拆解后并行下发给多个编码智能体（TraeCode/Claude Code/Codex/Gemini），经构建+测试多轮硬性验证后交付",
+  "description": "总指挥智能体：把项目需求拆解后按 zone 并行下发给 SenseNova API 执行器（3 密钥 × 3 模型故障转移），经构建+测试多轮硬性验证后交付",
   "main": "dist-electron/electron/main.js",
   "scripts": {
     "dev": "vite",
     "dev:electron": "tsc -b tsconfig.electron.json && cross-env OX_DEV_SERVER=1 electron .",
     "build": "tsc -b && vite build && tsc -b tsconfig.electron.json",
     "start": "electron .",
+    "build:headless": "tsc -b tsconfig.headless.json",
     "test": "vitest run",
-    "typecheck": "tsc -b && tsc -b tsconfig.electron.json"
+    "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json",
+    "verify": "npm run typecheck && npm test && npm run build && npm run build:headless"
   },
   "dependencies": {
     "react": "^18.3.1",

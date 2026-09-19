@@ -1,0 +1,25 @@
+{
+  "id": "workbuddy-bridge",
+  "displayName": "WorkBuddy（HTTP 桥接）",
+  "adapter": "http-bridge",
+  "entry": {
+    "kind": "http",
+    "baseUrl": "http://127.0.0.1:8787",
+    "healthPath": "/health",
+    "runsPath": "/v1/runs",
+    "pollMs": 500
+  },
+  "capabilities": {
+    "protocolVersion": "ox-agent/2",
+    "roles": ["*"],
+    "zoneGlobs": ["src/**", "tests/**", "docs/**"],
+    "supports": ["read", "edit", "create", "review"],
+    "artifactKinds": ["files", "logs", "report"],
+    "maxConcurrency": 3,
+    "selfIsolated": true
+  },
+  "credential": { "kind": "bearerFile", "tokenFile": "%USERPROFILE%\\.ox\\workbuddy.token" },
+  "limits": { "runDeadlineMs": 600000, "idleTimeoutMs": 90000 },
+  "priority": 5,
+  "enabled": true
+}

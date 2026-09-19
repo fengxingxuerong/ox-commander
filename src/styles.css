@@ -106,9 +106,23 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
   padding: 10px;
   border-bottom: 1px solid var(--border);
   cursor: pointer;
+}
+
+.delete-btn {
+  padding: 2px 6px;
+  font-size: 12px;
+  border: none;
+  background: transparent;
+}
+
+.delete-btn:hover {
+  background: var(--bad);
+  color: #fff;
+  border-radius: 4px;
 }
 
 .stage-chip {
@@ -124,6 +138,11 @@ button:disabled {
   align-items: center;
   gap: 16px;
   margin-bottom: 16px;
+}
+
+.error-text {
+  color: var(--bad);
+  font-size: 12px;
 }
 
 .board-columns {
@@ -160,7 +179,8 @@ button:disabled {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  gap: 8px;
+  flex-wrap: wrap;
+  gap: 4px 8px;
   padding: 8px;
   border-radius: 6px;
   margin-bottom: 4px;
@@ -184,6 +204,33 @@ button:disabled {
   font-size: 12px;
   color: var(--muted);
   white-space: nowrap;
+}
+
+/* 展开式失败根因块：任务行与验证结果共用 */
+.failure-details {
+  flex-basis: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.failure-details summary {
+  cursor: pointer;
+  color: var(--bad);
+  user-select: none;
+}
+
+.failure-details pre {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 220px;
+  overflow-y: auto;
 }
 
 .log-card {
@@ -210,3 +257,218 @@ button:disabled {
 .escalation {
   border-color: #d97706;
 }
+
+.escalation-item {
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px dashed #e5e7eb;
+}
+
+.escalation-item:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.escalation-summary {
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  margin: 0 0 8px;
+  max-height: 180px;
+  overflow: auto;
+}
+
+.page-header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+button.ghost {
+  background: transparent;
+}
+
+.form-row {
+  display: grid;
+  grid-template-columns: 140px 1fr;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.form-row label {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+select {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text);
+  padding: 10px;
+  font-size: 14px;
+}
+
+.agent-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.agent-toggle input {
+  width: auto;
+  margin: 0;
+}
+
+.plain-list {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.9;
+}
+
+.batch-block {
+  border-left: 3px solid var(--accent);
+  padding-left: 12px;
+  margin-bottom: 16px;
+}
+
+.batch-block h4 {
+  margin: 4px 0 8px;
+}
+
+button.small {
+  padding: 4px 10px;
+  font-size: 13px;
+}
+
+.edit-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.edit-row input {
+  margin-bottom: 0;
+}
+
+.edit-list h4 {
+  margin: 12px 0 8px;
+}
+
+.edit-list .edit-row {
+  margin-bottom: 6px;
+}
+
+.task-detail {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 6px;
+}
+
+.task-detail-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+
+.task-detail-head:hover {
+  background: var(--bg);
+}
+
+.task-detail-body {
+  padding: 0 10px 10px;
+  border-top: 1px solid var(--border);
+}
+
+.task-detail-body p {
+  margin: 8px 0 0;
+  line-height: 1.7;
+}
+
+.loading-line {
+  color: var(--muted);
+}
+
+.small-log {
+  max-height: 200px;
+  min-height: 80px;
+  margin-top: 8px;
+}
+
+.chip-ok {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.chip-missing {
+  border-color: #d97706;
+  color: #d97706;
+}
+
+.ok-text {
+  color: var(--ok);
+}
+
+.bad-text {
+  color: var(--bad);
+}
+
+/* ── Agent pool panel (P2) ── */
+.agent-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 10px 0;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.agent-card .form-row {
+  align-items: flex-start;
+}
+
+.agent-meta {
+  font-size: 12px;
+  line-height: 1.7;
+  margin: 6px 0 0;
+}
+
+.manifest-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 8px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  resize: vertical;
+}
+
+.manifest-input:focus {
+  outline: 1px solid var(--accent);
+}
+
+.manifest-error-box {
+  margin: 10px 0;
+  padding-left: 10px;
+  border-left: 3px solid var(--bad);
+}
+
+/* Failure class, shown on the board next to the failing task. */
+.error-class {
+  color: #d97706;
+}
+

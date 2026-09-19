@@ -1,0 +1,42 @@
+name: verify
+
+# The one command that IS the gate: typecheck (3 tsconfigs) → tests → desktop
+# build → headless build. Keep this file thin — if it needs to know more than
+# `npm run verify`, the gate has drifted out of `package.json`.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Electron ships a ~100 MB binary we never launch here; the type definitions
+  # in node_modules are all the build needs.
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+jobs:
+  verify:
+    name: verify (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows matters: the sandbox has a taskkill path and the CLI adapter
+        # spawns .cmd shims, neither of which is exercised on Linux.
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Verify (typecheck + tests + builds)
+        run: npm run verify

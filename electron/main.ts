@@ -1,6 +1,20 @@
 import { app, BrowserWindow } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import { registerIpc, attachWindow } from "./ipc";
+
+// Software rendering is plenty for this board-style UI and keeps the app
+// alive on VMs / remote desktops where the GPU process dies on startup.
+app.disableHardwareAcceleration();
+
+function loadEnvFile(): void {
+  const envPath = path.join(app.getAppPath(), ".env");
+  if (!fs.existsSync(envPath)) return;
+  for (const line of fs.readFileSync(envPath, "utf-8").split(/\r?\n/)) {
+    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  }
+}
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -24,6 +38,7 @@ function createWindow() {
 }
 
 app.whenReady().then(() => {
+  loadEnvFile();
   registerIpc();
   createWindow();
 });

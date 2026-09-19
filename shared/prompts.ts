@@ -16,8 +16,8 @@ Respond with ONLY a JSON object (no markdown fences) matching:
 Rules:
 - goal: one sentence describing the deliverable.
 - features: 3-8 concrete, independently verifiable features.
-- techStack: concrete technologies; prefer mainstream, well-supported choices.
-- acceptanceCriteria: objective, machine-checkable criteria (build passes, tests pass, feature X works).
+- techStack: MUST stay inside the execution sandbox: Node.js (CommonJS modules), Node built-in modules and the built-in node:test runner only. NEVER propose Python, browsers/bundlers, or external npm packages — the workspace has no network installs and verification runs npm scripts backed by node only.
+- acceptanceCriteria: objective, machine-checkable criteria (build passes, tests pass, feature X works). Tests must be runnable via "npm test" with test files under tests/*.test.js using require("node:test").
 
 User requirement:
 ${userRequirement}`;
@@ -42,11 +42,18 @@ Respond with ONLY a JSON object (no markdown fences) matching:
 
 Rules:
 - id: short unique slug (e.g. "t1", "t2").
-- zone: directory area this task owns. Tasks touching the same zone cannot run in parallel, so partition zones to maximize parallelism while respecting dependencies.
+- zone: a concrete directory this task owns (e.g. "src/store", "tests/unit"). Tasks touching the same zone cannot run in parallel, so partition zones to maximize parallelism while respecting dependencies.
+- NEVER use "." or "" as a zone unless the task genuinely must add or change root-level files: "." claims the entire repository, blocks every other task in the batch, and disables zone-based protection for the whole tree.
 - dependencies: ids of tasks that must finish before this one starts.
 - description: detailed enough for an agent to implement without further questions, including file paths when possible.
 - suggestedRole must be one of: frontend-dev, backend-dev, fullstack-dev, test-writer, docs-writer.
 - Produce 3-10 tasks. Maximize the size of the first parallel batch.
+- Every element of "tasks" MUST be a complete OBJECT with all six fields (id, title, description, zone, dependencies, suggestedRole). Never use plain strings as task entries.
+- All code is CommonJS Node.js with no external npm packages; descriptions must not require Python, browsers, or any dependency installation.
+- Do not create or modify package.json, lockfiles or .env files: those paths are protected and any write to them is rejected.
+
+Example shape:
+{"tasks": [{"id": "t1", "title": "Scaffold config module", "description": "Create src/config/defaults.js exporting the default settings object.", "zone": "src/config", "dependencies": [], "suggestedRole": "fullstack-dev"}, {"id": "t2", "title": "Implement store", "description": "...", "zone": "src/store", "dependencies": ["t1"], "suggestedRole": "backend-dev"}]}
 
 PRD:
 ${JSON.stringify(prd, null, 2)}`;

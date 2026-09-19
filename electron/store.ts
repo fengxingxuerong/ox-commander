@@ -2,6 +2,11 @@ import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
 
+/** Tolerate UTF-8 BOM written by external tools (e.g. PowerShell Set-Content). */
+function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 interface ProjectRecord {
   id: string;
   name: string;
@@ -25,7 +30,7 @@ export class ProjectStore {
 
   private readAll(): ProjectRecord[] {
     if (!fs.existsSync(this.file)) return [];
-    return JSON.parse(fs.readFileSync(this.file, "utf8")) as ProjectRecord[];
+    return JSON.parse(stripBom(fs.readFileSync(this.file, "utf8"))) as ProjectRecord[];
   }
 
   private writeAll(records: ProjectRecord[]): void {
@@ -62,6 +67,16 @@ export class ProjectStore {
   get(id: string): ProjectRecord | undefined {
     return this.readAll().find((r) => r.id === id);
   }
+
+  /** Removes the record; returns true when it existed. */
+  remove(id: string): boolean {
+    const all = this.readAll();
+    const idx = all.findIndex((r) => r.id === id);
+    if (idx < 0) return false;
+    all.splice(idx, 1);
+    this.writeAll(all);
+    return true;
+  }
 }
 
 export class SettingsStore {
@@ -69,7 +84,7 @@ export class SettingsStore {
 
   load(): ProjectSettings {
     if (!fs.existsSync(this.file)) return { ...DEFAULT_SETTINGS };
-    const parsed = JSON.parse(fs.readFileSync(this.file, "utf8")) as Partial<ProjectSettings>;
+    const parsed = JSON.parse(stripBom(fs.readFileSync(this.file, "utf8"))) as Partial<ProjectSettings>;
     return { ...DEFAULT_SETTINGS, ...parsed };
   }
 
