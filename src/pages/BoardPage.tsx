@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import { STAGE_ORDER } from "../../shared/types";
 
@@ -37,6 +37,20 @@ export function BoardPage() {
   const resume = () => void window.oxCommander.resume();
   const setPage = useApp((s) => s.setPage);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  // Terminal behavior: the log view follows new output, unless the operator
+  // has scrolled up to inspect history — then pinning pauses until they
+  // scroll back near the bottom.
+  const logRef = useRef<HTMLPreElement>(null);
+  const logPinnedRef = useRef(true);
+  const handleLogScroll = () => {
+    const el = logRef.current;
+    if (!el) return;
+    logPinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
+  useEffect(() => {
+    const el = logRef.current;
+    if (el && logPinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [logs]);
   const openWorkspace = async () => {
     if (!activeProjectId) return;
     setWorkspaceError(null);
@@ -103,7 +117,7 @@ export function BoardPage() {
         <main className="col col-center">
           <section className="card log-card">
             <h3>执行日志</h3>
-            <pre className="log-view">{logs.join("\n") || "等待开始…"}</pre>
+            <pre ref={logRef} onScroll={handleLogScroll} className="log-view">{logs.join("\n") || "等待开始…"}</pre>
           </section>
         </main>
 

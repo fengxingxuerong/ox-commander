@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import type { PrdDocument, Task } from "../../shared/types";
 
@@ -87,6 +87,12 @@ export function PrdReviewPage() {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
+  // 规划日志自动跟随新输出（终端行为）
+  const logRef = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [logs]);
 
   if (!prd || planningError) {
     return (
@@ -98,7 +104,7 @@ export function PrdReviewPage() {
         {planning && !planningError && (
           <section className="card">
             <p className="loading-line">⏳ 正在生成 PRD 并分解任务，通常需要几十秒…</p>
-            <pre className="log-view small-log">{logs.join("\n")}</pre>
+            <pre ref={logRef} className="log-view small-log">{logs.join("\n")}</pre>
           </section>
         )}
         {planningError && (
