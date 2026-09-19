@@ -76,6 +76,10 @@ POST {baseUrl}{runsPath}/{id}/abort           → 2xx
 
 ### GUI 智能体（如 Marvis）怎么接
 
+> **要给任何外部智能体发接入说明，直接发 [`onboarding-universal.md`](onboarding-universal.md)**——
+> 自包含的通用任务书：桌面助手/CLI 走路径 A（自实现 ox-agent/2），云端 bot/LLM API 走路径 B
+> （平台方架桥）。本文下面是协议速查，Marvis 专用实例见 `marvis-onboarding.md`。
+
 没有 CLI 的桌面智能体走 **HTTP 桥接**：让它在本地起一个实现上面四个接口的小服务
 （参考 `scripts/loomy-bridge.mjs`，约 200 行），然后二选一注册：
 
