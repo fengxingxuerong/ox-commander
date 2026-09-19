@@ -173,7 +173,18 @@ export class OrchestratorEngine {
 
       for (const [bi, batch] of batches.entries()) {
         await this.gate();
-        const pending = batch.filter((t) => !allDone.has(t.id) && !skipped.has(t.id));
+        const notDone = batch.filter((t) => !allDone.has(t.id) && !skipped.has(t.id));
+        // 配额守卫：上游依赖未成功的任务本轮不派发（依赖会在重修轮重试，
+        // 成功后下游自动解锁）——避免在注定失败的下游上白烧 API 配额。
+        // 用户跳过的依赖视为已满足（下游可继续）。
+        const depsReady = (t: Task) => t.dependencies.every((d) => allDone.has(d) || skipped.has(d));
+        const pending = notDone.filter(depsReady);
+        const blocked = notDone.filter((t) => !depsReady(t));
+        if (blocked.length > 0) {
+          this.cb.onLog(
+            `依赖未就绪，本轮跳过（等待上游修复后自动解锁，不烧配额）：${blocked.map((t) => t.id).join("、")}`,
+          );
+        }
         if (pending.length === 0) continue;
         for (const t of pending) {
           attempts.set(t.id, (attempts.get(t.id) ?? 0) + 1);

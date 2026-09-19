@@ -53,6 +53,15 @@ export interface SchedulerOptions {
   onRunComplete?: (outcome: DispatchOutcome, task: Task) => void;
   /** Sink for routing decisions, e.g. forwarded to the board log. */
   onRouting?: (decision: RoutingDecision, task: Task) => void;
+  /**
+   * 429 感知派发节流：一次 rate-limit 失败后，下一个排队任务延迟派发
+   * （指数退避，封顶 rateLimitMaxBackoffMs），避免在配额墙上继续撞。
+   */
+  rateLimitBackoffMs?: number;
+  /** 节流上限（默认 5 分钟）。 */
+  rateLimitMaxBackoffMs?: number;
+  /** 节流可观测性：实际等待了多久、连续第几次限流。 */
+  onThrottle?: (waitMs: number, streak: number) => void;
 }
 
 /**
@@ -73,6 +82,10 @@ export class Scheduler {
   /** Platform-wide concurrency gate (see `SchedulerOptions.maxParallelRuns`). */
   private running = 0;
   private slotWaiters: Array<() => void> = [];
+  /** 429 节流：此前派发必须等到的时间戳（epoch ms）。 */
+  private throttleUntil = 0;
+  /** 连续 rate-limit 次数（成功一次即清零）。 */
+  private rateLimitStreak = 0;
 
   constructor(
     private adapters: AgentAdapter[],
@@ -127,6 +140,31 @@ export class Scheduler {
   /** Live pool: the registry when present (so dynamic registration works), else the constructor list. */
   private pool(): AgentAdapter[] {
     return this.opts.registry ? this.opts.registry.activeAdapters() : this.adapters;
+  }
+
+  /**
+   * 429 节流闸：拿到并发槽位后、真正派发前等待。持槽等待是有意的——
+   * 节流的目的就是让后续排队任务一起延后，别在配额墙上继续撞。
+   */
+  private async awaitThrottle(): Promise<void> {
+    const wait = this.throttleUntil - Date.now();
+    if (wait > 0) {
+      this.opts.onThrottle?.(wait, this.rateLimitStreak);
+      await new Promise((r) => setTimeout(r, wait));
+    }
+  }
+
+  /** 根据刚结束的一次运行更新节流状态：rate-limit 指数退避，干净结果清零。 */
+  private noteRateLimit(errorClass?: string): void {
+    if (errorClass === "rate-limit") {
+      this.rateLimitStreak += 1;
+      const base = this.opts.rateLimitBackoffMs ?? 30_000;
+      const cap = this.opts.rateLimitMaxBackoffMs ?? 300_000;
+      this.throttleUntil = Date.now() + Math.min(base * 2 ** (this.rateLimitStreak - 1), cap);
+    } else {
+      this.rateLimitStreak = 0;
+      this.throttleUntil = 0;
+    }
   }
 
   private findAdapter(agentId: string): AgentAdapter | undefined {
@@ -270,6 +308,7 @@ export class Scheduler {
       // quota is not. Held for the whole run, released in `finally`.
       await this.acquireSlot();
       try {
+        await this.awaitThrottle();
         const handle = await agent.dispatch(payload);
         const outcome = await this.collectToTerminal(handle, task.id);
         const withMeta: DispatchOutcome = {
@@ -279,6 +318,7 @@ export class Scheduler {
           ...(outcome.ok ? {} : { errorClass: classifyFailure(outcome.logDigest) }),
         };
         this.opts.breaker?.record(agent.meta.id, withMeta.ok);
+        this.noteRateLimit(withMeta.errorClass);
         this.opts.onRunComplete?.(withMeta, task);
         return withMeta;
       } catch (err) {
@@ -292,6 +332,8 @@ export class Scheduler {
           durationMs: Date.now() - startedAt,
           errorClass: classifyFailure((err as Error).message) || "unknown",
         };
+        this.opts.breaker?.record(agent.meta.id, false);
+        this.noteRateLimit(failed.errorClass);
         this.opts.onRunComplete?.(failed, task);
         return failed;
       } finally {

@@ -478,3 +478,90 @@ describe("OrchestratorEngine brain cooldown handling", () => {
     expect(events.filter((e) => e.includes("冷却中")).length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("OrchestratorEngine.execute · 依赖失败跳过下游（配额守卫）", () => {
+  function twoBatchTasks(): Task[][] {
+    const A: Task = { ...TASKS[0], id: "A", dependencies: [] };
+    const B: Task = { ...TASKS[0], id: "B", dependencies: ["A"] };
+    return [[A], [B]];
+  }
+
+  function recordingScheduler(okIds: Set<string>, dispatched: string[]): Scheduler {
+    return {
+      async runBatch(tasks: Task[]) {
+        for (const t of tasks) dispatched.push(t.id);
+        return tasks.map((t: Task) => ({
+          taskId: t.id,
+          ok: okIds.has(t.id),
+          logDigest: "log",
+          events: [],
+        }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  function silentEngine(deps: OrchestratorDeps): OrchestratorEngine {
+    return new OrchestratorEngine(deps, {
+      onStage: () => {},
+      onLog: () => {},
+      onTaskStatus: () => {},
+      onVerification: () => {},
+      onEscalation: () => {},
+    });
+  }
+
+  it("上游失败时下游被跳过，不烧配额", async () => {
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(), dispatched), // A 永远失败
+      verify: async () => makeReport(false),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+    };
+    await expect(silentEngine(deps).execute(twoBatchTasks(), ".")).rejects.toThrow(
+      /verification still failing/,
+    );
+    // A 被派发（并重试预算耗尽），B 从未被派发 —— 省下注定失败的调用
+    expect(dispatched).toEqual(["A"]);
+  });
+
+  it("上游重修成功后，下游在后续轮次自动解锁", async () => {
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      // A 第 2 次派发起成功（模拟重修轮修复），B 一旦派发即成功
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          for (const t of tasks) dispatched.push(t.id);
+          return tasks.map((t: Task) => ({
+            taskId: t.id,
+            ok: t.id === "A" ? dispatched.filter((d) => d === "A").length >= 2 : true,
+            logDigest: "log",
+            events: [],
+          }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => makeReport(dispatched.includes("B")),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+    };
+    const report = await silentEngine(deps).execute(twoBatchTasks(), ".");
+    expect(report.passed).toBe(true);
+    // 第 0 轮 A 失败且 B 被跳过；第 1 轮 A 重派成功后 B 才解锁派发（且仅派发一次）
+    expect(dispatched).toEqual(["A", "A", "B"]);
+    expect(dispatched.filter((d) => d === "B").length).toBe(1);
+    expect(dispatched.indexOf("B")).toBeGreaterThan(dispatched.lastIndexOf("A"));
+  });
+
+  it("对照组：上游成功时下游当轮正常派发", async () => {
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["A", "B"]), dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const report = await silentEngine(deps).execute(twoBatchTasks(), ".");
+    expect(report.passed).toBe(true);
+    expect(dispatched).toEqual(["A", "B"]);
+  });
+});

@@ -10,7 +10,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -161,14 +161,26 @@ const spec = {
 
 const headless = path.join(root, "dist-headless", "headless", "headless-main.js");
 console.log("dispatching to commander via headless binary…\n");
-const res = spawnSync(process.execPath, [headless], {
-  input: JSON.stringify(spec),
-  encoding: "utf8",
-  maxBuffer: 64 * 1024 * 1024,
-  timeout: 25 * 60_000,
+// 流式管道：事件实时打到控制台（运行中即可看到 router/run/验证事件，
+// 不再是"运行中一片空白"的假卡住）。25 分钟硬超时兜底。
+const child = spawn(process.execPath, [headless], { stdio: ["pipe", "pipe", "pipe"] });
+child.stdin.write(JSON.stringify(spec));
+child.stdin.end();
+let stdout = "";
+child.stdout.on("data", (d) => {
+  stdout += d;
+  process.stdout.write(d);
+});
+child.stderr.on("data", (d) => process.stderr.write(d));
+const hardKill = setTimeout(() => child.kill("SIGKILL"), 25 * 60_000);
+const status = await new Promise((resolve) => {
+  child.on("close", (code) => {
+    clearTimeout(hardKill);
+    resolve(code);
+  });
 });
 
-const lines = (res.stdout ?? "").split(/\r?\n/).filter((l) => l.trim().startsWith("{"));
+const lines = stdout.split(/\r?\n/).filter((l) => l.trim().startsWith("{"));
 const events = [];
 for (const line of lines) {
   try {
@@ -206,8 +218,8 @@ const walk = (dir) => {
 walk(workspace);
 console.log("落盘文件:", files.filter((f) => !f.startsWith("ox-scripts/") && f !== "package.json").join(", ") || "（无）");
 console.log("loomy 接单数:", loomyRuns.length, "| 全部成功:", loomyRuns.every((r) => r.ok) && loomyRuns.length > 0);
-console.log("headless exit:", res.status);
+console.log("headless exit:", status);
 
 fs.mkdirSync(path.join(root, "logs"), { recursive: true });
-fs.writeFileSync(path.join(root, "logs", "multiagent-e2e.jsonl"), (res.stdout ?? ""), "utf8");
-process.exit(res.status ?? 1);
+fs.writeFileSync(path.join(root, "logs", "multiagent-e2e.jsonl"), stdout, "utf8");
+process.exit(status ?? 1);

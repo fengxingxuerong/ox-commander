@@ -316,3 +316,65 @@ describe("digest", () => {
     expect(d.endsWith("y".repeat(10))).toBe(true);
   });
 });
+
+describe("Scheduler · 429 感知派发节流", () => {
+  function rateLimitAdapter(state: { failNext: boolean }, dispatched: string[]): AgentAdapter {
+    return {
+      meta: { id: "a1", name: "a1", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        dispatched.push(payload.taskId);
+        return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
+      },
+      async *collect() {
+        if (state.failNext) {
+          yield { kind: "failed", text: "LLM HTTP 429: rate limit exceeded", timestamp: Date.now() };
+        } else {
+          yield { kind: "completed", text: "ok", timestamp: Date.now() };
+        }
+      },
+      async abort() {},
+    };
+  }
+
+  it("rate-limit 失败后，下一个派发被节流推迟；干净结果清零状态", async () => {
+    const state = { failNext: true };
+    const dispatched: string[] = [];
+    const throttled: number[] = [];
+    const sched = new Scheduler([rateLimitAdapter(state, dispatched)], [], undefined, {
+      maxParallelRuns: 1,
+      rateLimitBackoffMs: 150,
+      onThrottle: (ms) => throttled.push(ms),
+    });
+
+    await sched.runBatch([task("t1", "src/a")], "."); // 失败 → 记账节流（当下不等待）
+    expect(throttled.length).toBe(0);
+
+    state.failNext = false;
+    const t0 = Date.now();
+    await sched.runBatch([task("t2", "src/b")], "."); // 派发前等待节流窗口
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(120);
+    expect(throttled.length).toBe(1);
+
+    await sched.runBatch([task("t3", "src/c")], "."); // t2 成功已清零 → 不再节流
+    expect(throttled.length).toBe(1);
+  });
+
+  it("连续限流指数退避（第二次等待翻倍）", async () => {
+    const state = { failNext: true };
+    const throttled: number[] = [];
+    const sched = new Scheduler([rateLimitAdapter(state, [])], [], undefined, {
+      maxParallelRuns: 1,
+      rateLimitBackoffMs: 100,
+      onThrottle: (ms) => throttled.push(ms),
+    });
+
+    await sched.runBatch([task("t1", "z1")], ".");
+    await sched.runBatch([task("t2", "z2")], ".");
+    await sched.runBatch([task("t3", "z3")], ".");
+    expect(throttled[0]).toBe(100);
+    expect(throttled[1]).toBe(200);
+  });
+});
