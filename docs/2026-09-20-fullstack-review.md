@@ -540,6 +540,7 @@ const MAX_ZONE_LENGTH = 200;
 | — | 死代码清理（3 个函数） | ✅ 本轮 §9.5 |
 | — | **未接线检测门禁**（`check:unwired`） | ✅ 本轮 §9.7 |
 | — | **变异验证门禁**（`mutation:quick`）+ 修复 `glob.ts` 断言缺口 | ✅ 本轮 §9.8 |
+| — | Renderer 错误边界 + 状态回滚（7 处）+ `zone-coverage` 三处 `continue` 缺口 | ✅ 第十二章 `221923b` |
 
 **第十一章（独立复核）新增项**：
 
@@ -878,3 +879,137 @@ exit=0
 **第 4 层已核实的结论**：`scheduler.ts` 有三处缺陷（§11.2–11.4），
 `orchestrator.ts` 无（§11.8）。**没有第 5 层** —— 剩下的只是"还没纳入的目标"，
 按 §11.8 的 tier 机制可以低成本继续扩。
+
+---
+
+## 十二、第五类盲区：Renderer 层的错误边界（commit `221923b`）
+
+### 12.1 为什么这一层是盲区
+
+第十一章结束时，门禁覆盖的是 `shared/`（纯逻辑）、`electron/`（引擎与沙箱）。
+**Renderer 层（`src/store.ts` + 4 个页面 + 1 个面板）几乎不在门禁里** ——
+`ui.test.tsx` 只做"每个页面能渲染出来、按钮能调到 bridge"的冒烟，
+**没有一个用例问过"IPC 失败之后，状态机停在哪种状态"**。
+
+按 §11 的口径：这不是"还没纳入的目标"那么简单，而是**整层没有断言维度** ——
+错误路径零覆盖。
+
+### 12.2 做法：先写探测用例，再修
+
+沿用第九章的纪律：**不凭代码形状推断**。先写 6 个探测用例（新建
+`src/store-errors.test.ts`），跑一遍 —— **6 个全部真红**，逐条修。
+
+| # | 缺陷 | 实测后果 |
+| --- | --- | --- |
+| 1 | `refreshProjects` 无 try/catch | 挂载即调用，reject → unhandled rejection，列表静默为空（与"还没有项目"无法区分） |
+| 2 | `createAndOpen` 无 try/catch | 创建失败时抛出，无任何用户可见错误 |
+| 3 | `deleteProject` 无 try/catch | 同上；失败时不该从列表移除（工作区仍在磁盘上） |
+| 4 | `loadSettings` 失败**不写** `settingsError` | 见 12.3 |
+| 5 | `resolveEscalation` 乐观更新不回滚 | 见 12.4 |
+| 6 | `runPlanning` 并发无守卫 | 慢的旧请求覆盖新的，看板显示过期 PRD |
+| 7 | 无 React ErrorBoundary | 任何 render 抛错 = 整页白屏，只能重启应用（§12.5） |
+
+### 12.3 #4 值得单独说：注释承诺了，实现没做到
+
+`loadSettings` 的函数注释白纸黑字写着：
+
+> Unguarded before: a rejected IPC call … escaped as an unhandled rejection and
+> the settings page **silently showed defaults — indistinguishable from
+> "nothing configured yet"**.
+
+但实现里 catch 分支**只写了日志，没有写 `settingsError`**。而设置页：
+
+- `settings === undefined` → 渲染 `DEFAULT_SETTINGS`
+- `disabled={saving || !settings}` → **保存按钮永久禁用**
+
+于是失败的真实后果是：用户看到一份默认值、改一堆配置、点不了保存，
+**且没有任何提示解释为什么**。注释要解决的那个问题，一个字都没解决。
+
+**教训**：**注释不是证据。** 它对"已修复"的承诺，只有断言能兑现。
+这条与 §9.4 同族（helper 写了但没接线），不同之处在于这里**注释本身就是误导源** ——
+读代码的人会以为已经处理过了。
+
+修法：catch 里写 `settingsError`；UI 文案按 `settings` 是否加载成功区分
+「读取失败 / 保存失败」—— load 失败时说"保存失败"会让人去找一次
+根本没发生过的写操作。
+
+### 12.4 #5 乐观更新不回滚 = 操作入口消失
+
+```ts
+set(...)                              // 先把 escalation 标成 resolved
+await api().resolveEscalation(...)    // 失败 → 只加一条日志
+```
+
+`resolved: true` 之后，BoardPage 把三个按钮（跳过 / 重派 / 终止）
+替换成一行 `已处理`。**IPC 失败后入口消失，用户再也点不到**，
+而引擎其实没收到这次决策。
+
+修法：catch 里把该项回滚成 `before`（乐观更新前先存一份）。
+
+### 12.5 #7 ErrorBoundary
+
+新增 `src/components/ErrorBoundary.tsx` 包住整个 `App`。
+render 期抛错原本会卸载整棵树 —— 空白窗口，只能重启。
+现在降级成一个可恢复的面板（显示 message + 「重试渲染」/「重启界面」）。
+
+### 12.6 变异门禁的两个新教训（本轮最有价值的产出）
+
+#### ① 漏挂测试文件 = 那部分逻辑没有门禁
+
+把 `src/store.ts` 加进变异目标时只挂了两个测试文件，**`|| → &&` 存活**。
+那个 `||` 是 `newProjectName.trim() || "未命名项目"` ——
+**唯一的断言在 `ui.test.tsx` 里**，没挂上。
+
+> 这是「覆盖率数字骗人」的翻版：**挂了测试，但只覆盖了这个文件的一半。**
+
+修法：目标支持 `tests` 数组，把一个模块的**所有**测试文件都挂上，任一失败即杀死。
+
+#### ② `replaceAll` 变异必须拆单点（三处全中，零等价变异）
+
+`shared/zone-coverage.ts` 的 `continue → break` 存活。全局替换**命中 3 处**，
+拆开逐处验：**三处全部是真缺口，一个等价变异都没有**。
+
+| 处 | 守卫 | 改成 break 的后果 |
+| --- | --- | --- |
+| 1 | `prev` 是 `.` / `/` / `\` | 遇到 `../x/y.js` 就终止提取 |
+| 2 | `cleaned` 含 `..` | 遇到 `a..b/c.js` 就终止 |
+| 3 | `segments.length < 2`（裸文件名） | **遇到 `package.json` 就终止** |
+
+共同根因：所有既有用例要么全是有效 token、要么全是无效 token，
+**没有一个让「被跳过的 token」出现在「有效路径」之前**。
+
+第 3 处最危险，因为 PRD 里**几乎必然**会先提到 `package.json`
+（"不要改动 package.json" 是最常见的约束句式）：
+
+```
+PRD: "不要改动 package.json；新增 src/cli.js"
+原版  → 跳过 package.json，提取 src/cli.js     → 覆盖校验正常
+变异版 → 在 package.json 处 break，src/cli.js 丢失
+       → 校验认为"没有声明路径" → 放行
+       → 该计划会永远产生 zone 越权，正是本模块为之所写的那个事故
+```
+
+补 1 个用例（3 条断言）后三处全部由存活转杀死。
+
+**操作法**：`cp` 备份 → 只改一处 → 跑测试 → `cp` 回去 →
+`git diff --stat` 确认源文件干净。本次用临时脚本一次跑完三处，
+末尾自己校验"字节级一致"，用完即从临时目录删除。
+
+### 12.7 验证
+
+| 项 | 结果 |
+| --- | --- |
+| 探测用例 | 写时 **6/6 真红**，修后 6/6 绿 |
+| `npx vitest run` | **609 passed / 6 skipped**（596 → 609，+13） |
+| `npm run mutation` | **35/35 全杀** |
+| `npm run verify` | 全绿 |
+
+### 12.8 五层递进关系（终版）
+
+| 层 | 门禁 | 挡住的形态 | 抓不到 |
+| --- | --- | --- | --- |
+| 1 | `tsc` / `lint` | 类型错、风格错 | 逻辑错 |
+| 2 | `check:unwired` | helper 生产零调用 | 调用了但没验证 |
+| 3 | `mutation` | 断言不敏感（测试空转） | 未纳入目标的模块 |
+| 4 | `mutation` 扩展目标 | 集成层类内缺陷 | 未纳入目标的模块 |
+| 5 | `mutation` 扩展目标 + **挂全测试文件** | **整层无断言维度**（如 Renderer 错误路径） | 未纳入目标的模块 |
