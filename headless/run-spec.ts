@@ -163,7 +163,15 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
 
   const engine = new OrchestratorEngine(
     {
-      llm: io.llm ?? (spec.llmPool.length > 0 ? buildLlmPool({ providers: spec.llmPool }) : buildLlmClient(spec.llmProvider)),
+      llm:
+        io.llm ??
+        (spec.llmPool.length > 0
+          ? buildLlmPool({
+              providers: spec.llmPool,
+              // 池的每次轮换/冷却决策都上日志：杜绝"路由挂死 26 分钟全程静默"的盲区
+              onEvent: (text) => io.emit({ type: "log", text }),
+            })
+          : buildLlmClient(spec.llmProvider)),
       scheduler: new Scheduler(layer.adapters, spec.settings.enabledAgents, undefined, {
         ...layer.schedulerOptions,
         maxParallelRuns: spec.maxParallelRuns,
