@@ -14,6 +14,7 @@ import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
 import { AGENT_PROTOCOL_VERSION, type AgentCapabilities } from "../../shared/agent-contract";
 import { PathPolicy } from "../sandbox/path-policy";
 import { RunSession } from "./run-session";
+import { fencedBlock, inlineField } from "../../shared/prompt-text";
 
 const SYSTEM_PROMPT = [
   "你是 OxCommander 的代码执行智能体。",
@@ -165,8 +166,8 @@ export class SensenovaApiAdapter implements AgentAdapter {
       session.push("log", `[sensenova-api] 正在调用模型生成「${payload.title}」的代码…`);
       const snapshot = this.snapshot(payload.projectRoot);
       const userParts: string[] = [
-        `任务标题：${payload.title}`,
-        `所属区域（zone）：${payload.zone}`,
+        `任务标题：${inlineField(payload.title)}`,
+        `所属区域（zone）：${inlineField(payload.zone)}`,
         `任务描述：${payload.description}`,
       ];
       if (snapshot) {
@@ -177,7 +178,9 @@ export class SensenovaApiAdapter implements AgentAdapter {
       }
       if (payload.repairContext) {
         userParts.push(
-          `\n这是第 ${payload.repairContext.round} 轮修复。上一轮失败日志摘要：\n${payload.repairContext.errorLogDigest}`,
+          `\n这是第 ${payload.repairContext.round} 轮修复。上一轮失败日志摘要：\n${fencedBlock(
+            payload.repairContext.errorLogDigest,
+          )}`,
           "修复时做最小改动：只改导致失败的代码，其余已通过的部分保持原样。",
         );
       }

@@ -484,13 +484,45 @@ const MAX_ZONE_LENGTH = 200;
 **踩坑记录**：我一度在 `prompts.ts` 里用了 `path.resolve`，但 `shared/` 必须保持
 **不依赖 node**（要编译给 renderer），已改回原样。
 
-### 9.4 验证
+### 9.4 层 2 的接线缺陷（本轮修复，`9935ec1` 的补正）
+
+上一轮的层 2 **有两处没接上生产路径**，都是"helper 正确但没被调用"：
+
+| 缺陷 | 详情 |
+| --- | --- |
+| `fencedBlock` / `needsBlock` / `safeField` 零调用 | 三个导出只被测试引用，生产代码一次没调。`cli-agent.ts` 的 digest 区块仍用**硬编码三反引号**，所以 digest 里自带 ` ``` ` 时会提前闭合，剩余内容逃逸成正文 |
+| `sensenova-api.ts` 完全没防护 | `payload.title` / `payload.zone` **连 `inlineField` 都没有**，digest 也是裸拼。这是**默认适配器**（`DEFAULT_SETTINGS.enabledAgents = ["sensenova-api"]`，`agents/index.ts:20` 兜底），即新装用户实际跑的路径 |
+
+**修复**：
+
+- `cli-agent.ts`：digest 区块改走 `fencedBlock(tail(...))`
+- `sensenova-api.ts`：title/zone 走 `inlineField`，digest 走 `fencedBlock`
+
+**同时纠正我的测试口径**：原断言扫**全文行首**找 `## `，没考虑围栏上下文 ——
+围栏内的 `##` 是数据不是结构。改为 `headingsOutsideFences()`，只统计**围栏外**的标题行。
+
+### 9.5 死代码清理（本轮）
+
+`buildTaskDispatchPrompt` / `summarizeTasks` 经全仓 grep 确认零生产调用者。删除后
+`buildRepairPrompt` 的唯一调用者（`buildTaskDispatchPrompt:113`）也消失，一并成为孤儿 ——
+真实修复路径是 `cli-agent.ts:381` 与 `sensenova-api.ts:178` 各自内联拼装，与它无关。
+
+三个函数全部删除。**测试覆盖没有丢**：原 3 条针对死函数的断言，改写为针对
+`CliAgentAdapter.writePrompt()` 产出的**真实 prompt 文件**与 `SensenovaApiAdapter`
+发出的**真实 chat message**。
+
+### 9.6 验证
 
 | 项 | 结果 |
 | --- | --- |
-| `src/prompt-injection.test.ts` | **26 例**：8 类非法字符 / traversal 错误信息独立 / 超长 / 错误信息定位到 task；`inlineField` 换行·CRLF·tab·超长·空值；`fencedBlock` 围栏加长；三个 builder 断言"伪造的 `## 要求` 不出现在行首"；`summarizeTasks` 无法被注入出多余任务行 |
-| **变异验证** | 同时关掉白名单 + 把 `inlineField` 改成直通 → **13 条真红**，恢复后字节级一致 |
-| `npm run verify` | **590 passed / 6 skipped**（上轮 559），typecheck 3 套 + lint + build + artifact smoke（52 文件 `node --check` 0 错误）+ snapshot-secrets |
+| `src/prompt-injection.test.ts` | **32 例**：schema 13 例（8 类非法字符 / traversal / 超长 / 错误定位）；`prompt-text` 9 例；**真实路径 10 例** —— `CliAgentAdapter` 7 例（title/zone/taskId 注入、真实标题集合、digest 注入、digest 自带围栏）+ `SensenovaApiAdapter` 3 例 |
+| **变异验证（层 1+2）** | 关白名单 + `inlineField` 直通 → **13 条真红** |
+| **变异验证（层 2 接线）** | ①`cli-agent` title 回退裸值 + digest 回退硬编码围栏 → **3 条真红**；②`sensenova-api` title/zone 回退裸值 → **2 条真红**。恢复后字节级一致 |
+| `npm run verify` | **596 passed / 6 skipped**（上一轮 590），typecheck 3 套 + lint + build + artifact smoke（52 文件 `node --check` 0 错误）+ snapshot-secrets |
+
+**方法论再确认**：`fencedBlock` 这一轮的教训是 —— 纯函数测试全绿**不代表产能**。
+若当时只跑 `npm run verify`（590 全绿）就收工，这个缺陷会被完整地带进主干。
+发现它靠的是**给真实路径写断言时，真路径的行为和 helper 的承诺对不上**。
 
 ---
 
@@ -502,8 +534,9 @@ const MAX_ZONE_LENGTH = 200;
 | C2 | 持久化原子写 + audit 保留策略 | ✅ `81b3e3c` |
 | C3 | path-policy realpath / 大小写归一 | 已定性 **P2**（fail-closed 误拒，不改） |
 | C4 | 子进程 env 最小化 | ✅ `743c9fb` |
-| C5 | 补测试 | ✅ C5a（ipc 契约 + env e2e）+ 本轮 26 例 |
+| C5 | 补测试 | ✅ C5a（ipc 契约 + env e2e）+ 本轮 32 例 |
 | — | zone 白名单 + 渲染防护 | ✅ `9935ec1`（原 6.6 条，已更正定级） |
+| — | 层 2 接线修复（`fencedBlock` / `sensenova-api`） | ✅ 本轮 §9.4 |
+| — | 死代码清理（3 个函数） | ✅ 本轮 §9.5 |
 
-**已无已知未处理项**。后续可做但不阻塞：`buildTaskDispatchPrompt` / `summarizeTasks`
-等死代码的清理（保留是因为它们被测试用作契约文档，删除需先确认无外部消费者）。
+**已无已知未处理项。**

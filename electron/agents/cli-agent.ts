@@ -8,7 +8,7 @@ import { TimeoutGate } from "../sandbox/timeout-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
 import { scopedEnv } from "./scoped-env";
-import { inlineField } from "../../shared/prompt-text";
+import { fencedBlock, inlineField } from "../../shared/prompt-text";
 import { RunSession } from "./run-session";
 
 export interface CliAgentOptions {
@@ -385,9 +385,11 @@ export class CliAgentAdapter implements AgentAdapterV2 {
         "",
         "上一轮失败日志摘要：",
         "",
-        "```",
-        tail(payload.repairContext.errorLogDigest, PROMPT_EXCERPT),
-        "```",
+        // `errorLogDigest` is raw child output: it can contain a fence of its
+        // own, which would close the block early and spill the rest into the
+        // prompt as ordinary text. `fencedBlock` lengthens the fence past any
+        // run of backticks in the content, so the block always holds.
+        fencedBlock(tail(payload.repairContext.errorLogDigest, PROMPT_EXCERPT)),
         "",
         "只修导致失败的代码，已通过的部分保持原样。",
       );

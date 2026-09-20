@@ -1,5 +1,4 @@
-import type { PrdDocument, Task, TaskPayload } from "./types";
-import { inlineField } from "./prompt-text";
+import type { PrdDocument } from "./types";
 
 export function buildPrdPrompt(userRequirement: string): string {
   return `You are the planning brain of OxCommander, an orchestrator that decomposes software projects and dispatches them to coding agents.
@@ -92,34 +91,6 @@ PRD:
 ${JSON.stringify(prd, null, 2)}`;
 }
 
-export function buildRepairPrompt(payload: TaskPayload): string {
-  const repair = payload.repairContext;
-  return `Your previous attempt at this task failed automated verification.
-
-Task: ${inlineField(payload.title)}
-Zone (you may only modify files inside this area): ${inlineField(payload.zone)}
-Repair round: ${repair?.round ?? 1}
-
-Verification error digest:
-${repair?.errorLogDigest ?? "(no digest)"}
-
-Original description:
-${payload.description}
-
-Fix the failing code inside your zone. Do not rewrite unrelated code.`;
-}
-
-export function buildTaskDispatchPrompt(payload: TaskPayload): string {
-  if (payload.repairContext) return buildRepairPrompt(payload);
-  // `shared/` must stay free of `node:path` (it compiles for the renderer too),
-  // so `projectRoot` is rendered as given.
-  return `${payload.description}
-
-Constraints:
-- You may only create or modify files inside the zone: ${inlineField(payload.zone)}
-- The project root is: ${inlineField(payload.projectRoot)}
-- When finished, the code must compile and pass tests.`;
-}
 export interface RepairDecisionInput {
   taskTitle: string;
   attemptsSoFar: number;
@@ -134,20 +105,4 @@ export function buildEscalationSummary(input: RepairDecisionInput): string {
     input.lastErrorDigest || "(空)",
     "请选择处理方式：跳过该任务 / 更换智能体重派 / 终止项目。",
   ].join("\n");
-}
-
-/**
- * One-line-per-task summary. Fields are rendered inline so a value containing a
- * newline cannot fabricate extra task lines — this feeds a prompt, and a forged
- * line would read as another task to the model.
- */
-export function summarizeTasks(tasks: Task[]): string {
-  return tasks
-    .map(
-      (t) =>
-        `- [${inlineField(t.id)}] ${inlineField(t.title)} (zone=${inlineField(t.zone)}, deps=[${t.dependencies
-          .map((d) => inlineField(d))
-          .join(",")}], role=${inlineField(t.suggestedRole)})`,
-    )
-    .join("\n");
 }
