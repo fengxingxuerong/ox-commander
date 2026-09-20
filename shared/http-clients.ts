@@ -124,13 +124,19 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       messages: req.messages,
       temperature: req.temperature ?? 0.2,
       /*
-       * 必须显式带上 max_tokens。不带时商汤等 OpenAI 兼容端点会用自己的默认输出
-       * 上限，decompose 的大 JSON 在中途被截断（finish_reason=length），本类
-       * 抛 MalformedResponseError 后 failover 换哪条线路都是同样截断 —— 2026-09-20
-       * 真实案例里 PRD 之后 PLANNING 全池失败，根因就是它。Anthropic 分支一直带
-       * 8192 没出过问题；这里取 16384（该端点 max_output_length=65536，留足余量）。
+       * 必须显式带上 max_tokens，而且要给到端点允许的最大值。不带时商汤用默认
+       * 输出上限；给 16384 仍会在 PLANNING 上截断 —— 因为 sensenova 的模型是
+       * 推理型的，reasoning token 计入输出预算（实测 finish_reason=length 出现
+       * 在两个不同模型上，2026-09-20 真实案例）。用端点声明的
+       * max_output_length（65536）作为上限，reasoning 再长也不会吃掉正文。
+       *
+       * 同时关闭思考模式：sensenova 的推理模型思考一次要拖慢生成 15–20 倍
+       * （实测同一请求 42–60s → 3.1s），是 PLANNING 超时的另一半根因。
+       * OpenAI 兼容层对未知 body 字段普遍忽略；若未来某家报 400，
+       * 再做成 per-provider 开关。
        */
-      max_tokens: 16384,
+      max_tokens: 65536,
+      enable_thinking: false,
     };
     if (req.jsonMode) body.response_format = { type: "json_object" };
     const data = await this.postJson(
