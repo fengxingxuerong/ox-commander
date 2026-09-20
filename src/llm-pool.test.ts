@@ -62,10 +62,9 @@ describe("provider catalog", () => {
   it("lists the AMD Radeon endpoint as a first-class provider", () => {
     const amd = getProvider("amd-radeon");
     expect(amd.baseUrl).toBe("https://developer.amd.com.cn/radeon/api/v1");
-    // Verified against the live `GET /models`: this endpoint serves only
-    // MinerU2.5-Pro (ocr) and MiniCPM5-2B (text). The DeepSeek name that looks
-    // right there is a SenseNova model and returns 400 here.
-    expect(amd.defaultModel).toBe("MiniCPM5-2B");
+    // 2026-09-20 重新核对 live `GET /models`：端点已扩容到 7 个模型，
+    // `DeepSeek-V4-Flash` 实测返回 200（旧注释说它 400，已失效）。
+    expect(amd.defaultModel).toBe("DeepSeek-V4-Flash");
     expect(amd.apiKeyEnvVar).toBe("AMD_API_KEY");
     expect(amd.protocol).toBe("openai-compatible");
   });

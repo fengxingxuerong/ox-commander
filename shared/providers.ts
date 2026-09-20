@@ -41,16 +41,21 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://developer.amd.com.cn/radeon/api/v1",
     /*
-     * Model name verified against `GET /models` on the live endpoint: it serves
-     * exactly two models — `MinerU2.5-Pro` (output modality `ocr`) and
-     * `MiniCPM5-2B` (text, 128k context). `DeepSeek-V4-Flash` is *not* served
-     * here (400 "not supported") even though it is a valid SenseNova model.
+     * 2026-09-20 重新核对 `GET /models`：端点已扩容到 **7 个**模型 ——
+     * `DeepSeek-V4.1-Flash` · `DeepSeek-V4-Flash` · `GLM-5.3-Flash` ·
+     * `MinerU2.5-Pro`（输出模态 ocr，不能用于 chat）· `MiniCPM5-2B` ·
+     * `Qwen3.8-27B` · `Qwen3.8-Flash-Next`。
      *
-     * MiniCPM5-2B is small, so this provider is a **fallback**, not a
-     * first-choice brain: it sits second in DEFAULT_LLM_POOL and only answers
-     * when every SenseNova route is cooling.
+     * 旧注释断言这里"exactly two models"且 `DeepSeek-V4-Flash` 会被拒（400）——
+     * 该结论已失效：实测 `DeepSeek-V4-Flash` 与 `MiniCPM5-2B` 都返回 200。
+     * 改取 `DeepSeek-V4-Flash` 作兜底：同样是兜底，2B 小模型在商汤全池冷却时
+     * 会把大脑质量拉出断崖。
+     *
+     * 端点由 `self-dploy` 动态调度，worker 有波动（同日实测 `DeepSeek-V4.1-Flash`
+     * 返 503 `no_available_workers`）。兜底线路本就只在商汤全部冷却时才轮到，
+     * 单次失败会落进同一张冷却表继续轮换，不会卡住整条链路。
      */
-    defaultModel: "MiniCPM5-2B",
+    defaultModel: "DeepSeek-V4-Flash",
     apiKeyEnvVar: "AMD_API_KEY",
   },
   {
@@ -147,8 +152,9 @@ export const SENSENOVA_MODELS_EXTRA = ["kimi-k3"] as const;
  * among its 12 routes, and if the whole account is throttled the AMD endpoint
  * answers instead — without any change to the caller.
  *
- * Order matters: AMD's `MiniCPM5-2B` is a 2B model, fine as a safety net and a
- * poor first choice. SenseNova leads; AMD catches.
+ * Order matters: SenseNova leads with 12 routes; AMD catches. AMD's default is
+ * `DeepSeek-V4-Flash` (since 2026-09-20, was the 2B `MiniCPM5-2B`), so the
+ * safety net no longer drops brain quality off a cliff when it takes over.
  *
  * A provider whose key is absent is simply skipped at construction time.
  */

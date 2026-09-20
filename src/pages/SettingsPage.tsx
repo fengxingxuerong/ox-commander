@@ -193,7 +193,7 @@ export function SettingsPage() {
         ))}
         <p className="muted">
           商汤 = 3 密钥 × 4 模型 = <strong>12 条线路</strong>（deepseek-v4-flash / sensenova-6.8-flash-lite /
-          deepseek-v4-pro / glm-5.2）；AMD 端点实测只提供 MiniCPM5-2B（2B，作兜底）。
+          deepseek-v4-pro / glm-5.2）；AMD 端点兜底（实测提供 DeepSeek-V4-Flash 等多个模型）。
           全部取消勾选则退回单一提供商模式。
         </p>
       </section>
