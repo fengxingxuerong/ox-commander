@@ -8,6 +8,7 @@ const KIND_LABELS: Record<VerificationKind, string> = {
   build: "构建",
   typecheck: "类型检查",
   test: "测试",
+  smoke: "独立冒烟",
 };
 
 interface KeyStatus {

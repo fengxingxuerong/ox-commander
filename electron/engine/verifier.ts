@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import type { VerificationCommand, VerificationReport } from "../../shared/types";
+import type { SmokeCheck, VerificationCommand, VerificationReport } from "../../shared/types";
 import { digest } from "./scheduler";
 import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-policy";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
@@ -129,3 +129,102 @@ export async function verifyProject(
   }
   return { passed: results.every((r) => r.ok), results };
 }
+
+export interface SmokeRunnerDeps {
+  cwd: string;
+  spawnImpl?: typeof spawn;
+  /** 冒烟命令同样过沙箱门（默认策略）。 */
+  policy?: CommandPolicy;
+  timeoutMs?: number;
+  onEvent?: (text: string) => void;
+}
+
+/**
+ * 独立样本冒烟：运行规划期生成的真实样例命令（防自证盲区层）。
+ *
+ * 与 verifyProject 的区别：命令来自大脑的 decompose 产物（针对交付后的主入口），
+ * 支持通过 stdin 喂样例数据，且 ok = 退出码 0 且 stdout 包含全部 expectContains
+ * 片段。同样过 CommandPolicy 沙箱门 —— 冒烟命令也不得越界。首败即停，
+ * 与 verifyProject 保持一致，让失败进入重修循环。
+ */
+export async function runSmokeChecks(
+  checks: SmokeCheck[],
+  deps: SmokeRunnerDeps,
+): Promise<VerificationReport["results"]> {
+  const results: VerificationReport["results"] = [];
+  const spawnImpl = deps.spawnImpl ?? spawn;
+  const policy = deps.policy ?? createDefaultCommandPolicy();
+  const timeoutMs = deps.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
+
+  for (const check of checks) {
+    const verdict = policy.check(check.command, check.args);
+    if (!verdict.ok) {
+      results.push({
+        kind: "smoke",
+        ok: false,
+        exitCode: null,
+        logDigest: `[沙箱] 冒烟命令被拒绝：${verdict.reason}\n[${check.title}]`,
+        durationMs: 0,
+      });
+      break;
+    }
+
+    const startedAt = Date.now();
+    const plan = buildSpawnSpec(check.command, check.args);
+    const output = await new Promise<string>((resolve) => {
+      let log = "";
+      let timedOut = false;
+      let child: ReturnType<typeof spawnImpl>;
+      try {
+        child = spawnImpl(plan.file, plan.args, {
+          cwd: deps.cwd,
+          shell: false,
+          ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        });
+      } catch (err) {
+        resolve(`spawn failed (${plan.note}): ${String(err)}`);
+        return;
+      }
+      const timer = setTimeout(() => {
+        timedOut = true;
+        deps.onEvent?.(`[smoke] ${check.title} 超过 ${Math.round(timeoutMs / 1000)}s，终止进程树`);
+        killTree(child);
+      }, timeoutMs);
+      child.stdout?.on("data", (c: Buffer) => (log += c.toString("utf8")));
+      child.stderr?.on("data", (c: Buffer) => (log += c.toString("utf8")));
+      child.on("error", (err) => {
+        clearTimeout(timer);
+        resolve(`${log}\nspawn failed: ${String(err)}`);
+      });
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve(`${log}\n[exit]${timedOut ? "timeout" : String(code)}`);
+      });
+      if (check.stdin !== undefined) child.stdin?.write(check.stdin);
+      child.stdin?.end();
+    });
+
+    const timedOut = output.includes("\n[exit]timeout");
+    const exitMatch = /\n\[exit\](\d+)/.exec(output);
+    const missing = (check.expectContains ?? []).filter((frag) => !output.includes(frag));
+    const ok = !timedOut && exitMatch !== null && exitMatch[1] === "0" && missing.length === 0;
+
+    const digestParts = [
+      `[smoke] ${check.title}`,
+      `命令：${check.command} ${check.args.join(" ")}`,
+      output,
+    ];
+    if (missing.length > 0) digestParts.push(`缺失期望片段：${JSON.stringify(missing)}`);
+
+    results.push({
+      kind: "smoke",
+      ok,
+      exitCode: timedOut ? null : exitMatch ? Number(exitMatch[1]) : null,
+      logDigest: digest(digestParts.join("\n")),
+      durationMs: Date.now() - startedAt,
+    });
+    if (!ok) break;
+  }
+  return results;
+}
+

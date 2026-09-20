@@ -37,6 +37,15 @@ Respond with ONLY a JSON object (no markdown fences) matching:
       "dependencies": string[],
       "suggestedRole": "frontend-dev" | "backend-dev" | "fullstack-dev" | "test-writer" | "docs-writer"
     }
+  ],
+  "smoke": [
+    {
+      "title": string,
+      "command": string,
+      "args": string[],
+      "stdin": string,
+      "expectContains": string[]
+    }
   ]
 }
 
@@ -53,7 +62,14 @@ Rules:
 - Do not create or modify package.json, lockfiles or .env files: those paths are protected and any write to them is rejected.
 
 Example shape:
-{"tasks": [{"id": "t1", "title": "Scaffold config module", "description": "Create src/config/defaults.js exporting the default settings object.", "zone": "src/config", "dependencies": [], "suggestedRole": "fullstack-dev"}, {"id": "t2", "title": "Implement store", "description": "...", "zone": "src/store", "dependencies": ["t1"], "suggestedRole": "backend-dev"}]}
+{"tasks": [{"id": "t1", "title": "Scaffold config module", "description": "Create src/config/defaults.js exporting the default settings object.", "zone": "src/config", "dependencies": [], "suggestedRole": "fullstack-dev"}, {"id": "t2", "title": "Implement store", "description": "...", "zone": "src/store", "dependencies": ["t1"], "suggestedRole": "backend-dev"}], "smoke": [{"title": "CLI 打印统计报告", "command": "node", "args": ["src/cli.js", "sample-data.csv"], "expectContains": ["col0", "type="]}]}
+
+Smoke rules (the anti-self-confirmation layer — the tests you write may share blind spots with the code, so these run the DELIVERED entrypoint against real sample data):
+- 0-3 entries, each running the delivered main entrypoint (CLI/script) with CONCRETE sample data you invent (create any needed sample files as part of a task's zone, e.g. "sample-data.csv").
+- expectContains: 2-4 short substrings that the correct output MUST contain (e.g. computed stat values, column names). They must be derived from the sample data by hand, not copied from the implementation.
+- Include at least one edge case when the requirement implies data formats (empty values, quoted fields, unicode) — the exact blind spot that self-written tests miss.
+- command/args must pass a strict sandbox policy: no shell metacharacters, no destructive programs; stdin carries sample piped data when needed.
+- If the deliverable has no runnable entrypoint, return an empty "smoke" array.
 
 PRD:
 ${JSON.stringify(prd, null, 2)}`;

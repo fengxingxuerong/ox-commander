@@ -13,7 +13,7 @@ import { KeysStore, createSafeStorageCrypto } from "./keys-store";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import { HttpLlmError } from "../shared/http-clients";
-import type { EscalationAction, PrdDocument, ProjectSettings, Task } from "../shared/types";
+import type { EscalationAction, PrdDocument, ProjectSettings, SmokeCheck, Task } from "../shared/types";
 
 let store: ProjectStore | null = null;
 let settingsStore: SettingsStore | null = null;
@@ -345,8 +345,8 @@ export function registerIpc(): void {
       const prd = await engine.generatePrd(rec.requirement);
       s1.update(projectId, { prdJson: JSON.stringify(prd), stage: "PLANNING" });
       currentWindow?.webContents.send("ox:event", { type: "stage", stage: "PLANNING" });
-      const batches = await engine.decompose(prd);
-      s1.update(projectId, { batchesJson: JSON.stringify(batches) });
+      const { batches, smoke } = await engine.decompose(prd);
+      s1.update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
       return { prd, batches };
     },
   );
@@ -357,10 +357,10 @@ export function registerIpc(): void {
       const rec = s1.get(projectId);
       if (!rec) throw new Error(`project ${projectId} not found`);
       if (runningProjectId === projectId) throw new Error("项目正在执行中，请先取消再修改 PRD");
-      s1.update(projectId, { prdJson: JSON.stringify(prd), batchesJson: undefined });
+      s1.update(projectId, { prdJson: JSON.stringify(prd), batchesJson: undefined, smokeJson: undefined });
       const engine = buildEngine(projectId);
-      const batches = await engine.decompose(prd);
-      s1.update(projectId, { batchesJson: JSON.stringify(batches) });
+      const { batches, smoke } = await engine.decompose(prd);
+      s1.update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
       return { prd, batches };
     },
   );
@@ -374,7 +374,8 @@ export function registerIpc(): void {
       const engine = buildEngine(projectId);
       runningProjectId = projectId;
       try {
-        await engine.execute(JSON.parse(rec.batchesJson) as Task[][], ensureWorkspace(projectId));
+        const smoke: SmokeCheck[] = rec.smokeJson ? (JSON.parse(rec.smokeJson) as SmokeCheck[]) : [];
+        await engine.execute(JSON.parse(rec.batchesJson) as Task[][], ensureWorkspace(projectId), { smoke });
       } finally {
         runningProjectId = null;
       }

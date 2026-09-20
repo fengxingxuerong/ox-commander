@@ -56,7 +56,24 @@ export interface TaskState {
   lastErrorDigest?: string;
 }
 
-export type VerificationKind = "build" | "typecheck" | "test";
+export type VerificationKind = "build" | "typecheck" | "test" | "smoke";
+
+/**
+ * 独立样本冒烟检查（规划期由大脑生成）：针对交付后的主入口，用真实样例数据
+ * 实际运行并断言输出片段 —— 防止"实现与自写测试同口径共谋"的自证盲区
+ * （实证：转置 bug 骗过 13 项自写测试）。
+ */
+export interface SmokeCheck {
+  /** 一句话说明这条冒烟在验证什么。 */
+  title: string;
+  /** 在 projectRoot 下执行的程序（会被 CommandPolicy 沙箱门审查）。 */
+  command: string;
+  args: string[];
+  /** 可选：通过 stdin 喂给程序的样例数据。 */
+  stdin?: string;
+  /** stdout 必须包含的片段（空数组 = 只看退出码）。 */
+  expectContains?: string[];
+}
 
 export interface VerificationCommand {
   kind: VerificationKind;

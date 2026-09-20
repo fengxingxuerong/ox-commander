@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { AllRoutesCoolingError } from "../shared/http-clients";
 import {
   OrchestratorEngine,
@@ -7,7 +10,7 @@ import {
 } from "../electron/engine/orchestrator";
 import type { Scheduler } from "../electron/engine/scheduler";
 import type { LlmClient } from "../shared/llm-client";
-import { DEFAULT_SETTINGS, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
 
 const TASKS: Task[] = [
   {
@@ -654,5 +657,132 @@ describe("OrchestratorEngine · 断点续跑 journal", () => {
       }),
     ).rejects.toThrow(/verification still failing/);
     expect(dispatched).toEqual([]); // A 从未被重派
+  });
+});
+
+describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => {
+  let root = "";
+
+  function twoBatchTasks(): Task[][] {
+    const A: Task = { ...TASKS[0], id: "A", dependencies: [] };
+    const B: Task = { ...TASKS[0], id: "B", dependencies: ["A"] };
+    return [[A], [B]];
+  }
+
+  function recordingScheduler(okIds: Set<string>, dispatched: string[]): Scheduler {
+    return {
+      async runBatch(tasks: Task[]) {
+        for (const t of tasks) dispatched.push(t.id);
+        return tasks.map((t: Task) => ({
+          taskId: t.id,
+          ok: okIds.has(t.id),
+          logDigest: "log",
+          events: [],
+        }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-smoke-"));
+  });
+
+  afterEach(() => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    } catch {
+      // Windows 文件句柄竞态，尽力清理
+    }
+  });
+
+  function smokeEngine(
+    okIds: Set<string>,
+    dispatched: string[],
+    events: string[],
+  ): OrchestratorEngine {
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(okIds, dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: (s) => events.push(`stage:${s}`),
+      onLog: (l) => events.push(`log:${l}`),
+      onTaskStatus: () => {},
+      onVerification: (r) => events.push(`verify:${r.passed}`),
+      onEscalation: () => {},
+    });
+  }
+
+  it("冒烟通过 → 报告含 smoke 结果，正常交付", async () => {
+    fs.writeFileSync(path.join(root, "sample-smoke.js"), "console.log('col0: type=string');");
+    const smoke: SmokeCheck[] = [
+      { title: "CLI 冒烟", command: process.execPath, args: ["sample-smoke.js"], expectContains: ["col0: type=string"] },
+    ];
+    const dispatched: string[] = [];
+    const events: string[] = [];
+    const report = await smokeEngine(new Set(["A", "B"]), dispatched, events).execute(
+      twoBatchTasks(),
+      root,
+      { smoke },
+    );
+    expect(report.passed).toBe(true);
+    expect(report.results.some((r) => r.kind === "smoke" && r.ok)).toBe(true);
+    expect(events.some((l) => l.includes("独立样本冒烟"))).toBe(true);
+  });
+
+  it("冒烟失败 → 拦截交付进重修 → 修复后交付", async () => {
+    const script = path.join(root, "sample-smoke.js");
+    fs.writeFileSync(script, "console.log(process.env.SMOKE_FIX === '1' ? 'EXPECTED-OUTPUT' : 'nope');");
+    const smoke: SmokeCheck[] = [
+      { title: "CLI 冒烟", command: process.execPath, args: ["sample-smoke.js"], expectContains: ["EXPECTED-OUTPUT"] },
+    ];
+    const dispatched: string[] = [];
+    const events: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["A", "B"]), dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    // 重修轮把样例脚本修好（模拟任务修复），冒烟二轮通过 → 才允许交付
+    process.env.SMOKE_FIX = "";
+    const engine = new OrchestratorEngine(deps, {
+      onStage: () => {},
+      onLog: (l) => {
+        events.push(l);
+        if (l.includes("重修第 1/1 轮")) process.env.SMOKE_FIX = "1";
+      },
+      onTaskStatus: () => {},
+      onVerification: (r) => events.push("verify:" + r.passed),
+      onEscalation: () => {},
+    });
+    const report = await engine.execute(twoBatchTasks(), root, { smoke });
+    delete process.env.SMOKE_FIX;
+    expect(events.filter((l) => l === "verify:false").length).toBe(1); // 首轮被冒烟拦截
+    expect(report.passed).toBe(true);                                  // 修复后交付
+    // 最终报告只携带末轮验证结果：冒烟修复后 ok=true（首轮的失败在 events 里）
+    const sr = report.results.filter((r) => r.kind === "smoke");
+    expect(sr.length).toBe(1);
+    expect(sr[0]!.ok).toBe(true);
+  });
+
+  it("开发任务失败时不运行冒烟（先修任务，省配额）", async () => {
+    const smoke: SmokeCheck[] = [
+      { title: "CLI 冒烟", command: process.execPath, args: ["sample-smoke.js"], expectContains: ["x"] },
+    ];
+    const dispatched: string[] = [];
+    const events: string[] = [];
+    // A/B 永远失败（okIds 空）→ 重修预算耗尽抛出，冒烟全程未运行
+    await expect(
+      smokeEngine(new Set(), dispatched, events).execute(twoBatchTasks(), root, {
+        smoke,
+        resume: { allDone: ["A"], skipped: [], attempts: { A: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
+      }),
+    ).rejects.toThrow(/verification still failing/);
+    // resume 恢复 allDone=["A"] → 批次 1 的 A 被跳过；maxRounds=1 → 一轮后预算耗尽
+    expect(dispatched).toEqual(["B"]);
+    expect(events.some((l) => l.includes("独立样本冒烟"))).toBe(false);
   });
 });

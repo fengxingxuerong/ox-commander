@@ -374,7 +374,11 @@ describe("Scheduler · 429 感知派发节流", () => {
     await sched.runBatch([task("t1", "z1")], ".");
     await sched.runBatch([task("t2", "z2")], ".");
     await sched.runBatch([task("t3", "z3")], ".");
-    expect(throttled[0]).toBe(100);
-    expect(throttled[1]).toBe(200);
+    // onThrottle 上报的是"实际剩余等待"（含进程间开销），用区间断言验证退避翻倍
+    expect(throttled[0]!).toBeGreaterThanOrEqual(80);
+    expect(throttled[0]!).toBeLessThanOrEqual(100);
+    expect(throttled[1]!).toBeGreaterThanOrEqual(150);
+    expect(throttled[1]!).toBeLessThanOrEqual(200);
+    expect(throttled[1]!).toBeGreaterThan(throttled[0]!); // 第二次等待确实翻倍
   });
 });

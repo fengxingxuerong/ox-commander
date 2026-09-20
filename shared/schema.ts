@@ -1,4 +1,4 @@
-import type { PrdDocument, Task } from "./types";
+import type { PrdDocument, SmokeCheck, Task } from "./types";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
 
@@ -115,4 +115,53 @@ export function parseTaskList(raw: unknown): Task[] {
   }
   if (issues.length) throw new SchemaValidationError(issues);
   return tasks.map((t) => ({ ...t, dependencies: [...new Set(t.dependencies)] }));
+}
+
+/**
+ * 分解产物 = 任务清单 + 可选的独立样本冒烟清单（防自证盲区层）。
+ * smoke 缺省或为空数组都合法（无可运行入口的交付物）。
+ */
+export interface DecomposePlan {
+  tasks: Task[];
+  smoke: SmokeCheck[];
+}
+
+const MAX_SMOKE_CHECKS = 5;
+
+export function parseDecompose(raw: unknown): DecomposePlan {
+  const tasks = parseTaskList(raw);
+  const obj: Record<string, JsonValue> = Array.isArray(raw) ? { tasks: raw } : (raw as Record<string, JsonValue>);
+  const issues: string[] = [];
+  const smoke: SmokeCheck[] = [];
+  const rawSmoke = obj.smoke;
+  if (rawSmoke !== undefined) {
+    if (!Array.isArray(rawSmoke)) {
+      issues.push("smoke must be an array");
+    } else if (rawSmoke.length > MAX_SMOKE_CHECKS) {
+      issues.push(`smoke must have at most ${MAX_SMOKE_CHECKS} entries`);
+    } else {
+      rawSmoke.forEach((s, i) => {
+        if (!isObject(s)) {
+          issues.push(`smoke[${i}] must be an object`);
+          return;
+        }
+        const title = requireString(s, "title", issues);
+        const command = requireString(s, "command", issues);
+        const args = requireStringArray(s, "args", issues);
+        const stdin = typeof s.stdin === "string" ? s.stdin : undefined;
+        const expectContains =
+          s.expectContains === undefined ? [] : requireStringArray(s, "expectContains", issues);
+        if (!title || !command) return;
+        smoke.push({
+          title,
+          command,
+          args,
+          ...(stdin !== undefined ? { stdin } : {}),
+          expectContains,
+        });
+      });
+    }
+  }
+  if (issues.length) throw new SchemaValidationError(issues);
+  return { tasks, smoke };
 }

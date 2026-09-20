@@ -1,7 +1,9 @@
 import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
-import { parsePrd, parseTaskList } from "../../shared/schema";
+import { parseDecompose, parsePrd } from "../../shared/schema";
+import { runSmokeChecks } from "./verifier";
+import type { SmokeCheck } from "../../shared/types";
 import { planBatches } from "../../shared/graph";
 import { routeVerificationErrors } from "../../shared/routing";
 import type { DispatchOutcome } from "./scheduler";
@@ -30,6 +32,7 @@ export interface OrchestratorDeps {
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
 export interface RunSnapshot {
   batches: Task[][];
+  smoke?: SmokeCheck[];
   allDone: string[];
   skipped: string[];
   attempts: Record<string, number>;
@@ -40,6 +43,7 @@ export interface RunSnapshot {
 
 /** execute 的恢复入参：RunSnapshot 去掉 batches（batches 由宿主直接传入）。 */
 export interface ResumeState {
+  smoke?: SmokeCheck[];
   allDone: string[];
   skipped: string[];
   attempts: Record<string, number>;
@@ -152,28 +156,29 @@ export class OrchestratorEngine {
     return prd;
   }
 
-  async decompose(prd: PrdDocument): Promise<Task[][]> {
+  async decompose(prd: PrdDocument): Promise<{ batches: Task[][]; smoke: SmokeCheck[] }> {
     this.cb.onStage("PLANNING");
-    const tasks = await this.brainCall(
+    const plan = await this.brainCall(
       "任务分解",
       () =>
         chatJson(
           this.deps.llm,
           { messages: [{ role: "user", content: buildDecomposePrompt(prd) }] },
-          { schemaName: "task list", validate: parseTaskList },
+          { schemaName: "decompose plan", validate: parseDecompose },
         ),
     );
-    return planBatches(tasks);
+    return { batches: planBatches(plan.tasks), smoke: plan.smoke };
   }
 
   /** Runs DEVELOPMENT → VERIFICATION (+ repair loops) → DELIVERY. */
   async execute(
     batches: Task[][],
     projectRoot: string,
-    opts?: { resume?: ResumeState },
+    opts?: { resume?: ResumeState; smoke?: SmokeCheck[] },
   ): Promise<VerificationReport> {
     const maxRounds = this.deps.settings.maxRepairRounds;
     const resume = opts?.resume;
+    const smoke = opts?.smoke ?? resume?.smoke ?? [];
     const attempts = new Map<string, number>(
       Object.entries(resume?.attempts ?? {}).map(([k, v]) => [k, v]),
     );
@@ -186,6 +191,7 @@ export class OrchestratorEngine {
     const save = () =>
       this.deps.journal?.save({
         batches,
+        smoke,
         allDone: [...allDone],
         skipped: [...skipped],
         attempts: Object.fromEntries(attempts),
@@ -283,7 +289,20 @@ export class OrchestratorEngine {
       this.cb.onStage("VERIFICATION");
       await this.gate();
       const anyDevFailure = outcomes.some((o) => !o.ok);
-      const report = await this.deps.verify(projectRoot);
+      let report = await this.deps.verify(projectRoot);
+      // 独立样本冒烟（防自证盲区层）：仅在开发任务全部成功且常规验证通过后
+      // 运行规划期生成的真实样例 —— 失败同样进重修循环，不许带病交付。
+      if (!anyDevFailure && report.passed && smoke.length > 0) {
+        this.cb.onLog(`── 独立样本冒烟（${smoke.length} 项）：用真实样例运行交付物，防自测同盲 ──`);
+        const smokeResults = await runSmokeChecks(smoke, {
+          cwd: projectRoot,
+          onEvent: (text) => this.cb.onLog(text),
+        });
+        report = {
+          passed: smokeResults.every((r) => r.ok),
+          results: [...report.results, ...smokeResults],
+        };
+      }
       this.cb.onVerification(report);
       if (!anyDevFailure && report.passed) {
         this.cb.onStage("DELIVERY");

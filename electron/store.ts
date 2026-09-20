@@ -14,6 +14,8 @@ interface ProjectRecord {
   stage: string;
   prdJson?: string;
   batchesJson?: string;
+  /** 规划期生成的独立样本冒烟清单（SmokeCheck[]），与 batchesJson 同生共死。 */
+  smokeJson?: string;
   createdAt: string;
   updatedAt: string;
 }

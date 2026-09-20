@@ -12,7 +12,7 @@ import type { RunSnapshot } from "../electron/engine";
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../electron/agents";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import type { LlmClient } from "../shared/llm-client";
-import type { Task, EscalationAction, VerificationReport } from "../shared/types";
+import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
 import type { OrchestratorCallbacks } from "../electron/engine";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
 
@@ -198,16 +198,23 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
 
   try {
     let batches: Task[][];
+    let smoke: SmokeCheck[] = [];
     if (resume) {
       batches = resume.batches;
+      smoke = resume.smoke ?? [];
       io.emit({ type: "tasks", batches });
     } else {
       const prd = spec.prd ?? (await engine.generatePrd(spec.requirement));
       io.emit({ type: "prd", prd });
-      batches = await engine.decompose(prd);
+      const plan = await engine.decompose(prd);
+      batches = plan.batches;
+      smoke = plan.smoke;
       io.emit({ type: "tasks", batches });
     }
-    const report = await engine.execute(batches, spec.projectRoot, resume ? { resume } : undefined);
+    const report = await engine.execute(batches, spec.projectRoot, {
+      ...(resume ? { resume } : {}),
+      smoke,
+    });
     io.emit({ type: "done", passed: report.passed, report });
     return report.passed ? 0 : 2;
   } catch (err) {
