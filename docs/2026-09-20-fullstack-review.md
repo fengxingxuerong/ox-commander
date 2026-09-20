@@ -233,6 +233,9 @@ node scripts/run-multiagent-e2e.mjs  # 真实多智能体链路（真实 LLM + H
 
 ### 一次必须记录的操作失误
 
+清理 e2e 残留时对工作区跑了 `git checkout -- .`，回退了阶段 B 尚未提交的 6 个文件改动。
+**教训**：清理临时文件只能按路径精确 `rm`，绝不能对工作区用 `git checkout -- .`。
+
 **C3 实测命令与结果**（可复现）：
 ```bash
 node -e "const {PathPolicy}=require('./dist-electron/electron/sandbox/path-policy.js');
@@ -240,3 +243,92 @@ const p=new PathPolicy({projectRoot:'C:\\\\Proj\\\\App'});
 console.log(p.assertWritable('SRC/a.js','src'));"
 # → { ok: false, reason: 'zone 越权：SRC/a.js 不在 zone「src」内' }
 ```
+
+---
+
+## 六、阶段 B 之后：规划器 zone 覆盖缺陷（commit `a38e991`）
+
+### 6.1 怎么发现的
+
+**真实多智能体 e2e**（`scripts/run-multiagent-e2e.mjs`，真实 LLM + loomy 桥接），不是 mock：
+
+- ✅ agent 路由正确 —— `src/loomy` 任务派给外部 loomy 桥接，loomy 接单 2 次全成功
+- ✅ zone 越权裁决全链路可见 —— headless `conflict` 事件触发 3 次
+- ✅ B4 已生效 —— 单次 run 出现 **676900ms**，仍被 300s 线路池预算 + failover 兜住
+- ❌ **流水线不可能收敛**：落盘只剩 `tests/unit/greet.test.js`（被重命名后的文件），
+  而 smoke 命令要求 `src/cli.js` → 永远失败
+
+### 6.2 根因
+
+不是守卫的错，是**规划器与 PRD 对不上**：
+
+| 来源 | 内容 |
+| --- | --- |
+| PRD `acceptanceCriteria` | `tests/greet.test.js`、`tests/math.test.js`（在 `tests/` **根下**） |
+| 规划器产出的 zone | `tests/unit`、`tests/runner` |
+| `shared/prompts.ts:69` | 强制 "zone: a concrete directory"（目录名） |
+
+模型被两边夹住：想满足文件的**父目录**语义就得写 `tests`，但 prompt 明说要 concrete
+directory，于是它选了看起来更"目录"的 `tests/unit`。结果每次写 `tests/greet.test.js`
+都被判越权 → 沙箱回滚 → 验证永远缺文件 → 重修烧光预算，**且报的是错误的原因**
+（"测试文件不存在"而不是"zone 覆盖不到"）。
+
+### 6.3 修法：把不可能的计划挡在规划阶段
+
+新增 `shared/zone-coverage.ts`（纯 TS，`shared/` 不许碰 node/DOM，三端共用）：
+
+| 导出 | 职责 |
+| --- | --- |
+| `extractDeclaredPaths(text)` | 从文本里提取**被显式点名**的嵌套文件路径 |
+| `declaredArtifactPaths(prd)` | 扫 `goal` + `features` + `acceptanceCriteria` |
+| `findOrphanPaths(prd, tasks, protectedPrefixes?)` | 找出没有 zone 认领的声明路径 |
+| `describeZoneGaps(gaps)` | 生成给人看的摘要 |
+
+`decompose()` 末尾接 `assertZoneCoverage`：命中即 `onLog("[规划校验] …")` + throw
+`SchemaValidationError`。
+
+**刻意单向**：只拒绝，**绝不自动放宽 zone**。自动把 zone 提到父目录等于凭空授予
+规划器没打算给的写权限 —— 那正是 zone 模型存在的意义。
+
+**代价对比**：在这里失败 = **1 次 decompose 调用**；拖到运行期失败 = 整轮重修预算
++ 误导性归因。差 2~3 个数量级。
+
+### 6.4 提取规则为什么长这样（两个真阳性教训）
+
+写第一版正则时踩了两个坑，都是**测试先红**才发现的：
+
+| 输入 | 错误行为 | 修法 |
+| --- | --- | --- |
+| `../outside/secret.txt` | 提取出 `outside/secret.txt`（退化成看似合法的路径） | 前瞻断言 `(?!\.)` 挡不住 —— 引擎会退一格重新匹配。改判**前置字符** `prev === "." \|\| "/" \|\| "\\"` 就 continue |
+| `package.json` | 被当成产物路径，毙掉正常计划 | 裸文件名几乎都是散文里提到的**受保护**路径（"不要改 package.json"）。改为一律要求 `segments.length >= 2` |
+
+**取向**：偏向漏报。漏报只是少校验一次；误报会毙掉本来能跑的合法计划。
+
+### 6.5 验证
+
+- `src/zone-coverage.test.ts` — **11 例**，含真实回归：zones `tests/unit`+`tests/runner`
+  vs PRD `tests/greet.test.js` → 报 2 个 orphan，并断言 `gaps[0].zones` 列出全部现有 zone
+- `src/orchestrator.test.ts` — **+2 例**（拒 / 收各一）
+- **变异验证**：把 `this.assertZoneCoverage(prd, plan.tasks);` 换成死代码后，
+  「rejects a plan whose zones orphan a PRD-declared file」**真红**；恢复后 27/27 通过
+- `npm run verify` 全绿：**514 passed / 6 skipped**，typecheck 3 套 + lint + build
+  + `smoke:artifact`（45 个 dist-electron 文件 `node --check` 0 错误）+ `smoke:snapshot-secrets`
+
+### 6.6 本轮新发现（未修）
+
+`shared/prompts.ts` 把 `${payload.zone}` / `${payload.title}` 原文插进提示词。
+zone 由 LLM 产出，理论上可含 `${` 触发模板字面量展开，或纯文本注入。
+**影响面小**（上游本来就是 LLM 自己的输出，自我注入收益低），故列为待办而非 P0。
+
+---
+
+## 七、剩余工作
+
+| 编号 | 内容 | 状态 |
+| --- | --- | --- |
+| C1 | `ipc.ts` 拆 handlers | 未动 |
+| C2 | 持久化原子写 + audit 保留策略 | 未动 |
+| C3 | path-policy realpath / 大小写归一 | 已定性为 **P2**（fail-closed 误拒，不改） |
+| C4 | 子进程 env 最小化 | 未动 |
+| C5 | 补测试 | 未动 |
+| — | `prompts.ts` 模板注入通道 | 见 6.6 |
