@@ -1013,3 +1013,77 @@ PRD: "不要改动 package.json；新增 src/cli.js"
 | 3 | `mutation` | 断言不敏感（测试空转） | 未纳入目标的模块 |
 | 4 | `mutation` 扩展目标 | 集成层类内缺陷 | 未纳入目标的模块 |
 | 5 | `mutation` 扩展目标 + **挂全测试文件** | **整层无断言维度**（如 Renderer 错误路径） | 未纳入目标的模块 |
+
+---
+
+## 十三、agents 层接入变异门禁（commit `72b4987`）
+
+### 13.1 动机
+
+第十二章结束时门禁覆盖 `shared/` + `electron/engine/` + `src/store.ts`。
+**`electron/agents/` 2259 行里只有最小的 `scoped-env.ts`（160 行）在册** ——
+而 `sensenova-api` 是 `DEFAULT_SETTINGS` 里的**默认适配器**，
+即新装用户实际跑的那条路径（§9.4 的接线缺陷就出在这里）。
+
+按 §11.8 的 tier 机制新增 4 个 tier 2 目标：`manifest-schema` / `registry` /
+`cli-agent` / `sensenova-api`。
+
+### 13.2 首跑 5 个变异存活，拆单点后 7 处全是真缺口
+
+存活算子只有 5 个，但拆开位点后有 7 处 —— **全部是真缺口，零等价变异**
+（§12.6 的教训再次应验：连中两轮，3/3 与 7/7）。
+
+| 文件 | 位点 | 变异后的真实后果 |
+| --- | --- | --- |
+| cli-agent | `!run \|\| finished` → `&&` | abort 未知 runId 时 `run.session` 抛 TypeError |
+| cli-agent | `lastKind === "failed" && exitCode === null` → `\|\|` | 任何未退出的 run（含正在跑的）被标成 retryable timeout |
+| cli-agent | `oldest !== undefined` → `===` | **results 永不淘汰 → 无限增长**（非空 Map 的 key 不是 undefined） |
+| sensenova | `!session \|\| finished` → `&&` | 同上 TypeError |
+| sensenova | files 载荷校验三选一 → 三者兼具 | 校验几乎永不触发，模型返回什么都照收 |
+| sensenova | `start < 0 \|\| end <= start` → `&&` | 落到 `JSON.parse("")`，报 JSON 解析错而非可行动的提示 |
+| sensenova | `return false` → `true` | 每次都声称"并发槽位已满排队"，误导排查 |
+
+### 13.3 补断言的三条写法（可复用）
+
+**① 私有方法用反射，别硬跑真实流程。**
+验"结果缓存会淘汰"真跑 51 个子进程要几十秒，反射调私有方法 1ms。
+
+**② 断言错误消息，而不是"是否抛错"。**
+变异版常换个地方抛 —— `parseFiles("} {")` 原版抛「找不到 JSON 对象」，
+变异版落到 `JSON.parse("")` 抛 SyntaxError。**两者都抛，只断言 `toThrow()` 会假绿。**
+
+**③ 补反向断言。**
+`return false → true` 存活时，测试里**已经有**「排队的任务会报排队」。
+缺的是反面：**槽位空闲时绝不能出现排队提示**。
+
+> 一个布尔标志位被断言了「真」的那一面，不等于「假」的那一面有守护。
+> 看到存活变异时先问：**这个条件的反面有人测吗？**
+
+### 13.4 tier 分层的价值兑现
+
+4 个新目标全放 tier 2（慢），`verify` 的 quick 档**仍是 8/8、耗时零增长**
+（1m21s，与加目标前完全一致）。全量扫描从 35/35 涨到 **44/44**。
+
+> 分层是**成本维度**，不是重要性维度。新目标慢就别塞进快速门禁 —— 这条判断成立。
+
+### 13.5 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `npx vitest run` | **616 passed / 6 skipped**（609 → 616） |
+| `npm run mutation -- --file=agents` | **24/24 全杀** |
+| `npm run mutation`（全量） | **44/44 全杀** |
+| `npm run verify` | 全绿，耗时未变 |
+
+### 13.6 当前门禁覆盖全景（13 个目标）
+
+| 区域 | 目标模块 |
+| --- | --- |
+| `shared/` | `glob` · `redact` · `prompt-text` · `zone-coverage` |
+| `electron/sandbox/` | `path-policy` |
+| `electron/agents/` | `scoped-env` · `manifest-schema` · `registry` · `cli-agent` · `sensenova-api` |
+| `electron/engine/` | `scheduler` · `orchestrator` |
+| `src/`（Renderer） | `store` |
+
+**仍未纳入**：`http-bridge`（383 行）、`manifest-loader`（168 行）、`index`、
+`run-session`。按 tier 2 扩的成本已验证可接受。
