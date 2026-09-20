@@ -539,8 +539,16 @@ const MAX_ZONE_LENGTH = 200;
 | — | 层 2 接线修复（`fencedBlock` / `sensenova-api`） | ✅ 本轮 §9.4 |
 | — | 死代码清理（3 个函数） | ✅ 本轮 §9.5 |
 | — | **未接线检测门禁**（`check:unwired`） | ✅ 本轮 §9.7 |
+| — | **变异验证门禁**（`mutation:quick`）+ 修复 `glob.ts` 断言缺口 | ✅ 本轮 §9.8 |
 
 **已无已知未处理项。**
+
+**`verify` 当前全链路**（每步都可复现，耗时实测 80s）：
+
+```
+typecheck(3 套 tsconfig) → lint → check:unwired → vitest → mutation:quick
+  → vite build → build:headless → smoke:artifact → smoke:snapshot-secrets
+```
 
 ### 9.7 把「未接线」变成门禁（本轮）
 
@@ -575,3 +583,80 @@ npm run typecheck && npm run lint && npm run check:unwired && npm test && ...
 `parsePrd`…），因为「引用者都死」的判定在有循环依赖时失控。
 误报比漏检更消耗信任 —— **回退到单层判定**，把局限写进脚本注释。
 这条记在这里，是为了下次不要重复踩。
+
+### 9.8 把「测试空转」变成门禁（本轮）
+
+§9.7 解决的是「**没有测试看着它**」。
+还剩一类更难看的形态：**有测试，测试也全绿，但断言根本不敏感** ——
+把生产代码的 `&&` 改成 `||`，测试照样绿。`check:unwired` 抓不到这个，
+因为符号确实被生产代码调用了。**调用 ≠ 被验证。**
+
+新增 `scripts/mutation-check.mjs`，接进 `verify`（在 test 之后）：
+
+```
+... && npm test && npm run mutation:quick && npm run build && ...
+```
+
+**做法**：对每个目标模块逐个施加变异算子 → 跑对应测试 → 测试变红记「杀死」，
+仍绿记「存活」。**存活即失败**（`MAX_SURVIVORS = 0`）。
+
+**目标模块与算子**：
+
+| 维度 | 内容 |
+| --- | --- |
+| 目标（6 个安全关键模块） | `sandbox/path-policy` · `shared/glob` · `shared/redact` · `shared/prompt-text` · `agents/scoped-env` · `shared/zone-coverage` |
+| 算子（7 个） | `&&→\|\|` · `\|\|→&&` · `===→!==` · `!==→===` · `return true→false` · `return false→true` · `continue→break` |
+| 杀死判定 | 测试非零退出**即算杀死** —— 含类型错误。**编译失败是有效防线**，不需要先跑一遍语法预检 |
+| 安全保护 | ①改写前后比对 ②`try/finally` 恢复 ③`process.on("exit"/"SIGINT"/"SIGTERM")` 兜底恢复 |
+
+**本轮变异验证发现的真实缺陷（这是门禁的价值证明）**：
+
+`shared/glob.ts:91` 的 `isPathInZone` 模块文件规则：
+
+```ts
+if (p.startsWith(`${z}.`)) {
+  const rest = p.slice(z.length + 1);
+  return rest !== "" && !rest.includes("/");   // ← 两个半句都是承重的
+}
+```
+
+把 `&&` 变异成 `||` 后，**全部用例仍然绿**。手工复现三个差异点：
+
+| 输入 | 原版 | `&&→\|\|` 后 | 后果 |
+| --- | --- | --- | --- |
+| `isPathInZone("src/duration.", "src/duration")` | `false` | `true` | 空后缀被当成模块文件 |
+| `isPathInZone("src/duration.sub/x.js", "src/duration")` | `false` | `true` | **嵌套路径被错误纳入 zone** |
+| `isPathInZone("src/duration./x.js", "src/duration")` | `false` | `true` | 同上 |
+
+后两条是**沙箱 zone 边界被放宽** —— 与函数注释里明写的 "bounded" 意图相反。
+两个半句在整个测试集里**从未被单独触发过**，所以谁都发现不了。
+
+**修法**：在 `src/glob.test.ts` 新增一个用例，把三个差异点各钉一条断言
+（含注释写明「由变异测试发现」）。变异从**存活 → 杀死**。
+
+**验证**：
+
+| 项 | 结果 |
+| --- | --- |
+| `npm run mutation`（limit=8，全目标） | **杀死 22/22（100%）**，33–36s |
+| `npm run mutation:quick`（limit=1，verify 内） | 6/6，14s |
+| `npm run verify` 全流程 | **全绿**，80s（含两个新门禁） |
+| 测试数 | 596 passed / 6 skipped |
+
+**性能取舍（记录一次失败实现）**：首版每个变异先跑一次 `tsc` 单文件语法检查，
+Windows 上单次约 40s，6 个变异 5.5 分钟跑不完被 SIGTERM。
+**根因是把「类型错误」误当成需要排除的噪音** —— 实际上类型错误正是类型系统抓到了改动，
+属于有效防线。删掉预检后 33s 跑完全部 22 个变异，**提速约 20 倍**，
+行为语义反而更正确。同时消除了预检 `finally` 未生效留下的 `.mutation-probe.ts` 脏文件。
+
+**方法论**：这是本轮的第三层，三层递进关系值得记牢 ——
+
+| 层 | 门禁 | 挡住的形态 | 抓不到 |
+| --- | --- | --- | --- |
+| 1 | `tsc` / `lint` | 类型错、风格错 | 逻辑错 |
+| 2 | `check:unwired` | helper 生产零调用 | 调用了但没验证 |
+| 3 | `mutation` | 断言不敏感（测试空转） | 未纳入目标的模块 |
+
+**未覆盖范围（诚实记录）**：变异只跑 6 个模块，不是全仓。理由是变异验证的成本是
+「每变异一次跑一遍测试」，全仓会从 33s 涨到小时级，将无法容忍地拖慢 `verify`。
+选择标准是**安全关键 + 纯逻辑密集**；后续可按此标准增补目标。

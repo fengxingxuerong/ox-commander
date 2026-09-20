@@ -96,6 +96,20 @@ describe("isPathInZone", () => {
     expect(isPathInZone("src/duration.js.bak", "src/duration")).toBe(true);
   });
 
+  it("requires the module-file suffix to be a non-empty single segment", () => {
+    // Both halves of the `rest !== "" && !rest.includes("/")` guard must be
+    // load-bearing. Found by mutation testing: flipping `&&` to `||` kept every
+    // test green, because no case exercised either half in isolation — and the
+    // flipped version *widens* the zone (a nested path is wrongly owned).
+    //
+    // Empty remainder: `src/duration.` is not a module file of `src/duration`.
+    expect(isPathInZone("src/duration.", "src/duration")).toBe(false);
+    // Nested remainder: a directory named like the module is NOT owned via the
+    // module-file rule — only via the `zone/` prefix rule, which this is not.
+    expect(isPathInZone("src/duration.sub/x.js", "src/duration")).toBe(false);
+    expect(isPathInZone("src/duration./x.js", "src/duration")).toBe(false);
+  });
+
   it("normalizes separators and leading ./", () => {
     expect(isPathInZone("./src\\store\\a.js", "src/store/")).toBe(true);
     expect(isPathInZone("src/duration.js", "./src/duration")).toBe(true);
