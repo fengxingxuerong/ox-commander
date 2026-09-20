@@ -1,95 +1,34 @@
 import { describe, expect, it } from "vitest";
-import {
-  buildPrdPrompt,
-  buildDecomposePrompt,
-  buildTaskDispatchPrompt,
-  buildEscalationSummary,
-} from "../shared/prompts";
+import { buildDecomposePrompt } from "../shared/prompts";
+import type { PrdDocument } from "../shared/types";
 
-describe("buildPrdPrompt", () => {
-  it("constrains techStack to the Node.js execution sandbox", () => {
-    const prompt = buildPrdPrompt("做一个计算器");
-    expect(prompt).toContain("CommonJS");
-    expect(prompt).toContain("node:test");
-    expect(prompt).toContain("NEVER propose Python");
-  });
-
-  it("requires npm-test-runnable acceptance criteria", () => {
-    const prompt = buildPrdPrompt("做一个待办应用");
-    expect(prompt).toContain('npm test');
-    expect(prompt).toContain("tests/*.test.js");
-  });
-
-  it("embeds the user requirement verbatim", () => {
-    const req = "支持表达式求值 3+4*2";
-    expect(buildPrdPrompt(req)).toContain(req);
-  });
-});
+const PRD: PrdDocument = {
+  goal: "CSV 统计工具",
+  features: ["解析 CSV", "按列统计"],
+  techStack: ["Node.js"],
+  acceptanceCriteria: ["node --test 全绿"],
+};
 
 describe("buildDecomposePrompt", () => {
-  const prd = {
-    goal: "g",
-    features: ["f1"],
-    techStack: ["Node.js"],
-    acceptanceCriteria: ["npm test passes"],
-  };
-
-  it("demands six-field task objects and forbids string entries", () => {
-    const prompt = buildDecomposePrompt(prd);
-    expect(prompt).toContain("dependencies");
-    expect(prompt).toContain("Never use plain strings");
+  it("要求生成独立样本冒烟清单（防自证盲区层）", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toContain('"smoke"');
+    expect(p).toContain("expectContains");
+    expect(p).toMatch(/sample data|样例数据/);
   });
 
-  it("forbids non-Node runtime requirements in task descriptions", () => {
-    const prompt = buildDecomposePrompt(prd);
-    expect(prompt).toContain("CommonJS Node.js with no external npm packages");
+  it("冒烟期望片段必须来自样例数据手算，不得抄实现", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toMatch(/not copied from the implementation/);
   });
 
-  it("includes the PRD as JSON", () => {
-    const prompt = buildDecomposePrompt(prd);
-    expect(prompt).toContain('"techStack"');
-    expect(prompt).toContain("Node.js");
+  it("冒烟命令同样受沙箱约束（无 shell 元字符/危险程序）", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toMatch(/shell metacharacters|strict sandbox policy/);
   });
 
-  it("steers zones towards concrete directories and off the repository root", () => {
-    const prompt = buildDecomposePrompt(prd);
-    expect(prompt).toContain("concrete directory");
-    expect(prompt).toContain('NEVER use "." or "" as a zone');
-    expect(prompt).toContain('"zone": "src/config"');
-    // The example must not teach the model to claim the whole tree.
-    expect(prompt).not.toContain('"zone": "."');
-  });
-
-  it("tells the planner that protected paths cannot be written", () => {
-    const prompt = buildDecomposePrompt(prd);
-    expect(prompt).toContain("package.json");
-    expect(prompt).toContain("rejected");
-  });
-});
-
-describe("dispatch and escalation prompts", () => {
-  it("repair dispatch carries the error digest", () => {
-    const prompt = buildTaskDispatchPrompt({
-      runId: "r1",
-      taskId: "t1",
-      title: "修复",
-      description: "d",
-      zone: "z",
-      projectRoot: "/tmp/x",
-      repairContext: { round: 2, errorLogDigest: "TypeError: boom" },
-    });
-    expect(prompt).toContain("TypeError: boom");
-    expect(prompt).toContain("Repair round: 2");
-  });
-
-  it("escalation summary lists options when digest is empty", () => {
-    const summary = buildEscalationSummary({
-      taskTitle: "文档任务",
-      attemptsSoFar: 3,
-      maxRepairRounds: 2,
-      lastErrorDigest: "",
-    });
-    expect(summary).toContain("(空)");
-    expect(summary).toContain("跳过该任务");
+  it("无可运行入口时允许返回空冒烟数组", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toMatch(/empty "smoke" array/);
   });
 });

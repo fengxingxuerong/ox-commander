@@ -303,6 +303,45 @@ describe("runSpec", () => {
     expect(saved.snapshot.batches.length).toBe(1);
   });
 
+  it("journal 需求不匹配 → 忽略旧日志按全新运行", async () => {
+    const root = scratch("headless-journal-mismatch");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    fs.writeFileSync(
+      path.join(root, "ox-run-journal.json"),
+      JSON.stringify({
+        requirement: "另一个需求",
+        snapshot: { batches: [], allDone: [], skipped: [], attempts: {}, round: 3, extraRounds: 0, lastDigest: "" },
+      }),
+      "utf8",
+    );
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+    expect(code).toBe(0);
+    expect(events.some((e) => e.type === "log" && e.text.includes("需求不匹配"))).toBe(true);
+    expect(events.some((e) => e.type === "prd")).toBe(true); // 走了全新规划
+  });
+
+  it("journal 快照解析失败 → 忽略并按全新运行", async () => {
+    const root = scratch("headless-journal-corrupt");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    fs.writeFileSync(path.join(root, "ox-run-journal.json"), "{not-json", "utf8");
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+    expect(code).toBe(0);
+    expect(events.some((e) => e.type === "log" && e.text.includes("解析失败"))).toBe(true);
+    expect(events.some((e) => e.type === "prd")).toBe(true);
+  });
+
   it("skips PRD generation when the host supplies one", async () => {
     const root = scratch("headless-prd");
     const prd: PrdDocument = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
