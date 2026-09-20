@@ -266,3 +266,44 @@ describe("Scheduler run attribution", () => {
     expect(records[1]!.durationMs).toBeGreaterThanOrEqual(0);
   });
 });
+
+describe("AuditLog · retention", () => {
+  /** Forces a roll on every append by capping the file at one byte. */
+  function tiny(tag: string, maxFiles: number): AuditLog {
+    return new AuditLog({ dir: scratch(tag), maxFileBytes: 1, maxFiles });
+  }
+
+  it("keeps at most maxFiles rolled files", () => {
+    const audit = tiny("audit-retain", 3);
+    for (let i = 0; i < 12; i++) audit.append({ phase: "settings", detail: `r${i}` });
+    // Rolling without a cap was an unbounded disk leak in long-lived projects.
+    expect(audit.files().length).toBeLessThanOrEqual(3);
+  });
+
+  it("never deletes the file it is currently appending to", () => {
+    const audit = tiny("audit-current", 2);
+    for (let i = 0; i < 8; i++) audit.append({ phase: "settings", detail: `r${i}` });
+    expect(fs.existsSync(audit.currentFile())).toBe(true);
+    // With maxFiles: 1 the sweep must still not consider the active file doomed.
+    const solo = tiny("audit-solo", 1);
+    for (let i = 0; i < 5; i++) solo.append({ phase: "settings", detail: `r${i}` });
+    expect(fs.existsSync(solo.currentFile())).toBe(true);
+  });
+
+  it("sweeps pre-existing surplus on construction", () => {
+    const dir = scratch("audit-sweep");
+    // Simulate a directory left behind by a version with no retention at all.
+    for (let i = 0; i < 10; i++) {
+      fs.writeFileSync(path.join(dir, `audit-2026-01-01-${String(i).padStart(3, "0")}.jsonl`), "{}\n", "utf8");
+    }
+    const audit = new AuditLog({ dir, maxFiles: 4 });
+    expect(audit.files().length).toBeLessThanOrEqual(4);
+  });
+
+  it("keeps the newest records readable after a sweep", () => {
+    const audit = tiny("audit-recent", 3);
+    for (let i = 0; i < 9; i++) audit.append({ phase: "settings", detail: `r${i}` });
+    // Retention trims history, not the tail an operator actually needs.
+    expect(audit.read({ limit: 1 })[0]!.detail).toBe("r8");
+  });
+});

@@ -1,11 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
-
-/** Tolerate UTF-8 BOM written by external tools (e.g. PowerShell Set-Content). */
-function stripBom(text: string): string {
-  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
-}
+import { readJsonFile, writeFileAtomic } from "./atomic-file";
 
 interface ProjectRecord {
   id: string;
@@ -31,12 +27,13 @@ export class ProjectStore {
   }
 
   private readAll(): ProjectRecord[] {
-    if (!fs.existsSync(this.file)) return [];
-    return JSON.parse(stripBom(fs.readFileSync(this.file, "utf8"))) as ProjectRecord[];
+    return readJsonFile<ProjectRecord[]>(this.file, []);
   }
 
   private writeAll(records: ProjectRecord[]): void {
-    fs.writeFileSync(this.file, JSON.stringify(records, null, 2), "utf8");
+    // Atomic on purpose: an in-place truncate that dies half-way loses every
+    // project record, which is unrecoverable from the UI.
+    writeFileAtomic(this.file, JSON.stringify(records, null, 2));
   }
 
   create(name: string, requirement: string): ProjectRecord {
@@ -86,7 +83,7 @@ export class SettingsStore {
 
   load(): ProjectSettings {
     if (!fs.existsSync(this.file)) return structuredClone(DEFAULT_SETTINGS);
-    const parsed = JSON.parse(stripBom(fs.readFileSync(this.file, "utf8"))) as Partial<ProjectSettings>;
+    const parsed = readJsonFile<Partial<ProjectSettings>>(this.file, {});
     // Clone the defaults so nested arrays (verificationCommands / enabledAgents /
     // llmPool) are never shared with DEFAULT_SETTINGS: a caller mutating the
     // loaded settings in place must not be able to poison process-wide defaults.
@@ -94,6 +91,8 @@ export class SettingsStore {
   }
 
   save(settings: ProjectSettings): void {
-    fs.writeFileSync(this.file, JSON.stringify(settings, null, 2), "utf8");
+    // Atomic: a truncated settings.json silently resets the operator's whole
+    // configuration on next launch, including their LLM pool.
+    writeFileAtomic(this.file, JSON.stringify(settings, null, 2));
   }
 }

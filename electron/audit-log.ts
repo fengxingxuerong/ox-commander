@@ -29,6 +29,15 @@ export interface AuditLogOptions {
   maxFileBytes?: number;
   /** Paths recorded per record; default 20. */
   maxPaths?: number;
+  /**
+   * How many rolled files to keep (oldest are deleted once exceeded); default 20.
+   *
+   * The log used to roll by size but never drop anything, so a long-running
+   * project accumulated JSONL forever — a slow disk leak with no upper bound.
+   * Retention is deliberately generous: roughly 40 MiB of history at the
+   * defaults, enough for "which agent changed what" over many runs.
+   */
+  maxFiles?: number;
   now?: () => Date;
 }
 
@@ -44,6 +53,7 @@ export class AuditLog {
   private readonly dir: string;
   private readonly maxFileBytes: number;
   private readonly maxPaths: number;
+  private readonly maxFiles: number;
   private readonly now: () => Date;
   /** Cached size of the current file, so append() does not stat every time. */
   private size = 0;
@@ -53,9 +63,11 @@ export class AuditLog {
     this.dir = path.resolve(opts.dir);
     this.maxFileBytes = opts.maxFileBytes ?? 2 * 1024 * 1024;
     this.maxPaths = opts.maxPaths ?? 20;
+    this.maxFiles = opts.maxFiles ?? 20;
     this.now = opts.now ?? (() => new Date());
     fs.mkdirSync(this.dir, { recursive: true });
     this.current = this.pickFile();
+    this.enforceRetention();
   }
 
   /** The file currently being appended to. */
@@ -140,6 +152,35 @@ export class AuditLog {
 
   private rotate(): void {
     this.current = this.newFile(this.index(this.current) + 1);
+    this.enforceRetention();
+  }
+
+  /**
+   * Deletes the oldest files so the directory never holds more than `maxFiles`
+   * JSONL files *in total, including the active one*.
+   *
+   * Counting the active file matters: with `maxFiles: 1` the log must still
+   * hold exactly one file, and a naive "keep the newest N, plus current" would
+   * settle at N+1 forever.
+   *
+   * `this.current` is never deleted, so the active file survives even when the
+   * swept-away order would otherwise include it. Best-effort: a failure to
+   * delete must not break appending.
+   */
+  private enforceRetention(): void {
+    try {
+      const surplus = this.files().filter((f) => f !== this.current);
+      const removable = surplus.length - Math.max(1, this.maxFiles - 1);
+      for (const file of surplus.slice(0, Math.max(0, removable))) {
+        try {
+          fs.rmSync(file, { force: true });
+        } catch {
+          // keep going: one stubborn file must not stop the sweep
+        }
+      }
+    } catch {
+      // auditing must never take the pipeline down
+    }
   }
 
   private index(file: string): number {

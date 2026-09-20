@@ -13,6 +13,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, verifyProject } from "./engine";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
@@ -200,10 +201,11 @@ export function createFileJournal(projectRoot: string, requirement: string): Fil
     path: file,
     save: (snapshot: RunSnapshot): void => {
       try {
-        fs.writeFileSync(
+        // Atomic: a half-written checkpoint would make the next `load()` report
+        // `corrupted`, silently discarding a perfectly good resume point.
+        writeFileAtomic(
           file,
           JSON.stringify({ requirement, savedAt: new Date().toISOString(), snapshot }, null, 2),
-          "utf8",
         );
       } catch {
         // Checkpointing is a best-effort fuse; a failed write must not abort a run.
