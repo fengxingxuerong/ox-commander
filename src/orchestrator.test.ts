@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { AllRoutesCoolingError } from "../shared/http-clients";
-import { OrchestratorEngine, type OrchestratorDeps } from "../electron/engine/orchestrator";
+import {
+  OrchestratorEngine,
+  type OrchestratorDeps,
+  type RunSnapshot,
+} from "../electron/engine/orchestrator";
 import type { Scheduler } from "../electron/engine/scheduler";
 import type { LlmClient } from "../shared/llm-client";
 import { DEFAULT_SETTINGS, type Task, type VerificationReport } from "../shared/types";
@@ -563,5 +567,92 @@ describe("OrchestratorEngine.execute · 依赖失败跳过下游（配额守卫�
     const report = await silentEngine(deps).execute(twoBatchTasks(), ".");
     expect(report.passed).toBe(true);
     expect(dispatched).toEqual(["A", "B"]);
+  });
+});
+
+describe("OrchestratorEngine · 断点续跑 journal", () => {
+  function twoBatchTasks(): Task[][] {
+    const A: Task = { ...TASKS[0], id: "A", dependencies: [] };
+    const B: Task = { ...TASKS[0], id: "B", dependencies: ["A"] };
+    return [[A], [B]];
+  }
+
+  function recordingScheduler(okIds: Set<string>, dispatched: string[]): Scheduler {
+    return {
+      async runBatch(tasks: Task[]) {
+        for (const t of tasks) dispatched.push(t.id);
+        return tasks.map((t: Task) => ({
+          taskId: t.id,
+          ok: okIds.has(t.id),
+          logDigest: "log",
+          events: [],
+        }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  function silentEngine(deps: OrchestratorDeps): OrchestratorEngine {
+    return new OrchestratorEngine(deps, {
+      onStage: () => {},
+      onLog: () => {},
+      onTaskStatus: () => {},
+      onVerification: () => {},
+      onEscalation: () => {},
+    });
+  }
+
+  it("关键点保存快照（计划 + 每批次），最终快照含全部完成状态", async () => {
+    const snapshots: RunSnapshot[] = [];
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["A", "B"]), dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      journal: { save: (s) => snapshots.push(s) },
+    };
+    const report = await silentEngine(deps).execute(twoBatchTasks(), ".");
+    expect(report.passed).toBe(true);
+    // 计划快照 + 批次1 + 批次2 = 至少 3 个快照
+    expect(snapshots.length).toBeGreaterThanOrEqual(3);
+    expect(snapshots[0]!.batches.length).toBe(2); // 计划快照携带完整计划（免重规划）
+    const last = snapshots[snapshots.length - 1]!;
+    expect(last.allDone).toEqual(["A", "B"]);
+    expect(last.attempts).toEqual({ A: 1, B: 1 });
+  });
+
+  it("resume 恢复快照：已完成任务不再派发，直接续接后续批次", async () => {
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["B"]), dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const report = await silentEngine(deps).execute(twoBatchTasks(), ".", {
+      resume: { allDone: ["A"], skipped: [], attempts: { A: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
+    });
+    expect(report.passed).toBe(true);
+    expect(dispatched).toEqual(["B"]); // A 已完成 → 不重派，直接续接 B
+  });
+
+  it("resume 轮 outcomes 为空时不误触全员重跑（保护恢复的 allDone）", async () => {
+    const dispatched: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["A"]), dispatched), // A ok=true（若被误重派也能跑通）
+      verify: async () => makeReport(false), // 永远失败
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+      journal: { save: () => undefined },
+    };
+    // resume：round=1、allDone 含 A → 每个批次都无待派任务 → outcomes 恒为空
+    // 修复前：空 outcomes 触发"全员重跑"清掉恢复的 allDone → A 被误重派
+    // 修复后：guard 保护恢复的 allDone → A 从不重派，直至预算耗尽抛出
+    await expect(
+      silentEngine(deps).execute([[{ ...TASKS[0], id: "A", dependencies: [] }]], ".", {
+        resume: { allDone: ["A"], skipped: [], attempts: { A: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
+      }),
+    ).rejects.toThrow(/verification still failing/);
+    expect(dispatched).toEqual([]); // A 从未被重派
   });
 });

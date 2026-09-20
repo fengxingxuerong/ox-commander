@@ -20,6 +20,32 @@ export interface OrchestratorDeps {
   scheduler: import("./scheduler").Scheduler;
   verify: (cwd: string) => Promise<VerificationReport>;
   settings: ProjectSettings;
+  /**
+   * 断点续跑日志（可选）：宿主持久化快照，engine 在计划完成、每个批次结束、
+   * 每轮升级处理完成时调用 save。宿主重启后把快照经 execute 的 resume 参数喂回。
+   */
+  journal?: { save(snapshot: RunSnapshot): void };
+}
+
+/** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
+export interface RunSnapshot {
+  batches: Task[][];
+  allDone: string[];
+  skipped: string[];
+  attempts: Record<string, number>;
+  round: number;
+  extraRounds: number;
+  lastDigest: string;
+}
+
+/** execute 的恢复入参：RunSnapshot 去掉 batches（batches 由宿主直接传入）。 */
+export interface ResumeState {
+  allDone: string[];
+  skipped: string[];
+  attempts: Record<string, number>;
+  round: number;
+  extraRounds: number;
+  lastDigest: string;
 }
 
 export interface OrchestratorCallbacks {
@@ -141,30 +167,47 @@ export class OrchestratorEngine {
   }
 
   /** Runs DEVELOPMENT → VERIFICATION (+ repair loops) → DELIVERY. */
-  async execute(batches: Task[][], projectRoot: string): Promise<VerificationReport> {
+  async execute(
+    batches: Task[][],
+    projectRoot: string,
+    opts?: { resume?: ResumeState },
+  ): Promise<VerificationReport> {
     const maxRounds = this.deps.settings.maxRepairRounds;
-    const attempts = new Map<string, number>();
-    const allDone = new Set<string>();
-    // Skipped-by-user tasks count as done so their dependents can proceed.
-    const skipped = new Set<string>();
-    // Extra rounds granted by the user via "redispatch" escalation decisions.
-    let extraRounds = 0;
-
-    this.cb.onStage("DEVELOPMENT");
+    const resume = opts?.resume;
+    const attempts = new Map<string, number>(
+      Object.entries(resume?.attempts ?? {}).map(([k, v]) => [k, v]),
+    );
+    const allDone = new Set<string>(resume?.allDone ?? []);
+    const skipped = new Set<string>(resume?.skipped ?? []);
+    let extraRounds = resume?.extraRounds ?? 0;
+    let round = resume?.round ?? 0;
     let lastDigest = "";
+    // 断点续跑：关键点保存快照（计划完成 / 每批次 / 每轮收尾）。
+    const save = () =>
+      this.deps.journal?.save({
+        batches,
+        allDone: [...allDone],
+        skipped: [...skipped],
+        attempts: Object.fromEntries(attempts),
+        round,
+        extraRounds,
+        lastDigest,
+      });
+    save();
+    this.cb.onStage("DEVELOPMENT");
     /** Per-task digests routed by zone from the last verification report. */
     let routedByTask = new Map<string, string>();
     let outcomes: DispatchOutcome[] = [];
     let lastFailedLogs = new Map<string, string>();
-    let round = 0;
     while (round <= maxRounds + extraRounds) {
       await this.gate();
       const isRepair = round > 0;
       if (isRepair) {
         this.cb.onLog(`── 重修第 ${round}/${maxRounds + extraRounds} 轮 ──`);
-        if (outcomes.every((o) => o.ok)) {
+        if (outcomes.length > 0 && outcomes.every((o) => o.ok)) {
           // Verification failed with no failed dev task: workspace was broken
           // externally or integration regressed. Re-run everything.
+          // （outcomes 为空的断点续跑轮不算：恢复的 allDone 必须保留）
           allDone.clear();
           outcomes = [];
           this.cb.onLog("验证未过但无失败任务，判定工作区受损/集成回归，全员重跑。");
@@ -233,6 +276,7 @@ export class OrchestratorEngine {
           });
         }
         this.cb.onLog(`批次 ${bi + 1}/${batches.length} 完成：${batchOutcomes.filter((o) => o.ok).length}/${batchOutcomes.length} 成功`);
+        save();
       }
 
       // Stage 4: hard verification gates delivery.
@@ -289,6 +333,7 @@ export class OrchestratorEngine {
             // redispatch: grant one more round and reset this task's failure log.
             extraRounds += 1;
             this.cb.onLog(`用户要求重派任务「${t.title}」，追加一轮修复。`);
+            save();
           }
         }
 
@@ -308,12 +353,14 @@ export class OrchestratorEngine {
             throw new Error("所有失败任务已被跳过，但验证仍未通过");
           }
           round += 1;
+          save();
           continue;
         }
 
         throw new VerificationExhaustedError(maxRounds);
       }
       round += 1;
+      save();
     }
     throw new Error("unreachable");
   }

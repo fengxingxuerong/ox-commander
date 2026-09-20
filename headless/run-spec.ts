@@ -6,11 +6,13 @@
  * trustworthy if its happy path is actually exercised.
  */
 import * as fs from "node:fs";
+import path from "node:path";
 import { OrchestratorEngine, Scheduler, VerificationExhaustedError, verifyProject } from "../electron/engine";
+import type { RunSnapshot } from "../electron/engine";
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../electron/agents";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import type { LlmClient } from "../shared/llm-client";
-import type { EscalationAction, VerificationReport } from "../shared/types";
+import type { Task, EscalationAction, VerificationReport } from "../shared/types";
 import type { OrchestratorCallbacks } from "../electron/engine";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
 
@@ -122,6 +124,43 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       return "abort";
     };
   }
+  // 断点续跑：projectRoot 下的运行日志（若与本需求匹配）恢复进度状态，
+  // 跳过 PRD/分解，直接从保存的轮次继续 —— 被杀的长运行不再从零开始。
+  const journalPath = path.join(spec.projectRoot, "ox-run-journal.json");
+  const journal = {
+    save: (snapshot: RunSnapshot): void => {
+      try {
+        fs.writeFileSync(
+          journalPath,
+          JSON.stringify({ requirement: spec.requirement, savedAt: new Date().toISOString(), snapshot }, null, 2),
+          "utf8",
+        );
+      } catch {
+        // 快照写失败不中断运行（断点续跑是尽力而为的保险丝）
+      }
+    },
+  };
+  let resume: RunSnapshot | undefined;
+  if (fs.existsSync(journalPath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
+        requirement?: string;
+        snapshot?: RunSnapshot;
+      };
+      if (parsed.requirement === spec.requirement && Array.isArray(parsed.snapshot?.batches)) {
+        resume = parsed.snapshot;
+        io.emit({
+          type: "log",
+          text: `[journal] 断点续跑：恢复快照（round ${resume.round}，已完成 ${resume.allDone.length} 个任务），跳过规划`,
+        });
+      } else {
+        io.emit({ type: "log", text: "[journal] 发现旧运行日志但需求不匹配，按全新运行处理" });
+      }
+    } catch {
+      io.emit({ type: "log", text: "[journal] 快照解析失败，按全新运行处理" });
+    }
+  }
+
   const engine = new OrchestratorEngine(
     {
       llm: io.llm ?? (spec.llmPool.length > 0 ? buildLlmPool({ providers: spec.llmPool }) : buildLlmClient(spec.llmProvider)),
@@ -152,16 +191,23 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
             onEvent: (text) => io.emit({ type: "log", text }),
           })),
       settings: spec.settings,
+      journal,
     },
     callbacks,
   );
 
   try {
-    const prd = spec.prd ?? (await engine.generatePrd(spec.requirement));
-    io.emit({ type: "prd", prd });
-    const batches = await engine.decompose(prd);
-    io.emit({ type: "tasks", batches });
-    const report = await engine.execute(batches, spec.projectRoot);
+    let batches: Task[][];
+    if (resume) {
+      batches = resume.batches;
+      io.emit({ type: "tasks", batches });
+    } else {
+      const prd = spec.prd ?? (await engine.generatePrd(spec.requirement));
+      io.emit({ type: "prd", prd });
+      batches = await engine.decompose(prd);
+      io.emit({ type: "tasks", batches });
+    }
+    const report = await engine.execute(batches, spec.projectRoot, resume ? { resume } : undefined);
     io.emit({ type: "done", passed: report.passed, report });
     return report.passed ? 0 : 2;
   } catch (err) {

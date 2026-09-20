@@ -234,7 +234,7 @@ describe("runSpec", () => {
       verify: async () => pass,
     });
 
-    expect(code).toBe(0);
+    expect(code, JSON.stringify(events.filter((e) => e.type === "error"))).toBe(0);
     const types = events.map((e) => e.type);
     expect(types[0]).toBe("hello");
     expect(types).toContain("agents");
@@ -255,6 +255,52 @@ describe("runSpec", () => {
     expect(hello.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(hello.projectRoot).toBe(root);
     expect(hello.agentRouter).toBe(true);
+  });
+
+  it("断点续跑：journal 匹配需求时跳过规划（LLM 零调用），恢复执行", async () => {
+    const root = scratch("headless-resume");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    // 预写运行日志：t1 已完成（快照携带恢复后的计划）
+    const snapshot = {
+      batches: [[fakeTask("t1", "src")]],
+      allDone: ["t1"],
+      skipped: [],
+      attempts: { t1: 1 },
+      round: 1,
+      extraRounds: 0,
+      lastDigest: "",
+    };
+    fs.writeFileSync(
+      path.join(root, "ox-run-journal.json"),
+      JSON.stringify({ requirement: spec.requirement, snapshot }),
+      "utf8",
+    );
+    const { events, emit } = collect();
+    let llmCalled = 0;
+    const llm: LlmClient = {
+      async chat() {
+        llmCalled += 1;
+        throw new Error("resume 模式不应调用 LLM");
+      },
+    };
+    const adapter = fakeAdapter("worker");
+    const code = await runSpec(spec, {
+      emit,
+      llm,
+      layer: createAgentLayer({ adapters: [adapter] }),
+      verify: async () => pass,
+    });
+
+    expect(code).toBe(0);
+    expect(llmCalled).toBe(0); // 跳过 PRD/分解 → 大脑零调用
+    expect(events.some((e) => e.type === "log" && e.text.includes("断点续跑"))).toBe(true);
+    const runs = events.filter((e) => e.type === "run") as Array<{ phase: string }>;
+    expect(runs.length).toBe(0); // t1 已完成 → 无任何派发
+    expect(events.at(-1)?.type).toBe("done");
+    // 快照在运行中被更新（journal.save 钩子生效）
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "ox-run-journal.json"), "utf8"));
+    expect(saved.requirement).toBe(spec.requirement);
+    expect(saved.snapshot.batches.length).toBe(1);
   });
 
   it("skips PRD generation when the host supplies one", async () => {

@@ -7,6 +7,8 @@ export {
   VerificationExhaustedError,
   type OrchestratorCallbacks,
   type OrchestratorDeps,
+  type RunSnapshot,
+  type ResumeState,
 } from "./orchestrator";
 export {
   BatchGuard,

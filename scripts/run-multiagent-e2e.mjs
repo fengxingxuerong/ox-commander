@@ -81,9 +81,18 @@ if (!process.env.SENSENOVA_API_KEY) {
   process.exit(0);
 }
 
-const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "ox-multiagent-"));
+// 断点续跑：--workspace <dir> 复用上一次运行的工作区（含 ox-run-journal.json）
+// → headless 检测到日志且需求匹配时自动恢复进度，跳过规划与已完成任务。
+const wsIdx = process.argv.indexOf("--workspace");
+const workspace =
+  wsIdx > -1 && process.argv[wsIdx + 1]
+    ? path.resolve(process.argv[wsIdx + 1])
+    : fs.mkdtempSync(path.join(os.tmpdir(), "ox-multiagent-"));
 ensureWorkspace(workspace);
 console.log("workspace:", workspace);
+if (fs.existsSync(path.join(workspace, "ox-run-journal.json"))) {
+  console.log("发现运行日志 → headless 将自动断点续跑（跳过规划与已完成任务）");
+}
 
 const SIMPLE_REQUIREMENT = [
   "做一个双模块演示工具：",
