@@ -31,8 +31,16 @@ export class MalformedResponseError extends Error {
   }
 }
 
+/**
+ * Cap on the *in-call sleep* derived from `Retry-After`. The cooldown cap
+ * (`RETRY_AFTER_COOLDOWN_CAP_MS`) only bounds the bench time; without this
+ * second cap a single `retry-after: 86400` would park one `chat()` for a full
+ * day while the orchestrator still believes the run is healthy.
+ */
+const RETRY_AFTER_SLEEP_CAP_MS = 60_000;
+
 /** Parses a `retry-after` header value (delay-seconds or HTTP-date) into milliseconds. */
-function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
+function parseRawRetryAfterMs(raw: string | null | undefined): number | undefined {
   if (raw === null || raw === undefined || raw === "") return undefined;
   const seconds = Number(raw.trim());
   if (Number.isFinite(seconds)) return Math.max(0, seconds * 1000);
@@ -40,6 +48,22 @@ function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
   if (!Number.isNaN(date)) return Math.max(0, date - Date.now());
   return undefined;
 }
+
+/** Sleep-bounded view of a Retry-After header: the raw value may be arbitrarily large. */
+function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
+  const ms = parseRawRetryAfterMs(raw);
+  return ms === undefined ? undefined : Math.min(ms, RETRY_AFTER_SLEEP_CAP_MS);
+}
+
+/**
+ * Parse a `Retry-After` header into milliseconds, clamped to the in-call sleep
+ * cap. Exported so the cap itself is testable without a live HTTP round-trip.
+ */
+export function parseRetryAfterHeaderMs(raw: string | null | undefined): number | undefined {
+  return parseRetryAfterMs(raw);
+}
+
+export const RETRY_AFTER_SLEEP_CAP = RETRY_AFTER_SLEEP_CAP_MS;
 
 abstract class BaseHttpLlmClient implements LlmClient {
   constructor(

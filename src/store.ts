@@ -162,6 +162,11 @@ export const useApp = create<AppState>((set, get) => ({
             tasks: {
               ...s.tasks,
               [taskId]: {
+                // Spread prev first: a repair round re-dispatches the task and
+                // emits `running` again — wiping agentId/durationMs/errorClass
+                // here would erase the attribution the board needs to explain
+                // "who ran it, how long, why it failed".
+                ...prev,
                 taskId,
                 title: title ?? prev?.title ?? taskId,
                 zone: zone ?? prev?.zone ?? "",

@@ -11,11 +11,12 @@
     "start": "electron .",
     "build:headless": "tsc -b tsconfig.headless.json",
     "smoke:artifact": "node scripts/artifact-smoke.mjs",
+    "smoke:snapshot-secrets": "node scripts/e2e-snapshot-secrets.cjs",
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json",
-    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run build:headless && npm run smoke:artifact"
+    "verify": "npm run typecheck && npm run lint && npm test && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -80,6 +80,31 @@ describe("handleEvent · taskStatus", () => {
     emit({ type: "taskStatus", taskId: "t1", status: "done", attempts: 1 });
     expect(useApp.getState().tasks["t1"]).toMatchObject({ title: "T", zone: "src", status: "done" });
   });
+
+  it("keeps attribution across a repair-round re-dispatch", () => {
+    // Round 1 fails with full attribution.
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 1, title: "T", zone: "src" });
+    emit({
+      type: "taskOutcome",
+      taskId: "t1",
+      ok: false,
+      logDigest: "boom",
+      agentId: "codex-cli",
+      errorClass: "timeout",
+      durationMs: 900,
+    });
+    // Round 2 re-dispatches: `running` arrives again, carrying no attribution.
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 2 });
+    const t = useApp.getState().tasks["t1"]!;
+    expect(t).toMatchObject({
+      status: "running",
+      attempts: 2,
+      agentId: "codex-cli",
+      errorClass: "timeout",
+      durationMs: 900,
+      failureDigest: "boom",
+    });
+  });
 });
 
 describe("handleEvent · taskOutcome", () => {

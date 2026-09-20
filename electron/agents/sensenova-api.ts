@@ -29,6 +29,33 @@ const SNAPSHOT_SKIP_DIRS = new Set(["node_modules", ".git", "ox-scripts"]);
 const SNAPSHOT_MAX_FILE_CHARS = 4000;
 const SNAPSHOT_MAX_TOTAL_CHARS = 32000;
 
+/**
+ * 快照 = 发往第三方 LLM 端点的项目内容。凭据类文件一旦入快照就等同于外泄，
+ * 因此这里必须按文件名拉黑，不能只靠目录名单（`.env` 就在项目根目录下）。
+ * 规则按 basename 小写匹配，覆盖 .env 家族、密钥/证书、凭据文件与 dotenv 常见变体。
+ */
+const SNAPSHOT_SECRET_FILE_PATTERNS: RegExp[] = [
+  /^\.env(\..+)?$/, // .env / .env.local / .env.production …
+  /^\.?npmrc$/,
+  /^\.?yarnrc(\.yml)?$/,
+  /^\.?pnpmrc$/,
+  /^\.netrc$/,
+  /^\.git-credentials$/,
+  /^credentials(\..+)?$/,
+  /^secrets?(\..+)?$/,
+  /^id_(rsa|dsa|ecdsa|ed25519)(\..+)?$/,
+  /\.(pem|key|p12|pfx|jks|keystore|ppk|asc|gpg)$/,
+  /(^|[-_.])(api[-_]?key|apikey|access[-_]?key|secret[-_]?key|private[-_]?key|auth[-_]?token|access[-_]?token|refresh[-_]?token|password|passwd|credential|credentials)([-_.].*)?$/,
+  /^\.(aws|ssh|kube|docker|gnupg)$/,
+];
+
+/** True for files whose contents must never be copied into an LLM prompt. */
+export function isSecretLikeFile(rel: string): boolean {
+  const base = rel.split("/").pop() ?? rel;
+  const lower = base.toLowerCase();
+  return SNAPSHOT_SECRET_FILE_PATTERNS.some((re) => re.test(lower));
+}
+
 /** Readable-text guard: skip binary-looking files instead of flooding the prompt. */
 function looksBinary(content: string): boolean {
   return content.includes("\u0000");
@@ -248,10 +275,14 @@ export class SensenovaApiAdapter implements AgentAdapter {
           continue;
         }
         if (!entry.isFile()) continue;
+        const rel = path.relative(rootAbs, abs).replace(/\\/g, "/");
+        // 凭据类文件既不进指纹也不进内容：进指纹会暴露其存在与大小，
+        // 进内容则会随 prompt 发往第三方端点。
+        if (isSecretLikeFile(rel)) continue;
         try {
           const st = fs.statSync(abs);
           statEntries.push({
-            rel: path.relative(rootAbs, abs).replace(/\\/g, "/"),
+            rel,
             size: st.size,
             mtimeMs: st.mtimeMs,
           });
@@ -279,6 +310,8 @@ export class SensenovaApiAdapter implements AgentAdapter {
     let budget = SNAPSHOT_MAX_TOTAL_CHARS;
     for (const { rel } of statEntries) {
       if (budget <= 0) return chunks.join("\n\n");
+      // 二次防线：即使上层 walk 漏过某个凭据文件，这里也不读它的正文。
+      if (isSecretLikeFile(rel)) continue;
       const abs = path.join(rootAbs, rel);
       let content: string;
       try {

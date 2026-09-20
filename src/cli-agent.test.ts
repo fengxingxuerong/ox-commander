@@ -173,4 +173,35 @@ describe("killTree", () => {
   it("is a no-op for a process without a pid", () => {
     expect(() => killTree({ pid: undefined } as never)).not.toThrow();
   });
+
+  it("survives a child that throws on kill", () => {
+    // The portable path must swallow a kill() that throws rather than
+    // propagating into the caller's finally block.
+    const child = {
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      kill: () => {
+        throw new Error("ESRCH");
+      },
+    };
+    expect(() => killTree(child as never, { graceMs: 1 })).not.toThrow();
+  });
+
+  it("escalates to SIGKILL when the child ignores SIGTERM", async () => {
+    const signals: string[] = [];
+    const child = {
+      pid: 4242,
+      exitCode: null,
+      signalCode: null,
+      kill: (sig: string) => {
+        signals.push(sig);
+        return true;
+      },
+    };
+    killTree(child as never, { graceMs: 5 });
+    await new Promise((r) => setTimeout(r, 30));
+    expect(signals[0]).toBe("SIGTERM");
+    expect(signals).toContain("SIGKILL");
+  });
 });

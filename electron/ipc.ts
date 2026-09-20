@@ -12,6 +12,7 @@ import { ProjectStore, SettingsStore } from "./store";
 import { KeysStore, createSafeStorageCrypto } from "./keys-store";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
+import { redactSecrets } from "../shared/redact";
 import { HttpLlmError } from "../shared/http-clients";
 import type { EscalationAction, PrdDocument, ProjectSettings, SmokeCheck, Task } from "../shared/types";
 
@@ -223,7 +224,8 @@ function buildEngine(projectId: string): OrchestratorEngine {
             ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
             ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
             ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
-            detail: outcome.logDigest.slice(0, 300),
+            // Audit JSONL is durable: redact before it hits disk.
+            detail: redactSecrets(outcome.logDigest).slice(0, 300),
           });
         },
       }),
@@ -247,7 +249,9 @@ function buildEngine(projectId: string): OrchestratorEngine {
           type: "taskOutcome",
           taskId,
           ok,
-          logDigest: logDigest.slice(0, 2000),
+          // The renderer is a display surface: strip credentials before the
+          // digest becomes visible/copyable text on the board.
+          logDigest: redactSecrets(logDigest).slice(0, 2000),
           ...(meta ?? {}),
         }),
       onVerification: (report) =>
