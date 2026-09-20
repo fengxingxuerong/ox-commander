@@ -39,6 +39,28 @@ export class MalformedResponseError extends Error {
  */
 const RETRY_AFTER_SLEEP_CAP_MS = 60_000;
 
+/**
+ * Cap on the bytes read from a *failed* response body.
+ *
+ * `HttpLlmError` only ever shows 300 chars, but `await res.text()` first pulls
+ * the whole body into memory. A gateway returning a multi-megabyte HTML error
+ * page (or a hostile endpoint streaming forever) would otherwise be decoded in
+ * full, per route, per retry. Only the head is kept — enough for the message
+ * and for provider-specific error parsing.
+ */
+const MAX_ERROR_BODY_BYTES = 64 * 1024;
+
+/** Reads at most `MAX_ERROR_BODY_BYTES` of a response body, marking truncation. */
+async function readCappedErrorBody(res: FetchLikeResponse): Promise<string> {
+  const text = await res.text();
+  if (text.length <= MAX_ERROR_BODY_BYTES) return text;
+  return `${text.slice(0, MAX_ERROR_BODY_BYTES)}…[truncated ${text.length - MAX_ERROR_BODY_BYTES} chars]`;
+}
+
+/** Exported for the cap test; not part of the provider-facing surface. */
+export const ERROR_BODY_BYTE_CAP = MAX_ERROR_BODY_BYTES;
+export { readCappedErrorBody };
+
 /** Parses a `retry-after` header value (delay-seconds or HTTP-date) into milliseconds. */
 function parseRawRetryAfterMs(raw: string | null | undefined): number | undefined {
   if (raw === null || raw === undefined || raw === "") return undefined;
@@ -83,7 +105,7 @@ abstract class BaseHttpLlmClient implements LlmClient {
       signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!res.ok) {
-      const text = await res.text();
+      const text = await readCappedErrorBody(res);
       throw new HttpLlmError(res.status, text, parseRetryAfterMs(res.headers?.get("retry-after")));
     }
     const raw = (await res.text()).replace(/^\uFEFF/, "");

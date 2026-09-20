@@ -135,3 +135,81 @@ git diff --stat                # 每个阶段单独一次提交，便于二分�
 ```
 
 每一阶段独立提交、独立跑 `npm run verify`，任一阶段红则只回滚该阶段。
+
+---
+
+## 五、实施记录
+
+### 阶段 A —— 止血（commit `4803793`，14 文件 +581/−7）
+
+| A# | 问题（原文证据） | 修法 | 钉住它的测试 |
+| --- | --- | --- | --- |
+| A1 | `sensenova-api.ts:28` 快照遍历只跳目录，不做文件名过滤 → 项目 `.env` 进 LLM prompt | 新增 `SNAPSHOT_SECRET_FILE_PATTERNS`（dotenv / *rc / 私钥 / `id_rsa*` / `*.pem·key·p12` / 命名含 token·secret·password / `.aws`·`.ssh`·`.kube` 等）+ `isSecretLikeFile(rel)`，在 `walkStat` 与 `readSnapshotContents` **两处**拦截 | `src/snapshot-secrets.test.ts`（7 例，含反向样例：`tokenizer.js`、`secretsanta.js` 不得误杀） |
+| A2 | `http-clients.ts:289` `Retry-After` 未加帽（cap 只在 `:299` 作用于冷却表）→ 单次 chat 可挂 24h | 拆 `parseRawRetryAfterMs`（保原值给冷却表）与 `parseRetryAfterMs`（`min(cap)` 给 sleep），sleep 帽 60s、冷却帽 300s | `src/retry-after.test.ts`（5 例） |
+| A3 | `kill-tree.ts:15` taskkill `spawn` 未监听异步 `error` → Windows 可崩整个进程 | 补 `killer.on("error", fallback)` + `on("exit", code !== 0 && fallback())` + grace 窗口后 verify 定时器兜底；抽出可移植 `portableKill`（SIGTERM → SIGKILL） | `src/cli-agent.test.ts`（+2 例） |
+| A4 | `src/store.ts:164` `taskStatus` 重建对象未 spread `prev` → 重修轮 `running` 事件抹掉 `agentId`/`durationMs`/`errorClass` | 先 `...prev` 再覆盖 status/attempts | `src/store.test.ts`「keeps attribution across a repair-round re-dispatch」 |
+| A5 | 凭据可经审计 JSONL 与前端 digest 外泄 | 新增 `shared/redact.ts`（`sk-`/`nvapi-`/`ghp_`/JWT/AWS AKIA/`Bearer`/具名 secret 等），套在 `ipc.ts` 两个出口 | `src/redact.test.ts`（9 例） |
+
+**A 阶段的额外产出**：`scripts/e2e-snapshot-secrets.cjs` —— 真实 `dispatch()` 端到端：拦截 `globalThis.fetch` 抓实际 prompt，断言密钥不在其中（6 项断言），已串入 `npm run verify`。
+
+**A 阶段验收**：`npm run verify` 全绿 —— 478 测试（472 通过 / 6 真实 API smoke 跳过）。
+
+### 阶段 B1 —— 双端装配收敛（commit `a5086f1`，8 文件 +787/−194）
+
+**根因**：`ipc.ts` 与 `run-spec.ts` 各维护一份引擎装配代码，已实测漂移出 **4 处**：
+
+| 漂移点 | headless | 桌面（修复前） |
+| --- | --- | --- |
+| `journal`（断点续跑） | 有（`ox-run-journal.json`） | **无** |
+| `onVerdict`（越权裁决出口） | 有（`setVerdictSink` → `conflict` 事件） | **无** → 回滚/隔离在 UI 完全不可见 |
+| LLM `timeoutMs` | 300s（拥堵窗口必需） | **默认 120s** → 大脑在生成完成前被掐断 |
+| `Scheduler` 第三参 | `undefined`（已修） | `new ZoneGuard()` —— **死参**，永远被 BatchGuard 遮蔽 |
+
+**修法**：新增 `electron/platform.ts` 作为**唯一装配点**。
+- `createPlatform(config)` 内部负责：agent layer（含注入复用 + verdict sink 后挂）、`schedulerOptions()`（`maxParallelRuns` + run 归因回调）、`buildLlm()`（先播种 env 再建池，统一 300s）、engine（`new Scheduler(layer.adapters, enabledAgents, undefined, …)` —— 死参彻底消失）。
+- 双端现在只描述**策略**（日志去哪、审计去哪、升级策略是什么），不再各自描述**结构**。
+- 导出的 `BRAIN_POOL_TIMEOUT_MS = 300_000` 与 `createFileJournal(projectRoot, requirement)`（返回 `{path, save, load, mismatched, corrupted}`）供两端共用。
+
+**顺带补齐桌面侧缺口（原 B2）**：
+- journal → `userData/runs/<projectId>.json`，与 headless 同款恢复语义。
+- `onVerdict` → 逐条 conflict 经 `ox:event` 推给前端，`remedy` 映射为 `revert/isolate/keep/none`。
+- LLM 线路池与 headless 共用 300s 预算。
+
+**前端新增 conflict 链路**：
+- `src/types.ts`：`ConflictView { kind, paths[], remedy, ts }` + `AppState.conflicts`。
+- `src/store.ts`：初值、`confirmAndExecute` reset、`case "conflict"`（remedy 映射「已回滚/已隔离/保留改动/仅记录」，conflicts 环形截断 50 条，日志截断 500 行）。
+
+**钉住漂移的测试**：`src/platform.test.ts`（17 例），含 **desktop/headless parity** 测试块 —— 直接断言两侧装配出的选项在 journal / verdict / timeout 三项上一致。这正是本次修掉的那类漂移的回归防线。
+
+**B1 验收**：
+```bash
+npm run verify                     # 493 passed / 6 skipped（真实 API smoke）
+                                   # artifact smoke all checks passed
+                                   # e2e snapshot secrets all checks passed
+node scripts/run-multiagent-e2e.mjs  # 真实多智能体链路（真实 LLM + HTTP 桥接）
+```
+
+### 一次必须记录的操作失误
+
+期间我在清理 e2e 残留文件时执行了 `git checkout -- .`，**误回退了阶段 B 尚未提交的 6 个文件改动**（`ipc.ts` / `run-spec.ts` / `store.ts` / `types.ts` / `store.test.ts` / `ui.test.tsx`）。
+未跟踪的 `platform.ts` 与 `platform.test.ts` 不受影响，阶段 A 的提交 `4803793` 也不受影响。
+
+**教训（已写进本文件）**：清理临时文件**绝不能**对工作区使用 `git checkout -- .`；要按具体路径、且先 `git status --short` 确认。所有改动逐文件重建后，`npm run verify` 恢复全绿。
+
+### 剩余未做项
+
+| 项 | 状态 |
+| --- | --- |
+| B3 取消/暂停终态事件 + `runId` 屏障 | 未做 |
+| B4 输出字节上限（verifier log 截断、HTTP 响应体校验） | 未做 |
+| B5 IPC 错误统一包装 | 未做 |
+| B6 退出码契约对齐 | **已核实无需改动** —— `docs/headless-protocol.md:13,65-75` 的退出码表与 `run-spec.ts:187,191-196` 实现一致 |
+| C3 path-policy 大小写归一 | **已实测定性**：`SRC/a.js` 在 zone「src」下被**拒绝**（fail-closed，误拒而非放行），属 P2 误伤风险，非安全洞 |
+
+**C3 实测命令与结果**（可复现）：
+```bash
+node -e "const {PathPolicy}=require('./dist-electron/electron/sandbox/path-policy.js');
+const p=new PathPolicy({projectRoot:'C:\\\\Proj\\\\App'});
+console.log(p.assertWritable('SRC/a.js','src'));"
+# → { ok: false, reason: 'zone 越权：SRC/a.js 不在 zone「src」内' }
+```
