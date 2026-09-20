@@ -2,7 +2,7 @@ import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
-import { findOrphanPaths, describeZoneGaps } from "../../shared/zone-coverage";
+import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../../shared/zone-coverage";
 import { runSmokeChecks } from "./verifier";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches } from "../../shared/graph";
@@ -15,6 +15,7 @@ import type {
   Stage,
   Task,
   TaskStatus,
+  VerificationCommand,
   VerificationReport,
 } from "../../shared/types";
 
@@ -166,7 +167,16 @@ export class OrchestratorEngine {
     return prd;
   }
 
-  async decompose(prd: PrdDocument): Promise<{ batches: Task[][]; smoke: SmokeCheck[] }> {
+  /**
+   * `verificationCommands` is optional: passing it extends the zone-coverage
+   * guard to paths the host's verify step references. A verify command naming a
+   * file that no task's zone owns cannot be satisfied by any repair round —
+   * better to fail here than after three identical rounds.
+   */
+  async decompose(
+    prd: PrdDocument,
+    verificationCommands?: readonly VerificationCommand[],
+  ): Promise<{ batches: Task[][]; smoke: SmokeCheck[] }> {
     this.cb.onStage("PLANNING");
     const plan = await this.brainCall(
       "任务分解",
@@ -181,14 +191,23 @@ export class OrchestratorEngine {
     // zone is un-writable, so verification would fail forever while the repair
     // loop burned its whole budget on an impossible task. Failing here costs one
     // decompose call; failing later costs a full run and reports the wrong cause.
-    this.assertZoneCoverage(prd, plan.tasks);
+    this.assertZoneCoverage(prd, plan.tasks, verificationCommands);
     return { batches: planBatches(plan.tasks), smoke: plan.smoke };
   }
 
-  private assertZoneCoverage(prd: PrdDocument, tasks: readonly Task[]): void {
-    const gaps = findOrphanPaths(prd, tasks);
+  private assertZoneCoverage(
+    prd: PrdDocument,
+    tasks: readonly Task[],
+    verificationCommands?: readonly VerificationCommand[],
+  ): void {
+    const gaps = findOrphanPaths(
+      prd,
+      tasks,
+      undefined,
+      verificationCommandPaths(verificationCommands ?? []),
+    );
     if (gaps.length === 0) return;
-    const message = `PRD 声明的产物路径不属于任何 zone，写入必被沙箱拒绝，重修不可能成功：${describeZoneGaps(gaps)}`;
+    const message = `以下路径不属于任何 zone，写入必被沙箱拒绝、重修不可能成功：${describeZoneGaps(gaps)}`;
     this.cb.onLog(`[规划校验] ${message}`);
     throw new SchemaValidationError([
       message,

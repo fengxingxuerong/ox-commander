@@ -174,7 +174,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     } else {
       const prd = spec.prd ?? (await engine.generatePrd(spec.requirement));
       io.emit({ type: "prd", prd });
-      const plan = await engine.decompose(prd);
+      // 把宿主的验证命令一并交给 zone 覆盖校验：它引用的文件若不被任何任务
+      // 的 zone 覆盖，重修多少轮都造不出来 —— 早失败，别烧掉整个重修预算。
+      const plan = await engine.decompose(prd, spec.settings.verificationCommands);
       batches = plan.batches;
       smoke = plan.smoke;
       io.emit({ type: "tasks", batches });

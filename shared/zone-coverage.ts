@@ -74,6 +74,16 @@ export interface ZoneCoverageGap {
   path: string;
   /** Zones that exist but do not cover it. */
   zones: string[];
+  /**
+   * Where the path came from. `prd` = the PRD names it; `verification` = the
+   * host's `verificationCommands` reference it. The second source used to be
+   * invisible here: a verify command pointing at a file no zone owns makes every
+   * repair round fail identically and burns the whole budget. Real case
+   * 2026-09-20 — verify ran `node --check src/strutil/strutil.js` while the
+   * planner split into `src/strutil/slugify` + `src/strutil/truncate`, so 3
+   * repair rounds could never produce the file the verifier asked for.
+   */
+  source: "prd" | "verification";
 }
 
 /**
@@ -88,16 +98,23 @@ export function findOrphanPaths(
   prd: PrdDocument,
   tasks: readonly Task[],
   protectedPrefixes: readonly string[] = ["node_modules/", ".git/", "ox-scripts/"],
+  extraDeclared: readonly string[] = [],
 ): ZoneCoverageGap[] {
   const declared = declaredArtifactPaths(prd);
-  if (declared.length === 0 || tasks.length === 0) return [];
+  const extra = [...new Set(extraDeclared)].sort();
+  if ((declared.length === 0 && extra.length === 0) || tasks.length === 0) return [];
   const zones = [...new Set(tasks.map((t) => t.zone))];
   const gaps: ZoneCoverageGap[] = [];
-  for (const path of declared) {
-    if (protectedPrefixes.some((p) => path.startsWith(p))) continue;
-    if (zones.some((z) => isPathInZone(path, z))) continue;
-    gaps.push({ path, zones });
-  }
+  const seen = new Set<string>();
+  const check = (path: string, source: ZoneCoverageGap["source"]): void => {
+    if (seen.has(path)) return;
+    if (protectedPrefixes.some((p) => path.startsWith(p))) return;
+    if (zones.some((z) => isPathInZone(path, z))) return;
+    seen.add(path);
+    gaps.push({ path, zones, source });
+  };
+  for (const path of declared) check(path, "prd");
+  for (const path of extra) check(path, "verification");
   return gaps;
 }
 
@@ -106,5 +123,27 @@ export function findOrphanPaths(
  * Callers decide whether a gap is fatal (the orchestrator fails the plan).
  */
 export function describeZoneGaps(gaps: readonly ZoneCoverageGap[]): string {
-  return gaps.map((g) => `${g.path}（现有 zone：${g.zones.join("、") || "无"}）`).join("；");
+  return gaps
+    .map(
+      (g) =>
+        `${g.path}（${g.source === "verification" ? "验证命令引用" : "PRD 声明"}；现有 zone：${g.zones.join("、") || "无"}）`,
+    )
+    .join("；");
+}
+
+/**
+ * Paths referenced by a host's verification commands (`args` entries that look
+ * like nested relative files). Reuses `extractDeclaredPaths`, so a bare filename
+ * such as `package.json` is ignored — the same false-positive guard.
+ */
+export function verificationCommandPaths(
+  commands: readonly { args?: readonly string[] }[],
+): string[] {
+  const found = new Set<string>();
+  for (const c of commands) {
+    for (const arg of c.args ?? []) {
+      for (const p of extractDeclaredPaths(arg)) found.add(p);
+    }
+  }
+  return [...found].sort();
 }
