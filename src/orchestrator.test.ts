@@ -855,3 +855,70 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
     expect(statuses).not.toContain("t1:cancelled");
   });
 });
+
+/**
+ * decompose() is the last point where the PRD's declared files and the plan's
+ * zones are both in hand. A plan whose zones cannot reach a declared file is
+ * unexecutable — verified by a real run where zones `tests/unit` +
+ * `tests/runner` could never produce `tests/greet.test.js`, so every write was
+ * reverted and the repair loop spun until its budget ran out reporting the
+ * wrong cause.
+ */
+describe("OrchestratorEngine.decompose · 【规划校验】zone 覆盖", () => {
+  function planEngine(plan: unknown, logs: string[]): OrchestratorEngine {
+    const llm = {
+      async chat() {
+        return { content: JSON.stringify(plan), provider: "fake", model: "fake" };
+      },
+    } as unknown as LlmClient;
+    return new OrchestratorEngine(
+      { llm, scheduler: fakeScheduler(false), verify: async () => makeReport(true), settings: DEFAULT_SETTINGS },
+      {
+        onStage: () => undefined,
+        onLog: (l) => logs.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+  }
+
+  const prd = {
+    goal: "Build a tool",
+    features: ["Implement src/app/greet.js exporting greet(name)"],
+    techStack: ["Node"],
+    acceptanceCriteria: [
+      "src/app/greet.js exists",
+      "tests/greet.test.js contains at least 2 cases",
+    ],
+  } as const;
+
+  const taskOf = (id: string, zone: string) => ({
+    id,
+    title: id,
+    description: "do it",
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  it("rejects a plan whose zones orphan a PRD-declared file", async () => {
+    const logs: string[] = [];
+    const eng = planEngine(
+      { tasks: [taskOf("t1", "src/app"), taskOf("t5", "tests/unit")], smoke: [] },
+      logs,
+    );
+    await expect(eng.decompose(prd as never)).rejects.toThrow(/不属于任何 zone/);
+    // The operator must see why, in the run log, not just as a thrown error.
+    expect(logs.some((l) => l.includes("[规划校验]"))).toBe(true);
+    expect(logs.some((l) => l.includes("tests/greet.test.js"))).toBe(true);
+  });
+
+  it("accepts the same plan once the zone is the parent directory", async () => {
+    const logs: string[] = [];
+    const eng = planEngine({ tasks: [taskOf("t1", "src/app"), taskOf("t5", "tests")], smoke: [] }, logs);
+    const out = await eng.decompose(prd as never);
+    expect(out.batches.flat().map((t: Task) => t.id).sort()).toEqual(["t1", "t5"]);
+    expect(logs.some((l) => l.includes("[规划校验]"))).toBe(false);
+  });
+});

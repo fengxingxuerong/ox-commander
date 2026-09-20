@@ -1,7 +1,8 @@
 import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
-import { parseDecompose, parsePrd } from "../../shared/schema";
+import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
+import { findOrphanPaths, describeZoneGaps } from "../../shared/zone-coverage";
 import { runSmokeChecks } from "./verifier";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches } from "../../shared/graph";
@@ -176,7 +177,23 @@ export class OrchestratorEngine {
           { schemaName: "decompose plan", validate: parseDecompose },
         ),
     );
+    // Refuse a plan that cannot satisfy the PRD. A declared artifact owned by no
+    // zone is un-writable, so verification would fail forever while the repair
+    // loop burned its whole budget on an impossible task. Failing here costs one
+    // decompose call; failing later costs a full run and reports the wrong cause.
+    this.assertZoneCoverage(prd, plan.tasks);
     return { batches: planBatches(plan.tasks), smoke: plan.smoke };
+  }
+
+  private assertZoneCoverage(prd: PrdDocument, tasks: readonly Task[]): void {
+    const gaps = findOrphanPaths(prd, tasks);
+    if (gaps.length === 0) return;
+    const message = `PRD 声明的产物路径不属于任何 zone，写入必被沙箱拒绝，重修不可能成功：${describeZoneGaps(gaps)}`;
+    this.cb.onLog(`[规划校验] ${message}`);
+    throw new SchemaValidationError([
+      message,
+      "请让相关任务的 zone 覆盖这些路径（例如取它们的父目录），或修正 PRD 中的产物路径。",
+    ]);
   }
 
   /** Runs DEVELOPMENT → VERIFICATION (+ repair loops) → DELIVERY. */
