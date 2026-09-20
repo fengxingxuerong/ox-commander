@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
+import { DEFAULT_SETTINGS } from "../shared/types";
 import { useApp } from "./store";
 
 /**
@@ -22,12 +23,25 @@ function reset(): void {
     verification: undefined,
     planning: false,
     planningError: undefined,
+    settings: undefined,
+    settingsError: undefined,
   });
 }
 
 const emit = (payload: Record<string, unknown>) => useApp.getState().handleEvent(payload);
 
-beforeEach(reset);
+beforeEach(() => {
+  reset();
+  // This suite runs in the node environment (no `window`), so the preload
+  // bridge is installed on a minimal globalThis-backed `window` shim for the
+  // settings error-path tests. The store resolves its bridge via `window`.
+  const g = globalThis as { window?: unknown; oxCommander?: unknown };
+  g.window = g;
+  g.oxCommander = {
+    getSettings: async () => undefined,
+    saveSettings: async () => true,
+  };
+});
 
 describe("handleEvent · stage", () => {
   it("moves the pipeline stage and journals it", () => {
@@ -230,5 +244,51 @@ describe("handleEvent · robustness", () => {
 
   it("survives a payload with no type at all", () => {
     expect(() => emit({})).not.toThrow();
+  });
+});
+
+/**
+ * Settings load/save used to be the only unguarded IPC calls in the store: a
+ * rejection escaped as an unhandled promise rejection, and `saveSettings`
+ * committed the new value locally even when the write never landed — the UI
+ * then showed configuration that did not exist on disk.
+ */
+describe("store · settings 错误路径", () => {
+  const bridge = () => (globalThis as { oxCommander?: unknown }).oxCommander as {
+    getSettings: () => Promise<unknown>;
+    saveSettings: () => Promise<unknown>;
+  };
+
+  it("surfaces a load failure in the log instead of rejecting", async () => {
+    bridge().getSettings = async () => {
+      throw new Error("settings.json 损坏");
+    };
+    await expect(useApp.getState().loadSettings()).resolves.toBeUndefined();
+    expect(useApp.getState().settings).toBeUndefined();
+    expect(useApp.getState().logs.at(-1)).toContain("settings.json 损坏");
+  });
+
+  it("does not apply settings that failed to persist", async () => {
+    bridge().saveSettings = async () => {
+      throw new Error("磁盘只读");
+    };
+    const before = useApp.getState().settings;
+    await useApp.getState().saveSettings({ ...DEFAULT_SETTINGS, maxParallelRuns: 7 });
+    expect(useApp.getState().settings).toBe(before);
+    expect(useApp.getState().settingsError).toContain("磁盘只读");
+    expect(useApp.getState().logs.at(-1)).toContain("保存设置失败");
+  });
+
+  it("clears a previous failure once a save succeeds", async () => {
+    bridge().saveSettings = async () => {
+      throw new Error("临时故障");
+    };
+    await useApp.getState().saveSettings({ ...DEFAULT_SETTINGS });
+    expect(useApp.getState().settingsError).toBeTruthy();
+
+    bridge().saveSettings = async () => true;
+    await useApp.getState().saveSettings({ ...DEFAULT_SETTINGS, maxParallelRuns: 2 });
+    expect(useApp.getState().settingsError).toBeUndefined();
+    expect(useApp.getState().settings?.maxParallelRuns).toBe(2);
   });
 });

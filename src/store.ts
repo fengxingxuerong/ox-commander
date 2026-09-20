@@ -118,13 +118,29 @@ export const useApp = create<AppState>((set, get) => ({
     set({ page: "projects", prd: undefined, batches: undefined, stage: "PRD", tasks: {} }),
 
   loadSettings: async () => {
-    const settings = await api().getSettings();
-    set({ settings });
+    // Unguarded before: a rejected IPC call (corrupt settings file, store not
+    // ready) escaped as an unhandled rejection and the settings page silently
+    // showed defaults — indistinguishable from "nothing configured yet".
+    try {
+      const settings = await api().getSettings();
+      set({ settings });
+    } catch (err) {
+      set((s) => ({ logs: [...s.logs, `[错误] 读取设置失败: ${(err as Error).message}`] }));
+    }
   },
 
   saveSettings: async (settings) => {
-    await api().saveSettings(settings);
-    set({ settings });
+    // Only commit the new settings locally once the write succeeded; otherwise
+    // the UI would show settings that were never persisted.
+    try {
+      await api().saveSettings(settings);
+      set({ settings, settingsError: undefined });
+    } catch (err) {
+      set((s) => ({
+        logs: [...s.logs, `[错误] 保存设置失败: ${(err as Error).message}`],
+        settingsError: (err as Error).message,
+      }));
+    }
   },
 
   resolveEscalation: async (taskId, action) => {

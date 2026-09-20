@@ -105,6 +105,8 @@ export interface AppState {
   planning: boolean;
   planningError?: string;
   settings?: ProjectSettings;
+  /** Last settings save/load failure; cleared on a successful save. */
+  settingsError?: string;
   newProjectName: string;
   newRequirement: string;
 

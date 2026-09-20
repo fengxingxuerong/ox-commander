@@ -22,6 +22,7 @@ export function SettingsPage() {
   const loadSettings = useApp((s) => s.loadSettings);
   const saveSettings = useApp((s) => s.saveSettings);
   const setPage = useApp((s) => s.setPage);
+  const settingsError = useApp((s) => s.settingsError);
   const [draft, setDraft] = useState<ProjectSettings>(settings ?? DEFAULT_SETTINGS);
   const [saving, setSaving] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatus[]>([]);
@@ -336,6 +337,11 @@ export function SettingsPage() {
       <AgentsPanel />
 
       <section className="card">
+        {settingsError && (
+          <p className="inline-error" role="alert">
+            保存失败：{settingsError}
+          </p>
+        )}
         <button
           className="primary"
           disabled={saving || !settings}
@@ -351,7 +357,9 @@ export function SettingsPage() {
     setSaving(true);
     try {
       await saveSettings(draft);
-      setPage("projects");
+      // The store records failures instead of throwing, so navigate only when
+      // the write actually landed — otherwise a failed save looks successful.
+      if (!useApp.getState().settingsError) setPage("projects");
     } finally {
       setSaving(false);
     }

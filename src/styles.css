@@ -990,3 +990,15 @@ select {
     padding: 16px 14px 28px;
   }
 }
+
+/* Inline failure banner (settings save errors, etc.): visible without needing
+   a modal, so a failed write cannot be mistaken for a successful one. */
+.inline-error {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid rgba(255, 92, 92, 0.45);
+  border-radius: 6px;
+  background: rgba(255, 92, 92, 0.08);
+  color: var(--bad);
+  font-size: 13px;
+}
