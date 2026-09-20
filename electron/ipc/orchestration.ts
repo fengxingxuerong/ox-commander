@@ -137,7 +137,9 @@ export function registerOrchestrationHandlers(): void {
     const prd = await engine.generatePrd(rec.requirement);
     stores().update(projectId, { prdJson: JSON.stringify(prd), stage: "PLANNING" });
     send({ type: "stage", stage: "PLANNING" });
-    const { batches, smoke } = await engine.decompose(prd);
+    // 与 headless 入口保持一致：把验证命令交给 zone 覆盖校验。它引用的文件若
+    // 不被任何任务 zone 覆盖，重修会把整个预算烧在一个不可能完成的任务上。
+    const { batches, smoke } = await engine.decompose(prd, settingsStore().load().verificationCommands);
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
     return { prd, batches };
   });
@@ -148,7 +150,7 @@ export function registerOrchestrationHandlers(): void {
     if (getRunningProjectId() === projectId) throw new Error("项目正在执行中，请先取消再修改 PRD");
     stores().update(projectId, { prdJson: JSON.stringify(prd), batchesJson: undefined, smokeJson: undefined });
     const engine = buildEngine(projectId);
-    const { batches, smoke } = await engine.decompose(prd);
+    const { batches, smoke } = await engine.decompose(prd, settingsStore().load().verificationCommands);
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
     return { prd, batches };
   });
