@@ -322,13 +322,114 @@ zone 由 LLM 产出，理论上可含 `${` 触发模板字面量展开，或纯�
 
 ---
 
-## 七、剩余工作
+## 七、阶段 C 实施记录
+
+### C1 —— ipc.ts 上帝对象拆分（commit `81b3e3c`）
+
+原文件 **554 行**，同时承担装配、状态持有、5 个域共 26 个 channel 的注册；
+**整个项目没有任何测试碰过它**。改错一个 channel 名只会在打包后表现为
+`No handler registered`，现场无法定位。
+
+拆成 `electron/ipc/`：
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `context.ts` | 294 | 共享状态 + 单例工厂（stores / agentLayer / audit / platform / engine） |
+| `orchestration.ts` | 187 | PRD / 规划 / 启动 / 取消 + workspace 脚手架 + escalation |
+| `agents.ts` | 121 | agent 池 + 可观测性（breaker stats / audit） |
+| `projects.ts` | 78 | 项目生命周期 + settings / keys + `llm:test` |
+| `ipc.ts` | **31** | 只做编排：`ensureStores()` + 5 个 `register*` |
+
+**关键约束**：只有 `context.ts` 持有 `let` 绑定，handler 模块是无状态注册器。
+原 `let settingsStore` 与新的 `settingsStore()` getter 撞名（TS2395），
+内部变量改名 `settingsHolder` / `keysHolder`。
+
+### C5a —— 补 ipc 契约测试（此前零覆盖）
+
+`src/ipc.test.ts` 从**两个方向**钉死契约，对称所以能同时抓漏注册与多余注册：
+
+1. `preload.ts` 里每个 `ipcRenderer.invoke("x")` 都必须有 handler；
+2. 每个 handler 都必须能被 `preload.ts` 到达。
+
+外加「26 个 channel 全集快照」与「重复注册检测」。
+
+配套 `src/__fakes__/electron.ts` —— **必须存在**，因为
+`node_modules/electron/index.js` 是 `module.exports = getElectronPath()`，
+在 vitest 里 import 得到的是一个**字符串**，所有具名导出都是 `undefined`，
+主进程模块根本 import 不进来。`vitest.config.mts` 加 alias 指向它。
+替身按 Electron 语义**拒绝重复 handle**，让"拆模块拆出双注册"变成真红。
+
+### C2 —— 持久化原子写 + audit 保留（commit `81b3e3c`）
+
+新增 `electron/atomic-file.ts`：`writeFileAtomic`（同目录 tmp + rename）+ `readJsonFile`。
+
+原实现是就地 `writeFileSync` 截断，进程中途死掉会留下 0 字节或半截文件：
+
+| 文件 | 损坏后果 |
+| --- | --- |
+| `projects.json` | **全部项目记录静默消失**，UI 无法恢复 |
+| `settings.json` | 操作员整套配置（含 LLM 池）被重置 |
+| `ox-run-journal.json` | 下次 `load()` 报 `corrupted`，丢掉可用断点 |
+
+`readJsonFile` 刻意**不**对"文件存在但解析失败"回退默认值 —— 那正是把截断写
+变成"项目凭空消失且无任何报错"的原因，现在让 JSON 错误上抛。
+
+`audit-log.ts` 加 `maxFiles`（默认 20）：原来只按大小滚动、**从不删除**，
+长期项目无限堆积 JSONL。`enforceRetention` 计的是**文件总数（含当前文件）**，
+不是"保留 N 个之外" —— 后者在 `maxFiles: 1` 时会永远停在 2 个文件。
+
+### C4 —— 子进程 env 最小化（commit `743c9fb`）
+
+`cli-agent.ts` 的 `dispatch()` 原本是 `const env = { ...process.env }`，
+于是每个 CLI agent 子进程都能读到**所有**已配置 provider 的密钥。
+这与 A5/B4 修的快照密钥是同一威胁模型的两个出口。
+
+新增 `electron/agents/scoped-env.ts`，两条规则：
+
+1. **显式授权优先**（`envTemplate` 的 key，或 `allowProviders` 指定的 provider）；
+2. 其余按名字判定：像凭据的一律丢弃，剩下只留进程基本运行所需。
+
+`REQUIRED_EXACT` 是 allowlist —— 未列出的不流动，新增 provider 无需改这里。
+`SECRET_NAME_PATTERN` 走命名约定，尚未注册的 provider 也自动被挡。
+`CliAgentOptions.allowProviders` 默认空：CLI agent 靠自己的配置文件认证。
+
+**两个自己踩出来的真 bug（都是测试先红）**：
+
+| bug | 症状 | 修法 |
+| --- | --- | --- |
+| `allowProviders` 是死参数 | 我把 secret denylist 放在 provider allowlist 之前，而所有 provider key 都长得像密钥 → 永远无法放行 | 授权判定提到 denylist 之前 |
+| `SystemRoot` 被误删 | `REQUIRED_EXACT` 写 `"SystemRoot"`，但 Windows 实际暴露的是大写 `SYSTEMROOT`，Set 区分大小写 → 被丢弃。**正是注释里写"掉了会让很多 Windows 工具起不来"的那个变量** | 全大写存储 + 大小写不敏感比较 |
+
+顺带修正：`providerKeyEnvVars` 只对 sensenova 返回多 key 槽位，不是通用查询；
+取单个 key 要用 `getProvider(id).apiKeyEnvVar`。
+
+### 阶段 C 验证汇总
+
+| 项 | 结果 |
+| --- | --- |
+| `src/ipc.test.ts` | 5 例 |
+| `src/atomic-store.test.ts` | 11 例 |
+| `audit-log.test.ts` | +4 例（原 12 → 16） |
+| `src/scoped-env.test.ts` | 26 例 |
+| `src/cli-agent-env.test.ts` | 4 例，**真实子进程** e2e |
+| **变异验证** | 删 handler → 2 条真红；关 retention → 2 条真红；改回 `{...process.env}` → 2 条真红，报错 `expected 'sk-canary-sensenova' to be undefined`（真实泄漏被抓住）。三次均字节级还原 |
+| `npm run verify` | **559 passed / 6 skipped**（阶段 B 后为 514），typecheck 3 套 + lint + build + artifact smoke（51 个文件 `node --check` 0 错误）+ snapshot-secrets |
+
+**真实子进程 e2e 为什么必要**：`scoped-env.ts` 的纯函数测试全部通过，
+但变异验证证明 —— 一个"看起来正确"的 helper 只要没被 caller 调用就毫无价值。
+`cli-agent-env.test.ts` spawn 真实 node 子进程让它 `JSON.stringify(process.env)`
+自报环境，断言的是**外部可观测事实**，不是我们自己的对象。同时断言子进程仍拿得到
+`PATH` / `SYSTEMROOT`，否则"安全"会变成"跑不起来"。
+
+---
+
+## 八、剩余工作
 
 | 编号 | 内容 | 状态 |
 | --- | --- | --- |
-| C1 | `ipc.ts` 拆 handlers | 未动 |
-| C2 | 持久化原子写 + audit 保留策略 | 未动 |
-| C3 | path-policy realpath / 大小写归一 | 已定性为 **P2**（fail-closed 误拒，不改） |
-| C4 | 子进程 env 最小化 | 未动 |
-| C5 | 补测试 | 未动 |
-| — | `prompts.ts` 模板注入通道 | 见 6.6 |
+| C1 | `ipc.ts` 拆 handlers | ✅ `81b3e3c` |
+| C2 | 持久化原子写 + audit 保留策略 | ✅ `81b3e3c` |
+| C3 | path-policy realpath / 大小写归一 | 已定性 **P2**（fail-closed 误拒，不改） |
+| C4 | 子进程 env 最小化 | ✅ `743c9fb` |
+| C5 | 补测试 | ✅ C5a 已做（ipc 契约 + env e2e）；其余按需 |
+| — | `prompts.ts` 模板注入通道 | 见 6.6，待办 |
