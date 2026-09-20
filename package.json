@@ -14,7 +14,7 @@
     "smoke:snapshot-secrets": "node scripts/e2e-snapshot-secrets.cjs",
     "check:unwired": "node scripts/check-unwired.mjs",
     "mutation": "node scripts/mutation-check.mjs --limit=8",
-    "mutation:quick": "node scripts/mutation-check.mjs --limit=1",
+    "mutation:quick": "node scripts/mutation-check.mjs --tier=1 --limit=1",
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

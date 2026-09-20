@@ -33,19 +33,27 @@
  *   node scripts/mutation-check.mjs              # 全部目标
  *   node scripts/mutation-check.mjs --file=glob
  *   node scripts/mutation-check.mjs --limit=4    # 每文件最多 4 个变异（默认 4）
+ *   node scripts/mutation-check.mjs --tier=1     # 只跑 tier 1（快目标，verify 用这个）
  *   node scripts/mutation-check.mjs --list       # 只列变异，不改文件不跑测试
  *
- * 退出码：存活变异 > MAX_SURVIVORS 时 exit 1。
+ * 退出码：
+ *   - 存活变异 > MAX_SURVIVORS → exit 1
+ *   - **任何目标的基线测试未通过 → exit 1**（该目标完全没被验证，比存活更严重）
  *
  * ## 已知局限（不要误以为它覆盖全仓）
  *
- *   1. **只跑 TARGETS 里列的 7 个模块**，不是全仓。全仓会把 verify 从 ~33s
- *      拉到小时级 —— 跑不动的门禁等于没有门禁。选择标准：安全关键 + 逻辑密集。
- *      要扩就按这个标准加，别一次全铺开。
+ *   1. **只跑 TARGETS 里列的模块**（8 个，分 tier 1/2），不是全仓。全仓会把 verify
+ *      从 ~75s 拉到小时级 —— 跑不动的门禁等于没有门禁。选择标准：安全关键 + 逻辑密集。
+ *      要扩就按这个标准加，别一次全铺开；新目标若单次测试超过 ~10s，放 tier 2，
+ *      否则 `verify` 会被拖慢到没人愿意跑。
  *   2. **算子只覆盖布尔/比较/跳转**，抓不到「数值边界写错」（如 `>` 写成 `>=`）、
  *      「参数顺序颠倒」、「漏 await」。加算子前先确认不会引入等价变异噪声。
  *   3. **等价变异会存活**（语义未变的改写）。首次遇到时优先重构消除该分支；
  *      无法消除则在这里加白名单并附理由，**不要放宽 MAX_SURVIVORS**。
+ *   4. **曾经静默容忍「基线失败」**（2026-09-20 修复）。原实现把「基线测试未通过」
+ *      当作"无结论"打印一行、然后照常报 PASS —— 目标被跳过、不计入统计、门禁仍绿。
+ *      三种诱因（测试路径写错 / 测试被改坏 / 源码有语法错）都会让整块覆盖静默归零，
+ *      与「CI 里写错路径、从来没真正跑过的 job」同族。现在改为 exit 1 并点名。
  */
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
@@ -59,20 +67,30 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  *
  * 不做全仓：成本随变异数线性增长。挑判定逻辑最密集、改坏后果最严重的。
  *
+ * `tier` 是成本分层，不是重要性分层：
+ *   - tier 1（快，单个变异 ~2s）：`verify` 内的 `mutation:quick` 跑这些。
+ *   - tier 2（慢，单个变异 ~25s）：仅 `npm run mutation` 全量扫描时跑。
+ *
  * `electron/engine/scheduler.ts` 于 2026-09-20 接入：此前它不在目标里，于是
  * 「类内缺陷」穿过三层门禁（`check:unwired` 只查导出符号、变异不覆盖引擎层，
  * 而测试恰好没有断言触碰真实路径）。接入当天实测存活 1 个 —— `&& → ||`，
  * 定位到 `admitBreaker` 的兜底查找：改成 `||` 后，**整池熔断时任务会被重新派给
  * 一个已熔断的 agent**，熔断静默失效，21 条用例全绿。补一条断言后 4/4 全杀。
+ *
+ * `electron/engine/orchestrator.ts` 于同日接入 tier 2。**实测 5/5 全杀，
+ * 未发现断言缺口** —— 记录在此以说明「集成层盲区」这一判断已按模块逐一核查过，
+ * 不是猜的。它进 tier 2 的理由纯粹是成本：`orchestrator.test.ts` 有 30 条用例且
+ * 含多轮重修循环，单次约 20s，不是断言质量有问题。
  */
 const TARGETS = [
-  { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts" },
-  { file: "shared/glob.ts", test: "src/glob.test.ts" },
-  { file: "shared/redact.ts", test: "src/redact.test.ts" },
-  { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts" },
-  { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts" },
-  { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts" },
-  { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts" },
+  { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts", tier: 1 },
+  { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
+  { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
+  { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
+  { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
+  { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
+  { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts", tier: 1 },
+  { file: "electron/engine/orchestrator.ts", test: "src/orchestrator.test.ts", tier: 2 },
 ];
 
 /**
@@ -103,11 +121,14 @@ const OPERATORS = [
 const args = process.argv.slice(2);
 const onlyFile = args.find((a) => a.startsWith("--file="))?.slice(7);
 const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4");
+const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
 const listOnly = args.includes("--list");
 
-const targets = onlyFile ? TARGETS.filter((t) => t.file.includes(onlyFile)) : TARGETS;
+const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) =>
+  onlyFile ? t.file.includes(onlyFile) : true,
+);
 if (targets.length === 0) {
-  console.error(`没有匹配的目标：--file=${onlyFile}`);
+  console.error(`没有匹配的目标：--file=${onlyFile} --tier=${maxTier}`);
   process.exit(2);
 }
 
@@ -205,6 +226,7 @@ console.log("");
 let totalKilled = 0;
 let totalRan = 0;
 const survivors = [];
+const baselineFailures = results.filter((r) => r.baselineFailed);
 
 for (const r of results) {
   if (r.baselineFailed) {
@@ -225,6 +247,21 @@ for (const r of results) {
 
 const overall = totalRan === 0 ? 0 : Math.round((totalKilled / totalRan) * 100);
 console.log(`\n总计：杀死 ${totalKilled}/${totalRan}（${overall}%）`);
+
+// 基线失败必须 FAIL，而不是"无结论"然后照常 PASS。
+//
+// 曾经是后者：目标被静默跳过、不计入 totalRan、门禁照样绿。后果是**这个目标
+// 完全没有门禁**却看不出来 —— 测试文件路径写错、测试被改坏、源码有语法错误，
+// 三种情况都会让整块覆盖静默归零。这与「CI 里写错路径、从来没跑过的 job」同族。
+if (baselineFailures.length > 0) {
+  console.error(`\nFAIL: ${baselineFailures.length} 个目标的基线测试未通过 —— 这些目标**完全没被验证**：`);
+  for (const r of baselineFailures) console.error(`  ${r.target.file}  ::  ${r.target.test}`);
+  console.error(
+    "\n基线失败的常见原因：测试文件路径写错 / 测试被改坏 / 被测源码有语法错误。\n" +
+      "不要让它跳过就算了 —— 那等于这个目标从来没有门禁。\n",
+  );
+  process.exit(1);
+}
 
 if (survivors.length > MAX_SURVIVORS) {
   console.error(`\nFAIL: ${survivors.length} 个变异存活 —— 这些行为没有断言覆盖：`);
