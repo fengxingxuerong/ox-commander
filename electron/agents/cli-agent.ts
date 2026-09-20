@@ -7,6 +7,7 @@ import { AGENT_PROTOCOL_VERSION, DEFAULT_AGENT_LIMITS, type AgentAdapterV2, type
 import { TimeoutGate } from "../sandbox/timeout-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
+import { scopedEnv } from "./scoped-env";
 import { RunSession } from "./run-session";
 
 export interface CliAgentOptions {
@@ -17,6 +18,11 @@ export interface CliAgentOptions {
   argsTemplate: string[];
   probeArgs?: string[];
   envTemplate?: Record<string, string>;
+  /**
+   * Provider ids whose credentials this CLI may see. Normally empty: a CLI
+   * authenticates via its own config file, not via our environment.
+   */
+  allowProviders?: readonly string[];
   capabilities?: AgentCapabilities;
   limits?: Partial<AgentLimits>;
   /** Where prompt files are written. Defaults to a per-process temp dir. */
@@ -143,7 +149,15 @@ export class CliAgentAdapter implements AgentAdapterV2 {
     const promptPath = this.writePrompt(payload);
     vars.promptPath = promptPath;
     const args = this.opts.argsTemplate.map((a) => renderTemplate(a, vars));
-    const env = { ...process.env };
+    // Minimised on purpose. `{ ...process.env }` used to hand this child the API
+    // keys of every configured provider, including ones it has no business
+    // seeing. The agent's own envTemplate values are passed as an explicit
+    // operator grant; nothing else beyond process basics and those keys.
+    const envTemplateKeys = Object.keys(this.opts.envTemplate ?? {});
+    const env = scopedEnv({
+      ...(this.opts.allowProviders ? { allowProviders: this.opts.allowProviders } : {}),
+      extraKeys: envTemplateKeys,
+    });
     for (const [k, v] of Object.entries(this.opts.envTemplate ?? {})) env[k] = renderTemplate(v, vars);
 
     const session = new RunSession();
