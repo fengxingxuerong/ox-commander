@@ -6,6 +6,7 @@ import type {
   TaskPayload,
 } from "../../shared/types";
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
+import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES } from "../../shared/prompts";
 import { ZoneGuard } from "./zone-guard";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
@@ -293,11 +294,18 @@ export class Scheduler {
         return miss;
       }
       const repair = opts?.repairOf?.get(task.id);
+      // 平台契约模板强制注入：每个执行者（无论哪家智能体）都必须收到统一的
+      // 语义条款，堵住"description 没写清 → 各自发明口径"的漂移来源。
+      // 带标记检查，避免重修轮重复拼接。
+      const baseDesc = task.description ?? "";
+      const description = baseDesc.includes(CONTRACT_MARKER)
+        ? baseDesc
+        : `${baseDesc}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
       const payload: TaskPayload = {
         runId: `${task.id}-${Date.now()}-${i}`,
         taskId: task.id,
         title: task.title,
-        description: task.description,
+        description,
         zone: task.zone,
         projectRoot,
         ...(repair ? { repairContext: repair } : {}),

@@ -382,3 +382,44 @@ describe("Scheduler · 429 感知派发节流", () => {
     expect(throttled[1]!).toBeGreaterThan(throttled[0]!); // 第二次等待确实翻倍
   });
 });
+
+describe("Scheduler · 平台契约模板注入", () => {
+  function capturingAdapter(captured: Array<{ taskId: string; description: string }>): AgentAdapter {
+    return {
+      meta: { id: "a1", name: "a1", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        captured.push({ taskId: payload.taskId, description: payload.description });
+        return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "completed" as const, text: "ok", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  it("派发时强制注入契约模板（覆盖历史漂移维度）", async () => {
+    const captured: Array<{ taskId: string; description: string }> = [];
+    const sched = new Scheduler([capturingAdapter(captured)]);
+    await sched.runBatch([task("t1", "src")], ".");
+    const desc = captured[0]!.description;
+    expect(desc).toContain("[平台契约条款]");
+    expect(desc).toMatch(/退出码/);
+    expect(desc).toMatch(/stdout 只输出结果/);
+    expect(desc).toMatch(/不得照抄实现/);
+    expect(desc).toMatch(/表头\/总数口径/);
+  });
+
+  it("已带标记的 description 不会被重复拼接（重修轮幂等）", async () => {
+    const captured: Array<{ taskId: string; description: string }> = [];
+    const t = task("t1", "src");
+    t.description = "已有契约\n\n[平台契约条款]\n内容";
+    const sched = new Scheduler([capturingAdapter(captured)]);
+    await sched.runBatch([t], ".");
+    const desc = captured[0]!.description;
+    expect((desc.match(/\[平台契约条款\]/g) ?? []).length).toBe(1);
+  });
+});

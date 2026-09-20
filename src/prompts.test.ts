@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildDecomposePrompt } from "../shared/prompts";
+import { buildDecomposePrompt, CONTRACT_MARKER, STANDARD_CONTRACT_RULES } from "../shared/prompts";
 import type { PrdDocument } from "../shared/types";
 
 const PRD: PrdDocument = {
@@ -30,5 +30,28 @@ describe("buildDecomposePrompt", () => {
   it("无可运行入口时允许返回空冒烟数组", () => {
     const p = buildDecomposePrompt(PRD);
     expect(p).toMatch(/empty "smoke" array/);
+  });
+});
+
+describe("平台契约模板（STANDARD_CONTRACT_RULES）", () => {
+  it("覆盖历史漂移的全部语义维度（表头/空值/精度/错误/输出格式）", () => {
+    const rules = STANDARD_CONTRACT_RULES;
+    expect(rules).toMatch(/表头\/总数口径/);
+    expect(rules).toMatch(/缺失值/);
+    expect(rules).toMatch(/四舍五入/);
+    expect(rules).toMatch(/退出码/);
+    expect(rules).toMatch(/stdout 只输出结果/);
+    expect(rules).toMatch(/禁止自由发挥|不得照抄实现/);
+  });
+
+  it("含防重复拼接的标记", () => {
+    expect(STANDARD_CONTRACT_RULES).toContain("【平台契约条款");
+    expect(CONTRACT_MARKER).toBe("[平台契约条款]");
+  });
+
+  it("decompose 提示词要求任务描述携带契约条款", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toMatch(/contract clause list/);
+    expect(p).toMatch(/never invent conventions silently/);
   });
 });

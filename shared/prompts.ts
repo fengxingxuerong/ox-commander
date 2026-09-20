@@ -23,6 +23,21 @@ User requirement:
 ${userRequirement}`;
 }
 
+/**
+ * 平台契约模板：派发时强制注入每个任务（防跨智能体口径漂移）。
+ *
+ * 历史教训（docs/2026-09-19-real-task-e2e.md）：total/表头语义空白导致
+ * stats.js 两次口径错位；期望片段照抄实现导致自测与实现同盲。契约空白
+ * 必须由平台统一兜底，而不是赌 planner 或执行者自觉。
+ */
+export const CONTRACT_MARKER = "[平台契约条款]";
+
+export const STANDARD_CONTRACT_RULES = `【平台契约条款 · 必读】
+1. description 中的接口签名、行为边界、数据口径是本任务的跨智能体合同，逐字遵守。
+2. description 未定义的语义点禁止自由发挥或静默选择，必须在实现前明确并在测试中钉住，包括：表头/总数口径（total 是否含表头行）、缺失值与空值处理（null/空串/空白）、数值精度与四舍五入、排序规则、错误行为（退出码 / stderr 提示文案）、输出格式（stdout 只输出结果，日志走 stderr）。
+3. 测试断言必须从契约与真实样例数据推导，不得照抄实现行为（防止自测与实现同盲）。
+4. 只在你的 zone 目录内创建/修改文件；禁止触碰 node_modules/.git/.env/package.json/lockfile 与 ox-scripts。`;
+
 export function buildDecomposePrompt(prd: PrdDocument): string {
   return `You are the planning brain of OxCommander. Decompose the PRD into parallelizable development tasks for coding agents.
 
@@ -58,6 +73,7 @@ Rules:
 - suggestedRole must be one of: frontend-dev, backend-dev, fullstack-dev, test-writer, docs-writer.
 - Produce 3-10 tasks. Maximize the size of the first parallel batch.
 - Every element of "tasks" MUST be a complete OBJECT with all six fields (id, title, description, zone, dependencies, suggestedRole). Never use plain strings as task entries.
+- Every task description MUST carry a contract clause list covering: interface signatures, boundary behavior, data semantics (header/total semantics - whether total counts the header row, missing/empty/whitespace handling, rounding), error behavior (exit codes, stderr messages), and output format (stdout carries results only). Semantics the PRD leaves undefined must be EXPLICITLY pinned in the description - implementers must never invent conventions silently (they are injected a platform contract block that forbids it).
 - All code is CommonJS Node.js with no external npm packages; descriptions must not require Python, browsers, or any dependency installation.
 - Do not create or modify package.json, lockfiles or .env files: those paths are protected and any write to them is rejected.
 
