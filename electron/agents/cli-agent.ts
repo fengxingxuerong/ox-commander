@@ -8,6 +8,7 @@ import { TimeoutGate } from "../sandbox/timeout-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
 import { scopedEnv } from "./scoped-env";
+import { inlineField } from "../../shared/prompt-text";
 import { RunSession } from "./run-session";
 
 export interface CliAgentOptions {
@@ -357,11 +358,15 @@ export class CliAgentAdapter implements AgentAdapterV2 {
 
   private writePrompt(payload: TaskPayload): string {
     fs.mkdirSync(this.promptDir, { recursive: true });
+    // `title` / `zone` come from model output. Rendering them through
+    // `inlineField` keeps a newline in either one from injecting a fake `##`
+    // section that contradicts the real constraints below it. `zone` is also
+    // whitelisted at the schema, so this is the second layer.
     const lines = [
-      `# 任务：${payload.title}`,
+      `# 任务：${inlineField(payload.title)}`,
       "",
-      `- 任务 id：${payload.taskId}`,
-      `- 所属区域（zone）：${payload.zone}`,
+      `- 任务 id：${inlineField(payload.taskId)}`,
+      `- 所属区域（zone）：${inlineField(payload.zone)}`,
       `- 项目根目录：${path.resolve(payload.projectRoot)}`,
       "",
       "## 要求",
@@ -370,7 +375,7 @@ export class CliAgentAdapter implements AgentAdapterV2 {
       "",
       `## 约束`,
       "",
-      `- 只能创建或修改 zone「${payload.zone}」内的文件；其它路径一律不要动。`,
+      `- 只能创建或修改 zone「${inlineField(payload.zone)}」内的文件；其它路径一律不要动。`,
       `- 完成后请确保项目能通过构建与测试。`,
     ];
     if (payload.repairContext) {

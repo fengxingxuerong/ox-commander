@@ -64,6 +64,25 @@ interface RawTaskLike {
   suggestedRole: string;
 }
 
+/**
+ * Characters a zone may contain. A zone is a project-relative *directory*, so
+ * the set is deliberately narrow: letters, digits, and `_ - . /`.
+ *
+ * Why validate at all, given the sandbox is fail-closed on a malformed zone?
+ * Because "fail-closed" here means *every* write is rejected, so the task can
+ * never succeed — it burns the whole repair budget and reports "zone 越权"
+ * for a plan that was broken from the start. Rejecting the plan at parse time
+ * costs one decompose call and names the real problem.
+ *
+ * The security argument is secondary but real: `zone` is interpolated into the
+ * Markdown task prompt, where a newline could inject a fake `## 要求` section.
+ * Whitelisting removes that channel rather than escaping it.
+ */
+const VALID_ZONE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/;
+
+/** A zone deeper than this is almost certainly a model mistake, not a plan. */
+const MAX_ZONE_LENGTH = 200;
+
 function parseTask(raw: Record<string, JsonValue>, index: number, issues: string[]): RawTaskLike {
   const prefix = `tasks[${index}]`;
   const id = requireString(raw, "id", issues);
@@ -72,6 +91,17 @@ function parseTask(raw: Record<string, JsonValue>, index: number, issues: string
   let zone = requireString(raw, "zone", issues);
   if (zone.includes("..")) {
     issues.push(`${prefix}.zone must not contain path traversal`);
+    zone = "";
+  } else if (zone !== "" && !VALID_ZONE.test(zone)) {
+    // Rejects newlines, spaces, quotes, backslashes and absolute paths. Note the
+    // sandbox stays restrictive either way — the point is to fail *here*, with
+    // the real reason, instead of locking the task out of every write later.
+    issues.push(
+      `${prefix}.zone "${zone.slice(0, 80)}" must be a project-relative directory of letters, digits, "_", "-", "." and "/"`,
+    );
+    zone = "";
+  } else if (zone.length > MAX_ZONE_LENGTH) {
+    issues.push(`${prefix}.zone must be at most ${MAX_ZONE_LENGTH} characters`);
     zone = "";
   }
   const deps = requireStringArray(raw, "dependencies", issues);
