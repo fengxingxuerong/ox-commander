@@ -76,6 +76,18 @@ export interface EscalationView {
   resolved: boolean;
 }
 
+/**
+ * A zone-conflict verdict surfaced to the board. The engine's BatchGuard knows
+ * which files two concurrent tasks fought over and what it did about it; without
+ * this the arbitration outcome is only visible in the durable audit file.
+ */
+export interface ConflictView {
+  kind: string;
+  paths: string[];
+  remedy: string;
+  ts: string;
+}
+
 export type Page = "projects" | "board" | "prd-review" | "settings";
 
 export interface AppState {
@@ -87,6 +99,7 @@ export interface AppState {
   tasks: Record<string, TaskView>;
   verification?: VerificationReport;
   escalations: EscalationView[];
+  conflicts: ConflictView[];
   prd?: PrdDocument;
   batches?: Task[][];
   planning: boolean;

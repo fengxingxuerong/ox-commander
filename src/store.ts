@@ -11,6 +11,7 @@ export const useApp = create<AppState>((set, get) => ({
   logs: [],
   tasks: {},
   escalations: [] as AppState["escalations"],
+  conflicts: [] as AppState["conflicts"],
   planning: false,
   planningError: undefined,
   newProjectName: "",
@@ -47,6 +48,7 @@ export const useApp = create<AppState>((set, get) => ({
       logs: [],
       tasks: {},
       escalations: [],
+      conflicts: [],
       verification: undefined,
       prd: undefined,
       batches: undefined,
@@ -192,6 +194,33 @@ export const useApp = create<AppState>((set, get) => ({
             { taskId, summary, resolved: false },
           ],
           logs: [...s.logs, `── ⚠️ 任务 ${taskId} 需要决策（见右侧面板）──`],
+        }));
+        break;
+      }
+      case "conflict": {
+        const { kind, paths, remedy } = p as { kind?: string; paths?: string[]; remedy?: string };
+        const verb =
+          remedy === "revert"
+            ? "已回滚"
+            : remedy === "isolate"
+              ? "已隔离"
+              : remedy === "keep"
+                ? "保留改动"
+                : "仅记录";
+        set((s) => ({
+          conflicts: [
+            ...s.conflicts.slice(-49),
+            {
+              kind: kind ?? "unknown",
+              paths: paths ?? [],
+              remedy: remedy ?? "none",
+              ts: new Date().toISOString(),
+            },
+          ],
+          logs: [
+            ...s.logs.slice(-500),
+            `── ⚠️ 区域冲突（${kind ?? "unknown"}，${verb}）：${(paths ?? []).join("、").slice(0, 300)} ──`,
+          ],
         }));
         break;
       }

@@ -18,6 +18,7 @@ function reset(): void {
     logs: [],
     tasks: {},
     escalations: [],
+    conflicts: [],
     verification: undefined,
     planning: false,
     planningError: undefined,
@@ -177,6 +178,42 @@ describe("handleEvent · verification and escalation", () => {
     emit({ type: "escalation", taskId: "t1", summary: "a" });
     emit({ type: "escalation", taskId: "t2", summary: "b" });
     expect(useApp.getState().escalations.map((e) => e.taskId)).toEqual(["t1", "t2"]);
+  });
+});
+
+describe("handleEvent · conflict", () => {
+  it("records a zone-conflict verdict with its paths", () => {
+    emit({ type: "conflict", kind: "overlap", paths: ["src/a.ts", "src/b.ts"], remedy: "revert" });
+    const { conflicts, logs } = useApp.getState();
+    expect(conflicts).toHaveLength(1);
+    expect(conflicts[0]).toMatchObject({ kind: "overlap", paths: ["src/a.ts", "src/b.ts"], remedy: "revert" });
+    expect(conflicts[0].ts).toBeTruthy();
+    expect(logs.at(-1)).toContain("已回滚");
+  });
+
+  it("renders the remedy in plain language", () => {
+    const cases: Array<[string, string]> = [
+      ["revert", "已回滚"],
+      ["isolate", "已隔离"],
+      ["keep", "保留改动"],
+      ["none", "仅记录"],
+    ];
+    for (const [remedy, verb] of cases) {
+      reset();
+      emit({ type: "conflict", kind: "overlap", paths: ["x.ts"], remedy });
+      expect(useApp.getState().logs.at(-1)).toContain(verb);
+    }
+  });
+
+  it("keeps the conflict buffer bounded", () => {
+    for (let i = 0; i < 60; i++) emit({ type: "conflict", kind: `k${i}`, paths: ["x.ts"], remedy: "none" });
+    expect(useApp.getState().conflicts).toHaveLength(50);
+  });
+
+  it("survives a payload with missing fields", () => {
+    emit({ type: "conflict" });
+    const c = useApp.getState().conflicts[0];
+    expect(c).toMatchObject({ kind: "unknown", paths: [], remedy: "none" });
   });
 });
 

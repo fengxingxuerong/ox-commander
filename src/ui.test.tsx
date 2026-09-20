@@ -125,6 +125,7 @@ function resetStore() {
     tasks: {},
     verification: undefined,
     escalations: [],
+    conflicts: [],
     prd: undefined,
     batches: undefined,
     planning: false,

@@ -6,14 +6,12 @@
  * trustworthy if its happy path is actually exercised.
  */
 import * as fs from "node:fs";
-import path from "node:path";
-import { OrchestratorEngine, Scheduler, VerificationExhaustedError, verifyProject } from "../electron/engine";
-import type { RunSnapshot } from "../electron/engine";
-import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../electron/agents";
-import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
+import { VerificationExhaustedError } from "../electron/engine";
+import type { OrchestratorCallbacks, RunSnapshot } from "../electron/engine";
+import type { AgentLayer } from "../electron/agents";
+import { createFileJournal, createPlatform } from "../electron/platform";
 import type { LlmClient } from "../shared/llm-client";
 import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
-import type { OrchestratorCallbacks } from "../electron/engine";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
 
 export interface RunSpecIo {
@@ -50,47 +48,6 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   });
   for (const w of spec.warnings) io.emit({ type: "log", text: `[protocol] ${w}` });
 
-  const layer =
-    io.layer ??
-    createAgentLayer({
-      enableRouter: spec.settings.agentRouter !== false,
-      manifests: spec.agents,
-      ...(spec.manifestDir ? { manifestDir: spec.manifestDir } : {}),
-      snapshotRoot: spec.snapshotRoot,
-      arbitration: spec.settings.arbitration,
-      onRouting: (decision, task) => io.emit({ type: "log", text: agentRoutingLogLine(decision, task) }),
-      onEvent: (text) => io.emit({ type: "log", text: `[sandbox] ${text}` }),
-      breakerOptions: { onEvent: (text) => io.emit({ type: "log", text: `[breaker] ${text}` }) },
-    });
-
-  // Attached after the fact so an injected layer reports verdicts the same way a
-  // self-built one does.
-  layer.schedulerOptions.guard?.setVerdictSink((verdict) => {
-    for (const c of verdict.conflicts) {
-      io.emit({
-        type: "conflict",
-        kind: c.kind,
-        paths: c.paths,
-        remedy: verdict.remedies.find((r) => r.paths.some((p) => c.paths.includes(p)))?.action ?? "none",
-      });
-    }
-  });
-
-  for (const err of layer.manifestErrors) {
-    io.emit({ type: "log", text: `[agents.d] ${err.file} 未通过校验：${err.message}` });
-  }
-  io.emit({
-    type: "agents",
-    agents: layer.registry.list().map((d) => ({
-      id: d.manifest.id,
-      adapter: d.manifest.adapter,
-      enabled: d.enabled,
-      declared: !d.inferredLegacy,
-      roles: d.capabilities.roles as string[],
-      zoneGlobs: d.capabilities.zoneGlobs,
-    })),
-  });
-
   const policy = spec.escalationPolicy;
   const redispatched = new Set<string>();
   const callbacks: OrchestratorCallbacks = {
@@ -98,7 +55,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     onLog: (text) => io.emit({ type: "log", text }),
     onTaskStatus: (taskId, status, attempts) => io.emit({ type: "task", taskId, status, attempts }),
     onEscalation: (taskId, summary) => io.emit({ type: "escalation", taskId, summary }),
-      onVerification: (report) =>
+    onVerification: (report) =>
         io.emit({
           type: "verification",
           passed: report.passed,
@@ -126,86 +83,86 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   }
   // 断点续跑：projectRoot 下的运行日志（若与本需求匹配）恢复进度状态，
   // 跳过 PRD/分解，直接从保存的轮次继续 —— 被杀的长运行不再从零开始。
-  const journalPath = path.join(spec.projectRoot, "ox-run-journal.json");
-  const journal = {
-    save: (snapshot: RunSnapshot): void => {
-      try {
-        fs.writeFileSync(
-          journalPath,
-          JSON.stringify({ requirement: spec.requirement, savedAt: new Date().toISOString(), snapshot }, null, 2),
-          "utf8",
-        );
-      } catch {
-        // 快照写失败不中断运行（断点续跑是尽力而为的保险丝）
-      }
-    },
-  };
+  const journal = createFileJournal(spec.projectRoot, spec.requirement);
   let resume: RunSnapshot | undefined;
-  if (fs.existsSync(journalPath)) {
-    try {
-      const parsed = JSON.parse(fs.readFileSync(journalPath, "utf8")) as {
-        requirement?: string;
-        snapshot?: RunSnapshot;
-      };
-      if (parsed.requirement === spec.requirement && Array.isArray(parsed.snapshot?.batches)) {
-        resume = parsed.snapshot;
-        io.emit({
-          type: "log",
-          text: `[journal] 断点续跑：恢复快照（round ${resume.round}，已完成 ${resume.allDone.length} 个任务），跳过规划`,
-        });
-      } else {
-        io.emit({ type: "log", text: "[journal] 发现旧运行日志但需求不匹配，按全新运行处理" });
-      }
-    } catch {
-      io.emit({ type: "log", text: "[journal] 快照解析失败，按全新运行处理" });
-    }
+  const loaded = journal.load();
+  if (loaded) {
+    resume = loaded;
+    io.emit({
+      type: "log",
+      text: `[journal] 断点续跑：恢复快照（round ${resume.round}，已完成 ${resume.allDone.length} 个任务），跳过规划`,
+    });
+  } else if (journal.mismatched()) {
+    io.emit({ type: "log", text: "[journal] 发现旧运行日志但需求不匹配，按全新运行处理" });
+  } else if (journal.corrupted()) {
+    io.emit({ type: "log", text: "[journal] 快照解析失败，按全新运行处理" });
   }
 
-  const engine = new OrchestratorEngine(
-    {
-      llm:
-        io.llm ??
-        (spec.llmPool.length > 0
-          ? buildLlmPool({
-              providers: spec.llmPool,
-              // 拥堵窗口下 120s 大脑默认超时会让每条路由在生成完成前就被掐断
-              // （与执行器同款教训：越长的思考越需要执行器级预算），提到 300s
-              timeoutMs: 300_000,
-              // 池的每次轮换/冷却决策都上日志：杜绝"路由挂死全程静默"的盲区
-              onEvent: (text) => io.emit({ type: "log", text }),
-            })
-          : buildLlmClient(spec.llmProvider)),
-      scheduler: new Scheduler(layer.adapters, spec.settings.enabledAgents, undefined, {
-        ...layer.schedulerOptions,
-        maxParallelRuns: spec.maxParallelRuns,
-        // Headless has no userData directory to audit into, so run attribution
-        // is streamed and the host decides where to persist it.
-        onRunStart: (agentId, task) =>
-          io.emit({ type: "run", phase: "start", agentId, taskId: task.id, zone: task.zone }),
-        onRunComplete: (outcome, task) =>
+  const platform = createPlatform({
+    settings: spec.settings,
+    promptDir: spec.projectRoot,
+    snapshotRoot: spec.snapshotRoot,
+    manifests: spec.agents,
+    ...(spec.manifestDir ? { manifestDir: spec.manifestDir } : {}),
+    llmPool: spec.llmPool,
+    maxParallelRuns: spec.maxParallelRuns,
+    journal,
+    // Injected (tests) or self-built — the platform reports verdicts for both.
+    ...(io.layer ? { layer: io.layer } : {}),
+    ...(io.llm ? { llm: io.llm } : {}),
+    ...(io.verify ? { verify: io.verify } : {}),
+    host: {
+      log: (text) => io.emit({ type: "log", text }),
+      callbacks,
+      // Headless has no userData directory to audit into, so run attribution is
+      // streamed and the host decides where to persist it.
+      onRunStart: (agentId, task) =>
+        io.emit({ type: "run", phase: "start", agentId, taskId: task.id, zone: task.zone }),
+      onRunComplete: (outcome, task) =>
+        io.emit({
+          type: "run",
+          phase: "end",
+          taskId: task.id,
+          zone: task.zone,
+          ok: outcome.ok,
+          ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
+          ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
+          ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+        }),
+      onVerdict: (verdict) => {
+        for (const c of verdict.conflicts) {
           io.emit({
-            type: "run",
-            phase: "end",
-            taskId: task.id,
-            zone: task.zone,
-            ok: outcome.ok,
-            ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
-            ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
-            ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
-          }),
-      }),
-      verify:
-        io.verify ??
-        ((cwd: string) =>
-          verifyProject(spec.settings.verificationCommands, {
-            cwd: () => cwd,
-            onEvent: (text) => io.emit({ type: "log", text }),
-          })),
-      settings: spec.settings,
-      journal,
+            type: "conflict",
+            kind: c.kind,
+            paths: c.paths,
+            remedy: verdict.remedies.find((r) => r.paths.some((p) => c.paths.includes(p)))?.action ?? "none",
+          });
+        }
+      },
+      ...(callbacks.requestEscalationDecision
+        ? { requestEscalationDecision: callbacks.requestEscalationDecision }
+        : {}),
     },
-    callbacks,
-  );
+  });
+
+  const effectiveLayer: AgentLayer = platform.layer;
+
+  for (const err of effectiveLayer.manifestErrors) {
+    io.emit({ type: "log", text: `[agents.d] ${err.file} 未通过校验：${err.message}` });
+  }
+  io.emit({
+    type: "agents",
+    agents: effectiveLayer.registry.list().map((d) => ({
+      id: d.manifest.id,
+      adapter: d.manifest.adapter,
+      enabled: d.enabled,
+      declared: !d.inferredLegacy,
+      roles: d.capabilities.roles as string[],
+      zoneGlobs: d.capabilities.zoneGlobs,
+    })),
+  });
+
+  const engine = platform.engine;
 
   try {
     let batches: Task[][];

@@ -1,18 +1,21 @@
 import { app, ipcMain, safeStorage, shell, BrowserWindow } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import { OrchestratorEngine, Scheduler, verifyProject, ZoneGuard } from "./engine";
+import { OrchestratorEngine } from "./engine";
+import type { RunSnapshot } from "./engine";
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "./agents";
 import { buildAdaptersFromManifests } from "./agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "./agents/manifest-schema";
 import { AuditLog } from "./audit-log";
+import { createPlatform, type Platform } from "./platform";
 import type { AgentAdapter } from "../shared/types";
 import type { AgentDescriptor, AgentManifest } from "../shared/agent-contract";
 import { ProjectStore, SettingsStore } from "./store";
 import { KeysStore, createSafeStorageCrypto } from "./keys-store";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
-import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import { redactSecrets } from "../shared/redact";
+import type { LlmClient } from "../shared/llm-client";
+import type { OrchestratorCallbacks } from "./engine";
 import { HttpLlmError } from "../shared/http-clients";
 import type { EscalationAction, PrdDocument, ProjectSettings, SmokeCheck, Task } from "../shared/types";
 
@@ -113,12 +116,14 @@ function ensureStores(): void {
   }
 }
 
-function buildLlm(settings: ProjectSettings) {
+/**
+ * Seeds every pooled provider's env vars from the key store, so a provider with
+ * no key in the process environment still participates when the operator saved
+ * one on the settings screen. Passed into the platform so key-store knowledge
+ * stays on the Electron side (headless has no key store).
+ */
+function seedKeysFromStore(settings: ProjectSettings, envVars: Set<string>): void {
   const pool = settings.llmPool ?? [];
-  // Seed every pooled provider's keys from the store before building, so a
-  // provider with no key in the environment still participates when the
-  // operator saved one in the settings screen.
-  const envVars = new Set<string>();
   for (const id of pool.length > 0 ? pool : [settings.llmProvider]) {
     const provider = getProvider(id);
     for (const v of providerKeyEnvVars(id)) envVars.add(v);
@@ -127,8 +132,14 @@ function buildLlm(settings: ProjectSettings) {
   for (const v of envVars) {
     if (!process.env[v]) process.env[v] = keysStore!.get(v);
   }
-  // A pool of one behaves exactly like the old single-provider client.
-  return pool.length > 0 ? buildLlmPool({ providers: pool }) : buildLlmClient(settings.llmProvider);
+}
+
+/** Brain client for one-shot calls (the settings "test connection" button). */
+function buildLlm(settings: ProjectSettings): LlmClient {
+  const platform = buildPlatformLayer(settings, {
+    log: (text) => currentWindow?.webContents.send("ox:event", { type: "log", text }),
+  });
+  return platform.buildLlm((envVars) => seedKeysFromStore(settings, envVars));
 }
 
 const WORKSPACE_SCRIPTS = {
@@ -189,6 +200,81 @@ function ensureWorkspace(projectId: string): string {
   return root;
 }
 
+/** Where per-project checkpoint journals live (desktop parity with headless). */
+function journalDir(): string {
+  return path.join(app.getPath("userData"), "runs");
+}
+
+/**
+ * Desktop assembly of the shared platform. Every host-specific side effect
+ * (audit, renderer push, escalation parking) is supplied here, so the engine
+ * wiring itself stays identical to the headless entry point.
+ */
+function buildPlatformLayer(
+  settings: ProjectSettings,
+  overrides: {
+    log: (text: string) => void;
+    journal?: { save(snapshot: RunSnapshot): void };
+    callbacks?: Partial<OrchestratorCallbacks>;
+  },
+): Platform {
+  const audit = ensureAudit();
+  return createPlatform({
+    settings,
+    promptDir: promptDir(),
+    snapshotRoot: snapshotRoot(),
+    manifestDir: agentDir(),
+    enableRouter: settings.agentRouter !== false,
+    arbitration: settings.arbitration,
+    maxParallelRuns: settings.maxParallelRuns,
+    // The pool is a singleton so runtime registration survives engine rebuilds.
+    layer: ensureAgentLayer(settings),
+    ...(overrides.journal ? { journal: overrides.journal } : {}),
+    host: {
+      log: overrides.log,
+      ...(overrides.callbacks ? { callbacks: overrides.callbacks } : {}),
+      // P5 observability: every run start/end is attributed and persisted, so
+      // "which agent did what" survives a reload.
+      onRunStart: (agentId, task) => {
+        audit.append({ phase: "run-start", agentId, taskId: task.id, zone: task.zone });
+      },
+      onRunComplete: (outcome, task) => {
+        audit.append({
+          phase: "run-end",
+          taskId: task.id,
+          zone: task.zone,
+          ok: outcome.ok,
+          ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
+          ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
+          ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+          // Audit JSONL is durable: redact before it hits disk.
+          detail: redactSecrets(outcome.logDigest).slice(0, 300),
+        });
+      },
+      // Zone-conflict verdicts must reach the board even though the guard lives
+      // inside the long-lived layer, not inside this engine.
+      onVerdict: (verdict) => {
+        for (const conflict of verdict.conflicts) {
+          currentWindow?.webContents.send("ox:event", {
+            type: "conflict",
+            kind: conflict.kind,
+            paths: conflict.paths,
+            remedy:
+              verdict.remedies.find((r) => r.paths.some((p) => conflict.paths.includes(p)))?.action ??
+              "none",
+          });
+        }
+      },
+      requestEscalationDecision: (taskId) =>
+        new Promise<EscalationAction>((resolve) => {
+          // The escalation event itself is already sent by onEscalation; here
+          // we only park the resolver until the renderer answers.
+          pendingEscalations.set(taskId, resolve);
+        }),
+    },
+  });
+}
+
 /**
  * Builds a fresh engine bound to one project and records it as the project's
  * live engine (for cancel/pause/resume). Always rebuilt from current settings,
@@ -198,74 +284,44 @@ function ensureWorkspace(projectId: string): string {
 function buildEngine(projectId: string): OrchestratorEngine {
   const s1 = store!;
   const settings = settingsStore!.load();
-  // Capability routing (P1) + pluggable agents (P2): the pool is a singleton so
-  // runtime registration survives engine rebuilds. The pool stays on legacy
-  // round-robin whenever no agent declares capabilities, so enabling routing
-  // cannot regress a single-agent setup.
-  const layer = ensureAgentLayer(settings);
-  const audit = ensureAudit();
-  const engine = new OrchestratorEngine(
-    {
-      llm: buildLlm(settings),
-      scheduler: new Scheduler(layer.adapters, settings.enabledAgents, new ZoneGuard(), {
-        ...layer.schedulerOptions,
-        maxParallelRuns: settings.maxParallelRuns,
-        // P5 observability: every run start/end is attributed and persisted, so
-        // "which agent did what" survives a reload.
-        onRunStart: (agentId, task) => {
-          audit.append({ phase: "run-start", agentId, taskId: task.id, zone: task.zone });
-        },
-        onRunComplete: (outcome, task) => {
-          audit.append({
-            phase: "run-end",
-            taskId: task.id,
-            zone: task.zone,
-            ok: outcome.ok,
-            ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
-            ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
-            ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
-            // Audit JSONL is durable: redact before it hits disk.
-            detail: redactSecrets(outcome.logDigest).slice(0, 300),
-          });
-        },
-      }),
-      verify: (cwd: string) =>
-        verifyProject(settings.verificationCommands, {
-          cwd: () => cwd,
-          onEvent: (text) => currentWindow?.webContents.send("ox:event", { type: "log", text }),
-        }),
-      settings,
+  const send = (payload: Record<string, unknown>): void => {
+    currentWindow?.webContents.send("ox:event", payload);
+  };
+  // Checkpoint journal: desktop keeps the same resume fuse as headless, under
+  // userData/runs/<projectId>.json.
+  const journalFile = path.join(journalDir(), `${projectId}.json`);
+  const journal = {
+    save: (snapshot: RunSnapshot): void => {
+      try {
+        fs.mkdirSync(journalDir(), { recursive: true });
+        fs.writeFileSync(
+          journalFile,
+          JSON.stringify({ savedAt: new Date().toISOString(), snapshot }, null, 2),
+          "utf8",
+        );
+      } catch {
+        // Checkpointing is a best-effort fuse; never break a run over it.
+      }
     },
-    {
+  };
+  const platform = buildPlatformLayer(settings, {
+    log: (text) => send({ type: "log", text }),
+    journal,
+    callbacks: {
       onStage: (stage) => {
         s1.update(projectId, { stage });
-        currentWindow?.webContents.send("ox:event", { type: "stage", stage });
+        send({ type: "stage", stage });
       },
-      onLog: (text) => currentWindow?.webContents.send("ox:event", { type: "log", text }),
-      onTaskStatus: (taskId, status, attempts) =>
-        currentWindow?.webContents.send("ox:event", { type: "taskStatus", taskId, status, attempts }),
+      onTaskStatus: (taskId, status, attempts) => send({ type: "taskStatus", taskId, status, attempts }),
+      // The renderer is a display surface: strip credentials before the digest
+      // becomes visible/copyable text on the board.
       onTaskOutcome: (taskId, ok, logDigest, meta) =>
-        currentWindow?.webContents.send("ox:event", {
-          type: "taskOutcome",
-          taskId,
-          ok,
-          // The renderer is a display surface: strip credentials before the
-          // digest becomes visible/copyable text on the board.
-          logDigest: redactSecrets(logDigest).slice(0, 2000),
-          ...(meta ?? {}),
-        }),
-      onVerification: (report) =>
-        currentWindow?.webContents.send("ox:event", { type: "verification", report }),
-      onEscalation: (taskId, summary) =>
-        currentWindow?.webContents.send("ox:event", { type: "escalation", taskId, summary }),
-      requestEscalationDecision: (taskId) =>
-        new Promise<EscalationAction>((resolve) => {
-          // The escalation event itself is already sent by onEscalation; here
-          // we only park the resolver until the renderer answers.
-          pendingEscalations.set(taskId, resolve);
-        }),
+        send({ type: "taskOutcome", taskId, ok, logDigest: redactSecrets(logDigest).slice(0, 2000), ...(meta ?? {}) }),
+      onVerification: (report) => send({ type: "verification", report }),
+      onEscalation: (taskId, summary) => send({ type: "escalation", taskId, summary }),
     },
-  );
+  });
+  const engine = platform.engine;
   engines.set(projectId, engine);
   return engine;
 }
