@@ -92,10 +92,6 @@ export function enginesOf(): Map<string, OrchestratorEngine> {
   return engines;
 }
 
-export function pendingEscalationMap(): ReadonlyMap<string, (action: EscalationAction) => void> {
-  return pendingEscalations;
-}
-
 export function resolveEscalation(taskId: string, action: EscalationAction): boolean {
   const resolve = pendingEscalations.get(taskId);
   if (!resolve) return false;
@@ -112,10 +108,6 @@ export function abortAllEscalations(): void {
 
 export function dynamicAgentMap(): Map<string, { adapter: AgentAdapter; manifest: AgentManifest }> {
   return dynamicAgents;
-}
-
-export function getAgentLayer(): AgentLayer | null {
-  return agentLayer;
 }
 
 /** Append-only run audit under userData/audit (survives reloads and restarts). */

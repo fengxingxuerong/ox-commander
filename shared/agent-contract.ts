@@ -202,8 +202,3 @@ export function normalizeCapabilities(
     selfIsolated: caps.selfIsolated ?? false,
   };
 }
-
-/** True when the adapter declares nothing beyond the v1 interface. */
-export function isLegacyAdapter(adapter: AgentAdapterV2): boolean {
-  return typeof adapter.capabilities !== "function";
-}

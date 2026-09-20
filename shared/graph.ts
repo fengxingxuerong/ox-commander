@@ -1,5 +1,4 @@
 import type { Task } from "./types";
-import { STAGE_ORDER } from "./types";
 
 export class CycleError extends Error {
   constructor() {
@@ -66,10 +65,4 @@ export function planBatches(tasks: Task[]): Task[][] {
   }
   if (done.size < sorted.length) throw new CycleError();
   return batches;
-}
-
-export function nextStage(stage: (typeof STAGE_ORDER)[number]): (typeof STAGE_ORDER)[number] | null {
-  const idx = STAGE_ORDER.indexOf(stage);
-  if (idx < 0 || idx >= STAGE_ORDER.length - 1) return null;
-  return STAGE_ORDER[idx + 1];
 }

@@ -538,5 +538,40 @@ const MAX_ZONE_LENGTH = 200;
 | — | zone 白名单 + 渲染防护 | ✅ `9935ec1`（原 6.6 条，已更正定级） |
 | — | 层 2 接线修复（`fencedBlock` / `sensenova-api`） | ✅ 本轮 §9.4 |
 | — | 死代码清理（3 个函数） | ✅ 本轮 §9.5 |
+| — | **未接线检测门禁**（`check:unwired`） | ✅ 本轮 §9.7 |
 
 **已无已知未处理项。**
+
+### 9.7 把「未接线」变成门禁（本轮）
+
+§9.4 的缺陷（helper 写了但生产零调用）**无法靠 `npm run verify` 发现** ——
+当时 590 项全绿。既然如此，就不该指望下一轮靠运气再撞见它。
+
+新增 `scripts/check-unwired.mjs`，接进 `verify`（在 lint 与 test 之间）：
+
+```
+npm run typecheck && npm run lint && npm run check:unwired && npm test && ...
+```
+
+**判定口径**：
+
+| 维度 | 规则 |
+| --- | --- |
+| 查什么 | 只查**运行时**导出（`function` / `const` / `class` / `enum`）。`interface` / `type` 零引用通常无害，不查 |
+| 算接线 | ①同文件内部有调用（`topologicalSort` 被同文件 `planBatches` 调）②存在**非测试**文件引用 |
+| 不算接线 | **测试文件引用** —— 这正是要抓的「单测全绿但生产零调用」 |
+| 已接受项 | 写在 `ACCEPTED` 白名单，每项附理由。**新增未接线项 → exit 1** |
+
+**当前扫描结果**：104 个源文件，11 个生产零调用的运行时导出，**全部已评审接受**
+（测试辅助 4 个、便利包装 4 个、诊断/封装 2 个、测试 fake 1 个）。
+
+**本轮清掉的 3 个真死代码**：`isLegacyAdapter`、`nextStage`、`getAgentLayer`、
+`pendingEscalationMap`（4 个）。删除后测试数**不变**（596）—— 反证它们确实零覆盖。
+
+**变异验证**：临时加一个未接线导出 → 门禁 **exit 1** 并精确点名；恢复后 PASS。
+
+**设计取舍（记录一次失败尝试）**：曾想用 fixpoint 迭代抓「链式死代码」
+（A 只被死代码 B 调用）。实测**误报 74 个**在用的符号（`inlineField` / `Scheduler` /
+`parsePrd`…），因为「引用者都死」的判定在有循环依赖时失控。
+误报比漏检更消耗信任 —— **回退到单层判定**，把局限写进脚本注释。
+这条记在这里，是为了下次不要重复踩。
