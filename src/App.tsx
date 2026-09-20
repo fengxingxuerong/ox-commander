@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useApp } from "./store";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -15,6 +16,14 @@ export function App() {
     return api_unsubscribe(handleEvent);
   }, [handleEvent, refreshProjects]);
 
+  return (
+    <ErrorBoundary>
+      <CurrentPage page={page} />
+    </ErrorBoundary>
+  );
+}
+
+function CurrentPage({ page }: { page: ReturnType<typeof useApp.getState>["page"] }) {
   switch (page) {
     case "board":
       return <BoardPage />;

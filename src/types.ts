@@ -105,8 +105,14 @@ export interface AppState {
   planning: boolean;
   planningError?: string;
   settings?: ProjectSettings;
-  /** Last settings save/load failure; cleared on a successful save. */
+  /** Last settings load/save failure; cleared when the next call succeeds. */
   settingsError?: string;
+  /**
+   * Last project-list failure (refresh / create / delete). These all happen on
+   * the projects page, which has no log view, so the error has to live in
+   * state to be reachable at all.
+   */
+  projectsError?: string;
   newProjectName: string;
   newRequirement: string;
 

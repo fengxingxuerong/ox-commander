@@ -81,6 +81,13 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * 未发现断言缺口** —— 记录在此以说明「集成层盲区」这一判断已按模块逐一核查过，
  * 不是猜的。它进 tier 2 的理由纯粹是成本：`orchestrator.test.ts` 有 30 条用例且
  * 含多轮重修循环，单次约 20s，不是断言质量有问题。
+ *
+ * `src/store.ts` 于 2026-09-21 接入，配**三个**测试文件。它一个模块里装了三类
+ * 逻辑：`handleEvent` 的事件映射（store.test.ts）、IPC 失败/并发的状态机
+ * （store-errors.test.ts）、以及页面如何消费这些状态（ui.test.tsx）。
+ * 只挂前两个时 `|| → &&` 存活了 —— 那个 `||` 是 `newProjectName.trim() ||
+ * "未命名项目"`，唯一的断言在 ui.test.tsx 里。**漏挂测试文件 = 那部分逻辑
+ * 没有门禁**，与「覆盖率数字骗人」是同一条教训的翻版。
  */
 const TARGETS = [
   { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts", tier: 1 },
@@ -90,8 +97,22 @@ const TARGETS = [
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
   { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts", tier: 1 },
+  {
+    file: "src/store.ts",
+    tests: ["src/store.test.ts", "src/store-errors.test.ts", "src/ui.test.tsx"],
+    tier: 1,
+  },
   { file: "electron/engine/orchestrator.ts", test: "src/orchestrator.test.ts", tier: 2 },
 ];
+
+/**
+ * 目标对应的测试文件。`tests`（数组）优先于 `test`（单个）。
+ *
+ * 一个模块被拆成两个测试文件时，只挂一个会让另一半完全没门禁。
+ */
+function testFilesOf(target) {
+  return Array.isArray(target.tests) ? target.tests : [target.test];
+}
 
 /**
  * 允许的存活变异数量。
@@ -159,6 +180,14 @@ process.on("SIGTERM", () => {
   process.exit(143);
 });
 
+/**
+ * 跑一个目标对应的全部测试。任一失败即视为「杀死」。
+ * 多文件的目标：只挂一个文件会让另一半逻辑没有门禁。
+ */
+function testsPassAll(target) {
+  return testFilesOf(target).every((f) => testsPass(f));
+}
+
 /** 跑测试。返回 true = 通过（变异存活）。 */
 function testsPass(testFile) {
   try {
@@ -185,13 +214,15 @@ for (const target of targets) {
   const mutants = all.slice(0, limit);
 
   if (listOnly) {
-    console.log(`${target.file} → ${mutants.length}/${all.length} 个变异：${mutants.map((m) => m.op).join(", ")}`);
+    console.log(
+      `${target.file} → ${mutants.length}/${all.length} 个变异：${mutants.map((m) => m.op).join(", ")}`,
+    );
     continue;
   }
 
   // 基线：原文件必须通过，否则后面结论不可信
-  if (!testsPass(target.test)) {
-    console.error(`基线失败：${target.test} 在原始代码上不通过，跳过 ${target.file}`);
+  if (!testsPassAll(target)) {
+    console.error(`基线失败：${testFilesOf(target).join(", ")} 在原始代码上不通过，跳过 ${target.file}`);
     results.push({ target, baselineFailed: true, ran: [] });
     continue;
   }
@@ -202,7 +233,7 @@ for (const target of targets) {
     fs.writeFileSync(filePath, m.source, "utf8");
     let killed;
     try {
-      killed = !testsPass(target.test);
+      killed = !testsPassAll(target);
     } finally {
       fs.writeFileSync(filePath, original, "utf8");
     }
@@ -255,7 +286,8 @@ console.log(`\n总计：杀死 ${totalKilled}/${totalRan}（${overall}%）`);
 // 三种情况都会让整块覆盖静默归零。这与「CI 里写错路径、从来没跑过的 job」同族。
 if (baselineFailures.length > 0) {
   console.error(`\nFAIL: ${baselineFailures.length} 个目标的基线测试未通过 —— 这些目标**完全没被验证**：`);
-  for (const r of baselineFailures) console.error(`  ${r.target.file}  ::  ${r.target.test}`);
+  for (const r of baselineFailures)
+    console.error(`  ${r.target.file}  ::  ${testFilesOf(r.target).join(", ")}`);
   console.error(
     "\n基线失败的常见原因：测试文件路径写错 / 测试被改坏 / 被测源码有语法错误。\n" +
       "不要让它跳过就算了 —— 那等于这个目标从来没有门禁。\n",

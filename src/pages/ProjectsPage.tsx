@@ -9,11 +9,18 @@ export function ProjectsPage() {
   const createAndOpen = useApp((s) => s.createAndOpen);
   const deleteProject = useApp((s) => s.deleteProject);
   const setPage = useApp((s) => s.setPage);
+  const projectsError = useApp((s) => s.projectsError);
 
   const handleDelete = (e: React.MouseEvent, id: string, pname: string) => {
     e.stopPropagation();
     if (!window.confirm(`删除项目「${pname}」？工作区目录会移入回收站。`)) return;
-    void deleteProject(id).catch((err: Error) => window.alert(`删除失败: ${err.message}`));
+    // The store records failures instead of throwing, so the reason is read
+    // back from state rather than caught here. A `.catch` here would be dead
+    // code and would silently swallow the message.
+    void deleteProject(id).then(() => {
+      const err = useApp.getState().projectsError;
+      if (err) window.alert(`删除失败: ${err}`);
+    });
   };
 
   return (
@@ -25,6 +32,12 @@ export function ProjectsPage() {
           ⚙️ 设置
         </button>
       </header>
+
+      {projectsError && (
+        <p className="inline-error" role="alert">
+          操作失败：{projectsError}
+        </p>
+      )}
 
       <section className="card">
         <h2>新建项目</h2>

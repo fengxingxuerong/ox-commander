@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -131,6 +132,8 @@ function resetStore() {
     planning: false,
     planningError: undefined,
     settings: undefined,
+    settingsError: undefined,
+    projectsError: undefined,
     newProjectName: "",
     newRequirement: "",
   });
@@ -164,6 +167,40 @@ describe("App", () => {
     expect(await screen.findByText("线路池（多 API 同时工作）")).toBeTruthy();
     useApp.setState({ page: "projects" });
     expect(await screen.findByText("新建项目")).toBeTruthy();
+  });
+});
+
+describe("ErrorBoundary", () => {
+  function Boom({ armed }: { armed: boolean }) {
+    if (armed) throw new Error("渲染时炸了");
+    return <p>恢复正常</p>;
+  }
+
+  it("replaces a crashed tree with a recoverable panel instead of a blank window", async () => {
+    // A throw during render normally unmounts everything: without a boundary
+    // the operator sees a blank window and has to restart the app.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    let armed = true;
+    const { rerender } = render(
+      <ErrorBoundary>
+        <Boom armed={armed} />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText("界面出错了")).toBeTruthy();
+    expect(screen.getByText("渲染时炸了")).toBeTruthy();
+
+    // Disarm first: resetting while the children still throw would just
+    // re-crash on the very next render. The boundary must then re-render
+    // children for real, not merely clear its own error flag.
+    armed = false;
+    rerender(
+      <ErrorBoundary>
+        <Boom armed={armed} />
+      </ErrorBoundary>,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重试渲染" }));
+    expect(screen.getByText("恢复正常")).toBeTruthy();
+    spy.mockRestore();
   });
 });
 
@@ -206,6 +243,28 @@ describe("ProjectsPage", () => {
     fireEvent.click(screen.getByTitle("删除项目（工作区移入回收站）"));
     expect(window.oxCommander.deleteProject).not.toHaveBeenCalled();
     expect(screen.getByText("待办应用")).toBeTruthy();
+  });
+
+  it("shows why a failed delete kept the row, instead of failing silently", async () => {
+    // The store records the failure rather than rejecting, so the alert has to
+    // be driven from state — a `.catch` on the promise would never fire.
+    useApp.setState({
+      projects: [{ id: "p1", name: "待办应用", stage: "PRD", requirement: "x" }],
+    });
+    vi.mocked(window.oxCommander.deleteProject).mockRejectedValue(new Error("回收站不可用"));
+    window.confirm = vi.fn(() => true);
+    window.alert = vi.fn();
+    render(<ProjectsPage />);
+    fireEvent.click(screen.getByTitle("删除项目（工作区移入回收站）"));
+    await waitFor(() => expect(window.alert).toHaveBeenCalledWith("删除失败: 回收站不可用"));
+    // The row stays: the workspace is still on disk.
+    expect(screen.getByText("待办应用")).toBeTruthy();
+  });
+
+  it("surfaces a project-list failure on the page that has no log view", () => {
+    useApp.setState({ projectsError: "projects 目录不可读" });
+    render(<ProjectsPage />);
+    expect(screen.getByRole("alert").textContent).toContain("projects 目录不可读");
   });
 });
 
@@ -361,6 +420,18 @@ describe("SettingsPage", () => {
         { envVar: expect.any(String), value: "sk-test-123" },
       ]),
     );
+  });
+
+  it("labels a failed load as a read failure, not a save failure", async () => {
+    // `settings` stays undefined on a failed load, which also disables saving —
+    // saying "保存失败" there would point at a write that never happened.
+    vi.mocked(window.oxCommander.getSettings).mockRejectedValue(new Error("settings.json 损坏"));
+    render(<SettingsPage />);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("读取失败");
+    expect(alert.textContent).toContain("settings.json 损坏");
+    const save = screen.getByRole("button", { name: "保存设置" }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
   });
 
   it("persists edited settings via saveSettings", async () => {

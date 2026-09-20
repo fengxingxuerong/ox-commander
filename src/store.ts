@@ -4,6 +4,16 @@ import type { Stage, TaskStatus } from "../shared/types";
 
 const api = () => window.oxCommander;
 
+/**
+ * Monotonic token for the in-flight planning request.
+ *
+ * `createAndOpen` and `retryPlanning` can both fire `runPlanning`, and a slow
+ * first request would otherwise land *after* the newer one and overwrite it —
+ * the board then shows the stale PRD while the operator is looking at the
+ * retry's result. Only the newest request is allowed to commit.
+ */
+let planningSeq = 0;
+
 export const useApp = create<AppState>((set, get) => ({
   page: "projects",
   projects: [],
@@ -22,50 +32,88 @@ export const useApp = create<AppState>((set, get) => ({
   setNewRequirement: (newRequirement) => set({ newRequirement }),
 
   refreshProjects: async () => {
-    const projects = await api().listProjects();
-    set({ projects });
+    // Guarded: this runs on mount, so a rejected IPC call (unreadable projects
+    // dir) escaped as an unhandled rejection and left the list silently empty —
+    // indistinguishable from "no projects yet".
+    try {
+      const projects = await api().listProjects();
+      set({ projects, projectsError: undefined });
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        projectsError: message,
+        logs: [...s.logs, `[错误] 读取项目列表失败: ${message}`],
+      }));
+    }
   },
 
   deleteProject: async (projectId) => {
-    await api().deleteProject(projectId);
-    set((s) => ({
-      projects: s.projects.filter((p) => p.id !== projectId),
-      activeProjectId: s.activeProjectId === projectId ? undefined : s.activeProjectId,
-    }));
+    try {
+      await api().deleteProject(projectId);
+      set((s) => ({
+        projects: s.projects.filter((p) => p.id !== projectId),
+        activeProjectId: s.activeProjectId === projectId ? undefined : s.activeProjectId,
+        projectsError: undefined,
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      // The row is kept: deleting only from local state would show a project
+      // as gone while its workspace is still on disk.
+      set((s) => ({
+        projectsError: message,
+        logs: [...s.logs, `[错误] 删除项目失败: ${message}`],
+      }));
+    }
   },
 
   createAndOpen: async () => {
     const { newProjectName, newRequirement } = get();
     if (!newRequirement.trim()) return;
-    const rec = await api().createProject(
-      newProjectName.trim() || "未命名项目",
-      newRequirement.trim(),
-    );
-    set({
-      activeProjectId: rec.id,
-      page: "prd-review",
-      stage: "PLANNING",
-      logs: [],
-      tasks: {},
-      escalations: [],
-      conflicts: [],
-      verification: undefined,
-      prd: undefined,
-      batches: undefined,
-      planning: true,
-      planningError: undefined,
-    });
+    try {
+      const rec = await api().createProject(
+        newProjectName.trim() || "未命名项目",
+        newRequirement.trim(),
+      );
+      set({
+        activeProjectId: rec.id,
+        page: "prd-review",
+        stage: "PLANNING",
+        logs: [],
+        tasks: {},
+        escalations: [],
+        conflicts: [],
+        verification: undefined,
+        prd: undefined,
+        batches: undefined,
+        planning: true,
+        planningError: undefined,
+        projectsError: undefined,
+      });
+    } catch (err) {
+      // Staying on the projects page is deliberate: navigating to the PRD page
+      // first and failing afterwards would leave an empty review screen with no
+      // project behind it.
+      const message = (err as Error).message;
+      set((s) => ({
+        projectsError: message,
+        logs: [...s.logs, `[错误] 创建项目失败: ${message}`],
+      }));
+      return;
+    }
     void get().runPlanning();
   },
 
   runPlanning: async () => {
     const { activeProjectId } = get();
     if (!activeProjectId) return;
+    const seq = ++planningSeq;
     set((s) => ({ planning: true, planningError: undefined, logs: [...s.logs, "── 正在生成 PRD 并分解任务… ──"] }));
     try {
       const { prd, batches } = await api().runPlanning(activeProjectId);
+      if (seq !== planningSeq) return;
       set({ prd, batches, planning: false, logs: [] });
     } catch (err) {
+      if (seq !== planningSeq) return;
       set((s) => ({
         planning: false,
         planningError: (err as Error).message,
@@ -123,9 +171,16 @@ export const useApp = create<AppState>((set, get) => ({
     // showed defaults — indistinguishable from "nothing configured yet".
     try {
       const settings = await api().getSettings();
-      set({ settings });
+      set({ settings, settingsError: undefined });
     } catch (err) {
-      set((s) => ({ logs: [...s.logs, `[错误] 读取设置失败: ${(err as Error).message}`] }));
+      // The log alone is not enough: the page renders `settings === undefined`
+      // as defaults and disables saving, so a failed load looked exactly like
+      // "nothing configured yet" — with no hint about why saving is disabled.
+      const message = (err as Error).message;
+      set((s) => ({
+        settingsError: message,
+        logs: [...s.logs, `[错误] 读取设置失败: ${message}`],
+      }));
     }
   },
 
@@ -144,6 +199,7 @@ export const useApp = create<AppState>((set, get) => ({
   },
 
   resolveEscalation: async (taskId, action) => {
+    const before = get().escalations.find((e) => e.taskId === taskId);
     set((s) => ({
       escalations: s.escalations.map((e) =>
         e.taskId === taskId ? { ...e, resolved: true } : e,
@@ -153,7 +209,14 @@ export const useApp = create<AppState>((set, get) => ({
     try {
       await api().resolveEscalation(taskId, action);
     } catch (err) {
-      set((s) => ({ logs: [...s.logs, `[错误] 决策失败: ${(err as Error).message}`] }));
+      const message = (err as Error).message;
+      // Roll the optimistic update back. Leaving `resolved: true` hides the
+      // three action buttons behind a "已处理" label, so the operator can never
+      // retry — while the engine never actually received the decision.
+      set((s) => ({
+        escalations: s.escalations.map((e) => (e.taskId === taskId ? (before ?? e) : e)),
+        logs: [...s.logs, `[错误] 决策失败: ${message}`],
+      }));
     }
   },
 

@@ -339,7 +339,10 @@ export function SettingsPage() {
       <section className="card">
         {settingsError && (
           <p className="inline-error" role="alert">
-            保存失败：{settingsError}
+            {/* A failed load leaves `settings` undefined and the save button
+                disabled — saying "保存失败" there would send the operator
+                hunting for a write that never happened. */}
+            {settings ? "保存失败" : "读取失败"}：{settingsError}
           </p>
         )}
         <button

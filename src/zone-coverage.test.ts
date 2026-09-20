@@ -47,6 +47,29 @@ describe("extractDeclaredPaths", () => {
     const paths = extractDeclaredPaths("src/a.js then src/a.js again");
     expect(paths.filter((p) => p === "src/a.js")).toHaveLength(1);
   });
+
+  it("keeps scanning past a skipped token — each guard is `continue`, not `break`", () => {
+    // Three guards skip a token and move on. Flipping ANY of them to `break`
+    // stops the whole scan instead, so every path mentioned *after* a skipped
+    // token is silently lost. The coverage check then sees "no declared paths"
+    // and waves through a plan that will produce zone violations forever —
+    // exactly the regression this module was written to catch.
+    //
+    // Found by mutation testing: all three survived, because every earlier case
+    // had either all-valid or all-skipped tokens — none mixed the two.
+    //
+    // Guard 1 — a `../` continuation (`prev` is `.` / `/` / `\`).
+    expect(extractDeclaredPaths("escape ../outside/secret.txt then src/app/main.js")).toEqual([
+      "src/app/main.js",
+    ]);
+    // Guard 2 — a token whose cleaned form still contains `..`.
+    expect(extractDeclaredPaths("skip a..b/c.js then src/real.js")).toEqual(["src/real.js"]);
+    // Guard 3 — a bare filename. The most likely one to bite: PRDs constantly
+    // name `package.json` as a constraint *before* naming real artifacts.
+    expect(extractDeclaredPaths("do not modify package.json; write src/cli.js")).toEqual([
+      "src/cli.js",
+    ]);
+  });
 });
 
 describe("declaredArtifactPaths", () => {
