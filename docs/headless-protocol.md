@@ -109,7 +109,7 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
       "id": "codex-cli",
       "displayName": "Codex CLI",
       "adapter": "cli",
-      "entry": { "kind": "cli", "command": "codex", "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--prompt-file", "{{promptPath}}"] },
+      "entry": { "kind": "cli", "command": "codex", "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "严格按文件 {{promptPath}} 中的任务书执行（先读该文件）。"] },
       "capabilities": {
         "roles": ["backend-dev", "test-writer"],
         "zoneGlobs": ["src/**", "tests/**"],

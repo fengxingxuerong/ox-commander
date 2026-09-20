@@ -313,11 +313,16 @@ export class AgentRegistry {
 
 manifest 示例（`agents.d/codex.json`）：
 
+> **修正（2026-09-20）**：本条原先写 `"--prompt-file", "{{promptPath}}"`，但 `codex exec`
+> 没有这个参数（用 `codex exec --help` 实测核对；它只接受位置参数 PROMPT 或 stdin）。
+> 现在改用实测存在的参数。若你的 codex 版本不接受
+> `--dangerously-bypass-approvals-and-sandbox`，可换成 `-s workspace-write`。
+
 ```json
 {
   "id": "codex-cli", "displayName": "Codex CLI",
   "adapter": "cli",
-  "entry": { "command": "codex", "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--prompt-file", "{{promptPath}}"] },
+  "entry": { "command": "codex", "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--skip-git-repo-check", "--dangerously-bypass-approvals-and-sandbox", "严格按文件 {{promptPath}} 中的任务书执行（先读该文件）。"] },
   "capabilities": {
     "protocolVersion": "ox-agent/2",
     "roles": ["backend-dev", "fullstack-dev", "test-writer"],

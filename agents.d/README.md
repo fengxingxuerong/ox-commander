@@ -95,4 +95,11 @@ POST {baseUrl}{runsPath}/{id}/abort           → 2xx
 ## 示例
 
 - `codex.example.json` — 子进程型（Codex CLI）
+- `claude-code.example.json` — 子进程型（Claude Code，`-p` 非交互）
 - `workbuddy-bridge.example.json` — HTTP 桥接型（WorkBuddy / MCP 网关）
+
+> **CLI 型的 `argsTemplate` 必须逐字核对目标 CLI 的真实参数。**
+> 2026-09-20 实测踩到：本目录的 Codex 示例曾写 `--prompt-file`，而 `codex exec`
+> 根本没有这个参数（它只接受位置参数 PROMPT 或 stdin）。照抄的后果是
+> **probe 依然绿**（只跑 `--version`），但每次派单都因未知参数失败 ——
+> 配好了却永远跑不起来。加新 CLI 时先跑一遍 `--help` 核对每个参数。

@@ -1,0 +1,32 @@
+{
+  "id": "claude-code",
+  "displayName": "Claude Code（本机 CLI）",
+  "adapter": "cli",
+  "entry": {
+    "kind": "cli",
+    "command": "claude",
+    "argsTemplate": [
+      "-p",
+      "请严格执行文件 {{promptPath}} 中描述的任务（先读该文件，它是完整任务书）。只修改 zone「{{zone}}」内的文件。完成后直接结束。",
+      "--dangerously-skip-permissions"
+    ],
+    "probeArgs": ["--version"]
+  },
+  "capabilities": {
+    "protocolVersion": "ox-agent/2",
+    "roles": ["*"],
+    "zoneGlobs": ["**"],
+    "supports": ["read", "edit", "create", "run-test", "review"],
+    "artifactKinds": ["files", "logs", "diff"],
+    "maxConcurrency": 1,
+    "selfIsolated": false
+  },
+  "credential": { "kind": "none" },
+  "limits": {
+    "runDeadlineMs": 900000,
+    "idleTimeoutMs": 180000,
+    "maxStdoutBytes": 2097152
+  },
+  "priority": 30,
+  "enabled": true
+}

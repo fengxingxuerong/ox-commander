@@ -278,7 +278,20 @@ export function parseAgentManifestList(raw: unknown, source: AgentManifest["sour
   });
 }
 
-/** Convenience for the UI: a JSON snippet that validates against the contract. */
+/**
+ * Convenience for the UI: a JSON snippet that validates against the contract.
+ *
+ * `argsTemplate` 必须是**目标 CLI 真实存在的参数**。本模板原先写的是
+ * `["exec","--cd","{{projectRoot}}","--prompt-file","{{promptPath}}"]`，
+ * 但 `codex exec` 根本没有 `--prompt-file`（2026-09-20 用 `codex exec --help`
+ * 实测核对：位置参数 PROMPT 或 stdin，二者之外无文件入口）。照着复制的用户
+ * 会收到未知参数错误，且因为 probe 只跑 `--version`，健康检查还是绿的 ——
+ * 属于「配好了但永远跑不起来」的静默陷阱。
+ *
+ * 现在用的参数都在 `codex exec --help` 里实测存在：`--cd` / `--skip-git-repo-check`
+ * / `--dangerously-bypass-approvals-and-sandbox`；任务正文仍走 prompt 文件，
+ * 由位置参数指向它（cli-agent 的 stdin 是 ignore，所以不能走 stdin）。
+ */
 export function exampleManifest(): AgentManifest {
   return {
     id: "codex-cli",
@@ -287,7 +300,14 @@ export function exampleManifest(): AgentManifest {
     entry: {
       kind: "cli",
       command: "codex",
-      argsTemplate: ["exec", "--cd", "{{projectRoot}}", "--prompt-file", "{{promptPath}}"],
+      argsTemplate: [
+        "exec",
+        "--cd",
+        "{{projectRoot}}",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "严格按文件 {{promptPath}} 中的任务书执行（先读该文件）。",
+      ],
     },
     capabilities: {
       roles: ["backend-dev", "fullstack-dev", "test-writer"],

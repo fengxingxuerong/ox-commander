@@ -5,7 +5,14 @@
   "entry": {
     "kind": "cli",
     "command": "codex",
-    "argsTemplate": ["exec", "--cd", "{{projectRoot}}", "--prompt-file", "{{promptPath}}"],
+    "argsTemplate": [
+      "exec",
+      "--cd",
+      "{{projectRoot}}",
+      "--skip-git-repo-check",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "严格按文件 {{promptPath}} 中的任务书执行（先读该文件）。"
+    ],
     "probeArgs": ["--version"]
   },
   "capabilities": {
