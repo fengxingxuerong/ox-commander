@@ -123,6 +123,14 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       model: this.config.defaultModel,
       messages: req.messages,
       temperature: req.temperature ?? 0.2,
+      /*
+       * 必须显式带上 max_tokens。不带时商汤等 OpenAI 兼容端点会用自己的默认输出
+       * 上限，decompose 的大 JSON 在中途被截断（finish_reason=length），本类
+       * 抛 MalformedResponseError 后 failover 换哪条线路都是同样截断 —— 2026-09-20
+       * 真实案例里 PRD 之后 PLANNING 全池失败，根因就是它。Anthropic 分支一直带
+       * 8192 没出过问题；这里取 16384（该端点 max_output_length=65536，留足余量）。
+       */
+      max_tokens: 16384,
     };
     if (req.jsonMode) body.response_format = { type: "json_object" };
     const data = await this.postJson(
