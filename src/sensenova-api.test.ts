@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AllRoutesCoolingError } from "../shared/http-clients";
-import { SensenovaApiAdapter, parseFiles } from "../electron/agents/sensenova-api";
+import { SensenovaApiAdapter, parseFilePayload, parseFiles } from "../electron/agents/sensenova-api";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/llm-client";
 
@@ -76,6 +76,28 @@ describe("parseFiles", () => {
 
   it("drops non-string-field entries and fails later when nothing writable", () => {
     expect(parseFiles('{"files":[{"path":1,"content":"x"}]}')).toEqual([]);
+  });
+
+  it("rejects a payload that is not a files object — each clause is load-bearing", () => {
+    // The guard is `typeof value !== "object" || value === null || !Array.isArray(files)`.
+    // Flipping any `||` to `&&` demands all three failures at once, which is
+    // impossible in practice — the protocol check then silently passes and the
+    // adapter writes whatever the model returned.
+    //
+    // `null` is the sharpest case: `typeof null === "object"`, so only the
+    // middle clause catches it. With `&&` it slips straight through.
+    expect(() => parseFilePayload(null)).toThrowError(/files/);
+    expect(() => parseFilePayload("a string")).toThrowError(/files/);
+    expect(() => parseFilePayload({})).toThrowError(/files/);
+    expect(() => parseFilePayload({ files: "not-an-array" })).toThrowError(/files/);
+  });
+
+  it("names the reason when the output has no usable JSON object", () => {
+    // `start < 0 || end <= start` — with `&&`, the `} {` case falls through to
+    // `JSON.parse("")` and surfaces as a SyntaxError from the JSON parser
+    // instead of the actionable "找不到 JSON 对象" message.
+    expect(() => parseFiles("完全没有 JSON")).toThrowError(/找不到 JSON 对象/);
+    expect(() => parseFiles("} {")).toThrowError(/找不到 JSON 对象/);
   });
 });
 
@@ -303,6 +325,32 @@ describe("SensenovaApiAdapter", () => {
     }
     expect(peak).toBe(2); // never more than 2 in flight despite 3 parallel tasks
     expect(logs.some((t) => t.includes("排队等待"))).toBe(true); // third task queued visibly
+  });
+
+  it("does not report queueing when a slot was free", async () => {
+    // `acquireSlot()` returns false when it took a slot immediately. Flipping
+    // that `return false` to `true` makes every run claim it had to queue —
+    // an operator reading the log then blames a concurrency limit that never
+    // actually bound. This is the negative half of the semaphore test above.
+    const adapter = new SensenovaApiAdapter(
+      fakeClient('{"files":[{"path":"src/ok.js","content":"// fine"}]}'),
+      { maxConcurrent: 4 },
+    );
+    const handle = await run(adapter, tmpRoot());
+    const logs: string[] = [];
+    for await (const ev of adapter.collect(handle)) {
+      if (ev.kind === "log") logs.push(ev.text);
+    }
+    expect(logs.some((t) => t.includes("排队等待"))).toBe(false);
+  });
+
+  it("aborts an unknown run id without crashing", async () => {
+    // Same shape as the CLI adapter: `!session || session.finished` degrades
+    // into a TypeError on `session` when written with `&&`.
+    const adapter = new SensenovaApiAdapter(fakeClient('{"files":[]}'));
+    await expect(
+      adapter.abort({ runId: "ghost-run", agentId: "sensenova-api", taskId: "" }),
+    ).resolves.toBeUndefined();
   });
 
   it("abort terminates an in-flight run", async () => {

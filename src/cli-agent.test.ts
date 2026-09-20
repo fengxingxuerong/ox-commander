@@ -129,6 +129,47 @@ describe("CliAgentAdapter", () => {
     expect(result?.status).toBe("aborted");
   });
 
+  it("aborts an unknown run id without crashing", async () => {
+    // The guard is `!run || run.session.finished`. With `&&` instead, a missing
+    // run falls through to `run.session.finished` and throws a TypeError —
+    // aborting something already reaped would take down the caller.
+    const adapter = cli(["-e", ""]);
+    await expect(
+      adapter.abort({ runId: "ghost-run", agentId: "cli-under-test", taskId: "" }),
+    ).resolves.toBeUndefined();
+  });
+
+  it("does not label an in-flight run as a timeout", async () => {
+    // `lastKind === "failed" && run.exitCode === null` — both halves matter.
+    // Flipping to `||` marks ANY run that has not exited yet (including one
+    // still streaming output) as a retryable timeout.
+    const adapter = cli(["-e", "setTimeout(() => {}, 5000)"]);
+    const handle = await adapter.dispatch(payload());
+    const result = await adapter.lastResult(handle);
+    expect(result?.status).toBe("failed");
+    expect(result?.errorClass).toBeUndefined();
+    await adapter.abort(handle);
+  });
+
+  it("caps the finished-result cache instead of growing forever", async () => {
+    // The eviction guard is `oldest !== undefined`. With `===` it never fires,
+    // because the key of a non-empty Map is never undefined — `results` then
+    // grows without bound for the lifetime of the adapter.
+    const adapter = cli(["-e", ""]);
+    const internals = adapter as unknown as {
+      results: Map<string, unknown>;
+      rememberResult(run: unknown, runId: string, kind: string): void;
+    };
+    for (let i = 0; i < 60; i++) {
+      internals.rememberResult(
+        { taskId: "t1", logs: [], startedAt: Date.now(), exitCode: 0 },
+        `r-${i}`,
+        "completed",
+      );
+    }
+    expect(internals.results.size).toBeLessThanOrEqual(50);
+  });
+
   it("drains immediately when nothing is running", async () => {
     expect(await cli(["-e", ""]).drain(100)).toBe("drained");
   });

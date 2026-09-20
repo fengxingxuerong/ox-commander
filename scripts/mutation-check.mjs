@@ -103,6 +103,17 @@ const TARGETS = [
     tier: 1,
   },
   { file: "electron/engine/orchestrator.ts", test: "src/orchestrator.test.ts", tier: 2 },
+  // 2026-09-21 接入 tier 2：agents 层 2259 行此前只有最小的 scoped-env.ts
+  // 在册，而 sensenova-api 是 DEFAULT_SETTINGS 里的默认适配器 —— 即新装用户
+  // 实际跑的那条路径（§9.4 的接线缺陷就出在这里）。先挂 tier 2 探成本。
+  { file: "electron/agents/manifest-schema.ts", test: "src/manifest.test.ts", tier: 2 },
+  { file: "electron/agents/registry.ts", test: "src/agent-registry.test.ts", tier: 2 },
+  {
+    file: "electron/agents/cli-agent.ts",
+    tests: ["src/cli-agent.test.ts", "src/cli-agent-env.test.ts"],
+    tier: 2,
+  },
+  { file: "electron/agents/sensenova-api.ts", test: "src/sensenova-api.test.ts", tier: 2 },
 ];
 
 /**
