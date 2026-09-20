@@ -168,7 +168,10 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
         (spec.llmPool.length > 0
           ? buildLlmPool({
               providers: spec.llmPool,
-              // 池的每次轮换/冷却决策都上日志：杜绝"路由挂死 26 分钟全程静默"的盲区
+              // 拥堵窗口下 120s 大脑默认超时会让每条路由在生成完成前就被掐断
+              // （与执行器同款教训：越长的思考越需要执行器级预算），提到 300s
+              timeoutMs: 300_000,
+              // 池的每次轮换/冷却决策都上日志：杜绝"路由挂死全程静默"的盲区
               onEvent: (text) => io.emit({ type: "log", text }),
             })
           : buildLlmClient(spec.llmProvider)),
