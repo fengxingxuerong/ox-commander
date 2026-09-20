@@ -7,7 +7,6 @@ import type {
 } from "../../shared/types";
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
 import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES } from "../../shared/prompts";
-import { ZoneGuard } from "./zone-guard";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
 import type { CircuitBreaker } from "../sandbox/circuit-breaker";
@@ -38,8 +37,9 @@ export interface SchedulerOptions {
   /** Three-state breaker: an agent that keeps failing is skipped, not retried. */
   breaker?: CircuitBreaker;
   /**
-   * Post-batch adjudicator (P4): stat-only change detection + rollback +
-   * arbitration. When present it replaces the ZoneGuard fail-everything path.
+   * Post-batch adjudicator: stat-only change detection + rollback +
+   * arbitration. When present, a write outside the declared zones is detected,
+   * rolled back (per `mode`) and attributed instead of going unnoticed.
    */
   guard?: BatchGuard;
   /**
@@ -70,8 +70,14 @@ export interface SchedulerOptions {
  * across the available agent pool concurrently, collects each run to its
  * terminal event, and returns structured outcomes. When several agents are
  * available, tasks are distributed round-robin so the batch genuinely runs as
- * multi-agent parallel work; a ZoneGuard (optional) fails any batch whose
- * files changed outside the declared zones.
+ * multi-agent parallel work.
+ *
+ * Unauthorized writes are handled once, after the batch settles, by `opts.guard`
+ * (see `SchedulerOptions.guard`). An earlier third constructor argument took a
+ * `ZoneGuard` and failed the whole batch on any out-of-zone change; it was
+ * removed because no production assembly ever passed one — `platform.ts` is the
+ * only wiring point and always passed `undefined`, so that branch could not run
+ * while its tests kept passing (dead path kept alive by coverage).
  *
  * With `opts.router` + `opts.registry` the round-robin assignment is replaced
  * by capability routing (agent capability declaration → task role/zone/tags).
@@ -91,7 +97,6 @@ export class Scheduler {
   constructor(
     private adapters: AgentAdapter[],
     private preferredAgents: string[] = [],
-    private zoneGuard?: ZoneGuard,
     private opts: SchedulerOptions = {},
   ) {}
 
@@ -278,7 +283,6 @@ export class Scheduler {
     const scope = guard
       ? await guard.begin(`batch-${Date.now().toString(36)}-${tasks.map((t) => t.id).join("_")}`, projectRoot, zones)
       : null;
-    const before = !guard && this.zoneGuard ? this.zoneGuard.snapshot(projectRoot) : null;
 
     const jobs = tasks.map(async (task, i) => {
       const agent = agentPool[i];
@@ -330,7 +334,6 @@ export class Scheduler {
         this.opts.onRunComplete?.(withMeta, task);
         return withMeta;
       } catch (err) {
-        this.opts.breaker?.record(agent.meta.id, false);
         const failed: DispatchOutcome = {
           taskId: task.id,
           ok: false,
@@ -340,6 +343,9 @@ export class Scheduler {
           durationMs: Date.now() - startedAt,
           errorClass: classifyFailure((err as Error).message) || "unknown",
         };
+        // Exactly one record per failed dispatch. `recordFailure` increments
+        // `consecutiveFailures`, so a second call here would open a
+        // threshold-3 circuit after 2 independent failures instead of 3.
         this.opts.breaker?.record(agent.meta.id, false);
         this.noteRateLimit(failed.errorClass);
         this.opts.onRunComplete?.(failed, task);
@@ -350,25 +356,13 @@ export class Scheduler {
     });
     const outcomes = await Promise.all(jobs);
 
-    // P4 path: journal + snapshot + arbitration (detect, roll back, arbitrate).
+    // Zone violations are detected, rolled back and adjudicated by the guard.
+    // Without one there is no post-batch check at all: the sandbox still
+    // fail-closes every individual write, but nothing can attribute an
+    // unauthorized write to the batch that caused it.
     if (scope && guard) {
       const verdict = await guard.settle(scope, outcomes);
       return verdict.outcomes;
-    }
-
-    if (before && this.zoneGuard) {
-      const diff = this.zoneGuard.diff(projectRoot, before);
-      const violations = this.zoneGuard.unownedChanges(diff, zones);
-      if (violations.length > 0) {
-        const notice =
-          `zone 越权：本批任务修改了声明 zone 之外的文件 → ${violations.join("、")}` +
-          `\n声明 zone：${zones.join("、")}。整批任务判定失败。`;
-        return outcomes.map((o) =>
-          o.ok
-            ? { ...o, ok: false, logDigest: `${o.logDigest}\n${notice}`.trim() }
-            : { ...o, logDigest: `${o.logDigest}\n${notice}`.trim() },
-        );
-      }
     }
     return outcomes;
   }

@@ -41,8 +41,9 @@ export interface AgentLayerOptions {
   breakerOptions?: CircuitBreakerOptions;
   /**
    * Where content backups live. When set, a BatchGuard is installed and zone
-   * violations can actually be rolled back; when omitted, the historic
-   * ZoneGuard path stays in charge.
+   * violations can actually be rolled back; when omitted, no guard is installed
+   * and an out-of-zone write is not attributed to the batch that caused it (the
+   * sandbox still fail-closes the individual write itself).
    */
   snapshotRoot?: string;
   /** Zone-violation policy; defaults to `revert-batch`. */
@@ -62,7 +63,7 @@ export interface AgentLayer {
   registry: AgentRegistry;
   /** Three-state breaker shared by the router (scoring) and the scheduler (admission). */
   breaker: CircuitBreaker;
-  /** Spread into `new Scheduler(adapters, preferred, zoneGuard, schedulerOptions)`. */
+  /** Spread into `new Scheduler(adapters, preferredAgents, schedulerOptions)`. */
   schedulerOptions: SchedulerOptions;
   /** `agents.d` files that failed validation (reported, never fatal). */
   manifestErrors: ManifestLoadError[];

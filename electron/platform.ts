@@ -5,7 +5,8 @@
  * built their own engine from their own copy of the wiring. That is how the two
  * drifted: the desktop entry had no `journal` (no checkpoint/resume), no verdict
  * sink (zone rollback invisible in the UI), no LLM timeout override, and passed
- * a dead `ZoneGuard` third argument that the BatchGuard always shadowed.
+ * a legacy `ZoneGuard` third argument that `BatchGuard` always shadowed (that
+ * argument has since been removed from `Scheduler`).
  *
  * Everything shared lives here; what genuinely differs per host is passed in as
  * callbacks (where logs go, where audit records go, what the escalation policy
@@ -95,7 +96,7 @@ export interface Platform {
    */
   buildLlm(seedKeys?: (envVars: Set<string>) => void): LlmClient;
   /** Scheduler options shared by both hosts (exposed for parity assertions). */
-  schedulerOptions(): ConstructorParameters<typeof Scheduler>[3];
+  schedulerOptions(): NonNullable<ConstructorParameters<typeof Scheduler>[2]>;
 }
 
 /**
@@ -128,7 +129,7 @@ export function createPlatform(config: PlatformConfig): Platform {
     layer.schedulerOptions.guard.setVerdictSink((verdict) => sink(verdict));
   }
 
-  const schedulerOptions = (): ConstructorParameters<typeof Scheduler>[3] => ({
+  const schedulerOptions = (): NonNullable<ConstructorParameters<typeof Scheduler>[2]> => ({
     ...layer.schedulerOptions,
     maxParallelRuns: config.maxParallelRuns ?? settings.maxParallelRuns,
     ...(host.onRunStart ? { onRunStart: host.onRunStart } : {}),
@@ -165,7 +166,7 @@ export function createPlatform(config: PlatformConfig): Platform {
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
-      scheduler: new Scheduler(layer.adapters, settings.enabledAgents, undefined, schedulerOptions()),
+      scheduler: new Scheduler(layer.adapters, settings.enabledAgents, schedulerOptions()),
       verify:
         config.verify ??
         ((cwd: string) => verifyProject(settings.verificationCommands, { cwd: () => cwd, onEvent: log })),

@@ -44,7 +44,8 @@ function options(platform: ReturnType<typeof createPlatform>): ConcreteScheduler
  * These tests guard the reason `platform.ts` exists: the desktop and headless
  * entries used to assemble their engines separately, and drifted four ways
  * (missing journal, missing verdict sink, different LLM timeout, dead ZoneGuard
- * argument). Anything asserted here is a structural guarantee both hosts share.
+ * argument — the latter has since been deleted from `Scheduler` entirely).
+ * Anything asserted here is a structural guarantee both hosts share.
  */
 describe("createPlatform · shared structure", () => {
   it("installs a guard when a snapshot root is given (zone rollback wired)", () => {
@@ -57,7 +58,7 @@ describe("createPlatform · shared structure", () => {
     expect(options(platform).guard).toBeDefined();
   });
 
-  it("omits the guard when no snapshot root is given (historic ZoneGuard path)", () => {
+  it("omits the guard when no snapshot root is given (no rollback, no detection)", () => {
     const platform = createPlatform({
       settings: settings(),
       promptDir: tempDir(),
@@ -208,9 +209,9 @@ describe("createPlatform · desktop/headless parity", () => {
   });
 
   it("installs the guard on both hosts when a snapshot root is present", () => {
-    // The desktop entry previously passed a dead ZoneGuard third argument while
-    // headless passed undefined — same behaviour, different expression. Now both
-    // express it identically: guard present, ZoneGuard absent.
+    // The desktop entry previously passed a legacy ZoneGuard third argument while
+    // headless passed undefined — same behaviour, different expression. That
+    // argument is gone; both hosts now express the same thing: guard present.
     expect(options(buildAsDesktop()).guard).toBeDefined();
     expect(options(buildAsHeadless()).guard).toBeDefined();
   });

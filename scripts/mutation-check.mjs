@@ -39,7 +39,7 @@
  *
  * ## 已知局限（不要误以为它覆盖全仓）
  *
- *   1. **只跑 TARGETS 里列的 6 个模块**，不是全仓。全仓会把 verify 从 ~33s
+ *   1. **只跑 TARGETS 里列的 7 个模块**，不是全仓。全仓会把 verify 从 ~33s
  *      拉到小时级 —— 跑不动的门禁等于没有门禁。选择标准：安全关键 + 逻辑密集。
  *      要扩就按这个标准加，别一次全铺开。
  *   2. **算子只覆盖布尔/比较/跳转**，抓不到「数值边界写错」（如 `>` 写成 `>=`）、
@@ -58,6 +58,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * 变异目标 —— 安全与正确性关键、逻辑密集的模块。
  *
  * 不做全仓：成本随变异数线性增长。挑判定逻辑最密集、改坏后果最严重的。
+ *
+ * `electron/engine/scheduler.ts` 于 2026-09-20 接入：此前它不在目标里，于是
+ * 「类内缺陷」穿过三层门禁（`check:unwired` 只查导出符号、变异不覆盖引擎层，
+ * 而测试恰好没有断言触碰真实路径）。接入当天实测存活 1 个 —— `&& → ||`，
+ * 定位到 `admitBreaker` 的兜底查找：改成 `||` 后，**整池熔断时任务会被重新派给
+ * 一个已熔断的 agent**，熔断静默失效，21 条用例全绿。补一条断言后 4/4 全杀。
  */
 const TARGETS = [
   { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts" },
@@ -66,6 +72,7 @@ const TARGETS = [
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts" },
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts" },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts" },
+  { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts" },
 ];
 
 /**

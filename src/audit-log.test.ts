@@ -149,7 +149,7 @@ describe("Scheduler concurrency cap", () => {
     const state = { peak: 0, inflight: 0, releases: [] as Array<() => void> };
     const adapter = gateAdapter("a1", state);
     const registry = new AgentRegistry([{ adapter }]);
-    const sched = new Scheduler([adapter], [], undefined, {
+    const sched = new Scheduler([adapter], [], {
       registry,
       maxParallelRuns: 2,
     });
@@ -179,7 +179,7 @@ describe("Scheduler concurrency cap", () => {
     const state = { peak: 0, inflight: 0, releases: [] as Array<() => void> };
     const adapter = gateAdapter("a1", state);
     const registry = new AgentRegistry([{ adapter }]);
-    const sched = new Scheduler([adapter], [], undefined, { registry, maxParallelRuns: 0 });
+    const sched = new Scheduler([adapter], [], { registry, maxParallelRuns: 0 });
     const pending = sched.runBatch([task("t1", "z1"), task("t2", "z2"), task("t3", "z3")], ".");
     await new Promise((r) => setTimeout(r, 30));
     expect(state.peak).toBe(3);
@@ -218,7 +218,6 @@ describe("Scheduler run attribution", () => {
     const sched = new Scheduler(
       [adapter("worker-1", false, "zone 越权：本批任务修改了声明 zone 之外的文件")],
       [],
-      undefined,
       {
         onRunStart: (agentId, t) => events.push(`start:${agentId}:${t.id}`),
         onRunComplete: (o, t) => events.push(`end:${t.id}:${o.ok}:${o.agentId}:${o.errorClass}`),
@@ -234,7 +233,7 @@ describe("Scheduler run attribution", () => {
 
   it("still reports a terminal outcome when no agent is available", async () => {
     const events: string[] = [];
-    const sched = new Scheduler([], [], undefined, {
+    const sched = new Scheduler([], [], {
       onRunComplete: (o) => events.push(`${o.taskId}:${o.ok}:${o.errorClass}`),
     });
     await sched.runBatch([task("t1", "src")], ".");
@@ -244,7 +243,7 @@ describe("Scheduler run attribution", () => {
   it("feeds an audit log with a complete run-start / run-end pair", async () => {
     const dir = scratch("audit-integration");
     const audit = new AuditLog({ dir });
-    const sched = new Scheduler([adapter("worker-1", true)], [], undefined, {
+    const sched = new Scheduler([adapter("worker-1", true)], [], {
       onRunStart: (agentId, t) => audit.append({ phase: "run-start", agentId, taskId: t.id, zone: t.zone }),
       onRunComplete: (o, t) =>
         audit.append({

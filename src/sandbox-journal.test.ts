@@ -306,7 +306,7 @@ describe("Scheduler + guard integration", () => {
       write(payload.projectRoot, "src/a.js", "changed-by-agent");
     });
     const registry = new AgentRegistry([{ adapter }]);
-    const sched = new Scheduler([adapter], [], undefined, {
+    const sched = new Scheduler([adapter], [], {
       registry,
       router: createCapabilityRouter(),
       guard: new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode: "revert-batch" }),
@@ -321,18 +321,20 @@ describe("Scheduler + guard integration", () => {
     expect(fs.existsSync(path.join(root, "outside/x.js"))).toBe(false);
   });
 
-  it("still uses the legacy ZoneGuard path when no guard is configured", async () => {
-    const root = scratch("sched-legacy");
+  it("records no batch-level violation when no guard is configured", async () => {
+    const root = scratch("sched-no-guard");
     write(root, "src/a.js", "a");
     const adapter = declared("rogue", (payload) => write(payload.projectRoot, "outside/x.js", "rogue"));
-    const sched = new Scheduler([adapter], [], new ZoneGuard());
+    // No guard ⇒ no post-batch detection. The sandbox still fail-closes each
+    // individual write it brokers, but nothing attributes an out-of-zone write
+    // to this batch. Pinned so the boundary stays explicit rather than drifting.
+    const sched = new Scheduler([adapter], []);
     const outcomes = await sched.runBatch(
       [{ id: "t1", title: "t1", description: "", zone: "src", dependencies: [], suggestedRole: "backend-dev" }],
       root,
     );
-    expect(outcomes[0]!.ok).toBe(false);
-    expect(outcomes[0]!.logDigest).toContain("zone 越权");
-    // Legacy path does not roll back — the file stays.
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.logDigest).not.toContain("zone 越权");
     expect(fs.existsSync(path.join(root, "outside/x.js"))).toBe(true);
   });
 });

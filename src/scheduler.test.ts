@@ -126,47 +126,21 @@ describe("Scheduler.runBatch", () => {
     expect(handles.map((h) => h.agentId)).toEqual(["a1", "a2", "a1"]);
   });
 
-  it("fails the whole batch when files change outside declared zones", async () => {
-    const fs = await import("node:fs");
-    const os = await import("node:os");
-    const path = await import("node:path");
-    const { ZoneGuard } = await import("../electron/engine/zone-guard");
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sched-"));
-    try {
-      fs.mkdirSync(path.join(root, "src/core"), { recursive: true });
-      fs.writeFileSync(path.join(root, "src/core/a.js"), "a", "utf8");
-      // The adapter writes one legit file and one rogue file outside its zone.
-      const rogue = {
-        meta: { id: "a1", name: "a1", kind: "api" as const },
-        async probe() {
-          return true;
-        },
-        async dispatch(payload: { runId: string; taskId: string }) {
-          fs.mkdirSync(path.join(root, "rogue"), { recursive: true });
-          fs.writeFileSync(path.join(root, "rogue/x.js"), "x", "utf8");
-          return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
-        },
-        async *collect() {
-          yield { kind: "completed" as const, text: "done", timestamp: Date.now() };
-        },
-        async abort() {},
-      } as unknown as AgentAdapter;
-      const sched = new Scheduler([rogue], [], new ZoneGuard());
-      const outcomes = await sched.runBatch([task("t1", "src/core")], root);
-      expect(outcomes[0].ok).toBe(false);
-      expect(outcomes[0].logDigest).toContain("zone 越权");
-      expect(outcomes[0].logDigest).toContain("rogue/x.js");
-    } finally {
-      fs.rmSync(root, { recursive: true, force: true });
-    }
-  });
+  // The legacy third constructor argument (`ZoneGuard`) was removed: `platform.ts`
+  // is the only production wiring point and always passed `undefined`, so the
+  // out-of-zone branch it drove could never run — while its tests kept passing.
+  // The rogue-write case now lives on the real guard path, end-to-end, in
+  // `sandbox-journal.test.ts` ("rolls a rogue write back and fails only the
+  // batch that caused it").
 
-  it("passes the batch when changes stay inside declared zones", async () => {
+  it("passes the batch when changes stay inside declared zones (real guard path)", async () => {
     const fs = await import("node:fs");
     const os = await import("node:os");
     const path = await import("node:path");
-    const { ZoneGuard } = await import("../electron/engine/zone-guard");
+    const { BatchGuard } = await import("../electron/engine/batch-guard");
+    const { SnapshotStore } = await import("../electron/sandbox/snapshot-store");
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sched-"));
+    const backupRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sched-bak-"));
     try {
       const wellBehaved = {
         meta: { id: "a1", name: "a1", kind: "api" as const },
@@ -183,12 +157,62 @@ describe("Scheduler.runBatch", () => {
         },
         async abort() {},
       } as unknown as AgentAdapter;
-      const sched = new Scheduler([wellBehaved], [], new ZoneGuard());
+      const sched = new Scheduler([wellBehaved], [], {
+        guard: new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode: "revert-batch" }),
+      });
       const outcomes = await sched.runBatch([task("t1", "src/core")], root);
       expect(outcomes[0].ok).toBe(true);
+      // Legitimate work must survive the guard: no rollback, no report.
+      expect(fs.readFileSync(path.join(root, "src/core/b.js"), "utf8")).toBe("b");
     } finally {
       fs.rmSync(root, { recursive: true, force: true });
+      fs.rmSync(backupRoot, { recursive: true, force: true });
     }
+  });
+
+  it("records exactly one circuit-breaker failure per failed dispatch", async () => {
+    const { CircuitBreaker } = await import("../electron/sandbox/circuit-breaker");
+    const breaker = new CircuitBreaker({ failureThreshold: 3 });
+    const exploding = {
+      meta: { id: "a1", name: "a1", kind: "api" as const },
+      async probe() {
+        return true;
+      },
+      async dispatch() {
+        throw new Error("boom");
+      },
+      async *collect() {},
+      async abort() {},
+    } as unknown as AgentAdapter;
+    const sched = new Scheduler([exploding], [], { breaker });
+    await sched.runBatch([task("t1", "z")], ".");
+    // `recordFailure` bumps `consecutiveFailures`, so a second record on the same
+    // dispatch opened a threshold-3 circuit after 2 independent failures.
+    expect(breaker.stats("a1").failures).toBe(1);
+    expect(breaker.stats("a1").consecutiveFailures).toBe(1);
+    await sched.runBatch([task("t2", "z")], ".");
+    expect(breaker.stats("a1").state).toBe("closed");
+  });
+
+  it("does not fall back to an agent whose circuit is open", async () => {
+    const { CircuitBreaker } = await import("../electron/sandbox/circuit-breaker");
+    const breaker = new CircuitBreaker({ failureThreshold: 1 });
+    // Threshold 1: one recorded failure opens each circuit.
+    breaker.record("a1", false);
+    breaker.record("a2", false);
+    const dispatched: string[] = [];
+    const sched = new Scheduler(
+      [adapterWith("a1", true, { dispatched }), adapterWith("a2", true, { dispatched })],
+      [],
+      { breaker },
+    );
+    const outcomes = await sched.runBatch([task("t1", "z")], ".");
+    // The fallback must skip an open circuit too. `||` instead of `&&` in
+    // `admitBreaker` would hand the task to a tripped agent and quietly defeat
+    // the breaker — found by mutation testing.
+    expect(outcomes[0].ok).toBe(false);
+    expect(outcomes[0].logDigest).toBe("no agent available");
+    expect(dispatched).toEqual([]);
   });
 });
 
@@ -217,7 +241,7 @@ describe("Scheduler capability routing (P1)", () => {
     const generalist = declared("generalist", true, {}, dispatched);
     const tests = declared("tests-specialist", true, { roles: ["test-writer"], zoneGlobs: ["tests/**"] }, dispatched);
     const registry = new AgentRegistry([{ adapter: generalist }, { adapter: tests }]);
-    const sched = new Scheduler([generalist, tests], [], undefined, {
+    const sched = new Scheduler([generalist, tests], [], {
       registry,
       router: createCapabilityRouter(),
     });
@@ -231,7 +255,7 @@ describe("Scheduler capability routing (P1)", () => {
     const layer = createAgentLayer({
       adapters: [adapterWith("a1", true, { dispatched }), adapterWith("a2", true, { dispatched })],
     });
-    const sched = new Scheduler(layer.adapters, [], undefined, layer.schedulerOptions);
+    const sched = new Scheduler(layer.adapters, [], layer.schedulerOptions);
     const outcomes = await sched.runBatch(
       [roleTask("t1", "src/a", "backend-dev"), roleTask("t2", "src/b", "backend-dev"), roleTask("t3", "src/c", "backend-dev")],
       ".",
@@ -247,7 +271,7 @@ describe("Scheduler capability routing (P1)", () => {
       adapters: [declared("only", true, { roles: ["docs-writer"], zoneGlobs: ["docs/**"] }, dispatched)],
       onRouting: (decision, task) => seen.push(`${task.id}->${decision.agentId}`),
     });
-    const sched = new Scheduler(layer.adapters, [], undefined, layer.schedulerOptions);
+    const sched = new Scheduler(layer.adapters, [], layer.schedulerOptions);
     await sched.runBatch([roleTask("t1", "docs/api", "docs-writer")], ".");
     expect(seen).toEqual(["t1->only"]);
   });
@@ -262,7 +286,7 @@ describe("Scheduler capability routing (P1)", () => {
       enableRouter: false,
     });
     expect(layer.schedulerOptions.router).toBeUndefined();
-    const sched = new Scheduler(layer.adapters, [], undefined, layer.schedulerOptions);
+    const sched = new Scheduler(layer.adapters, [], layer.schedulerOptions);
     await sched.runBatch([roleTask("t1", "tests/unit", "test-writer")], ".");
     expect(dispatched[0]).toBe("tests-specialist");
   });
@@ -270,7 +294,7 @@ describe("Scheduler capability routing (P1)", () => {
   it("sees an agent registered after the Scheduler was built", async () => {
     const dispatched: string[] = [];
     const layer = createAgentLayer({ adapters: [adapterWith("generalist", true, { dispatched })] });
-    const sched = new Scheduler(layer.adapters, [], undefined, layer.schedulerOptions);
+    const sched = new Scheduler(layer.adapters, [], layer.schedulerOptions);
 
     // Register a specialist into the live registry, then route again.
     class TraeAdapter {
@@ -343,7 +367,7 @@ describe("Scheduler · 429 感知派发节流", () => {
     const state = { failNext: true };
     const dispatched: string[] = [];
     const throttled: number[] = [];
-    const sched = new Scheduler([rateLimitAdapter(state, dispatched)], [], undefined, {
+    const sched = new Scheduler([rateLimitAdapter(state, dispatched)], [], {
       maxParallelRuns: 1,
       rateLimitBackoffMs: 150,
       onThrottle: (ms) => throttled.push(ms),
@@ -365,7 +389,7 @@ describe("Scheduler · 429 感知派发节流", () => {
   it("连续限流指数退避（第二次等待翻倍）", async () => {
     const state = { failNext: true };
     const throttled: number[] = [];
-    const sched = new Scheduler([rateLimitAdapter(state, [])], [], undefined, {
+    const sched = new Scheduler([rateLimitAdapter(state, [])], [], {
       maxParallelRuns: 1,
       rateLimitBackoffMs: 100,
       onThrottle: (ms) => throttled.push(ms),
