@@ -196,15 +196,42 @@ node scripts/run-multiagent-e2e.mjs  # 真实多智能体链路（真实 LLM + H
 
 **教训（已写进本文件）**：清理临时文件**绝不能**对工作区使用 `git checkout -- .`；要按具体路径、且先 `git status --short` 确认。所有改动逐文件重建后，`npm run verify` 恢复全绿。
 
-### 剩余未做项
+### 阶段 B 收尾（B3–B6）
 
 | 项 | 状态 |
 | --- | --- |
-| B3 取消/暂停终态事件 + `runId` 屏障 | 未做 |
-| B4 输出字节上限（verifier log 截断、HTTP 响应体校验） | 未做 |
-| B5 IPC 错误统一包装 | 未做 |
+| B3 取消/暂停终态事件 | **已完成**（commit `d0f8717`） |
+| B4 输出字节上限（HTTP 响应体校验） | **已完成**（commit `1db27a1`） |
+| B5 IPC 错误统一包装 | **已完成**（commit `d6b50c7`） |
 | B6 退出码契约对齐 | **已核实无需改动** —— `docs/headless-protocol.md:13,65-75` 的退出码表与 `run-spec.ts:187,191-196` 实现一致 |
 | C3 path-policy 大小写归一 | **已实测定性**：`SRC/a.js` 在 zone「src」下被**拒绝**（fail-closed，误拒而非放行），属 P2 误伤风险，非安全洞 |
+
+#### B3 —— 取消终态（`d0f8717`）
+
+`execute()` 包一层 catch：捕获 `CancelledError` 时，对 `inFlight` 中每个任务补发
+`taskStatus("cancelled", 上次 attempt)` 再原样抛出。新增 `TaskStatus = "cancelled"`
+（与 `failed` 区分：取消是操作员动作）+ `.status-cancelled` 灰色无脉冲样式。
+
+**变异验证**：把补终态分支改成死代码后，第 1 例真红；恢复后 25 例全绿。
+
+#### B4 —— 失败响应体上限（`1db27a1`）
+
+`HttpLlmError` 只展示 300 字符，但 `await res.text()` 先把整个 body 读进内存。
+新增 `readCappedErrorBody()`：超 64 KiB 只留头部并标注截断长度。
+**变异验证**：导出 `ERROR_BODY_BYTE_CAP` 钉住"恰好等于 cap 时不得截断"的边界。
+
+#### B5 —— 设置读写错误处理（`d6b50c7`）
+
+`loadSettings`/`saveSettings` 原是 store 里仅剩的无 catch IPC 调用。
+改为：捕获 + 日志；`saveSettings` **只在写成功后**提交本地状态并记录
+`settingsError`。`SettingsPage` 有错误时不再跳回项目页，并显示 `role="alert"` 错误条。
+
+**变异验证**：把 `settingsError` 赋值改成常量、成功后置 `undefined` 改成乱值后，
+后两例真红；恢复后 25 例全绿。
+
+---
+
+### 一次必须记录的操作失误
 
 **C3 实测命令与结果**（可复现）：
 ```bash
