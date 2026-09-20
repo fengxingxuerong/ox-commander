@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { AllRoutesCoolingError } from "../shared/http-clients";
 import {
+  CancelledError,
   OrchestratorEngine,
   type OrchestratorDeps,
   type RunSnapshot,
@@ -784,5 +785,73 @@ describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => 
     // resume 恢复 allDone=["A"] → 批次 1 的 A 被跳过；maxRounds=1 → 一轮后预算耗尽
     expect(dispatched).toEqual(["B"]);
     expect(events.some((l) => l.includes("独立样本冒烟"))).toBe(false);
+  });
+});
+
+/**
+ * Cancel is an operator action, not an agent failure. A task interrupted
+ * mid-batch would otherwise keep the `running` status forever, so the board
+ * shows a spinner that never resolves and the operator cannot tell whether the
+ * stop actually took effect.
+ */
+describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
+  it("emits cancelled for tasks left running, and propagates the cancel", async () => {
+    const statuses: string[] = [];
+    let eng!: OrchestratorEngine;
+    const scheduler = {
+      async runBatch() {
+        // Cancel while the batch is in flight, then fail the way a real
+        // scheduler does once the underlying dispatch is aborted.
+        eng.cancel();
+        throw new CancelledError();
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: (id, st) => statuses.push(`${id}:${st}`),
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    await expect(eng.execute([TASKS], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(statuses).toContain("t1:running");
+    expect(statuses.at(-1)).toBe("t1:cancelled");
+  });
+
+  it("does not mark a task cancelled once it already reached a terminal state", async () => {
+    const statuses: string[] = [];
+    let eng!: OrchestratorEngine;
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "log", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      // The cancel lands after the batch succeeded — the task is already `done`
+      // and must stay that way.
+      verify: async () => {
+        eng.cancel();
+        throw new CancelledError();
+      },
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: (id, st) => statuses.push(`${id}:${st}`),
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    await expect(eng.execute([TASKS], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(statuses).toContain("t1:done");
+    expect(statuses).not.toContain("t1:cancelled");
   });
 });

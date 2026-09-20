@@ -22,7 +22,10 @@ export type TaskStatus =
   | "verifying"
   | "repairing"
   | "done"
-  | "failed";
+  | "failed"
+  /** Terminal, user-initiated stop: distinct from `failed` so the board does
+   * not report an operator's cancel as an agent failure. */
+  | "cancelled";
 
 export interface PrdDocument {
   goal: string;

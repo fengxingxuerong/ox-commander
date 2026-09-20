@@ -84,6 +84,11 @@ export class CancelledError extends Error {
   }
 }
 
+/** True when a rejected promise is the orchestrator's own cancel signal. */
+export function isCancelled(err: unknown): boolean {
+  return err instanceof CancelledError || (err as { name?: string } | null)?.name === "CancelledError";
+}
+
 /**
  * Repair rounds ran out while verification still failed.
  *
@@ -105,6 +110,10 @@ export class VerificationExhaustedError extends Error {
 export class OrchestratorEngine {
   private cancelled = false;
   private paused = false;
+  /** Tasks currently dispatched (status `running`); drives the cancel sweep. */
+  private readonly inFlight = new Set<string>();
+  /** Last attempt number emitted per task, reused by the cancel sweep. */
+  private readonly attemptsSeen = new Map<string, number>();
 
   constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {}
 
@@ -176,6 +185,29 @@ export class OrchestratorEngine {
     projectRoot: string,
     opts?: { resume?: ResumeState; smoke?: SmokeCheck[] },
   ): Promise<VerificationReport> {
+    try {
+      return await this.runPipeline(batches, projectRoot, opts);
+    } catch (err) {
+      // A cancel aborts mid-batch: tasks already switched to `running` never
+      // receive a terminal status, so the board would show them spinning
+      // forever. Emit an explicit terminal state for everything in flight.
+      if (isCancelled(err)) {
+        for (const task of batches.flat()) {
+          if (this.inFlight.has(task.id)) {
+            this.inFlight.delete(task.id);
+            this.cb.onTaskStatus(task.id, "cancelled", this.attemptsSeen.get(task.id) ?? 1);
+          }
+        }
+      }
+      throw err;
+    }
+  }
+
+  private async runPipeline(
+    batches: Task[][],
+    projectRoot: string,
+    opts?: { resume?: ResumeState; smoke?: SmokeCheck[] },
+  ): Promise<VerificationReport> {
     const maxRounds = this.deps.settings.maxRepairRounds;
     const resume = opts?.resume;
     const smoke = opts?.smoke ?? resume?.smoke ?? [];
@@ -237,6 +269,8 @@ export class OrchestratorEngine {
         if (pending.length === 0) continue;
         for (const t of pending) {
           attempts.set(t.id, (attempts.get(t.id) ?? 0) + 1);
+          this.attemptsSeen.set(t.id, attempts.get(t.id)!);
+          this.inFlight.add(t.id);
           this.cb.onTaskStatus(t.id, "running", attempts.get(t.id)!);
         }
         // Route verification errors to the zone that owns the failing files:
@@ -269,6 +303,7 @@ export class OrchestratorEngine {
           else lastFailedLogs.delete(o.taskId);
         }
         for (const o of batchOutcomes) {
+          this.inFlight.delete(o.taskId);
           if (o.ok) {
             allDone.add(o.taskId);
             this.cb.onTaskStatus(o.taskId, "done", attempts.get(o.taskId)!);
