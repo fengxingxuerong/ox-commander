@@ -212,6 +212,26 @@ const MUTANT_TIMEOUT_MS = Number(
   args.find((a) => a.startsWith("--mutant-timeout="))?.slice("--mutant-timeout=".length) ?? "20000",
 );
 
+/**
+ * vitest 自己的 per-test 超时（`--test-timeout=`）。这是**第二层**时限：
+ * `execFileSync` 的 timeout 管整个进程，这一层管单个用例。
+ *
+ * 挂住时**先撞这一层**：单文件里几个用例各挂满它，串行累加就是几十秒。
+ * 实测 `sensenova-api.ts` 的 `=== → !==` 变异 —— 5 个 adapter 用例各
+ * `Test timed out in 5000ms`，一轮 60s，而正常一轮只要 1.2s。
+ *
+ * - 变异体：调小到 2s（正常用例在该文件里是 1-6ms 级，10 倍以上余量）
+ * - 基线：保持宽裕（15s）—— 它的任务是证明"这套测试本来是好的"
+ *
+ * **只在这里传参，不改 `npm test` 的默认值**：开发者本地跑测试的体验不该被动。
+ */
+const MUTANT_VITEST_TEST_TIMEOUT_MS = Number(
+  args.find((a) => a.startsWith("--mutant-test-timeout="))?.slice("--mutant-test-timeout=".length) ?? "1200",
+);
+const BASELINE_VITEST_TEST_TIMEOUT_MS = Number(
+  args.find((a) => a.startsWith("--baseline-test-timeout="))?.slice("--baseline-test-timeout=".length) ?? "15000",
+);
+
 const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) =>
   onlyFile ? t.file.includes(onlyFile) : true,
 );
@@ -251,8 +271,8 @@ process.on("SIGTERM", () => {
  * 跑一个目标对应的全部测试。任一失败即视为「杀死」。
  * 多文件的目标：只挂一个文件会让另一半逻辑没有门禁。
  */
-function testsPassAll(target, timeoutMs) {
-  return testFilesOf(target).every((f) => testsPass(f, timeoutMs));
+function testsPassAll(target, execTimeoutMs, vitestTestTimeoutMs) {
+  return testFilesOf(target).every((f) => testsPass(f, execTimeoutMs, vitestTestTimeoutMs));
 }
 
 /**
@@ -261,11 +281,34 @@ function testsPassAll(target, timeoutMs) {
  * 超时算「不通过」：一个挂住的变异体**没有**让测试照样绿，它就是被发现了。
  * 见 `MUTANT_TIMEOUT_MS` 的注释 —— 这正是省下 80% 时间的地方。
  */
-function testsPass(testFile, timeoutMs = MUTANT_TIMEOUT_MS) {
+function testsPass(
+  testFile,
+  timeoutMs = MUTANT_TIMEOUT_MS,
+  vitestTestTimeoutMs = MUTANT_VITEST_TEST_TIMEOUT_MS,
+) {
   try {
     execFileSync(
       process.execPath,
-      ["./node_modules/vitest/vitest.mjs", "run", testFile, "--reporter=dot", "--coverage.enabled=false"],
+      [
+        "./node_modules/vitest/vitest.mjs",
+        "run",
+        testFile,
+        "--reporter=dot",
+        "--coverage.enabled=false",
+        // 挂住的用例会在**这一层**先耗时间：vitest 默认 testTimeout 5000ms，
+        // 单个文件里几个用例各挂满它就会串行累加出几十秒。
+        //
+        // 实测（sensenova-api.ts，`=== → !==` 变异）：5 个 adapter 用例各
+        // `Test timed out in 5000ms` → 一轮 60s，而该模块的正常一轮只要 1.2s。
+        //
+        // 门禁里调到 2s：正常用例在此文件里是 1-6ms 级（10 倍以上余量），
+        // 而挂住的用例更快暴露。**只在这里调，不改 `npm test` 的默认值** ——
+        // 开发者本地跑测试的体验不该被动。
+        // ⚠️ 参数名是 camelCase `--testTimeout`。写成 kebab-case `--test-timeout`
+        // 会被 vitest **静默忽略**（不报错、不警告），于是这一层优化看着接上了
+        // 却毫无效果 —— 修完必须用"挂住的变异"实测超时信息真的变成 2000ms。
+        `--testTimeout=${vitestTestTimeoutMs}`,
+      ],
       { cwd: ROOT, stdio: "pipe", timeout: timeoutMs, env: { ...process.env, CI: "1" } },
     );
     return true;
@@ -295,7 +338,7 @@ for (const target of targets) {
 
   // 基线：原文件必须通过，否则后面结论不可信。这里用长超时 —— 要的是
   // 「这套测试本来是好的」这个事实，不是「它有多快」。
-  if (!testsPassAll(target, BASELINE_TIMEOUT_MS)) {
+  if (!testsPassAll(target, BASELINE_TIMEOUT_MS, BASELINE_VITEST_TEST_TIMEOUT_MS)) {
     console.error(`基线失败：${testFilesOf(target).join(", ")} 在原始代码上不通过，跳过 ${target.file}`);
     results.push({ target, baselineFailed: true, ran: [], ms: Date.now() - startedAt });
     continue;
