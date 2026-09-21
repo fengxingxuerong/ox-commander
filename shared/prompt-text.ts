@@ -27,24 +27,14 @@ const INLINE_SAFE_LIMIT = 120;
  * only cosmetic here.
  *
  * A value that is too long or contains a newline is *annotated* rather than
- * mangled: the caller is expected to use `fencedBlock` for those.
+ * mangled: callers that need the full text wrap it in `fencedBlock` instead.
  */
 export function inlineField(value: string): string {
   const flat = value.replace(/\r\n?/g, "\n").replace(/\t/g, " ");
   const single = flat.replace(/\n+/g, " ⏎ ").trim();
   if (single === "") return "(空)";
-  if (single.length > INLINE_SAFE_LIMIT) return `${single.slice(0, INLINE_SAFE_LIMIT)}…（已截断，完整内容见下方区块）`;
+  if (single.length > INLINE_SAFE_LIMIT) return `${single.slice(0, INLINE_SAFE_LIMIT)}…（已截断）`;
   return single;
-}
-
-/**
- * True when a value must be rendered as its own block rather than inline.
- *
- * Callers use this to decide between `inlineField` and `fencedBlock`; keeping
- * the rule in one place means the two stay consistent.
- */
-export function needsBlock(value: string): boolean {
-  return /[\r\n]/.test(value) || value.replace(/\t/g, " ").length > INLINE_SAFE_LIMIT;
 }
 
 /**
@@ -65,11 +55,13 @@ export function fencedBlock(text: string, lang = ""): string {
   return `${ticks}${lang}\n${text}\n${ticks}`;
 }
 
-/**
- * Renders a field inline when it is safe to do so, otherwise as a fenced block
- * on its own lines. Always returns something that ends without trailing space.
- */
-export function safeField(label: string, value: string): string {
-  if (!needsBlock(value)) return `${label}${inlineField(value)}`;
-  return `${label}\n\n${fencedBlock(value)}`;
-}
+// `needsBlock` / `safeField` used to live here as a closed pair: `safeField`
+// chose between `inlineField` and `fencedBlock`, and `needsBlock` held the rule.
+// Neither had a production caller — both adapters call `inlineField` directly,
+// which already neutralises the structural risk on its own (newlines become
+// " ⏎ "), so the inline-vs-block decision had nothing to decide. Their unit
+// tests were pinning a code path no run could reach.
+//
+// This is the chained-dead-code shape `check-unwired` cannot see (it exempts
+// same-file callers): `needsBlock` looked wired because `safeField` called it,
+// while `safeField` itself was already dead. Found by reading, not by the gate.

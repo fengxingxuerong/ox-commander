@@ -5,7 +5,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { CliAgentAdapter } from "../electron/agents/cli-agent";
 import { SensenovaApiAdapter } from "../electron/agents/sensenova-api";
 import type { ChatRequest, ChatResponse, LlmClient } from "../shared/llm-client";
-import { fencedBlock, inlineField, needsBlock, safeField } from "../shared/prompt-text";
+import { fencedBlock, inlineField } from "../shared/prompt-text";
 import { parseDecompose } from "../shared/schema";
 import type { TaskPayload } from "../shared/types";
 
@@ -128,19 +128,6 @@ describe("prompt-text · inlineField", () => {
   it("normalises CRLF, not just LF", () => {
     expect(inlineField("a\r\nb")).not.toContain("\r");
     expect(inlineField("a\rb")).not.toContain("\r");
-  });
-});
-
-describe("prompt-text · needsBlock and safeField", () => {
-  it("routes multi-line values to a block", () => {
-    expect(needsBlock("a\nb")).toBe(true);
-    expect(needsBlock("short")).toBe(false);
-    expect(safeField("Zone: ", "a\nb")).toContain("```");
-  });
-
-  it("keeps single-line values inline", () => {
-    expect(needsBlock("src/core")).toBe(false);
-    expect(safeField("Zone: ", "src/core")).toBe("Zone: src/core");
   });
 });
 

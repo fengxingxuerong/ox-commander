@@ -34,20 +34,12 @@ const SKIP_DIR = /(^|[\\/])(node_modules|dist|dist-electron|dist-headless|covera
  */
 const ACCEPTED = new Map([
   // ---- 「为可测试而导出」：注释已声明，设计意图就是给测试用 ----
-  ["shared/redact.ts::containsLikelySecret", "断言辅助（注释：assert helper），非生产路径"],
-  ["shared/http-clients.ts::parseRetryAfterHeaderMs", "测试专用包装（注释：Exported so the cap is testable）"],
-  ["shared/http-clients.ts::ERROR_BODY_BYTE_CAP", "常量别名导出，真实常量在文件内部使用"],
-  ["shared/http-clients.ts::RETRY_AFTER_SLEEP_CAP", "常量别名导出，真实常量在文件内部使用"],
-  // ---- 便利包装 / 辅助入口：生产走另一条等价路径 ----
-  ["shared/http-clients.ts::createSensenovaFailoverClient", "通用工厂包装，生产走 createFailoverClient"],
-  ["shared/http-clients.ts::countPoolRoutes", "池规格计数（注释：used by the UI/tests），当前仅测试消费"],
-  ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表，供显式探测用"],
-  ["electron/agents/sensenova-api.ts::parseFiles", "parseFilePayload 的宽松包装，生产用严格版"],
-  // ---- 诊断 / 分层封装 ----
-  ["shared/prompt-text.ts::safeField", "inlineField|fencedBlock 二选一封装；真实路径已手工做同样判断"],
-  ["electron/agents/scoped-env.ts::droppedSecretNames", "诊断辅助，只给名字不给值"],
-  // ---- 测试 fake 模块的组成部分 ----
-  ["src/__fakes__/electron.ts::createFakeWebContents", "测试 fake 模块"],
+  ["shared/redact.ts::containsLikelySecret", "断言辅助（注释：assert helper），与 redactSecrets 共享 KEY_PREFIXES/JWT 判定"],
+  ["shared/http-clients.ts::countPoolRoutes", "池展开测试的断言辅助：验证 pool 规格 → 线路数，避免构造真实 client"],
+  // ---- 配置表：数据而非逻辑，测试用它钉住「默认轮转不含扩展模型」 ----
+  ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表（kimi-k3），刻意不加入默认轮转；测试守着这一点"],
+  // ---- 诊断：安全地只输出名字，尚未接到生产日志 ----
+  ["electron/agents/scoped-env.ts::droppedSecretNames", "诊断辅助，只给名字不给值；接上日志后即可移出本表"],
 ]);
 
 function walk(dir, out = []) {
@@ -141,8 +133,18 @@ if (unexpected.length > 0) {
   process.exit(1);
 }
 
-console.log("PASS: 无新增未接线导出");
+// 白名单失效同样 FAIL —— 与 check-script-wiring.mjs 保持同一口径。
+//
+// 曾经只是"提示"，结果是它悄悄腐烂：删掉的导出仍留在表里，读的人以为
+// "这里有人评审过"。**腐烂的白名单比缺失的更糟**，因为它是一份假证据。
 if (stale.length > 0) {
-  console.log(`\n提示：${stale.length} 条 ACCEPTED 已失效（对应导出已消失或已接线），可清理：`);
-  for (const k of stale.slice(0, 10)) console.log(`  ${k}`);
+  console.error(`\nFAIL: ${stale.length} 条 ACCEPTED 已失效（导出已删除或已接线）—— 请清理：`);
+  for (const k of stale) console.error(`  ${k}`);
+  console.error(
+    "\n失效条目不清理，下一个人会把这份白名单当成'已经评审过'的证据。\n" +
+      "用 `node scripts/check-unwired.mjs --list` 看当前真实命中项。\n",
+  );
+  process.exit(1);
 }
+
+console.log("PASS: 无新增未接线导出");

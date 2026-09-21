@@ -3,7 +3,6 @@ import { buildLlmClient } from "../shared/build-llm";
 import {
   AllRoutesCoolingError,
   createFailoverClient,
-  createSensenovaFailoverClient,
   FailoverLlmClient,
   HttpLlmError,
   type FailoverGroup,
@@ -311,11 +310,17 @@ describe("buildLlmClient", () => {
   });
 });
 
-describe("createSensenovaFailoverClient", () => {
+describe("createFailoverClient · sensenova flavor", () => {
+  // Driven through the same call the two production sites make — build-llm.ts
+  // and sensenova-api.ts — rather than through a convenience wrapper that only
+  // the tests used.
+  const sensenovaClient = (env?: NodeJS.ProcessEnv) =>
+    createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, env ? { env } : {});
+
   it("builds one group per present key with all models in order", () => {
     process.env.SENSENOVA_API_KEY = "k1";
     delete process.env.SENSENOVA_API_KEY_2;
-    const client = createSensenovaFailoverClient();
+    const client = sensenovaClient();
     expect(client).toBeInstanceOf(FailoverLlmClient);
     // Pool geometry is intentional: 3 keys × 4 models = the 12-route rotation.
     expect(SENSENOVA_KEY_VARS).toHaveLength(3);
@@ -326,7 +331,7 @@ describe("createSensenovaFailoverClient", () => {
 
   it("returns inert client when no keys are configured", async () => {
     for (const v of SENSENOVA_KEY_VARS) delete process.env[v];
-    const client = createSensenovaFailoverClient({});
+    const client = sensenovaClient({});
     await expect(client.chat(REQ)).rejects.toThrow("no groups");
   });
 });

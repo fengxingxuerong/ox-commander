@@ -55,20 +55,6 @@ export function createFakeIpcMain(): FakeIpcMain {
   };
 }
 
-export interface FakeWebContents {
-  send: ReturnType<typeof vi.fn>;
-  /** Every payload pushed to the renderer, oldest first. */
-  sent(): Array<Record<string, unknown>>;
-}
-
-export function createFakeWebContents(): FakeWebContents {
-  const send = vi.fn();
-  return {
-    send,
-    sent: () => send.mock.calls.map((c) => c[1] as Record<string, unknown>),
-  };
-}
-
 /** userData root used by every fake app; tests may override `app.getPath`. */
 export const fakeUserData = "/tmp/ox-test-userdata";
 

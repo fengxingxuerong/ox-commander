@@ -413,12 +413,9 @@ export function parseFilePayload(value: unknown): FilePayload {
     .map((f) => ({ path: f.path, content: f.content }));
 }
 
-export function parseFiles(content: string): FilePayload {
-  let text = content.trim();
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) text = fence[1].trim();
-  const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("模型输出中找不到 JSON 对象");
-  return parseFilePayload(JSON.parse(text.slice(start, end + 1)));
-}
+// `parseFiles(content)` was removed here: it extracted one JSON object with
+// indexOf/lastIndexOf and was never called in production. The live path goes
+// through `chatJson` → `extractJsonCandidates`, which is strictly stronger
+// (tries every balanced candidate, so it also survives reasoning models that
+// echo prompt JSON before the answer) and is covered by llm-client.test.ts.
+// Its old unit tests were pinning a code path no run could reach.

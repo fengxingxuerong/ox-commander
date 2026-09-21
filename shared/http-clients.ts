@@ -1,4 +1,4 @@
-import { getProvider, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, type ChatMessage, type ProviderConfig } from "./providers";
+import { getProvider, type ChatMessage, type ProviderConfig } from "./providers";
 import type { ChatRequest, ChatResponse, LlmClient } from "./llm-client";
 
 interface FetchLikeResponse {
@@ -36,8 +36,10 @@ export class MalformedResponseError extends Error {
  * (`RETRY_AFTER_COOLDOWN_CAP_MS`) only bounds the bench time; without this
  * second cap a single `retry-after: 86400` would park one `chat()` for a full
  * day while the orchestrator still believes the run is healthy.
+ *
+ * Exported so the cap itself is testable without a live HTTP round-trip.
  */
-const RETRY_AFTER_SLEEP_CAP_MS = 60_000;
+export const RETRY_AFTER_SLEEP_CAP = 60_000;
 
 /**
  * Cap on the bytes read from a *failed* response body.
@@ -47,19 +49,17 @@ const RETRY_AFTER_SLEEP_CAP_MS = 60_000;
  * page (or a hostile endpoint streaming forever) would otherwise be decoded in
  * full, per route, per retry. Only the head is kept — enough for the message
  * and for provider-specific error parsing.
+ *
+ * Exported so the cap itself is testable without a live HTTP round-trip.
  */
-const MAX_ERROR_BODY_BYTES = 64 * 1024;
+export const ERROR_BODY_BYTE_CAP = 64 * 1024;
 
-/** Reads at most `MAX_ERROR_BODY_BYTES` of a response body, marking truncation. */
-async function readCappedErrorBody(res: FetchLikeResponse): Promise<string> {
+/** Reads at most `ERROR_BODY_BYTE_CAP` of a response body, marking truncation. */
+export async function readCappedErrorBody(res: FetchLikeResponse): Promise<string> {
   const text = await res.text();
-  if (text.length <= MAX_ERROR_BODY_BYTES) return text;
-  return `${text.slice(0, MAX_ERROR_BODY_BYTES)}…[truncated ${text.length - MAX_ERROR_BODY_BYTES} chars]`;
+  if (text.length <= ERROR_BODY_BYTE_CAP) return text;
+  return `${text.slice(0, ERROR_BODY_BYTE_CAP)}…[truncated ${text.length - ERROR_BODY_BYTE_CAP} chars]`;
 }
-
-/** Exported for the cap test; not part of the provider-facing surface. */
-export const ERROR_BODY_BYTE_CAP = MAX_ERROR_BODY_BYTES;
-export { readCappedErrorBody };
 
 /** Parses a `retry-after` header value (delay-seconds or HTTP-date) into milliseconds. */
 function parseRawRetryAfterMs(raw: string | null | undefined): number | undefined {
@@ -71,21 +71,15 @@ function parseRawRetryAfterMs(raw: string | null | undefined): number | undefine
   return undefined;
 }
 
-/** Sleep-bounded view of a Retry-After header: the raw value may be arbitrarily large. */
-function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
-  const ms = parseRawRetryAfterMs(raw);
-  return ms === undefined ? undefined : Math.min(ms, RETRY_AFTER_SLEEP_CAP_MS);
-}
-
 /**
- * Parse a `Retry-After` header into milliseconds, clamped to the in-call sleep
- * cap. Exported so the cap itself is testable without a live HTTP round-trip.
+ * Sleep-bounded view of a `Retry-After` header: the raw value may be
+ * arbitrarily large. Exported so the cap itself is testable without a live
+ * HTTP round-trip.
  */
-export function parseRetryAfterHeaderMs(raw: string | null | undefined): number | undefined {
-  return parseRetryAfterMs(raw);
+export function parseRetryAfterMs(raw: string | null | undefined): number | undefined {
+  const ms = parseRawRetryAfterMs(raw);
+  return ms === undefined ? undefined : Math.min(ms, RETRY_AFTER_SLEEP_CAP);
 }
-
-export const RETRY_AFTER_SLEEP_CAP = RETRY_AFTER_SLEEP_CAP_MS;
 
 abstract class BaseHttpLlmClient implements LlmClient {
   constructor(
@@ -397,12 +391,12 @@ export function createFailoverClient(
   return new FailoverLlmClient(groups, undefined, { onEvent: opts.onEvent });
 }
 
-/** SenseNova flavor: 3 key env vars x N models with automatic failover. Thin wrapper, signature preserved. */
-export function createSensenovaFailoverClient(
-  env: NodeJS.ProcessEnv = process.env,
-): LlmClient {
-  return createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, { env });
-}
+// `createSensenovaFailoverClient(env)` was removed here. It differed from
+// `createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, ...)`
+// only by defaulting the env, so it could not serve either production caller —
+// `shared/build-llm.ts` passes `{ env, timeoutMs, onEvent }` and
+// `electron/agents/sensenova-api.ts` passes `{ timeoutMs, onEvent }`. It was a
+// second way to say the same thing, with a narrower signature than both.
 
 /** One provider's participation in a cross-provider pool. */
 export interface PoolRoute {
@@ -459,7 +453,13 @@ export function createMultiProviderFailover(
   });
 }
 
-/** Number of routes a pool spec would produce — used by the UI/tests. */
+/**
+ * Number of routes a pool spec would produce, given which key env vars are set.
+ *
+ * Used by the pool-expansion tests to assert the pool geometry without
+ * constructing real clients. (The comment here used to claim the UI needed it;
+ * no renderer code has ever called it — corrected rather than left to mislead.)
+ */
 export function countPoolRoutes(routes: readonly PoolRoute[], env: NodeJS.ProcessEnv = process.env): number {
   let n = 0;
   for (const route of routes) {

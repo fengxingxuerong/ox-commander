@@ -44,8 +44,11 @@ const ACCEPTED = new Map([
   ["run-multiagent-e2e.mjs", "长跑端到端（--max-minutes 可配），需真实 LLM 凭据，人工验收用"],
   ["probe-endpoints.cjs", "诊断工具，探测外部端点连通性，非验收判据"],
   ["gen-repair-smoke.cjs", "生成器：产出 smoke-repair / smoke-fullchain 的用例，人工按需运行"],
-  ["smoke-e2e.mjs", "旧版 e2e，已被 run-multiagent-e2e.mjs 取代（保留待清理）"],
-  ["bridge-smoke.mjs", "旧版桥冒烟，已被 admission-gateway-it.mjs 取代（保留待清理）"],
+  // 下面两条曾被误标为「已被取代，待清理」—— 那是凭脚本名推断的，实际读完才知：
+  // bridge-smoke 验的是**跨项目**桥接（DSH 插件 → headless runner），
+  // smoke-e2e 用的是 dist-electron 真实引擎 + 真实凭据。两者都不可被别的脚本替代。
+  ["smoke-e2e.mjs", "真实凭据端到端（加载 .env，走 dist-electron 的 Engine/Scheduler/verifier）"],
+  ["bridge-smoke.mjs", "跨项目桥接冒烟：DSH 插件（外部仓库 dsh-oxcommander）→ headless runner"],
   ["smoke-fullchain.mjs", "全链路冒烟，需真实凭据；被 gen-repair-smoke.cjs 生成后人工跑（引用者自己也不在入口）"],
   ["smoke-repair.mjs", "重修循环冒烟，同上"],
   ["loomy-bridge.mjs", "被 run-multiagent-e2e.mjs 引用，但该 runner 同样只在人工验收时跑 —— 链条未接到入口"],

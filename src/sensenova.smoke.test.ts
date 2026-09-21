@@ -14,9 +14,9 @@
  * not enough) passed on the first attempt after a ~5 minute cooldown.
  */
 import { describe, expect, it } from "vitest";
-import { OpenAiCompatibleClient, createSensenovaFailoverClient } from "../shared/http-clients";
+import { OpenAiCompatibleClient, createFailoverClient } from "../shared/http-clients";
 import { chatJson } from "../shared/llm-client";
-import { getProvider, SENSENOVA_MODELS, type ProviderConfig } from "../shared/providers";
+import { getProvider, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, type ProviderConfig } from "../shared/providers";
 import { parsePrd } from "../shared/schema";
 
 const BASE = "https://token.sensenova.cn/v1";
@@ -88,7 +88,7 @@ describe.skipIf(!enabled)("SenseNova real API smoke tests", () => {
   it(
     "failover client (3 keys x 3 models) answers a real request",
     async () => {
-      const client = createSensenovaFailoverClient();
+      const client = createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS);
       const res = await client.chat({
         messages: [{ role: "user", content: "Reply with exactly the word: pong" }],
         temperature: 0,

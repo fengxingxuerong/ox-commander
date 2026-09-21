@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AllRoutesCoolingError } from "../shared/http-clients";
-import { SensenovaApiAdapter, parseFilePayload, parseFiles } from "../electron/agents/sensenova-api";
+import { SensenovaApiAdapter, parseFilePayload } from "../electron/agents/sensenova-api";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/llm-client";
 
@@ -62,20 +62,22 @@ async function terminalText(adapter: SensenovaApiAdapter, handle: Awaited<Return
   return last;
 }
 
-describe("parseFiles", () => {
-  it("parses plain json", () => {
-    expect(parseFiles('{"files":[{"path":"a.js","content":"x"}]}')).toEqual([
+/**
+ * `parseFilePayload` is the validator the live path actually runs
+ * (`chatJson(..., { validate: parseFilePayload })`). The old `parseFiles`
+ * helper — which did its own fence-stripping and indexOf/lastIndexOf
+ * extraction — was deleted: it had no production caller, and the extraction it
+ * duplicated is covered by llm-client.test.ts against `extractJsonCandidates`.
+ */
+describe("parseFilePayload", () => {
+  it("keeps well-formed entries", () => {
+    expect(parseFilePayload({ files: [{ path: "a.js", content: "x" }] })).toEqual([
       { path: "a.js", content: "x" },
     ]);
   });
 
-  it("parses fenced json with surrounding prose", () => {
-    const out = parseFiles('说明如下\n```json\n{"files":[{"path":"a.js","content":"x"}]}\n```\n完');
-    expect(out).toHaveLength(1);
-  });
-
-  it("drops non-string-field entries and fails later when nothing writable", () => {
-    expect(parseFiles('{"files":[{"path":1,"content":"x"}]}')).toEqual([]);
+  it("drops non-string-field entries and lets the caller fail on an empty result", () => {
+    expect(parseFilePayload({ files: [{ path: 1, content: "x" }] })).toEqual([]);
   });
 
   it("rejects a payload that is not a files object — each clause is load-bearing", () => {
@@ -90,14 +92,6 @@ describe("parseFiles", () => {
     expect(() => parseFilePayload("a string")).toThrowError(/files/);
     expect(() => parseFilePayload({})).toThrowError(/files/);
     expect(() => parseFilePayload({ files: "not-an-array" })).toThrowError(/files/);
-  });
-
-  it("names the reason when the output has no usable JSON object", () => {
-    // `start < 0 || end <= start` — with `&&`, the `} {` case falls through to
-    // `JSON.parse("")` and surfaces as a SyntaxError from the JSON parser
-    // instead of the actionable "找不到 JSON 对象" message.
-    expect(() => parseFiles("完全没有 JSON")).toThrowError(/找不到 JSON 对象/);
-    expect(() => parseFiles("} {")).toThrowError(/找不到 JSON 对象/);
   });
 });
 
