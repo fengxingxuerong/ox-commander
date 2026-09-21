@@ -181,7 +181,9 @@ child.stdout.on("data", (d) => {
   process.stdout.write(d);
 });
 child.stderr.on("data", (d) => process.stderr.write(d));
-const hardKill = setTimeout(() => child.kill("SIGKILL"), 25 * 60_000);
+const maxMinIdx = process.argv.indexOf("--max-minutes");
+const maxMinutes = maxMinIdx > -1 ? Number(process.argv[maxMinIdx + 1]) || 25 : 25;
+const hardKill = setTimeout(() => child.kill("SIGKILL"), maxMinutes * 60_000);
 const status = await new Promise((resolve) => {
   child.on("close", (code) => {
     clearTimeout(hardKill);

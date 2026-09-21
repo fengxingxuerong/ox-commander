@@ -13,13 +13,14 @@
     "smoke:artifact": "node scripts/artifact-smoke.mjs",
     "smoke:snapshot-secrets": "node scripts/e2e-snapshot-secrets.cjs",
     "check:unwired": "node scripts/check-unwired.mjs",
+    "check:scripts": "node scripts/check-syntax.mjs",
     "mutation": "node scripts/mutation-check.mjs --limit=8",
     "mutation:quick": "node scripts/mutation-check.mjs --tier=1 --limit=1",
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json",
-    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets"
+    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets"
   },
   "dependencies": {
     "react": "^18.3.1",

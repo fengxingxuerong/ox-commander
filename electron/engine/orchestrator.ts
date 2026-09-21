@@ -269,6 +269,8 @@ export class OrchestratorEngine {
       Object.entries(resume?.attempts ?? {}).map(([k, v]) => [k, v]),
     );
     const allDone = new Set<string>(resume?.allDone ?? []);
+    // 断点续跑恢复的完成状态：全员重跑分支不得清掉它们（真实工作成果）
+    const restoredIds = new Set(resume?.allDone ?? []);
     const skipped = new Set<string>(resume?.skipped ?? []);
     let extraRounds = resume?.extraRounds ?? 0;
     let round = resume?.round ?? 0;
@@ -300,7 +302,10 @@ export class OrchestratorEngine {
           // Verification failed with no failed dev task: workspace was broken
           // externally or integration regressed. Re-run everything.
           // （outcomes 为空的断点续跑轮不算：恢复的 allDone 必须保留）
+          // 断点续跑恢复的完成状态是真实工作成果，全员重跑只清本轮派发过的，
+          // 不清从 journal 恢复的 —— 否则已交付模块会被无谓重派。
           allDone.clear();
+          for (const id of restoredIds) allDone.add(id);
           outcomes = [];
           this.cb.onLog("验证未过但无失败任务，判定工作区受损/集成回归，全员重跑。");
         }

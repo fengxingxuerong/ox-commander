@@ -874,15 +874,50 @@ describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => 
     const dispatched: string[] = [];
     const events: string[] = [];
     // A/B 永远失败（okIds 空）→ 重修预算耗尽抛出，冒烟全程未运行
+    // 预期 ["A","A"]：B 依赖 A，A 永不成功 → 依赖门每轮阻断 B（依赖跳过层的正确行为）
     await expect(
-      smokeEngine(new Set(), dispatched, events).execute(twoBatchTasks(), root, {
-        smoke,
-        resume: { allDone: ["A"], skipped: [], attempts: { A: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
-      }),
+      smokeEngine(new Set(), dispatched, events).execute(twoBatchTasks(), root, { smoke }),
     ).rejects.toThrow(/verification still failing/);
-    // resume 恢复 allDone=["A"] → 批次 1 的 A 被跳过；maxRounds=1 → 一轮后预算耗尽
-    expect(dispatched).toEqual(["B"]);
+    expect(dispatched).toEqual(["A", "A"]);
     expect(events.some((l) => l.includes("独立样本冒烟"))).toBe(false);
+  });
+
+  it("resume + 冒烟首败 → 重修轮冒烟转绿 → 交付（两层联动）", async () => {
+    const script = path.join(root, "sample-smoke.js");
+    fs.writeFileSync(script, "console.log('nope');");
+    const smoke: SmokeCheck[] = [
+      { title: "冒烟", command: process.execPath, args: ["sample-smoke.js"], expectContains: ["EXPECTED"] },
+    ];
+    const dispatched: string[] = [];
+    let verifyCalls = 0;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["B"]), dispatched), // A 已完成不重派；B 首败重派成功
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+      journal: { save: () => undefined },
+    };
+    // 首次验证后把样例脚本修好（模拟重修轮完成任务修复了冒烟缺口）
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => {},
+      onLog: () => {},
+      onTaskStatus: () => {},
+      onVerification: () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) fs.writeFileSync(script, "console.log('EXPECTED');");
+      },
+      onEscalation: () => {},
+    });
+    const report = await eng.execute(twoBatchTasks(), root, {
+      resume: { allDone: ["A"], skipped: [], attempts: { A: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
+      smoke,
+    });
+    expect(report.passed).toBe(true);
+    expect(verifyCalls).toBe(2); // 首败 + 重修轮转绿
+    expect(dispatched).toEqual(["B", "B"]); // A 不重派；B 两轮各一次
+    const sr = report.results.filter((r) => r.kind === "smoke");
+    expect(sr.length).toBe(1);
+    expect(sr[0]!.ok).toBe(true); // 最终报告的冒烟已转绿
   });
 });
 
