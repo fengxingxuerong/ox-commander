@@ -177,6 +177,27 @@ const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4"
 const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
 const listOnly = args.includes("--list");
 
+/**
+ * 两档超时，因为两种情况要问的问题不同。
+ *
+ * **基线**问的是「这套测试在这个模块上本来是好的吗」—— 值得等，给足余量。
+ * **变异体**问的是「改了这一处，测试还会通过吗」——**挂住本身就等于不通过**，
+ * 没有任何理由陪它等满。
+ *
+ * 实测（2026-09-21）：`llm-client.ts` 的 `|| → &&` 变异让测试挂到 timeout —— 基线
+ * 0.9s、变异体 200s（正好是上限）。全量 8m37s 里 81% 花在这种"等它自己放弃"上。
+ * 而所有基线轮最慢也只要 ~6s（含四文件目标），所以 20s 对变异体有 3 倍余量。
+ *
+ * 若某个模块的正常测试确实需要更久，用 `--mutant-timeout=` 调高它 ——
+ * 但先确认那是"正常慢"而不是"挂住"。
+ */
+const BASELINE_TIMEOUT_MS = Number(
+  args.find((a) => a.startsWith("--baseline-timeout="))?.slice("--baseline-timeout=".length) ?? "60000",
+);
+const MUTANT_TIMEOUT_MS = Number(
+  args.find((a) => a.startsWith("--mutant-timeout="))?.slice("--mutant-timeout=".length) ?? "20000",
+);
+
 const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) =>
   onlyFile ? t.file.includes(onlyFile) : true,
 );
@@ -216,17 +237,22 @@ process.on("SIGTERM", () => {
  * 跑一个目标对应的全部测试。任一失败即视为「杀死」。
  * 多文件的目标：只挂一个文件会让另一半逻辑没有门禁。
  */
-function testsPassAll(target) {
-  return testFilesOf(target).every((f) => testsPass(f));
+function testsPassAll(target, timeoutMs) {
+  return testFilesOf(target).every((f) => testsPass(f, timeoutMs));
 }
 
-/** 跑测试。返回 true = 通过（变异存活）。 */
-function testsPass(testFile) {
+/**
+ * 跑测试。返回 true = 通过（变异存活）。
+ *
+ * 超时算「不通过」：一个挂住的变异体**没有**让测试照样绿，它就是被发现了。
+ * 见 `MUTANT_TIMEOUT_MS` 的注释 —— 这正是省下 80% 时间的地方。
+ */
+function testsPass(testFile, timeoutMs = MUTANT_TIMEOUT_MS) {
   try {
     execFileSync(
       process.execPath,
       ["./node_modules/vitest/vitest.mjs", "run", testFile, "--reporter=dot", "--coverage.enabled=false"],
-      { cwd: ROOT, stdio: "pipe", timeout: 120_000, env: { ...process.env, CI: "1" } },
+      { cwd: ROOT, stdio: "pipe", timeout: timeoutMs, env: { ...process.env, CI: "1" } },
     );
     return true;
   } catch {
@@ -237,6 +263,7 @@ function testsPass(testFile) {
 const results = [];
 
 for (const target of targets) {
+  const startedAt = Date.now();
   const filePath = path.join(ROOT, target.file);
   const original = fs.readFileSync(filePath, "utf8");
 
@@ -252,10 +279,11 @@ for (const target of targets) {
     continue;
   }
 
-  // 基线：原文件必须通过，否则后面结论不可信
-  if (!testsPassAll(target)) {
+  // 基线：原文件必须通过，否则后面结论不可信。这里用长超时 —— 要的是
+  // 「这套测试本来是好的」这个事实，不是「它有多快」。
+  if (!testsPassAll(target, BASELINE_TIMEOUT_MS)) {
     console.error(`基线失败：${testFilesOf(target).join(", ")} 在原始代码上不通过，跳过 ${target.file}`);
-    results.push({ target, baselineFailed: true, ran: [] });
+    results.push({ target, baselineFailed: true, ran: [], ms: Date.now() - startedAt });
     continue;
   }
 
@@ -279,13 +307,14 @@ for (const target of targets) {
     console.error(`严重：${target.file} 未还原！`);
     process.exit(2);
   }
-  results.push({ target, baselineFailed: false, ran });
+  results.push({ target, baselineFailed: false, ran, ms: Date.now() - startedAt });
 }
 
 if (listOnly) process.exit(0);
 
 // ---- 报告 ----
 console.log("");
+const fmtMs = (ms) => `${(ms / 1000).toFixed(1)}s`;
 let totalKilled = 0;
 let totalRan = 0;
 const survivors = [];
@@ -300,7 +329,12 @@ for (const r of results) {
   totalKilled += killed;
   totalRan += r.ran.length;
   const rate = r.ran.length === 0 ? 0 : Math.round((killed / r.ran.length) * 100);
-  console.log(`${r.target.file}   杀死 ${killed}/${r.ran.length}（${rate}%）`);
+  // Per-mutation cost = (1 baseline + N mutants) vitest subprocesses, so the
+  // wall clock is dominated by process startup, not by the assertions. The
+  // timing column exists to keep that visible: a target whose per-mutant cost
+  // balloons is a candidate for `tier` re-sorting or dropping into the
+  // slow-only tier.
+  console.log(`${r.target.file}   杀死 ${killed}/${r.ran.length}（${rate}%）   ${fmtMs(r.ms ?? 0)}`);
   const survived = r.ran.filter((m) => !m.killed);
   if (survived.length > 0) {
     console.log(`  存活：${survived.map((m) => m.op).join(", ")}`);
@@ -309,7 +343,19 @@ for (const r of results) {
 }
 
 const overall = totalRan === 0 ? 0 : Math.round((totalKilled / totalRan) * 100);
-console.log(`\n总计：杀死 ${totalKilled}/${totalRan}（${overall}%）`);
+const totalMs = results.reduce((sum, r) => sum + (r.ms ?? 0), 0);
+console.log(`\n总计：杀死 ${totalKilled}/${totalRan}（${overall}%）   耗时 ${fmtMs(totalMs)}`);
+
+// 最慢的三个目标点名 —— 全量跑一次要几分钟，瓶颈通常集中在一两个目标。
+const slowest = [...results].sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 3);
+if (slowest.length > 0 && slowest[0].ms > 0) {
+  console.log(
+    `最慢：${slowest
+      .filter((r) => (r.ms ?? 0) > 0)
+      .map((r) => `${r.target.file} ${fmtMs(r.ms)}`)
+      .join(" · ")}`,
+  );
+}
 
 // 基线失败必须 FAIL，而不是"无结论"然后照常 PASS。
 //
