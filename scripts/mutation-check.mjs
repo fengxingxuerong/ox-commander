@@ -135,6 +135,20 @@ const TARGETS = [
     ],
     tier: 2,
   },
+  // schema.ts 的冒烟测试（sensenova.smoke.test.ts）刻意不挂：它要真实 API 凭据，
+  // 挂进去会让变异验证依赖网络。parseDecompose 的注入断言在 prompt-injection.test.ts。
+  {
+    file: "shared/schema.ts",
+    tests: ["src/schema.test.ts", "src/prompt-injection.test.ts"],
+    tier: 2,
+  },
+  // verifier 的断言散在三个文件：runSmokeChecks 在 verifier.test.ts，
+  // verifyProject 在 sandbox-runtime / spawn-plan 两个集成测试里。
+  {
+    file: "electron/engine/verifier.ts",
+    tests: ["src/verifier.test.ts", "src/sandbox-runtime.test.ts", "src/spawn-plan.test.ts"],
+    tier: 2,
+  },
 ];
 
 /**
