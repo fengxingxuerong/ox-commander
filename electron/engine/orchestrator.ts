@@ -178,21 +178,39 @@ export class OrchestratorEngine {
     verificationCommands?: readonly VerificationCommand[],
   ): Promise<{ batches: Task[][]; smoke: SmokeCheck[] }> {
     this.cb.onStage("PLANNING");
-    const plan = await this.brainCall(
-      "任务分解",
-      () =>
-        chatJson(
-          this.deps.llm,
-          { messages: [{ role: "user", content: buildDecomposePrompt(prd) }] },
-          { schemaName: "decompose plan", validate: parseDecompose },
-        ),
-    );
-    // Refuse a plan that cannot satisfy the PRD. A declared artifact owned by no
-    // zone is un-writable, so verification would fail forever while the repair
-    // loop burned its whole budget on an impossible task. Failing here costs one
-    // decompose call; failing later costs a full run and reports the wrong cause.
-    this.assertZoneCoverage(prd, plan.tasks, verificationCommands);
-    return { batches: planBatches(plan.tasks), smoke: plan.smoke };
+    // 规划校验失败（zone 覆盖缺口等）不是终点：把校验错误回喂大脑重新规划，
+    // 最多 2 次修正重试 —— 比快速失败省一次人工介入，比硬着头皮派发省整轮配额。
+    const MAX_PLAN_RETRIES = 2;
+    let feedback = "";
+    for (let attempt = 0; ; attempt++) {
+      const label = attempt === 0 ? "任务分解" : `任务分解（第 ${attempt} 次校验修正重试）`;
+      const plan = await this.brainCall(
+        label,
+        () =>
+          chatJson(
+            this.deps.llm,
+            {
+              messages: [
+                {
+                  role: "user",
+                  content:
+                    buildDecomposePrompt(prd) +
+                    (feedback ? `\n\n【上一次规划未通过 zone 覆盖校验，必须修正】\n${feedback}` : ""),
+                },
+              ],
+            },
+            { schemaName: "decompose plan", validate: parseDecompose },
+          ),
+      );
+      try {
+        this.assertZoneCoverage(prd, plan.tasks, verificationCommands);
+        return { batches: planBatches(plan.tasks), smoke: plan.smoke };
+      } catch (err) {
+        feedback = (err as SchemaValidationError).message;
+        if (attempt >= MAX_PLAN_RETRIES) throw err;
+        this.cb.onLog(`[规划校验] 规划不合格，携带校验错误重试分解（${attempt + 1}/${MAX_PLAN_RETRIES}）`);
+      }
+    }
   }
 
   private assertZoneCoverage(

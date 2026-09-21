@@ -11,7 +11,7 @@ import {
 } from "../electron/engine/orchestrator";
 import type { Scheduler } from "../electron/engine/scheduler";
 import type { LlmClient } from "../shared/llm-client";
-import { DEFAULT_SETTINGS, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type PrdDocument, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
 
 const TASKS: Task[] = [
   {
@@ -658,6 +658,104 @@ describe("OrchestratorEngine · 断点续跑 journal", () => {
       }),
     ).rejects.toThrow(/verification still failing/);
     expect(dispatched).toEqual([]); // A 从未被重派
+  });
+});
+
+describe("OrchestratorEngine · 分解校验失败带反馈重试", () => {
+  const PRD_WITH_FILE: PrdDocument = {
+    goal: "g",
+    features: ["实现 src/cli.test.js 测试文件"],
+    techStack: ["Node.js"],
+    acceptanceCriteria: ["npm test 通过"],
+  };
+
+  function recordingScheduler(okIds: Set<string>, dispatched: string[]): Scheduler {
+    return {
+      async runBatch(tasks: Task[]) {
+        for (const t of tasks) dispatched.push(t.id);
+        return tasks.map((t: Task) => ({
+          taskId: t.id,
+          ok: okIds.has(t.id),
+          logDigest: "log",
+          events: [],
+        }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  function silentEngine(deps: OrchestratorDeps): OrchestratorEngine {
+    return new OrchestratorEngine(deps, {
+      onStage: () => {},
+      onLog: () => {},
+      onTaskStatus: () => {},
+      onVerification: () => {},
+      onEscalation: () => {},
+    });
+  }
+
+  it("zone 覆盖缺口触发重试，校验错误回喂大脑后修正规划", async () => {
+    const prompts: string[] = [];
+    const dispatched: string[] = [];
+    const llm: LlmClient = {
+      async chat(req) {
+        const prompt = req.messages.map((m) => m.content).join("\n");
+        prompts.push(prompt);
+        // 首次 zone 不覆盖 PRD 声明文件 → 触发校验缺口 → 重试时修正 zone
+        const zone = prompts.length === 1 ? "tests" : "src";
+        const plan = {
+          tasks: [
+            {
+              id: "t1",
+              title: "CLI 测试",
+              description: "实现 src/cli.test.js",
+              zone,
+              dependencies: [],
+              suggestedRole: "test-writer",
+            },
+          ],
+          smoke: [],
+        };
+        return { content: JSON.stringify(plan), provider: "fake", model: "fake" };
+      },
+    };
+    const deps: OrchestratorDeps = {
+      llm,
+      scheduler: recordingScheduler(new Set(["t1"]), dispatched),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const { batches, smoke } = await silentEngine(deps).decompose(PRD_WITH_FILE);
+    expect(prompts.length).toBe(2); // 恰好一次修正重试
+    expect(prompts[1]).toMatch(/不属于任何 zone/); // 校验错误回喂
+    expect(prompts[1]).toContain("src/cli.test.js"); // 缺口路径在反馈里
+    expect(batches.flat().map((t) => t.zone)).toEqual(["src"]); // 修正后的 zone
+    expect(smoke).toEqual([]);
+  });
+
+  it("重试预算耗尽仍失败 → 抛出校验错误", async () => {
+    let calls = 0;
+    const llm: LlmClient = {
+      async chat() {
+        calls += 1;
+        const plan = {
+          tasks: [
+            { id: "t1", title: "x", description: "x", zone: "tests", dependencies: [], suggestedRole: "test-writer" },
+          ],
+          smoke: [],
+        };
+        return { content: JSON.stringify(plan), provider: "fake", model: "fake" };
+      },
+    };
+    const deps: OrchestratorDeps = {
+      llm,
+      scheduler: recordingScheduler(new Set(["t1"]), []),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    await expect(silentEngine(deps).decompose(PRD_WITH_FILE)).rejects.toThrow(
+      /src\/cli\.test\.js/,
+    );
+    expect(calls).toBe(3); // 首次 + 2 次重试
   });
 });
 
