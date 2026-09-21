@@ -114,6 +114,10 @@ const TARGETS = [
     tier: 2,
   },
   { file: "electron/agents/sensenova-api.ts", test: "src/sensenova-api.test.ts", tier: 2 },
+  { file: "electron/agents/http-bridge.ts", test: "src/http-bridge.test.ts", tier: 2 },
+  // manifest-loader 与 manifest-schema 共用 src/manifest.test.ts —— 同一个测试
+  // 文件挂两个目标是对的，不要为了"去重"只挂一个。
+  { file: "electron/agents/manifest-loader.ts", test: "src/manifest.test.ts", tier: 2 },
 ];
 
 /**

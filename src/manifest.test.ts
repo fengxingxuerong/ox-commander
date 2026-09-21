@@ -176,6 +176,35 @@ describe("buildAdaptersFromManifests", () => {
     expect(adapters).toEqual([]);
     expect(skipped[0]!.reason).toContain("内置适配器");
   });
+
+  it("builds every manifest in the list — the per-kind branches `continue`, they do not `break`", () => {
+    // Both branches end with `continue`. Flipping either to `break` drops every
+    // manifest after that point: no adapter is built AND nothing lands in
+    // `skipped`, so an agent disappears with no signal at all.
+    //
+    // The single-manifest cases above cannot tell the two apart — with one
+    // element, `continue` and `break` are the same thing.
+    const cli = parseAgentManifest(validCodex());
+    const http = parseAgentManifest({
+      id: "workbuddy",
+      displayName: "WorkBuddy",
+      adapter: "http-bridge",
+      entry: { kind: "http", baseUrl: "http://127.0.0.1:9999" },
+      capabilities: validCodex().capabilities,
+    });
+    const local = parseAgentManifest({
+      id: "local",
+      displayName: "Local",
+      adapter: "local-llm",
+      capabilities: validCodex().capabilities,
+    });
+    const { adapters, skipped } = buildAdaptersFromManifests([cli, http, local]);
+    expect(adapters.map((a) => a.meta.id)).toEqual(["codex-cli", "workbuddy"]);
+    expect(adapters[0]).toBeInstanceOf(CliAgentAdapter);
+    expect(adapters[1]).toBeInstanceOf(HttpBridgeAdapter);
+    expect(skipped).toHaveLength(1);
+    expect(skipped[0]!.id).toBe("local");
+  });
 });
 
 describe("tokenResolver", () => {

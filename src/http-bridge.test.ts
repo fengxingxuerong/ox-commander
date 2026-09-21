@@ -105,6 +105,68 @@ describe("HttpBridgeAdapter", () => {
     expect(polls).toBeGreaterThanOrEqual(2);
   });
 
+  it("finishes immediately when the dispatch response is already terminal", async () => {
+    // `body.status === "completed" || body.status === "failed"` — with `&&` the
+    // dispatch falls through to polling instead of finishing. Racing the
+    // collect against a timeout keeps a stuck run from hanging the suite for
+    // the full vitest timeout: the mutated build simply yields no events.
+    const calls: Call[] = [];
+    const adapter = bridge(
+      fakeFetch(
+        [
+          {
+            match: "/v1/runs",
+            method: "POST",
+            reply: () => ({ status: 200, body: { runId: "42", status: "completed" } }),
+          },
+        ],
+        calls,
+      ),
+    );
+    const handle = await adapter.dispatch(payload());
+    const events = await Promise.race([
+      collect(adapter, handle),
+      new Promise<AgentEvent[]>((resolve) => setTimeout(() => resolve([]), 1500)),
+    ]);
+    expect(events.map((e) => e.kind)).toContain("completed");
+    expect(calls.some((c) => c.url.includes("/events"))).toBe(false);
+  });
+
+  it("ends a run from an incoming terminal event, not only from the poll status", async () => {
+    // `pushIncoming` maps `e.kind` through a three-way `||`. With `&&` every
+    // event degrades to "log", `markTerminal` is never called, and a run whose
+    // remote status stays "running" never finishes at all. Existing tests all
+    // completed via the *status* field, so this path had no coverage.
+    const adapter = bridge(
+      fakeFetch([
+        {
+          match: "/v1/runs/42/events",
+          reply: () => ({
+            status: 200,
+            body: { events: [{ kind: "completed", text: "远端已完成" }], status: "running" },
+          }),
+        },
+        { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+      ]),
+    );
+    const handle = await adapter.dispatch(payload());
+    const events = await Promise.race([
+      collect(adapter, handle),
+      new Promise<AgentEvent[]>((resolve) => setTimeout(() => resolve([]), 1500)),
+    ]);
+    expect(events.map((e) => e.kind)).toContain("completed");
+    expect(events.map((e) => e.text).join("\n")).toContain("远端已完成");
+  });
+
+  it("aborts an unknown run id without crashing", async () => {
+    // Same guard shape as the CLI adapter: `!run || run.session.finished`
+    // written with `&&` throws a TypeError on `run.session`.
+    const adapter = bridge(fakeFetch([]));
+    await expect(
+      adapter.abort({ runId: "ghost-run", agentId: "workbuddy-bridge", taskId: "" }),
+    ).resolves.toBeUndefined();
+  });
+
   it("treats a synchronous response with events and no runId as terminal", async () => {
     const adapter = bridge(
       fakeFetch([
