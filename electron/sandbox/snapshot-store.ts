@@ -207,7 +207,12 @@ export class SnapshotStore {
     // Only paths the batch could have touched: inside the zones. Widening this
     // to the whole tree would delete pre-existing files outside the scope.
     for (const zone of token.zones) {
-      const dirAbs = path.join(token.rootAbs, zone === "." || zone === "" ? "" : zone);
+      // 这里原先有个三目：zone 为 "." 或空串时取空串，否则取 zone 本身。其实
+      // path.join 自己就会把 "." 与空串归一化到根，两个分支结果完全相同 ——
+      // 删掉它而不是留着：它看着承重，实际没有任何可观测效果。
+      // （注释里刻意不写会命中变异算子的运算符字面量：那些算子是 replaceAll，
+      // 会连注释一起改写，制造"只改注释不改行为"的假存活。）
+      const dirAbs = path.join(token.rootAbs, zone);
       if (fs.existsSync(dirAbs)) walk(dirAbs);
     }
     return out;
@@ -238,7 +243,8 @@ export class SnapshotStore {
       }
     };
     for (const zone of zones) {
-      const dirAbs = path.join(rootAbs, zone === "." || zone === "" ? "" : zone);
+      // Same as above: `path.join` normalises "." and "" to the root by itself.
+      const dirAbs = path.join(rootAbs, zone);
       if (!fs.existsSync(dirAbs)) continue;
       const stat = fs.statSync(dirAbs);
       if (stat.isFile()) {

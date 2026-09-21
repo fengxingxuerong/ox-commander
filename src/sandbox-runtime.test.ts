@@ -248,6 +248,29 @@ describe("TimeoutGate", () => {
     expect(count).toBe(1);
   });
 
+  it("touch 一个未在监控中的 id 静默返回，不会误伤其它 run", () => {
+    // `if (!w || w.tripped) return` —— 变异成 `&&` 后，未知 id 会走到
+    // `w.tripped` 并在 undefined 上抛 TypeError。这条钉住"未知 id 必须静默"。
+    const { g, clock } = gate();
+    const trips: string[] = [];
+    g.attach({ id: "r6" }, (reason) => trips.push(reason));
+    expect(() => g.touch("no-such-run")).not.toThrow();
+    expect(g.activeCount()).toBe(1); // 没把正在监控的 run 弄丢
+    clock.advance(3_100);
+    expect(trips).toEqual(["idle"]);
+  });
+
+  it("TimeoutError 的消息与 reason 严格对应（不能互换）", () => {
+    // `reason === "deadline" ? "超出总时限" : "空闲超时"` —— 变异成 `!==` 会把
+    // 两种原因的文案互换，而只断言 `reason` 字段的用例照样全绿。
+    const dl = new TimeoutError("r", "deadline").message;
+    const idle = new TimeoutError("r", "idle").message;
+    expect(dl).toContain("超出总时限");
+    expect(dl).not.toContain("空闲超时");
+    expect(idle).toContain("空闲超时");
+    expect(idle).not.toContain("超出总时限");
+  });
+
   it("stops watching after detach", () => {
     const { g, clock } = gate();
     const trips: string[] = [];
@@ -294,6 +317,19 @@ describe("CircuitBreaker", () => {
     });
     return { b, events, advance: (ms: number) => (now += ms) };
   }
+
+  it("查询一个从未记录过的 id：state 为 closed 且 retryInMs 为 0，不抛异常", () => {
+    // `state === "open" && e?.openedAt !== null` —— 变异成 `||` 后，
+    // 未知 id 的 `e?.openedAt` 是 **undefined**，而 `undefined !== null` 为真，
+    // 于是短路失败、继续去读 `e!.openedAt!` 并在 undefined 上抛 TypeError。
+    // 这条同时钉住"stats 未知 id 必须健壮"。
+    const { b } = breaker();
+    expect(() => b.stats("never-seen")).not.toThrow();
+    const s = b.stats("never-seen");
+    expect(s.state).toBe("closed");
+    expect(s.retryInMs).toBe(0);
+    expect(s.consecutiveFailures).toBe(0);
+  });
 
   it("starts closed and stays closed below the threshold", () => {
     const { b } = breaker();

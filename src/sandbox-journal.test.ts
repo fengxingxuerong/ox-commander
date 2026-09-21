@@ -45,6 +45,57 @@ afterEach(() => {
 });
 
 describe("FileJournal", () => {
+  /**
+   * 下面三条同一个根因：**所有既有用例的输入都是"全有效"的**，遍历里每个
+   * `continue` 被改成 `break` 都照样全绿 —— 因为从来没有任何东西需要被跳过。
+   * 一旦真实输入里出现「先有被跳过的项、后有要收集的项」，那些改动就会让
+   * 遍历在第一个跳过项处提前终止，后面的文件全部丢失。
+   */
+  it("尺寸未变只改 mtime 也算修改（不能被 size 相同就跳过）", () => {
+    // `size === now.size && mtimeMs === now.mtimeMs` —— 变异成 `||` 后，
+    // 只要 size 相同就 continue，同尺寸改写会被静默漏报。
+    const root = scratch("journal-same-size");
+    write(root, "src/a.js", "aaa");
+    const journal = new FileJournal();
+    const token = journal.begin(root, ["src"]);
+
+    const abs = path.join(root, "src/a.js");
+    fs.writeFileSync(abs, "bbb", "utf8"); // 同样 3 字节
+    const later = new Date(Date.now() + 5_000);
+    fs.utimesSync(abs, later, later);
+
+    const changes = journal.changed(token);
+    expect(changes).toEqual([{ path: "src/a.js", op: "modify", bytes: 3 }]);
+  });
+
+  it("node_modules 排在前面时，后面的 src 仍会被纳入基线", () => {
+    // `if (this.skipDirs.has(entry.name)) continue` —— 变 break 后，walk 在
+    // node_modules 处终止（字母序 n < s），src 下的文件完全不进基线。
+    const root = scratch("journal-skip-first");
+    write(root, "node_modules/pkg/index.js", "dep");
+    write(root, "src/app.js", "app");
+
+    const journal = new FileJournal();
+    const token = journal.begin(root, ["src"]);
+    expect([...token.baseline.keys()]).toContain("src/app.js");
+    expect([...token.baseline.keys()]).not.toContain("node_modules/pkg/index.js");
+  });
+
+  it("新增项排在前面时，后面的修改项不会被漏掉", () => {
+    // `if (!before) { push create; continue }` —— 变 break 后，遍历在第一个
+    // 新增文件处终止，排在字母序后面的 modify 全部丢失。
+    const root = scratch("journal-create-first");
+    write(root, "src/z.js", "old");
+    const journal = new FileJournal();
+    const token = journal.begin(root, ["src"]);
+
+    write(root, "src/a.js", "new"); // 新增，字母序在最前
+    write(root, "src/z.js", "changed"); // 修改，排在后面
+
+    const ops = journal.changed(token).map((c) => `${c.op}:${c.path}`).sort();
+    expect(ops).toEqual(["create:src/a.js", "modify:src/z.js"]);
+  });
+
   it("detects create / modify / delete without reading file contents", () => {
     const root = scratch("journal");
     write(root, "src/a.js", "one");
@@ -185,6 +236,74 @@ describe("SnapshotStore", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "electron/sandbox/snapshot-store.ts"), "utf8");
     expect(source).not.toMatch(/node:child_process/);
     expect(source).not.toMatch(/execSync|spawnSync|execFileSync/);
+  });
+
+  /**
+   * 下面几条是同一个根因，在本仓库已第三次出现（此前在 zone-coverage 与 glob）：
+   * **所有用例的输入都是「全有效」的**，于是遍历里每一个 `continue` 被改成
+   * `break` 都照样全绿 —— 因为从来没有任何东西需要被跳过。
+   * 一旦真实输入里出现「先有被跳过的项、后有要收集的项」，那些改动就会让
+   * 遍历在第一个跳过项处**提前终止**，后面的文件全部丢失。
+   */
+  it("被跳过的目录排在前面时，后面的文件仍然会被备份", async () => {
+    const root = scratch("snap-skip-first");
+    const backupRoot = scratch("snap-skip-first-backups");
+    // node_modules 排在 src 之前（字母序），且属于默认 skipDirs
+    write(root, "node_modules/pkg/index.js", "dep");
+    write(root, "src/app.js", "app");
+
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-skip-first", root, zones: ["."] });
+
+    const backedUp = [...token.backedUp.keys()].sort();
+    expect(backedUp).toContain("src/app.js");
+    expect(backedUp.some((p) => p.includes("node_modules"))).toBe(false);
+  });
+
+  it("zone 不存在时不终止后续 zone 的扫描", async () => {
+    const root = scratch("snap-missing-zone");
+    const backupRoot = scratch("snap-missing-zone-backups");
+    write(root, "src/app.js", "app");
+
+    const store = new SnapshotStore({ backupRoot });
+    // 第一个 zone 不存在 —— 跳过它之后必须继续处理 src
+    const token = await store.begin({ runId: "r-missing-zone", root, zones: ["no-such-zone", "src"] });
+
+    expect([...token.backedUp.keys()]).toContain("src/app.js");
+  });
+
+  it("include 里已备份过的路径不重复收集，且不影响后面的条目", async () => {
+    const root = scratch("snap-include-dup");
+    const backupRoot = scratch("snap-include-dup-backups");
+    write(root, "src/a.js", "a");
+    write(root, "src/c.js", "c");
+
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({
+      runId: "r-include-dup",
+      root,
+      zones: ["src"],
+      // a.js 已在 zone 里收集过（重复 → 跳过），b.js 不存在（跳过），
+      // 两种情况都不能让遍历提前结束 —— 否则 c.js 会丢
+      include: ["src/a.js", "src/missing.js", "src/c.js"],
+    });
+
+    const backedUp = [...token.backedUp.keys()].sort();
+    expect(backedUp).toEqual(["src/a.js", "src/c.js"]);
+  });
+
+  it("zone 为 '.' 与 '' 时都从项目根开始收集", async () => {
+    const root = scratch("snap-dot-zone");
+    const backupRoot = scratch("snap-dot-zone-backups");
+    write(root, "src/app.js", "app");
+
+    const store = new SnapshotStore({ backupRoot });
+    const dot = await store.begin({ runId: "r-dot", root, zones: ["."] });
+    const empty = await store.begin({ runId: "r-empty", root, zones: [""] });
+
+    // `zone === "." || zone === ""` —— 两个分支必须落到同一个起点
+    expect([...empty.backedUp.keys()].sort()).toEqual([...dot.backedUp.keys()].sort());
+    expect([...dot.backedUp.keys()]).toContain("src/app.js");
   });
 });
 

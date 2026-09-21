@@ -63,6 +63,26 @@ describe("buildSpawnSpec", () => {
     expect(plan.note).toBe("windows direct");
   });
 
+  it("PATH 上与目标同名的目录不会被当成可执行文件（必须继续往后找）", () => {
+    // `existsSync(p) && statSync(p).isFile()` —— 变异成 `||` 后，existsSync 为真
+    // 就短路返回 true，于是"同名目录"被误判为可执行文件并被 spawn。
+    // 注意：路径**不存在**时两种写法都返回 false（一个靠 && 短路、一个靠
+    // catch 兜住 statSync 的 ENOENT），所以只有"存在但是目录"能区分它们。
+    const decoyDir = scratch("spawn-decoy");
+    fs.mkdirSync(path.join(decoyDir, "tool.exe"), { recursive: true }); // 目录，不是文件
+    const goodDir = scratch("spawn-good");
+    const real = path.join(goodDir, "tool.exe");
+    fs.writeFileSync(real, "");
+
+    const plan = buildSpawnSpec("tool", ["--flag"], {
+      platform: "win32",
+      env: { PATH: [decoyDir, goodDir].join(path.delimiter) },
+    });
+    // 跳过 decoy 目录，落到 goodDir 里的真文件
+    expect(plan.file).toBe(real);
+    expect(plan.note).toBe("windows direct");
+  });
+
   it("keeps the original command when it cannot be resolved on PATH", () => {
     const plan = buildSpawnSpec("nowhere-to-be-found", ["x"], { platform: "win32", env: { PATH: "" } });
     expect(plan.file).toBe("nowhere-to-be-found");
@@ -100,6 +120,22 @@ describe("needsCmdWrapper", () => {
 describe("planSpawn (check then wrap)", () => {
   it("refuses a destructive command before building any spawn plan", () => {
     expect(() => planSpawn("rm", ["-rf", "/"])).toThrow(/禁止/);
+  });
+
+  it("refuses an empty or whitespace-only command", () => {
+    // `typeof command !== "string" || command.trim() === ""` —— 变异成 `&&` 后，
+    // 对字符串输入前半恒为 false，于是空串与纯空白都能绕过这条检查。
+    // 前半是类型系统保证的防御分支，运行时恒假，所以只有"空/空白"能区分两种写法。
+    const p = createDefaultCommandPolicy();
+    // CommandDecision 是判别联合，先收窄再读 reason（否则 tsc 会拒绝）。
+    const rejectReason = (c: string): string => {
+      const d = p.check(c, []);
+      if (d.ok) throw new Error(`期望被拒，实际放行了：${JSON.stringify(c)}`);
+      return d.reason;
+    };
+    expect(rejectReason("")).toMatch(/空/);
+    expect(rejectReason("   ")).toBeTruthy();
+    expect(rejectReason("\t\n")).toBeTruthy();
   });
 
   it("refuses a metacharacter, which is what makes the cmd.exe wrap safe", () => {

@@ -154,6 +154,24 @@ const TARGETS = [
   // 出问题时表现为"用例挂住直到超时"而非明确报错 —— 见 2026-09-21 的
   // `=== → !==` 挂住调查。
   { file: "electron/agents/run-session.ts", test: "src/run-session.test.ts", tier: 2 },
+
+  // ---- 2026-09-21 第二批：沙箱层是安全边界，此前完全不在门禁内 ----
+  // 挂载一律用「精确 import 匹配」的结果，不按文件名猜 —— 模块名与测试名
+  // 常常不一致（electron/store.ts 的测试叫 atomic-store.test.ts）。
+  {
+    file: "electron/sandbox/command-policy.ts",
+    tests: ["src/spawn-plan.test.ts", "src/sandbox-runtime.test.ts"],
+    tier: 2,
+  },
+  {
+    file: "electron/sandbox/spawn-plan.ts",
+    tests: ["src/spawn-plan.test.ts", "src/sandbox-runtime.test.ts"],
+    tier: 2,
+  },
+  { file: "electron/sandbox/circuit-breaker.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
+  { file: "electron/sandbox/timeout-gate.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
+  { file: "electron/sandbox/file-journal.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
+  { file: "electron/sandbox/snapshot-store.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
 ];
 
 /**
