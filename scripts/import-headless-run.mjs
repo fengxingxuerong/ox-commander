@@ -64,7 +64,22 @@ try {
   /* 查询失败不阻断（保守继续，写入前仍有备份） */
 }
 
-const store = JSON.parse(fs.readFileSync(storePath, "utf8").replace(/^\uFEFF/, ""));
+// 读取 + 解析都要挡住：全新安装时 projects.json 还不存在（用户从没打开过
+// 桌面端），文件损坏时则是 JSON 语法错。两种情况下抛出 node 的 ENOENT /
+// SyntaxError 堆栈对操作员毫无意义 —— 这里换成可行动的提示。
+let store;
+try {
+  store = JSON.parse(fs.readFileSync(storePath, "utf8").replace(/^\uFEFF/, ""));
+} catch (err) {
+  const why = err.code === "ENOENT" ? "不存在" : "无法解析（文件可能已损坏）";
+  console.error(`FAIL: 桌面端项目库${why}：${storePath}`);
+  console.error("  请先启动一次 OxCommander 桌面端以初始化项目库，再重试导入。");
+  process.exit(1);
+}
+if (!Array.isArray(store)) {
+  console.error(`FAIL: 桌面端项目库内容不是项目数组：${storePath}`);
+  process.exit(1);
+}
 const nameArg = args.indexOf("--name");
 const name =
   nameArg > -1 && args[nameArg + 1]
