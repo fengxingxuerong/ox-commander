@@ -40,6 +40,31 @@ describe("chatJson", () => {
     expect(messages[0]!.content).toBe("original");
   });
 
+  it("sends exactly one system message plus every non-system message", async () => {
+    // The split is `messages.filter((m) => m.role !== "system")`. Flipping it to
+    // `===` drops every user turn and duplicates the system prompt instead — the
+    // model receives no question at all.
+    //
+    // The "does not mutate" test above cannot see this: it only checks that the
+    // caller's own object was left alone, which stays true either way.
+    const { client, calls } = clientWith(['{"ok": true}']);
+    await chatJson(
+      client,
+      {
+        messages: [
+          { role: "system", content: "sys" },
+          { role: "user", content: "first" },
+          { role: "user", content: "second" },
+        ],
+      },
+      { schemaName: "t", validate: (raw) => raw as { ok: boolean } },
+    );
+
+    const sent = calls[0]!.messages;
+    expect(sent.filter((m) => m.role === "system")).toHaveLength(1);
+    expect(sent.filter((m) => m.role === "user").map((m) => m.content)).toEqual(["first", "second"]);
+  });
+
   it("strips markdown fences before parsing", async () => {
     const { client } = clientWith(['```json\n{"ok": 1}\n```']);
     const result = await chatJson(client, { messages: [] }, {

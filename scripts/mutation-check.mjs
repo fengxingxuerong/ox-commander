@@ -118,6 +118,23 @@ const TARGETS = [
   // manifest-loader 与 manifest-schema 共用 src/manifest.test.ts —— 同一个测试
   // 文件挂两个目标是对的，不要为了"去重"只挂一个。
   { file: "electron/agents/manifest-loader.ts", test: "src/manifest.test.ts", tier: 2 },
+  // 2026-09-21 接入 tier 2：LLM 通信层此前完全不在目标内。它是全项目最热的
+  // 路径（每个适配器、每个 provider 都从这里出去），却从没被变异覆盖过。
+  { file: "shared/llm-client.ts", test: "src/llm-client.test.ts", tier: 2 },
+  {
+    file: "shared/http-clients.ts",
+    // 四个文件缺一不可：http-clients.test.ts 只覆盖两个 client 类，
+    // FailoverLlmClient 的断言全在 failover.test.ts，池展开在 llm-pool.test.ts，
+    // cap/Retry-After 在 retry-after.test.ts。首版只挂了两个，
+    // 于是 11 个位点全"存活"—— 其中一半其实是断言挂在没跑的文件里。
+    tests: [
+      "src/http-clients.test.ts",
+      "src/retry-after.test.ts",
+      "src/failover.test.ts",
+      "src/llm-pool.test.ts",
+    ],
+    tier: 2,
+  },
 ];
 
 /**
