@@ -149,6 +149,11 @@ const TARGETS = [
     tests: ["src/verifier.test.ts", "src/sandbox-runtime.test.ts", "src/spawn-plan.test.ts"],
     tier: 2,
   },
+  // run-session 是三个适配器共用的等待-唤醒协议核心（消费者 await 一个
+  // **没有超时**的 promise）。此前只在各适配器的集成测试里被间接覆盖，
+  // 出问题时表现为"用例挂住直到超时"而非明确报错 —— 见 2026-09-21 的
+  // `=== → !==` 挂住调查。
+  { file: "electron/agents/run-session.ts", test: "src/run-session.test.ts", tier: 2 },
 ];
 
 /**
