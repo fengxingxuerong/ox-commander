@@ -56,7 +56,20 @@ function fakeSpawnImpl(b: FakeBehavior) {
         child.emit("error", new Error(b.err));
         return;
       }
-      if (b.out !== undefined) (child.stdout as PassThrough).write(b.out);
+      if (b.out !== undefined) {
+        // ⚠️ 必须按真实 pipe 粒度**分块**投递，不能一次 `write(整串)`。
+        // `PassThrough.write(huge)` 会把整串塞进 readableLength，`data` 只触发
+        // 一次且 chunk 就是全部内容 —— 而生产代码的字节预算是**块粒度**判定
+        // （`if (logBytes >= MAX_LOG_BYTES) 丢弃`），单块超大输入必然整套漏掉，
+        // 让"超预算丢弃"这条路径在测试里永远不可达（实测：一次 write
+        // 2.09MiB → 单次 data、dropped 恒为 0）。
+        // 真实子进程经 OS pipe（~64KB）分块到达，分块才是忠实的替身。
+        const CHUNK = 256 * 1024;
+        const out = b.out;
+        for (let i = 0; i < out.length; i += CHUNK) {
+          (child.stdout as PassThrough).write(out.slice(i, i + CHUNK));
+        }
+      }
       const finish = () => {
         child.exitCode = b.code ?? 0;
         child.emit("close", child.exitCode);
@@ -172,5 +185,48 @@ describe("runSmokeChecks", () => {
     );
     expect(calls).toBe(1); // 第二条冒烟未执行
     expect(results.length).toBe(1);
+  });
+});
+
+describe("输出字节预算（P2-4）", () => {
+  it("超预算的输出被丢弃并注明，而不是无限累积", async () => {
+    const results = await runSmokeChecks(
+      [check({ expectContains: [] })],
+      { cwd: ".", spawnImpl: fakeSpawnImpl({ out: "x".repeat(6 * 1024 * 1024), code: 0 }) as never },
+    );
+    // 截断只影响日志，不改变退出码判定
+    expect(results[0]!.ok).toBe(true);
+    expect(results[0]!.exitCode).toBe(0);
+    // ⚠️ 不要断言 logDigest 含「输出超过」：digest() 只保留首尾各 2000 字符，
+    // 中间被 `...[truncated]...` 顶掉。截断标注恰好落在中段 —— 6MiB 输出时
+    // 它前面有 2MiB 的 `x`，后面只剩 `[exit]0`，首尾各取 2000 都取不到它，
+    // 正则一律匹配不上，测试必然假红。要验这条备注必须走**未截断的原始 output**：
+    // 让超额量小于 digest 的 maxLen（4000），首尾窗口即可覆盖全串。
+    const small = await runSmokeChecks(
+      [check({ expectContains: [] })],
+      {
+        cwd: ".",
+        // 超出 2MiB 帽 100KB → 丢 98KB（余量不足 1KB 时 Math.round 会给 0）
+        spawnImpl: fakeSpawnImpl({ out: "x".repeat(2 * 1024 * 1024 + 100_000), code: 0 }) as never,
+      },
+    );
+    const note = small[0]!.logDigest.match(/输出超过 (\d+)KB 预算，已丢弃约 (\d+)KB/);
+    expect(note).not.toBeNull();
+    // 帽值如实引用 MAX_LOG_BYTES，不是硬编码在提示语里的另一个数
+    expect(Number(note![1])).toBe(2048);
+    // 丢弃量如实上报（累计被截掉的字节），不是占位 0
+    expect(Number(note![2])).toBe(98);
+  });
+
+  it("帽内头部保留：期望片段在头部仍能命中", async () => {
+    const results = await runSmokeChecks(
+      [check({ expectContains: ["HEAD-MARK"] })],
+      {
+        cwd: ".",
+        spawnImpl: fakeSpawnImpl({ out: `HEAD-MARK\n${"x".repeat(6 * 1024 * 1024)}`, code: 0 }) as never,
+      },
+    );
+    expect(results[0]!.ok).toBe(true);
+    expect(results[0]!.logDigest).toContain("HEAD-MARK");
   });
 });

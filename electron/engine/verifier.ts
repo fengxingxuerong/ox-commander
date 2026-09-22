@@ -22,6 +22,16 @@ export interface VerifierDeps {
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 300_000;
 
+/**
+ * Byte budget for one command's captured output (aligned with the agent
+ * `maxStdoutBytes` default). Without it a pathological build script stuck in a
+ * print loop balloons memory per verification round. The stream is ALWAYS
+ * drained — only the accumulation stops — so the child never blocks on a full
+ * pipe; the budget is enforced at chunk granularity (worst case overshoot is
+ * one pipe chunk).
+ */
+export const MAX_LOG_BYTES = 2 * 1024 * 1024;
+
 function runOnce(
   cmd: VerificationCommand,
   cwd: string,
@@ -54,6 +64,8 @@ function runOnce(
       return;
     }
     let log = "";
+    let logBytes = 0;
+    let droppedBytes = 0;
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
@@ -61,8 +73,16 @@ function runOnce(
       killTree(child);
     }, timeoutMs);
 
-    child.stdout?.on("data", (c: Buffer) => (log += c.toString("utf8")));
-    child.stderr?.on("data", (c: Buffer) => (log += c.toString("utf8")));
+    const onChunk = (c: Buffer): void => {
+      if (logBytes >= MAX_LOG_BYTES) {
+        droppedBytes += c.length;
+        return;
+      }
+      logBytes += c.length;
+      log += c.toString("utf8");
+    };
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
     child.on("error", (err) => {
       clearTimeout(timer);
       resolve({
@@ -75,7 +95,10 @@ function runOnce(
     });
     child.on("close", (code) => {
       clearTimeout(timer);
-      const finalLog = timedOut ? `${log}\n[沙箱] 超过 ${timeoutMs}ms，已终止进程树` : log;
+      let finalLog = timedOut ? `${log}\n[沙箱] 超过 ${timeoutMs}ms，已终止进程树` : log;
+      if (droppedBytes > 0) {
+        finalLog += `\n[沙箱] 输出超过 ${Math.round(MAX_LOG_BYTES / 1024)}KB 预算，已丢弃约 ${Math.round(droppedBytes / 1024)}KB`;
+      }
       resolve({
         kind: cmd.kind,
         ok: !timedOut && code === 0,
@@ -172,7 +195,6 @@ export async function runSmokeChecks(
     const startedAt = Date.now();
     const plan = buildSpawnSpec(check.command, check.args);
     const output = await new Promise<string>((resolve) => {
-      let log = "";
       let timedOut = false;
       let child: ReturnType<typeof spawnImpl>;
       try {
@@ -190,15 +212,33 @@ export async function runSmokeChecks(
         deps.onEvent?.(`[smoke] ${check.title} 超过 ${Math.round(timeoutMs / 1000)}s，终止进程树`);
         killTree(child);
       }, timeoutMs);
-      child.stdout?.on("data", (c: Buffer) => (log += c.toString("utf8")));
-      child.stderr?.on("data", (c: Buffer) => (log += c.toString("utf8")));
+      // Same byte budget as runOnce. Note: expect-fragment matching runs
+      // against the capped log — a fragment past the budget reads as missing,
+      // which is the honest outcome for output that large anyway.
+      let log = "";
+      let logBytes = 0;
+      let droppedBytes = 0;
+      const onChunk = (c: Buffer): void => {
+        if (logBytes >= MAX_LOG_BYTES) {
+          droppedBytes += c.length;
+          return;
+        }
+        logBytes += c.length;
+        log += c.toString("utf8");
+      };
+      child.stdout?.on("data", onChunk);
+      child.stderr?.on("data", onChunk);
       child.on("error", (err) => {
         clearTimeout(timer);
         resolve(`${log}\nspawn failed: ${String(err)}`);
       });
       child.on("close", (code) => {
         clearTimeout(timer);
-        resolve(`${log}\n[exit]${timedOut ? "timeout" : String(code)}`);
+        const droppedMark =
+          droppedBytes > 0
+            ? `\n[沙箱] 输出超过 ${Math.round(MAX_LOG_BYTES / 1024)}KB 预算，已丢弃约 ${Math.round(droppedBytes / 1024)}KB`
+            : "";
+        resolve(`${log}${droppedMark}\n[exit]${timedOut ? "timeout" : String(code)}`);
       });
       if (check.stdin !== undefined) child.stdin?.write(check.stdin);
       child.stdin?.end();

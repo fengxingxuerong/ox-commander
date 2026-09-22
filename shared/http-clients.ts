@@ -8,6 +8,12 @@ interface FetchLikeResponse {
   json(): Promise<unknown>;
   /** Present on real fetch responses; optional so test doubles stay compatible. */
   headers?: { get(name: string): string | null };
+  /**
+   * Present on real fetch responses; optional so test doubles stay compatible.
+   * Exposed so large bodies can be capped *while streaming* instead of after a
+   * full `text()` decode.
+   */
+  body?: { getReader(): ReadableStreamDefaultReader<Uint8Array> };
 }
 
 interface FetchLike {
@@ -54,11 +60,61 @@ export const RETRY_AFTER_SLEEP_CAP = 60_000;
  */
 export const ERROR_BODY_BYTE_CAP = 64 * 1024;
 
+/**
+ * Cap on the successful JSON body of a chat call. A legitimate response is
+ * kilobytes; a broken or hostile endpoint can stream arbitrarily more — and a
+ * body that large would fail JSON parsing anyway, so the cap only keeps the
+ * memory honest on the way to the same error.
+ */
+export const RESPONSE_BODY_BYTE_CAP = 8 * 1024 * 1024;
+
+/**
+ * Reads a response body under a hard byte budget. When the runtime exposes a
+ * stream (every real `fetch` response does), the reader stops pulling and
+ * cancels the stream as soon as the budget is spent — bytes past the cap never
+ * cross the wire into memory. Response doubles that only implement `text()`
+ * fall back to decode-then-trim. A torn multi-byte sequence at the cap
+ * boundary is discarded (never flushed as replacement chars), since everything
+ * after it is dropped anyway.
+ */
+export async function readBodyWithCap(res: FetchLikeResponse, capBytes: number): Promise<string> {
+  const reader = res.body?.getReader?.();
+  if (!reader) {
+    const text = await res.text();
+    if (text.length <= capBytes) return text;
+    return `${text.slice(0, capBytes)}…[truncated ${text.length - capBytes} chars]`;
+  }
+  const decoder = new TextDecoder();
+  let out = "";
+  let kept = 0;
+  let dropped = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    const chunk = value!;
+    const remaining = capBytes - kept;
+    if (chunk.byteLength > remaining) {
+      if (remaining > 0) {
+        out += decoder.decode(chunk.slice(0, remaining), { stream: true });
+        kept = capBytes;
+      }
+      dropped += chunk.byteLength - Math.max(0, remaining);
+      // Budget spent: stop pulling from the wire. No flush — the held tail of
+      // a torn multi-byte sequence is dropped along with the rest.
+      void reader.cancel().catch(() => {});
+      if (dropped > 0) out += `…[truncated ~${Math.round(dropped / 1024)}KB]`;
+      return out;
+    }
+    kept += chunk.byteLength;
+    out += decoder.decode(chunk, { stream: true });
+  }
+  out += decoder.decode();
+  return out;
+}
+
 /** Reads at most `ERROR_BODY_BYTE_CAP` of a response body, marking truncation. */
 export async function readCappedErrorBody(res: FetchLikeResponse): Promise<string> {
-  const text = await res.text();
-  if (text.length <= ERROR_BODY_BYTE_CAP) return text;
-  return `${text.slice(0, ERROR_BODY_BYTE_CAP)}…[truncated ${text.length - ERROR_BODY_BYTE_CAP} chars]`;
+  return readBodyWithCap(res, ERROR_BODY_BYTE_CAP);
 }
 
 /** Parses a `retry-after` header value (delay-seconds or HTTP-date) into milliseconds. */
@@ -102,7 +158,7 @@ abstract class BaseHttpLlmClient implements LlmClient {
       const text = await readCappedErrorBody(res);
       throw new HttpLlmError(res.status, text, parseRetryAfterMs(res.headers?.get("retry-after")));
     }
-    const raw = (await res.text()).replace(/^\uFEFF/, "");
+    const raw = (await readBodyWithCap(res, RESPONSE_BODY_BYTE_CAP)).replace(/^\uFEFF/, "");
     try {
       return JSON.parse(raw) as Record<string, unknown>;
     } catch {
