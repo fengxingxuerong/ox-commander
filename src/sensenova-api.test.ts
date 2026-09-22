@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -31,8 +31,27 @@ function scriptedClient(replies: Array<string | Error>): { client: LlmClient; pr
   return { client, prompts };
 }
 
+/**
+ * 每个 fixture 目录都要登记，`afterEach` 统一收。
+ *
+ * 这里此前**一个都不删** —— 实测本文件跑一轮留下一个 `ox-sensenova-*`，
+ * 累积到 4822 个（含 node_modules/src/tests 骨架），是 `%TEMP%` 里最大的一堆。
+ */
+const dirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of dirs.splice(0)) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // Windows 上子进程可能仍持有句柄；留给系统临时目录清理，不因此让用例失败
+    }
+  }
+});
+
 function tmpRoot(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sensenova-"));
+  dirs.push(dir);
   fs.mkdirSync(path.join(dir, "src"));
   fs.mkdirSync(path.join(dir, "tests"));
   fs.writeFileSync(
