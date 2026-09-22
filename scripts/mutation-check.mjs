@@ -97,6 +97,9 @@ const TARGETS = [
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
   { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts", tier: 1 },
+  // kill-tree 是超时兜底的最后一道闸：A3 加固的 fallback/二次确认分支都在
+  // 这里，一个算子翻转就意味着"杀不掉的进程"回来了。纯 mock 测试，毫秒级。
+  { file: "electron/sandbox/kill-tree.ts", test: "src/kill-tree.test.ts", tier: 1 },
   {
     file: "src/store.ts",
     tests: ["src/store.test.ts", "src/store-errors.test.ts", "src/ui.test.tsx"],
