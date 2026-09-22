@@ -126,4 +126,16 @@ describe("parseDecompose（任务 + 独立冒烟清单）", () => {
   it("smoke 不是数组 → 校验失败", () => {
     expect(() => parseDecompose({ ...valid, smoke: "node src/cli.js" })).toThrow(/smoke/);
   });
+
+  it("smoke 条目不是对象时给出校验错误，而不是让 TypeError 冒出去", () => {
+    // `isObject` 的守卫是 `typeof v === "object" && v !== null && !Array.isArray(v)`。
+    // 任一处 `&&` 改成 `||` 都会让它**恒真**，于是 null/字符串/数组会被当成对象继续往下走：
+    // 字符串和数字会静默变成"缺字段"（仍抛 SchemaValidationError，看不出差别），
+    // 但 `null` 会在 `s["title"]` 处抛 **TypeError** —— 调用方拿到的是运行时崩溃，
+    // 而不是可读的校验信息。
+    for (const bad of [null, "just-a-string", 42, ["title", "command"]]) {
+      expect(() => parseDecompose({ ...valid, smoke: [bad] })).toThrow(SchemaValidationError);
+    }
+    expect(() => parseDecompose({ ...valid, smoke: [null] })).toThrow(/must be an object/);
+  });
 });
