@@ -50,8 +50,24 @@ function toPosix(p: string): string {
   return p.replace(/\\/g, "/");
 }
 
-/** Filesystems where `PACKAGE.JSON` and `package.json` are the same file. */
-const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+/**
+ * Filesystems where `PACKAGE.JSON` and `package.json` are the same file.
+ *
+ * ⚠️ 平台判断抽成函数并导出，是为了让它**可测**。
+ *
+ * 写死成模块常量（`process.platform === "win32" || ...`）时，在任一具体 OS 上
+ * `a || b` 总有一个分支恒被短路 —— 于是另一个分支的变异**永远杀不掉**：
+ * 在 Windows 上把 `=== "darwin"` 改成 `!==`，整式仍是 `true || true`，
+ * 测试照绿。这是 site 逐位点审计里唯一一类"换个 OS 才成立"的存活项。
+ *
+ * 显式接收 platform 之后，测试可以直接喂 `"win32"` / `"darwin"` / `"linux"`，
+ * 两个分支都能被真实断言覆盖 —— 不依赖跑测试的机器是哪个系统。
+ */
+export function isCaseInsensitiveFs(platform: string = process.platform): boolean {
+  return platform === "win32" || platform === "darwin";
+}
+
+const CASE_INSENSITIVE_FS = isCaseInsensitiveFs();
 
 /**
  * Resolves symlinks/junctions and 8.3 short names for the deepest ancestor of

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { DEFAULT_FORBIDDEN_WRITE, PathPolicy } from "../electron/sandbox/path-policy";
+import { DEFAULT_FORBIDDEN_WRITE, PathPolicy, isCaseInsensitiveFs } from "../electron/sandbox/path-policy";
 
 // Realpath with `.native` on purpose: mkdtemp may return an 8.3 short-name
 // path (e.g. `ADMIN~1` for a non-ASCII user directory), and PathPolicy now
@@ -115,6 +115,51 @@ describe("PathPolicy.assertWritable", () => {
     expect(p.assertWritable("src/a.js", "src").ok).toBe(true);
   });
 
+  /**
+   * 下面三条来自 site 逐位点审计（path-policy 6 处存活中的 5 处）。
+   *
+   * 共同形态：`zoneAllows` / `zoneIsUnrestricted` 的 **strict 分支与 `via` 语义**
+   * 此前只有少量用例，且**都不检查 `via`**。而 `via` 恰恰是这两个方法唯一的
+   * 可观测输出 —— 不断言它，位点怎么改都看不出来。
+   */
+  it("strict 下不传 zone 时全项目可写，且 via 为 unrestricted", () => {
+    // @209 `if (z === "") return true;` 改成 `return false` 会让 strict 且无 zone 时
+    // **拒绝一切写入**；@200 `return z === ""` 改成 `!==` 会把 via 错标成 "zone"。
+    const p = policy({ zoneMode: "strict" });
+    const d = p.assertWritable("deep/nested/a.js");
+    expect(d.ok).toBe(true);
+    if (d.ok) expect(d.via).toBe("unrestricted");
+  });
+
+  it("legacy 下 zone '.' 是 unrestricted —— via 不能被标成 zone", () => {
+    // @198 的 `z === "."`：改成 `!==` 后 legacy + "." 会被误判成受限。
+    // 既有用例（"enforces the zone in legacy mode"）只断言 `ok`，
+    // 而 `ok` 在这条路径上恒为 true —— 只有 `via` 能区分。
+    const p = policy(); // 默认 legacy
+    const d = p.assertWritable("anything/a.js", ".");
+    expect(d.ok).toBe(true);
+    if (d.ok) expect(d.via).toBe("unrestricted");
+  });
+
+  it("strict 下 zone '.' 是受限的 —— via 必须标 zone 而不是 unrestricted", () => {
+    // @198 的 `this.zoneMode === "legacy"`：改成 `!==` 后 strict 分支会走进
+    // legacy 那行（`z === "" || z === "."`），于是 strict 的 "." 被当成不受限 ——
+    // 与 strict 模式"'.' 只拥有根目录文件"的设计直接冲突。
+    const p = policy({ zoneMode: "strict" });
+    const d = p.assertWritable("a.js", ".");
+    expect(d.ok).toBe(true);
+    if (d.ok) expect(d.via).toBe("zone");
+  });
+
+  it("zone 正好等于写入路径本身时允许（strict 分支的 rel === z）", () => {
+    // @211 `return rel === z || rel.startsWith(\`${z}/\`);` —— 第一个分支此前零覆盖：
+    // 既有用例的 zone 都是目录，rel 永远带 "/"，于是 `rel === z` 恒假，
+    // 把它改成 `!==` 也照样全绿。真实场景里 zone 可以就是一个文件。
+    const p = policy({ zoneMode: "strict" });
+    const d = p.assertWritable("src/index.js", "src/index.js");
+    expect(d.ok).toBe(true);
+  });
+
   it("allows a zone violation only when the path is delegated", () => {
     const p = policy({ delegatedWrite: ["shared/**"] });
     expect(p.assertWritable("tests/x.js", "src").ok).toBe(false);
@@ -205,5 +250,33 @@ describe("PathPolicy.assertReadable", () => {
     expect(p.assertReadable("src/a.js")).toBe(true);
     expect(p.assertReadable("../a.js")).toBe(false);
     expect(p.assertReadable("")).toBe(false);
+  });
+});
+
+/**
+ * `isCaseInsensitiveFs` 独立成组，是因为它曾是本模块最难验证的一处。
+ *
+ * 原先写成模块常量 `process.platform === "win32" || process.platform === "darwin"`，
+ * 在**任何一个**具体 OS 上 `||` 总有一侧恒被短路，另一侧无论怎么改都是等价变异 ——
+ * Windows 上把 `=== "darwin"` 改成 `!==`，整式仍是 `true || true`，测试照绿。
+ *
+ * 抽成接收 platform 参数的函数之后，两个分支都能被显式喂参覆盖，
+ * 不再依赖"跑测试的机器是哪个系统"。
+ */
+describe("isCaseInsensitiveFs", () => {
+  it("Windows 与 macOS 上大小写不敏感", () => {
+    expect(isCaseInsensitiveFs("win32")).toBe(true);
+    expect(isCaseInsensitiveFs("darwin")).toBe(true);
+  });
+
+  it("Linux 与其它平台上大小写敏感", () => {
+    // 这一条是杀掉两个 `===` 变异的关键：在 Windows 上跑时，
+    // 只有显式传入非 win32 的平台才能覆盖到 `||` 的**右侧**取值。
+    expect(isCaseInsensitiveFs("linux")).toBe(false);
+    expect(isCaseInsensitiveFs("freebsd")).toBe(false);
+  });
+
+  it("不传参时取当前平台", () => {
+    expect(isCaseInsensitiveFs()).toBe(process.platform === "win32" || process.platform === "darwin");
   });
 });
