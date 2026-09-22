@@ -195,6 +195,24 @@ const TARGETS = [
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
     tier: 2,
   },
+  // ---- 2026-09-22 第四批（续）：IPC 其余 handler 域 + 共享装配层 ----
+  {
+    file: "electron/ipc/projects.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
+  {
+    file: "electron/ipc/agents.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
+  // context.ts 是全部单例状态与桌面装配的家：密钥播种、审计落盘、journal、
+  // layer 缓存都在这里，变异一露头就说明装配语义可被悄悄改变。
+  {
+    file: "electron/ipc/context.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
 ];
 
 /**

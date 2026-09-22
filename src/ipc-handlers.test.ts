@@ -29,6 +29,9 @@ const h = vi.hoisted(() => ({
   llmChat: null as any,
   builtAdapter: null as any,
   buildAdapters: null as any,
+  createAgentLayerFn: null as any,
+  llmSeeders: [] as any[],
+  writeFileAtomic: null as any,
   generatePrd: null as any,
   decompose: null as any,
   execute: null as any,
@@ -95,6 +98,14 @@ vi.mock("../electron/audit-log", () => ({
   },
 }));
 
+// Pass-through by default; individual tests flip `mockImplementationOnce` to
+// make the atomic write fail (writeJournal's best-effort contract).
+vi.mock("../electron/atomic-file", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../electron/atomic-file")>();
+  h.writeFileAtomic = vi.fn((file: string, data: string) => mod.writeFileAtomic(file, data));
+  return { ...mod, writeFileAtomic: h.writeFileAtomic };
+});
+
 vi.mock("../electron/agents", async (importOriginal) => {
   const layer = {
     registry: {
@@ -112,7 +123,7 @@ vi.mock("../electron/agents", async (importOriginal) => {
   h.layer = layer;
   return {
     ...(await importOriginal<typeof import("../electron/agents")>()),
-    createAgentLayer: vi.fn(() => layer),
+    createAgentLayer: (h.createAgentLayerFn = vi.fn(() => layer)),
   };
 });
 
@@ -135,7 +146,10 @@ vi.mock("../electron/platform", () => ({
         pause: h.pauseEngine,
         resume: h.resumeEngine,
       },
-      buildLlm: vi.fn(() => ({ chat: h.llmChat })),
+      buildLlm: vi.fn((seeder: unknown) => {
+        h.llmSeeders.push(seeder);
+        return { chat: h.llmChat };
+      }),
     };
   }),
 }));
@@ -159,11 +173,14 @@ import type { FakeIpcMain } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, registerIpc } from "../electron/ipc";
 import {
+  buildLlm,
   dynamicAgentMap,
   enginesOf,
   getRunningProjectId,
+  seedKeysFromStore,
   setRunningProjectId,
   workspaceRoot,
+  writeJournal,
 } from "../electron/ipc/context";
 import { exampleManifest } from "../electron/agents/manifest-schema";
 import { HttpLlmError } from "../shared/http-clients";
@@ -232,6 +249,8 @@ beforeEach(() => {
   dynamicAgentMap().clear();
   setRunningProjectId(null);
   h.createPlatformCalls.length = 0;
+  h.llmSeeders.length = 0;
+  h.writeFileAtomic.mockClear();
   resetRegistryMocks();
   for (const store of h.projectInstances) {
     (store.get as Mock).mockReset().mockReturnValue(undefined);
@@ -444,8 +463,12 @@ describe("agent handlers", () => {
     const raw = exampleManifest();
     (h.ipcMain as FakeIpcMain).invoke("agents:register", raw);
     expect(dynamicAgentMap().has("codex-cli")).toBe(true);
+    const layer = h.layer;
     const res = await (h.ipcMain as FakeIpcMain).invoke("agents:unregister", "codex-cli", 100);
     expect(res).toEqual({ ok: true, drained: 2 });
+    // The drain window must reach the registry: unregister(id) vs
+    // unregister(id, {graceMs}) are different contracts.
+    expect(layer.registry.unregister).toHaveBeenCalledWith("codex-cli", { graceMs: 100 });
     expect(dynamicAgentMap().has("codex-cli")).toBe(false);
     const audit = inst(h.auditInstances);
     expect(audit.append).toHaveBeenCalledWith(
@@ -690,5 +713,134 @@ describe("orchestration handlers", () => {
       "ox:event",
       expect.objectContaining({ type: "conflict", remedy: "none" }),
     );
+  });
+});
+
+describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
+  /** Env vars the SenseNova/AMD seeding may touch; every test cleans up. */
+  function deleteSeededEnvVars(): void {
+    for (const v of ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "SENSENOVA_API_KEY_3", "AMD_API_KEY"]) {
+      delete process.env[v];
+    }
+  }
+
+  it("writeJournal persists an atomically written checkpoint", () => {
+    writeJournal("p-j", { batches: [["t1"]] } as never);
+    const file = path.join(tmp, "runs", "p-j.json");
+    expect(fs.existsSync(file)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as { savedAt: string; snapshot: unknown };
+    expect(parsed.snapshot).toEqual({ batches: [["t1"]] });
+    expect(typeof parsed.savedAt).toBe("string");
+  });
+
+  it("writeJournal never breaks a run when the disk write fails", () => {
+    h.writeFileAtomic.mockImplementationOnce(() => {
+      throw new Error("disk full");
+    });
+    expect(() => writeJournal("p-j2", { batches: [] } as never)).not.toThrow();
+  });
+
+  it("seedKeysFromStore expands the pool into provider env vars and seeds missing ones", () => {
+    try {
+      const keys = inst(h.keysInstances);
+      (keys.get as Mock).mockImplementation((v: string) => (v === "AMD_API_KEY" ? "amd-store" : "sk-store"));
+      const envVars = new Set<string>();
+      seedKeysFromStore({ llmPool: ["sensenova", "amd-radeon"] } as never, envVars);
+      // SenseNova contributes its 3 key vars + primary; AMD only its primary.
+      expect(envVars.has("SENSENOVA_API_KEY")).toBe(true);
+      expect(envVars.has("SENSENOVA_API_KEY_3")).toBe(true);
+      expect(envVars.has("AMD_API_KEY")).toBe(true);
+      expect(process.env.AMD_API_KEY).toBe("amd-store");
+      expect(process.env.SENSENOVA_API_KEY).toBe("sk-store");
+    } finally {
+      deleteSeededEnvVars();
+    }
+  });
+
+  it("seedKeysFromStore never overwrites a var already present in the environment", () => {
+    process.env.SENSENOVA_API_KEY = "env-wins";
+    try {
+      const keys = inst(h.keysInstances);
+      (keys.get as Mock).mockReturnValue("sk-store");
+      const envVars = new Set<string>();
+      seedKeysFromStore({ llmPool: ["sensenova"] } as never, envVars);
+      expect(process.env.SENSENOVA_API_KEY).toBe("env-wins");
+    } finally {
+      deleteSeededEnvVars();
+    }
+  });
+
+  it("seedKeysFromStore falls back to the single provider when the pool is empty", () => {
+    try {
+      const envVars = new Set<string>();
+      seedKeysFromStore({ llmProvider: "amd-radeon" } as never, envVars);
+      expect(envVars).toEqual(new Set(["AMD_API_KEY"]));
+    } finally {
+      deleteSeededEnvVars();
+    }
+  });
+
+  it("buildLlm wires the one-shot client and hands back the key-store seeder", async () => {
+    try {
+      h.llmChat.mockResolvedValue({ content: "pong", provider: "sensenova", model: "m1" });
+      const llm = buildLlm({ llmProvider: "sensenova", llmPool: [] } as never);
+      const res = await llm.chat({ messages: [{ role: "user", content: "ping" }] });
+      expect(res.model).toBe("m1");
+      expect(h.llmSeeders.length).toBe(1);
+      const envVars = new Set<string>();
+      (h.llmSeeders[0] as (s: Set<string>) => void)(envVars);
+      expect(envVars.has("SENSENOVA_API_KEY")).toBe(true);
+    } finally {
+      deleteSeededEnvVars();
+    }
+  });
+
+  it("caches the agent layer per settings signature", () => {
+    const settings = inst(h.settingsInstances);
+    (settings.load as Mock).mockReturnValue({
+      llmProvider: "sensenova",
+      llmPool: [],
+      agentRouter: false,
+      arbitration: "skip",
+    });
+    const before = h.createAgentLayerFn.mock.calls.length;
+    (h.ipcMain as FakeIpcMain).invoke("agents:list");
+    (h.ipcMain as FakeIpcMain).invoke("agents:list");
+    // Two list calls with one signature → exactly one rebuild; the cache is
+    // what lets runtime-registered agents survive engine rebuilds.
+    expect(h.createAgentLayerFn.mock.calls.length - before).toBe(1);
+    expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(expect.objectContaining({ enableRouter: false }));
+  });
+
+  it("audits run start/end with redacted digests", () => {
+    buildEngine("p-audit");
+    const host = lastPlatformConfig().host;
+    host.onRunStart("a1", task({ id: "t1", zone: "src/**" }));
+    host.onRunComplete(
+      { ok: true, agentId: "a1", durationMs: 12, logDigest: "boom sk-live-abcdef123456" },
+      task({ id: "t1", zone: "src/**" }),
+    );
+    const audit = inst(h.auditInstances);
+    expect(audit.append).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ phase: "run-start", agentId: "a1", taskId: "t1", zone: "src/**" }),
+    );
+    const endCall = audit.append.mock.calls[1]![0] as Record<string, unknown>;
+    expect(endCall).toMatchObject({ phase: "run-end", ok: true, durationMs: 12 });
+    // The JSONL is durable: credentials must not survive to disk. (The redactor
+    // requires 12+ body chars, so the test key must be realistically long.)
+    expect(endCall.detail).not.toContain("sk-live-abcdef123456");
+    expect(endCall.detail).toContain("sk-[REDACTED]");
+  });
+
+  it("omits optional fields from the run-end audit when absent", () => {
+    buildEngine("p-audit2");
+    const host = lastPlatformConfig().host;
+    host.onRunComplete({ ok: false, logDigest: "x" }, task({ id: "t9", zone: "z" }));
+    const call = inst(h.auditInstances).append.mock.calls.at(-1)![0] as Record<string, unknown>;
+    expect(call).toMatchObject({ phase: "run-end", ok: false, taskId: "t9" });
+    expect("agentId" in call).toBe(false);
+    expect("durationMs" in call).toBe(false);
+    expect("errorClass" in call).toBe(false);
   });
 });
