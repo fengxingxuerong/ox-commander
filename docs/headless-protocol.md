@@ -156,3 +156,29 @@ const code = await once(child, "exit"); // 0 交付 / 2 预算耗尽 / 1 致命
 | escalation | 弹出面板等操作者决策 | 由 `escalationPolicy` 决定 |
 
 因此 headless 跑出来的行为与桌面端一致——包括沙箱拦截、熔断、越权回滚。
+
+## 7. 独立样本冒烟与断点续跑（2026-09-20 新增）
+
+### verification 结果中的 kind=smoke
+
+分解阶段大脑可随任务一并生成 0–3 条独立样本冒烟清单（防自证盲区层）：
+主入口 + 真实样例数据 + 期望输出片段（由大脑按样例手算，禁止抄实现）。
+验证阶段在 build/typecheck/test 全过后实际运行冒烟命令：
+
+```json
+{"kind": "smoke", "ok": true, "exitCode": 0, "logDigest": "[smoke] ...", "durationMs": 82}
+```
+
+任一冒烟失败即拦截交付并进重修循环（与测试失败同语义）。
+
+### 运行日志 ox-run-journal.json（断点续跑）
+
+execute 在计划完成、每批次、每轮升级处理完成时把快照写入
+`<projectRoot>/ox-run-journal.json`。快照含 batches / smoke / allDone /
+skipped / attempts / round / extraRounds / lastDigest。
+
+宿主被杀后重跑同一 spec 时，若日志存在且 requirement 匹配：
+跳过 PRD 与分解（大脑零调用），恢复轮次与完成状态，只派发剩余任务。
+注意：恢复的完成状态在"全员成功但验证失败 → 全员重跑"分支中被保护，
+不会被清掉。e2e runner 支持 `--workspace <dir>` 指回被杀运行的工作区
+与 `--max-minutes <n>` 调整墙钟。

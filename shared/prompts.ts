@@ -74,6 +74,7 @@ Rules:
 - Produce 3-10 tasks. Maximize the size of the first parallel batch.
 - Every element of "tasks" MUST be a complete OBJECT with all six fields (id, title, description, zone, dependencies, suggestedRole). Never use plain strings as task entries.
 - Every task description MUST carry a contract clause list covering: interface signatures, boundary behavior, data semantics (header/total semantics - whether total counts the header row, missing/empty/whitespace handling, rounding), error behavior (exit codes, stderr messages), and output format (stdout carries results only). Semantics the PRD leaves undefined must be EXPLICITLY pinned in the description - implementers must never invent conventions silently (they are injected a platform contract block that forbids it).
+- Test files MUST be created directly under tests/ (e.g. tests/csv.test.js, tests/stats.test.js) — the verification runner scans only the top level of tests/; test files in subdirectories like tests/unit/ will NOT be found and the run will fail verification. Zones for test tasks should therefore be "tests" (top level), never "tests/something".
 - All code is CommonJS Node.js with no external npm packages; descriptions must not require Python, browsers, or any dependency installation.
 - Do not create or modify package.json, lockfiles or .env files: those paths are protected and any write to them is rejected.
 
