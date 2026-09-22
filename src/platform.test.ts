@@ -164,6 +164,60 @@ describe("createPlatform · brain client grade", () => {
 });
 
 /**
+ * `enableRouter: config.enableRouter ?? settings.agentRouter !== false` ——
+ * 这一行的 `!==` 变 `===` 后测试全绿（变异测试发现）。语义差异在于
+ * **只有显式 `agentRouter: false` 才关路由**：缺省 true 与显式 true 都必须开。
+ * 现有用例全用默认 settings（`agentRouter` 为 true），于是两个分支等价。
+ */
+describe("createPlatform · router 开关的三态（变异测试发现的缺口）", () => {
+  function routerEnabled(patch: Partial<ProjectSettings>): boolean {
+    const platform = createPlatform({
+      settings: settings(patch),
+      promptDir: tempDir(),
+      host: { log: () => undefined },
+    });
+    return Boolean(options(platform).router);
+  }
+
+  it("缺省即开启：未显式设置时路由必须是开的", () => {
+    // `agentRouter !== false` 的默认态。变异成 `===` 时此项仍为真 → 无法区分，
+    // 所以下面两项才是关键。
+    expect(routerEnabled({})).toBe(true);
+  });
+
+  it("显式 true 开启路由", () => {
+    expect(routerEnabled({ agentRouter: true })).toBe(true);
+  });
+
+  it("只有显式 false 才关闭路由", () => {
+    // 这是 `!== false` 与 `=== false` 唯一分开的一格：变异版会把
+    // 「缺省 true」也判成关闭 —— 即默认配置下静默失去能力路由。
+    expect(routerEnabled({ agentRouter: false })).toBe(false);
+  });
+
+  it("config.enableRouter 覆盖 settings（两者冲突时以 config 为准）", () => {
+    const platform = createPlatform({
+      settings: settings({ agentRouter: false }),
+      promptDir: tempDir(),
+      enableRouter: true,
+      host: { log: () => undefined },
+    });
+    // `??` 的左侧优先：显式传了 enableRouter 就不再看 settings
+    expect(Boolean(options(platform).router)).toBe(true);
+  });
+
+  it("enableRouter: false 也覆盖 settings 的 true", () => {
+    const platform = createPlatform({
+      settings: settings({ agentRouter: true }),
+      promptDir: tempDir(),
+      enableRouter: false,
+      host: { log: () => undefined },
+    });
+    expect(Boolean(options(platform).router)).toBe(false);
+  });
+});
+
+/**
  * The drift guard proper: build a platform the way each host builds one and
  * compare the structural fields. If a future change wires the desktop host
  * differently from headless, this fails instead of silently diverging.

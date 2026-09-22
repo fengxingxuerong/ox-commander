@@ -1075,15 +1075,179 @@ PRD: "不要改动 package.json；新增 src/cli.js"
 | `npm run mutation`（全量） | **44/44 全杀** |
 | `npm run verify` | 全绿，耗时未变 |
 
-### 13.6 当前门禁覆盖全景（13 个目标）
+### 13.6 当前门禁覆盖全景
+
+> ⚠️ 本节随门禁扩张**多次过时**。截至 2026-09-22 晚，`TARGETS` 共 **40 个目标**
+> （权威来源是 `scripts/mutation-check.mjs` 的 `TARGETS` 数组，不要在文档里数）。
+> 最近一次更新见 §14.3。历史遗留的一句「仍未纳入 `http-bridge` / `manifest-loader` /
+> `run-session`」已失效 —— 三者分别在 `944baf5`、`944baf5`、`3cd4b74` 接入。
 
 | 区域 | 目标模块 |
 | --- | --- |
-| `shared/` | `glob` · `redact` · `prompt-text` · `zone-coverage` |
-| `electron/sandbox/` | `path-policy` |
-| `electron/agents/` | `scoped-env` · `manifest-schema` · `registry` · `cli-agent` · `sensenova-api` |
-| `electron/engine/` | `scheduler` · `orchestrator` |
+| `shared/` | `glob` · `redact` · `prompt-text` · `zone-coverage` · `graph` · `llm-client` · `http-clients` · `schema` |
+| `electron/sandbox/` | `path-policy` · `command-policy` · `spawn-plan` · `circuit-breaker` · `timeout-gate` · `file-journal` · `snapshot-store` · `kill-tree` |
+| `electron/agents/` | `scoped-env` · `manifest-schema` · `manifest-loader` · `registry` · `cli-agent` · `sensenova-api` · `http-bridge` · `run-session` |
+| `electron/engine/` | `scheduler` · `orchestrator` · `router` · `batch-guard` · `verifier` · `zone-guard` |
+| `electron/ipc/` | `orchestration` · `projects` · `agents` · `context` |
+| `electron/`（根） | `keys-store` · `platform` |
+| `headless/` | `protocol` |
 | `src/`（Renderer） | `store` |
 
-**仍未纳入**：`http-bridge`（383 行）、`manifest-loader`（168 行）、`index`、
-`run-session`。按 tier 2 扩的成本已验证可接受。
+---
+
+## 十四、测试与优化：门禁盲区扫描（2026-09-22 晚）
+
+### 14.1 方法：用覆盖率反查门禁盲区
+
+前十三章的扩张方式是「按区域逐个纳入」（沙箱层 → agents 层 → 引擎层 → IPC 层）。
+本轮换一个入口：**先跑覆盖率，再和 `TARGETS` 清单做差集**，找
+「不在门禁内 **且** 覆盖偏低」的模块。比按区域扫更省力，因为它自带优先级排序。
+
+跑法（两次，**必须串行** —— 见 §14.5）：
+
+```
+npx vitest run --coverage       # 拿到各文件 stmts/branch/funcs
+```
+
+筛出的三个模块，共同特征是**都在关键路径上、却不在 40 个目标内**：
+
+| 模块 | 行数 | stmts | funcs | 为什么值得纳入 |
+| --- | --- | --- | --- | --- |
+| `electron/platform.ts` | 235 | 77.08% | **47.36%** | 双入口唯一装配点，P1-1 双端漂移就出在这里 |
+| `headless/protocol.ts` | 326 | 82.82% | — | 宿主 ↔ 进程的契约面，326 行 |
+| `electron/engine/zone-guard.ts` | — | 91.3% | — | zone 沙箱的 before/after diff 实现 |
+
+### 14.2 首跑 9 个位点存活 —— **零等价变异**（连续第三轮）
+
+把三个模块临时接入门禁（先不改测试）跑全量算子：
+
+```
+electron/platform.ts          杀死 2/3（67%）   存活：!== → ===
+headless/protocol.ts          杀死 4/5（80%）   存活：continue → break
+electron/engine/zone-guard.ts 杀死 2/3（67%）   存活：continue → break
+```
+
+聚合结果是 3 个存活，但**变异算子用 `replaceAll` 全局替换**，`continue → break`
+在 `protocol.ts` 命中 4 处、在 `zone-guard.ts` 命中 4 处。按 §12.6 的纪律拆单点：
+
+| 文件 | 位点 | 拆开后 |
+| --- | --- | --- |
+| `zone-guard.ts` | 48 / 50 / 52 / 57 | **4/4 全真缺口** |
+| `protocol.ts` | 158 / 163 / 167 / 172 | **4/4 全真缺口** |
+| `platform.ts` | 114 | **1/1 真缺口** |
+
+**9 个位点全部是真缺口，没有一个等价变异。** 这已经是连续第三轮出现这个结果
+（§12.6 的 3/3、§13.2 的 7/7，现在 9/9）——
+**「多半是等价变异」这个直觉不可靠，必须真拆。**
+
+### 14.3 缺口的共同形态：**「被跳过的项永远是最后一项」**
+
+九处缺口其实只有两种根因，都指向同一个测试设计缺陷。
+
+**根因 A：`continue` vs `break` 分不开，因为循环里最后一个元素才触发跳过。**
+
+`scanFiles`（zone-guard）和 `parseCommands`（protocol）里都有若干
+「跳过这一项、继续下一项」的 `continue`。旧用例的通病是：只放**一个**触发跳过的项，
+或者让触发跳过的项**排在同级最后**。这两种情况下 `continue` 与 `break` 行为完全相同，
+于是测试断不出任何差异 —— 而实际后果是**同类项被静默丢弃**：
+
+| 位点 | 变异后的真实后果 |
+| --- | --- |
+| `zone-guard:48` | 遇到 `node_modules` 直接终止整个目录遍历，同级的其他文件全部漏掉 |
+| `zone-guard:50` | 递归进第一个子目录后就停，同级后续文件消失 |
+| `zone-guard:52` | 遇到一个非普通文件（fifo/socket）就放弃整个目录 |
+| `zone-guard:57` | 一个文件读失败（EACCES）→ 同目录其余文件全部不进快照 → **zone diff 出现假新增** |
+| `protocol:158` | verificationCommands 里第一个非对象项 → 后面所有项不再校验 |
+| `protocol:163/167/172` | 同上，宿主拿到不完整的诊断，得改几轮才能把 spec 改对 |
+
+**`zone-guard:57` 是这批里唯一有安全含义的**：读文件失败被当成"目录扫完了"，
+会让 diff 误报新增/删除，进而可能把**误判的** zone 越权算到任务头上（或反过来漏掉真实的越权）。
+
+**根因 B：三态写成两态，缺省值那一格没人测。**
+
+`platform.ts:114` 的 `settings.agentRouter !== false` 表达的是**三态**：
+缺省（true）/ 显式 true / 显式 false 才关。现有用例全用默认 settings（true），
+于是 `!==` 与 `===` 只在「缺省」这一格分开 —— 而那一格恰好没人测。
+变异版会把**默认配置**判成"关闭路由"，即新装用户静默失去能力路由。
+
+> **可复用的判据**：看到一个布尔表达式带 `!== false` / `!== undefined` 这类写法时，
+> 先问「有没有三态？缺省那一格谁在测？」
+
+### 14.4 补断言的两条写法
+
+**① 让「被跳过的项」后面还有兄弟。** 这是拆开 `continue`/`break` 的唯一办法：
+
+```ts
+// 48 行：aaa 排在 node_modules 之前，保证 node_modules 不是最后一项
+write("aaa/keep.js", "keep");
+write("node_modules/pkg/index.js", "x");
+write("zzz/also-kept.js", "kept");   // continue→break 时它会被整棵漏掉
+expect(files).toEqual(["aaa/keep.js", "zzz/also-kept.js"]);
+```
+
+**② 用注入的 `FsLike` 造出真实文件系统里难复现的形态**（fifo、EACCES、EPERM）。
+`ZoneGuard` 的构造函数接受 `fsImpl`，这是现成的测试缝：
+
+```ts
+const fakeFs = {
+  existsSync: () => true,
+  readdirSync: () => [
+    { name: "bad.js",  isDirectory: () => false, isFile: () => true },
+    { name: "good.js", isDirectory: () => false, isFile: () => true },  // 必须活下来
+  ],
+  readFileSync: (p: string) => { if (p.endsWith("bad.js")) throw new Error("EACCES"); return "ok"; },
+};
+```
+
+注意**断言诊断文本而不是"是否抛错"**（§13.3 的教训）：`parseCommands` 的错误是
+拼进 `ParseResult.message` 的，断言要落在 `message` 的具体片段上。
+
+### 14.5 ⚠️ 操作纪律：**不要并发跑两个门禁**
+
+本轮踩了一个，值得单独记：
+
+`npm run mutation`（后台）与 `npx vitest run --coverage`（前台）**同时跑**，
+coverage 那边报出 `src/kill-tree.test.ts` 失败（`hasExited` 断言翻转）。
+看起来很像是真缺陷 —— 但真因是**变异脚本正在按设计改写源文件**
+（`fs.writeFileSync(filePath, m.source)` → 跑测试 → 再写回）。
+两个门禁同时读同一个工作区，必然互相污染。
+
+**判据**：源文件 `git status` 干净 + 单独复跑该测试全绿 → 确认是并发污染。
+**纪律**：变异门禁**独占**工作区，任何时候都不与另一个跑测试的命令并行。
+
+### 14.6 验证
+
+| 项 | 结果 |
+| --- | --- |
+| `npx vitest run` | **736 passed / 6 skipped**（716 → 736，**+20 例**） |
+| `zone-guard.ts` 变异 | 2/3 → **3/3** |
+| `protocol.ts` 变异 | 4/5 → **5/5** |
+| `platform.ts` 变异 | 2/3 → **3/3** |
+| **拆单点独立验证** | **9/9 全杀**，源文件 md5 字节级还原 |
+| `npm run mutation`（全量 40 目标） | **152/152（100%）**，399.3s |
+| `npm run verify` | 全绿（1m47s） |
+| `check:unwired` | 109 源文件，4 个已接受，PASS |
+
+覆盖率变化（`npx vitest run --coverage`，串行）：
+
+| 模块 | stmts | branch | funcs |
+| --- | --- | --- | --- |
+| `zone-guard.ts` | 91.3 → **97.82** | 86.66 → **93.33** | 100 |
+| `protocol.ts` | 82.82 → **88.88** | 80.64 → **83.87** | — → **100** |
+| `platform.ts` | 77.08（未变） | 91.11 | 47.36 |
+| 全仓 | 89.38 → **89.6** | 83.1 → **83.3** | 84.11 |
+
+> **`platform.ts` 覆盖数字一点没动、变异却从 2/3 变成 3/3** —— 这是
+> 「覆盖率数字骗人」的又一次实证：缺口在**断言敏感度**，不在**行覆盖**。
+> 只补行覆盖、不补断言敏感度，等于没补。
+
+### 14.7 剩余未纳入
+
+`electron/engine/index.ts` · `electron/sandbox/index.ts` · `electron/main.ts` ·
+`electron/preload.ts` · `headless/headless-main.ts` 仍是 0% 覆盖，
+**刻意不纳入变异门禁** —— 它们是进程入口与 re-export barrel，
+纳入需要起 Electron / 独立进程，成本与收益不成比例。
+
+`electron/sandbox/snapshot-store.ts` 虽在门禁内且 2/2 全杀，但
+stmts 80.64% / branch 73.91% 是沙箱层最低，值得下一轮作为**覆盖补强**目标
+（注意：它的变异已全杀，缺口同样在行覆盖而非断言敏感度）。

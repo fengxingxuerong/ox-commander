@@ -216,6 +216,31 @@ const TARGETS = [
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
     tier: 2,
   },
+
+  // ---- 2026-09-22 第五批：门禁盲区扫描（覆盖率交叉比对找出的三个模块）----
+  // 挑选口径：不在既有 37 个目标内，且**函数覆盖偏低**或**属于集成层**。
+  // 三个目标首跑共 9 个位点存活、**零等价变异**（连续第三轮全真缺口）。
+  //
+  // platform.ts 是双入口的唯一装配点 —— P1-1「Electron 与 headless 装配漂移」
+  // 就出在这里。它的 `agentRouter !== false` 曾整格无守护。
+  {
+    file: "electron/platform.ts",
+    // platform.test.ts 覆盖 createPlatform/createFileJournal；ipc.test.ts 与
+    // headless-protocol.test.ts 从两个宿主侧间接走同一条装配路径。
+    tests: ["src/platform.test.ts", "src/ipc.test.ts", "src/headless-protocol.test.ts"],
+    tier: 2,
+  },
+  // protocol.ts 是宿主与进程之间的契约面（326 行）。parseCommands 的四个
+  // `continue` 此前零覆盖：旧用例只传单个非法项，「跳过本条」与「中止循环」
+  // 行为相同，于是断不出差异。补的断言都让**非法项后面还有项**。
+  { file: "headless/protocol.ts", tests: ["src/headless-protocol.test.ts"], tier: 2 },
+  // zone-guard.ts 是 zone 沙箱的 before/after diff 实现。scanFiles 的四个
+  // `continue` 同理：旧用例里被跳过的项永远是同级最后一项。
+  {
+    file: "electron/engine/zone-guard.ts",
+    tests: ["src/zone-guard.test.ts", "src/scheduler.test.ts"],
+    tier: 2,
+  },
 ];
 
 /**

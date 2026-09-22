@@ -164,6 +164,134 @@ describe("parseSpec", () => {
   });
 });
 
+/**
+ * `parseCommands` 的四个 `continue` 此前零覆盖：现有用例只传**单个**非法项，
+ * 于是"跳过本条"与"中止整个循环"行为相同。变异成 `break` 后测试全绿。
+ *
+ * 下面每条都让**非法项后面还有更多项** —— 这才分得开两个分支。共同后果是
+ * **错误收集不全**：`parseSpec` 的设计承诺是"一次把所有问题报给宿主"
+ * （见 `collects every problem at once`），而 break 会让它半途而废。
+ */
+describe("parseCommands · 逐项校验不中途放弃（变异测试发现的缺口）", () => {
+  function issueLines(commands: unknown[]): string {
+    const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, verificationCommands: commands }));
+    expect(r.ok).toBe(false);
+    return r.ok ? "" : r.message;
+  }
+
+  it("非对象项之后的非法项仍被检查出来", () => {
+    const msg = issueLines([
+      "not-an-object",
+      { kind: "test", command: "" }, // 必须仍然报出：command 不能为空
+    ]);
+    expect(msg).toContain("verificationCommands[0] 必须是对象");
+    expect(msg).toContain("verificationCommands[1].command 必须是非空字符串");
+  });
+
+  it("非法 kind 之后的非法 command 仍被检查出来", () => {
+    const msg = issueLines([
+      { kind: "nope", command: "x" },
+      { kind: "test", command: "" },
+    ]);
+    expect(msg).toContain("verificationCommands[0].kind 必须是");
+    expect(msg).toContain("verificationCommands[1].command 必须是非空字符串");
+  });
+
+  it("空 command 之后的非法 args 仍被检查出来", () => {
+    const msg = issueLines([
+      { kind: "test", command: "" },
+      { kind: "test", command: "node", args: [1, 2] },
+    ]);
+    expect(msg).toContain("verificationCommands[0].command 必须是非空字符串");
+    expect(msg).toContain("verificationCommands[1].args 必须是字符串数组");
+  });
+
+  it("前三项全非法时四条诊断一次报齐，且合法项照常入列", () => {
+    // 这一条把四个 continue 全部钉住：任何一处变 break，后面的诊断就会消失。
+    const commands = [
+      "not-an-object",
+      { kind: "nope", command: "x" },
+      { kind: "test", command: "" },
+      { kind: "test", command: "node", args: [1] },
+      { kind: "build", command: "npm", args: ["run", "build"] }, // 唯一合法的项
+    ];
+    const msg = issueLines(commands);
+    expect(msg).toContain("verificationCommands[0] 必须是对象");
+    expect(msg).toContain("verificationCommands[1].kind");
+    expect(msg).toContain("verificationCommands[2].command");
+    expect(msg).toContain("verificationCommands[3].args");
+  });
+
+  it("非法 args 之后仍有合法项时，合法项的 args 校验不被跳过（172 行 continue → break 会漏掉它）", () => {
+    // 关键：后面那一项的 args 也非法。continue → break 时循环在第 1 项就退出，
+    // 于是 [1] 的 args 诊断永远不出现 —— 宿主需要改两轮才能把 spec 改对。
+    const msg = issueLines([
+      { kind: "test", command: "node", args: [1, 2] }, // 非法 args
+      { kind: "build", command: "npm", args: "run build" }, // args 也不是数组
+    ]);
+    expect(msg).toContain("verificationCommands[0].args 必须是字符串数组");
+    expect(msg).toContain("verificationCommands[1].args 必须是字符串数组");
+  });
+
+  it("kind 非法之后的项仍被继续检查（163 行 continue → break 会漏掉）", () => {
+    const msg = issueLines([
+      { kind: "nope", command: "x" },
+      { kind: "test", command: "" }, // 必须报出：command 为空
+    ]);
+    expect(msg).toContain("verificationCommands[0].kind 必须是");
+    expect(msg).toContain("verificationCommands[1].command 必须是非空字符串");
+  });
+
+  it("空 command 之后的项仍被继续检查（167 行 continue → break 会漏掉）", () => {
+    const msg = issueLines([
+      { kind: "test", command: "  " }, // 纯空白 = 空
+      { kind: "build", command: "npm", args: [1] }, // args 非法，必须报出
+    ]);
+    expect(msg).toContain("verificationCommands[0].command 必须是非空字符串");
+    expect(msg).toContain("verificationCommands[1].args 必须是字符串数组");
+  });
+
+  it("非对象项之后的项仍被继续检查（158 行 continue → break 会漏掉）", () => {
+    const msg = issueLines([
+      "not-an-object",
+      { kind: "nope", command: "x" }, // kind 非法，必须报出
+    ]);
+    expect(msg).toContain("verificationCommands[0] 必须是对象");
+    expect(msg).toContain("verificationCommands[1].kind 必须是");
+  });
+
+  it("全部合法时逐项校验通过（对照组：确认上面的诊断只来自非法项）", () => {
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        verificationCommands: [
+          { kind: "build", command: "npm", args: ["run", "build"] },
+          { kind: "test", command: "npm", args: ["test"] },
+        ],
+      }),
+    );
+    expect(spec.settings.verificationCommands).toHaveLength(2);
+  });
+
+  it("逐项校验通过后保留 args 的原始顺序与内容", () => {
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        verificationCommands: [
+          { kind: "build", command: "npm", args: ["run", "build"] },
+          { kind: "test", command: "npm", args: ["run", "test", "--silent"] },
+          { kind: "typecheck", command: "tsc" }, // args 缺省 → 空数组
+        ],
+      }),
+    );
+    expect(spec.settings.verificationCommands).toEqual([
+      { kind: "build", command: "npm", args: ["run", "build"] },
+      { kind: "test", command: "npm", args: ["run", "test", "--silent"] },
+      { kind: "typecheck", command: "tsc", args: [] },
+    ]);
+  });
+});
+
 describe("runSpec", () => {
   function fakeTask(id: string, zone: string, role = "backend-dev"): Task {
     return { id, title: `任务 ${id}`, description: "做点事", zone, dependencies: [], suggestedRole: role };
