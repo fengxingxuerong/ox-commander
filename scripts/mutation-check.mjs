@@ -186,6 +186,15 @@ const TARGETS = [
     tier: 2,
   },
   { file: "shared/graph.ts", test: "src/graph.test.ts", tier: 2 },
+
+  // ---- 2026-09-22 第四批：IPC handler 层试点（C1 拆分后行为测试补齐） ----
+  // orchestration.ts 是任务下发主链路（规划/启动/取消/仲裁回流）。
+  // 挂行为测试 + 通道契约两个文件：前者杀行为变异，后者守住 handler 注册面。
+  {
+    file: "electron/ipc/orchestration.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
 ];
 
 /**
