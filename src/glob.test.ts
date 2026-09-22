@@ -120,3 +120,58 @@ describe("isPathInZone", () => {
     expect(isPathInZone("src/a.js", "src")).toBe(true);
   });
 });
+
+/**
+ * 下面这几条来自 site 逐位点审计（glob.ts 5 处存活）。
+ *
+ * 共同点：存活的都是"两个分支几乎互斥 / 或恒被短路"的写法 ——
+ * 必须挑出**只有一个分支成立**的输入才能区分，而既有用例都落在
+ * "两个都成立"或"两个都不成立"的区域里。
+ */
+describe("compileGlob · ? 后面还有内容", () => {
+  it("? 不在模式末尾时，其后的字符不能被丢掉", () => {
+    // 编译循环里 `?` 分支后的 `continue`（第 46 行）。改成 break 之后，
+    // 遇到第一个 `?` 就退出循环 —— `a?b` 只编译成 `a[^/]`，尾部的 b 被丢掉，
+    // 于是 `/^a[^/]$/` 既匹配不了 "axb"（漏报），又会误匹配 "ab"（误报）。
+    const re = compileGlob("a?b");
+    expect(re.test("axb")).toBe(true);
+    expect(re.test("ab")).toBe(false);
+  });
+});
+
+describe("matchesAnyGlob · 受限 glob 仍然生效", () => {
+  it("受限 glob 按模式匹配，而不是被「不受限」条件吞掉", () => {
+    // 第 73 行 `isUnrestrictedGlob(g) || compiled(g).test(p)`。
+    // 改成 `&&` 之后，任何**受限** glob 都不再匹配任何东西 ——
+    // 受保护路径清单（DEFAULT_FORBIDDEN_WRITE）会整体失效，这是放行而非拦截。
+    expect(matchesAnyGlob("src/core/a.js", ["src/**"])).toBe(true);
+    expect(matchesAnyGlob("tests/a.js", ["src/**"])).toBe(false);
+  });
+});
+
+describe("zoneWithinGlobs · 边界", () => {
+  it("不受限的 '.' glob 覆盖任意 zone（不能掉到 compiled('.') 去兜）", () => {
+    // 第 111 行 `if (isUnrestrictedGlob(pattern)) return true;`。
+    // 改成 `return false` 后会掉进下面的分支，而 `compiled('.')` 是 /^\.$/ ——
+    // 它只匹配字面的 "."，于是 zone "src" 不再被 "." 覆盖。
+    expect(zoneWithinGlobs("src", ["."])).toBe(true);
+    expect(zoneWithinGlobs("src/core/deep", ["."])).toBe(true);
+  });
+
+  it("glob 直接写出 zone 本身、或写出其父级时都算覆盖", () => {
+    // 第 120 行 `re.test(z) || z.startsWith(`${pattern}/`)`。
+    // 这两个分支几乎互斥：z 等于 pattern 时后者必假，z 在 pattern 之下时前者必假。
+    // 改成 `&&` 之后整行恒假 —— 只有"恰好等于"与"在其之下"各一条用例才能区分。
+    expect(zoneWithinGlobs("src/core", ["src/core"])).toBe(true);
+    expect(zoneWithinGlobs("src/core/deep", ["src/core"])).toBe(true);
+    expect(zoneWithinGlobs("tests", ["src/core"])).toBe(false);
+  });
+
+  it("空 glob 不代表覆盖项目根", () => {
+    // 第 108 行 `if (z === "" || z === ".") return globs.some(isUnrestrictedGlob);`
+    // 改成 `&&` 后该条件恒假，会掉进下面的循环，而 `compiled("")` 是 /^$/ ——
+    // 空 zone 会被空 glob"匹配"上，等于把项目根判成被覆盖。
+    // 这是 project-root 只认不受限 glob 这条策略的兜底。
+    expect(zoneWithinGlobs("", [""])).toBe(false);
+  });
+});
