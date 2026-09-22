@@ -1096,6 +1096,64 @@ describe("BatchGuard arbitration", () => {
     const source = fs.readFileSync(path.join(process.cwd(), "electron/engine/batch-guard.ts"), "utf8");
     expect(source).toContain("Concurrent writes to the same file cannot happen inside a batch");
   });
+
+  it("report-only 的事件文案写明「未回滚」，不带 deny-all 的措辞", async () => {
+    // 文案里的三元是 `this.mode === "report-only" ? "，未回滚" : "，保留现场"`。
+    // 改成 `!==` 后两种 mode 的措辞**对调** —— report-only 反而声称"保留现场"，
+    // 让运维以为已经处置过。既有用例只断言了文件还在盘上，没读这段文案。
+    const root = scratch("guard-mode-text");
+    const events: string[] = [];
+    const guard = new BatchGuard({ mode: "report-only", onEvent: (t) => events.push(t) });
+    const scope = await guard.begin("r-mode-text", root, ["src"]);
+    write(root, "rogue/x.js", "rogue");
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+
+    const joined = events.join("|");
+    expect(joined).toContain("未回滚");
+    expect(joined).not.toContain("保留现场");
+  });
+
+  it("冲突描述区分「越权写入」与「共享文件被改动」", async () => {
+    // `describe()` 是 `c.kind === "unauthorized-write" ? … : …`，
+    // 改成 `!==` 后两类冲突的文案对调。既有用例只断言了 `kind` 和 `remedies[].action`，
+    // 而 `remedies[].detail` 才是真正写进日志与报告的那句
+    // （注意：`detail` 挂在 **Remedy** 上，Conflict 只有 kind/paths/runs）。
+    const outcomes = [{ taskId: "t1", ok: true, logDigest: "", events: [] }];
+    const mk = async (name: string, zones: string[], writeRel: string) => {
+      const root = scratch(`guard-desc-${name}`);
+      const guard = new BatchGuard({ mode: "report-only" });
+      const scope = await guard.begin(`r-${name}`, root, zones);
+      write(root, writeRel, "x");
+      return guard.settle(scope, outcomes);
+    };
+
+    const unauth = await mk("unauth", ["src"], "rogue/x.js");
+    expect(unauth.conflicts[0]!.kind).toBe("unauthorized-write");
+    expect(unauth.remedies[0]!.detail).toContain("越权写入");
+
+    const shared = await mk("shared", ["."], "package.json");
+    const drift = shared.conflicts.find((c) => c.kind === "shared-drift");
+    expect(drift).toBeDefined();
+    expect(shared.remedies.map((r) => r.detail).join("|")).toContain("共享文件被改动");
+  });
+
+  it("共享目录模式（dir/**）能命中该目录下的文件", async () => {
+    // `matchesShared` 里 `return rel === base || rel.startsWith(`${base}/`)`。
+    // 改成 `&&` 后两个条件无法同时成立（"shared/x.js" 既不等于 "shared"、
+    // 又确实以 "shared/" 开头 —— 前者必为 false），于是**整个目录下的漂移都检测不到**。
+    //
+    // 默认列表里唯一的 `dir/**` 是 `.git/**`，但 `.git` 同时在 journal 的
+    // skipDirs 里（改动根本扫不进来），所以这里用自定义 sharedPaths 来测。
+    const root = scratch("guard-shared-dir");
+    const guard = new BatchGuard({ mode: "report-only", sharedPaths: ["shared/**"] });
+    const scope = await guard.begin("r-shared-dir", root, ["."]);
+    write(root, "shared/x.js", "x");
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+    const drift = verdict.conflicts.find((c) => c.kind === "shared-drift");
+    expect(drift).toBeDefined();
+    expect(drift!.paths).toEqual(["shared/x.js"]);
+  });
 });
 
 describe("Scheduler + guard integration", () => {
