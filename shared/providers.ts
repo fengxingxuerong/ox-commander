@@ -114,6 +114,14 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     defaultModel: "claude-sonnet-4-20250514",
     apiKeyEnvVar: "ANTHROPIC_API_KEY",
   },
+  {
+    id: "nvidia",
+    displayName: "NVIDIA (integrate.api.nvidia.com)",
+    protocol: "openai-compatible",
+    baseUrl: "https://integrate.api.nvidia.com/v1",
+    defaultModel: "z-ai/glm-5.3-flash",
+    apiKeyEnvVar: "NVIDIA_API_KEY",
+  },
 ];
 
 export function getProvider(id: string): ProviderConfig {
@@ -143,6 +151,15 @@ export const SENSENOVA_KEY_VARS = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "
 
 /** Requested but not rotated by default (see above). */
 export const SENSENOVA_MODELS_EXTRA = ["kimi-k3"] as const;
+
+/**
+ * NVIDIA（z-ai/glm-5.3-flash）deliberately NOT in DEFAULT_LLM_POOL（2026-09-22 实测）：
+ * 单次调用 280s 完全无响应（HTTP 000 连接挂死），入池会让故障转移在它身上
+ * 空烧整段超时预算。端点恢复可靠后（连续探针 <240s 有完整正文）再移入
+ * DEFAULT_LLM_POOL 末位 —— 届时它是全网关最深的兜底线路。
+ *
+ * OpenRouter 同样排除：账号被平台锁推理（403），非密钥问题。
+ */
 
 /**
  * Default cross-provider pool, in preference order.
