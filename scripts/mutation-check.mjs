@@ -34,18 +34,45 @@
  *   node scripts/mutation-check.mjs --file=glob
  *   node scripts/mutation-check.mjs --limit=4    # 每文件最多 4 个变异（默认 4）
  *   node scripts/mutation-check.mjs --tier=1     # 只跑 tier 1（快目标，verify 用这个）
- *   node scripts/mutation-check.mjs --list       # 只列变异，不改文件不跑测试
+ *   node scripts/mutation-check.mjs --list       # 只列变异（含位点数），不改文件不跑测试
+ *   node scripts/mutation-check.mjs --mode=site  # **逐位点**变异（默认 aggregate，见下）
+ *   node scripts/mutation-check.mjs --audit      # = --mode=site --limit=999，逐点全量
+ *
+ * ## ⚠️ 两种口径：aggregate（默认）与 site
+ *
+ * 算子用 `replaceAll` 实现，所以一次变异会改掉源码里**该算子的全部位点**：
+ *
+ *   - **aggregate（默认）**：N 个算子 = N 个变异。一个"聚合变异被杀死"只证明
+ *     「这 N 处里**至少有一处**有断言覆盖」—— **不能**说明其余处也被覆盖。
+ *   - **site**：一处一个变异，逐点判定。只有它才能得出「每一处都被断言覆盖」。
+ *
+ * 这不是理论问题。2026-09-22 实测全仓 **153 个算子对应 540 个位点**（3.5 倍），
+ * 而 `snapshot-store.ts` 报「2/2 全杀」时源码里有 12 个 `continue;` ——
+ * 拆单点后 **5 个位点存活**。即聚合口径下「100% 全杀」曾系统性高估覆盖率。
+ *
+ * 成本分层：
+ *   - `verify` 里的 `mutation:quick` 用 **aggregate**（每次改动都要跑，必须快）
+ *   - `npm run mutation` 用 **aggregate**（成本 460s；CI 上限 20min）
+ *   - `npm run mutation:site` 用 **site**（成本约 3.5 倍）——**周期性审计**用，
+ *     不是每次改动都跑。审计后聚合计数的可信度才真正成立。
+ *
+ * 报告会**显式披露**聚合口径下有多少位点没被逐点验证，PASS 文案也区分两种口径 ——
+ * 门禁可以慢、可以只覆盖子集，但不能让数字读起来比实际覆盖更强（这是本仓库
+ * 反复踩过的「覆盖率数字骗人」，此处是同一教训在门禁自身上的体现）。
  *
  * 退出码：
  *   - 存活变异 > MAX_SURVIVORS → exit 1
  *   - **任何目标的基线测试未通过 → exit 1**（该目标完全没被验证，比存活更严重）
+ *   - **位点数与 SITE_BASELINE 不符 → exit 1**（新增位点没人逐点审计过）
  *
  * ## 已知局限（不要误以为它覆盖全仓）
  *
- *   1. **只跑 TARGETS 里列的模块**（8 个，分 tier 1/2），不是全仓。全仓会把 verify
- *      从 ~75s 拉到小时级 —— 跑不动的门禁等于没有门禁。选择标准：安全关键 + 逻辑密集。
+ *   1. **只跑 TARGETS 里列的模块**，不是全仓。全仓会把 verify 从 ~75s 拉到小时级 ——
+ *      跑不动的门禁等于没有门禁。选择标准：安全关键 + 逻辑密集。
  *      要扩就按这个标准加，别一次全铺开；新目标若单次测试超过 ~10s，放 tier 2，
  *      否则 `verify` 会被拖慢到没人愿意跑。
+ *      （截至 2026-09-22：39 个目标 / 583 处位点，aggregate 全量约 6m30s。
+ *      这个数字会变，**别在注释里写死**，用 `--list` 看当前实数。）
  *   2. **算子只覆盖布尔/比较/跳转**，抓不到「数值边界写错」（如 `>` 写成 `>=`）、
  *      「参数顺序颠倒」、「漏 await」。加算子前先确认不会引入等价变异噪声。
  *   3. **等价变异会存活**（语义未变的改写）。首次遇到时优先重构消除该分支；
@@ -270,19 +297,37 @@ const MAX_SURVIVORS = 0;
 /**
  * 变异算子。
  *
+ * 每个算子两个形态，回答的是**不同的问题**：
+ *   - `find` / `to` + `siteMutant`：**逐位点**变异 —— 一次只改一处，
+ *     能回答「**这一处**有断言吗」。
+ *   - `aggregateMutant`：**聚合**变异 —— 一次改掉全部位点，
+ *     只能回答「这些处里**至少有一处**有断言吗」。
+ *
  * 只保留**语义明确变化**的替换。像 `> → >=` 这类在边界值上语义相同的
  * （没有等于边界的用例时）容易产生"等价变异"—— 它们存活不代表测试有问题。
- * 所以下面优先用语义必然变化的算子。
+ *
+ * ⚠️ `find` 一律带 `\b` 或明确边界：`return true` 若不加边界会命中 `return trueX`，
+ * 在逐位点口径下会造出一个"改了但语义没变"的假存活。
  */
 const OPERATORS = [
-  { name: "&& → ||", apply: (s) => s.replaceAll("&&", "||") },
-  { name: "|| → &&", apply: (s) => s.replaceAll("||", "&&") },
-  { name: "=== → !==", apply: (s) => s.replaceAll("===", "!==") },
-  { name: "!== → ===", apply: (s) => s.replaceAll("!==", "===") },
-  { name: "return true → false", apply: (s) => s.replaceAll("return true", "return false") },
-  { name: "return false → true", apply: (s) => s.replaceAll("return false", "return true") },
-  { name: "继续(continue) → 中断(break)", apply: (s) => s.replaceAll(/\bcontinue;/g, "break;") },
+  { name: "&& → ||", find: /&&/g, to: "||" },
+  { name: "|| → &&", find: /\|\|/g, to: "&&" },
+  { name: "=== → !==", find: /===/g, to: "!==" },
+  { name: "!== → ===", find: /!==/g, to: "===" },
+  { name: "return true → false", find: /\breturn true\b/g, to: "return false" },
+  { name: "return false → true", find: /\breturn false\b/g, to: "return true" },
+  { name: "继续(continue) → 中断(break)", find: /\bcontinue;/g, to: "break;" },
 ];
+
+/** 聚合变异体：一次改掉该算子的**全部**位点。`replace` 带 /g 会重置 lastIndex，可复用。 */
+function aggregateMutant(source, op) {
+  return source.replace(op.find, op.to);
+}
+
+/** 逐位点变异体：只改 `site` 指出的那一处，其余原样。 */
+function siteMutant(source, site, op) {
+  return source.slice(0, site.index) + op.to + source.slice(site.end);
+}
 
 /**
  * 等价变异排除名单：这些位点替换后**语义不变**，存活不代表测试有缺口。
@@ -312,11 +357,279 @@ function changedLines(original, mutant) {
   return out;
 }
 
+/**
+ * 判断 `i` 处的 `/` 是否可能是**正则字面量**的开头（而不是除法）。
+ *
+ * 用通行的启发式：看 `out`（已掩空）里前一个**有效字符**。
+ * 它是 `(` `,` `=` `:` `[` `!` `&` `|` `?` `{` `}` `;` `+` `-` `*` `%` `<` `>` `~` `^`
+ * 之一、或位于文件开头 → 正则；是标识符/`)`/`]`/`.` 结尾 → 除法。
+ *
+ * 为什么必须做：正则体里可以出现任何字符，**包括反引号与引号**。本仓库实测
+ * `electron/sandbox/command-policy.ts:114` 的 `/[;&|`$<>^!]/` 里就有反引号 ——
+ * 不识别正则时，掩空器会把那个反引号当模板字符串开头，**跨行不闭合，吞掉整个
+ * 文件剩余部分**，于是该文件的位点数静默归零（比没有门禁更糟：它看起来是绿的）。
+ */
+function regexMayStartAt(src, out, i) {
+  for (let j = i - 1; j >= 0; j--) {
+    const c = out[j];
+    if (c === " " || c === "\n" || c === "\t" || c === "\r") continue;
+    return "(,=:[!&|?{};+-*%<>~^".includes(c);
+  }
+  return true; // 文件开头
+}
+
+/**
+ * 从 `i`（`/`）扫描正则字面量的结束位置，返回「闭斜杠 + 标志位」之后的索引。
+ *
+ * 找不到合法的收尾（跨行、或没闭合）时返回 -1 —— 此时按普通字符处理。
+ * 这个回退把"启发式猜错"的损害限制在**一行以内**，不会吞掉整份文件。
+ */
+function scanRegexEnd(src, i) {
+  const n = src.length;
+  let j = i + 1;
+  let inClass = false;
+  let closed = -1;
+  while (j < n) {
+    const c = src[j];
+    if (c === "\\") {
+      j += 2;
+      continue;
+    }
+    if (c === "\n") return -1; // 正则不能跨行 → 不是正则
+    if (c === "[") inClass = true;
+    else if (c === "]") inClass = false;
+    else if (c === "/" && !inClass) {
+      closed = j;
+      break;
+    }
+    j += 1;
+  }
+  if (closed < 0) return -1;
+  let k = closed + 1;
+  while (k < n && /[a-z]/i.test(src[k])) k += 1; // 标志位 gimsuy
+  return k;
+}
+
+/**
+ * 把注释、字符串与正则字面量「挖空」（**保留长度与换行**），只留可执行代码的位置。
+ *
+ * 为什么必须做：变异是**纯文本**替换，注释里写一个 `||` 字面量也会被命中。
+ *   - 聚合口径下：产生"改了注释、行为不变"的**假存活**（本仓库踩过一次，
+ *     见 `snapshot-store.ts` 里那段"注释里刻意不写会命中变异算子的运算符字面量"）。
+ *   - 逐位点口径下更糟：每个注释位点都是一个**永远存活**的变异，
+ *     会让 `--mode=site` 直接变红，而且是假红。
+ *
+ * 挖空之后注释/字符串里的算子不再算位点，同时把「挖掉了几个命中」报出来 ——
+ * 它就是「注释里不要留算子字面量」这条约定的自动体检。
+ *
+ * ⚠️ 状态未闭合时**抛错**，不静默继续。掩空器一旦出错就是"位点归零"——
+ * 门禁照常报 PASS 却说不出任何事，与「CI 里路径写错、从没跑过的 job」同族。
+ */
+function maskNonCode(src) {
+  // 必须用数组承接：字符串不可变，逐字符挖空需要一个可写的容器。
+  const out = src.split("");
+  const n = src.length;
+  const BLANK = (i) => {
+    if (i >= 0 && i < n && src.charCodeAt(i) !== 10) out[i] = " ";
+  };
+  let i = 0;
+  let state = "code"; // code | line | block | single | double | template
+  /**
+   * 模板表达式栈：每个 `${` 压一层，记录该层里 `{` 的嵌套深度。
+   *
+   * 为什么需要它：`` `${a === "x" ? 1 : 2}` `` 里的 `a === "x"` 是**真代码**，
+   * 掩掉整个模板会**漏掉真实位点**（本仓库实测：`cli-agent.ts:219`、
+   * `http-bridge.ts:150/185/220-222` 都有这种 `${x === "..."}`）。
+   * 加栈之后模板**文本**被挖空、`${...}` 里的表达式按代码处理。
+   */
+  const tmplStack = [];
+  while (i < n) {
+    const c = src[i];
+    const c2 = src[i + 1];
+    if (state === "code") {
+      // `${` 的收尾 `}`：深度为 0 时它关闭表达式、回到模板文本态。
+      // 必须排在正常代码处理之前，否则会把 `}` 当普通字符。
+      if (tmplStack.length > 0) {
+        if (c === "{") {
+          tmplStack[tmplStack.length - 1].braces += 1;
+        } else if (c === "}") {
+          if (tmplStack[tmplStack.length - 1].braces > 0) tmplStack[tmplStack.length - 1].braces -= 1;
+          else {
+            tmplStack.pop();
+            state = "template";
+            i += 1;
+            continue;
+          }
+        }
+      }
+      if (c === "/" && c2 === "/") {
+        state = "line";
+        BLANK(i);
+        BLANK(i + 1);
+        i += 2;
+        continue;
+      }
+      if (c === "/" && c2 === "*") {
+        state = "block";
+        BLANK(i);
+        BLANK(i + 1);
+        i += 2;
+        continue;
+      }
+      // 正则字面量必须排在字符串判定**之前**：正则体里可能出现反引号或引号
+      // （command-policy.ts:114 实测有反引号），漏判会让状态机吞掉整个文件。
+      if (c === "/" && regexMayStartAt(src, out, i)) {
+        const end = scanRegexEnd(src, i);
+        if (end > 0) {
+          for (let k = i; k < end; k++) BLANK(k);
+          i = end;
+          continue;
+        }
+      }
+      if (c === "'" || c === '"') {
+        state = c === "'" ? "single" : "double";
+        BLANK(i);
+        i += 1;
+        continue;
+      }
+      if (c === "`") {
+        state = "template";
+        BLANK(i);
+        i += 1;
+        continue;
+      }
+      i += 1;
+      continue;
+    }
+    if (state === "line") {
+      if (c === "\n") {
+        state = "code";
+        i += 1;
+        continue;
+      }
+      BLANK(i);
+      i += 1;
+      continue;
+    }
+    if (state === "block") {
+      if (c === "*" && c2 === "/") {
+        BLANK(i);
+        BLANK(i + 1);
+        i += 2;
+        state = "code";
+        continue;
+      }
+      BLANK(i);
+      i += 1;
+      continue;
+    }
+    // 模板**文本**段：只有 `${` 会切回代码态，反引号收尾；换行合法。
+    if (state === "template") {
+      if (c === "\\") {
+        BLANK(i);
+        BLANK(i + 1);
+        i += 2;
+        continue;
+      }
+      if (c === "`") {
+        BLANK(i);
+        i += 1;
+        state = "code";
+        continue;
+      }
+      if (c === "$" && c2 === "{") {
+        BLANK(i);
+        BLANK(i + 1);
+        tmplStack.push({ braces: 0 });
+        i += 2;
+        state = "code";
+        continue;
+      }
+      BLANK(i);
+      i += 1;
+      continue;
+    }
+    // 单/双引号字符串内
+    if (c === "\\") {
+      BLANK(i);
+      BLANK(i + 1);
+      i += 2;
+      continue;
+    }
+    const closer = state === "single" ? "'" : '"';
+    if (c === closer) {
+      BLANK(i);
+      i += 1;
+      state = "code";
+      continue;
+    }
+    // 未闭合的引号（单引号/双引号跨行在 TS 里不合法）→ 遇换行退出字符串态，
+    // 避免一个笔误把后面整段代码都当成字符串而漏掉全部位点。
+    if (c === "\n") {
+      state = "code";
+      i += 1;
+      continue;
+    }
+    BLANK(i);
+    i += 1;
+  }
+  // ⚠️ 失效保护：停在非 code 态 = 掩空器有 bug（引号/正则识别失败），
+  // 后果是"该文件的位点静默归零、门禁照常报 PASS"。宁可炸掉也不能静默。
+  if (state !== "code" || tmplStack.length > 0) {
+    throw new Error(
+      `maskNonCode 状态未闭合（state=${state}, 未闭合模板表达式=${tmplStack.length}）—— ` +
+        `掩空器识别失败会让位点数静默归零。请修 maskNonCode 的引号/正则/模板处理，` +
+        `不要绕过这个检查。`,
+    );
+  }
+  return out.join("");
+}
+
+/** 1-based 行号。 */
+function lineOf(src, index) {
+  let line = 1;
+  for (let i = 0; i < index; i++) if (src.charCodeAt(i) === 10) line += 1;
+  return line;
+}
+
+/**
+ * 列出算子在**可执行代码**里的全部位点。
+ * 返回 `{ sites, rawHits, maskedHits }`：
+ *   - `rawHits`   —— 原文（含注释/字符串）里的全部命中
+ *   - `maskedHits`—— 被挖空掉的命中数（在注释/字符串/正则里的）
+ * 恒有 `sites.length + maskedHits === rawHits`，这是掩空器的自洽校验。
+ */
+function findSites(source, masked, op) {
+  const sites = [];
+  for (const m of masked.matchAll(op.find)) {
+    sites.push({ index: m.index, end: m.index + m[0].length, line: lineOf(source, m.index) });
+  }
+  let rawHits = 0;
+  for (const _ of source.matchAll(op.find)) rawHits += 1;
+  return { sites, rawHits, maskedHits: rawHits - sites.length };
+}
+
 const args = process.argv.slice(2);
 const onlyFile = args.find((a) => a.startsWith("--file="))?.slice(7);
 const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4");
 const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
 const listOnly = args.includes("--list");
+
+/**
+ * 变异口径（见文件头「两种口径」）：
+ *   - `aggregate`（默认）：一个算子一个变异，改掉全部位点。
+ *   - `site`：一个位点一个变异。
+ *
+ * `--audit` 是 `--mode=site --limit=999` 的简写 —— 逐点全量，用来给一个模块出
+ * 「每一处都有断言」的结论。
+ */
+const auditMode = args.includes("--audit");
+const mode = auditMode ? "site" : (args.find((a) => a.startsWith("--mode="))?.slice(7) ?? "aggregate");
+if (mode !== "aggregate" && mode !== "site") {
+  console.error(`未知 --mode=${mode}（只能是 aggregate 或 site）`);
+  process.exit(2);
+}
+const effectiveLimit = auditMode ? 999 : limit;
 
 /**
  * 两档超时，因为两种情况要问的问题不同。
@@ -452,21 +765,82 @@ for (const target of targets) {
   const original = fs.readFileSync(filePath, "utf8");
 
   const excluded = EQUIVALENT_SITES.filter((e) => e.file === target.file);
-  const all = OPERATORS.map((op) => ({ op: op.name, source: op.apply(original) }))
-    .filter((m) => m.source !== original)
-    // 等价变异排除：只有当变异**只**触碰名单内的位点时才跳过；
-    // 同时命中非等价位点的变异照常参与判定。
-    .filter((m) => {
-      const sites = excluded.filter((e) => e.op === m.op);
-      if (sites.length === 0) return true;
-      const lines = changedLines(original, m.source);
-      return !lines.every((l) => sites.some((e) => e.line === l));
-    });
-  const mutants = all.slice(0, limit);
+  const masked = maskNonCode(original);
+
+  // 每个算子的真实位点（只数可执行代码里的），聚合与逐位点两种口径共用。
+  // ⚠️ 统计用 `perOpAll`（含 0 位点的算子）—— 否则"全部位点都在注释里"这种
+  // 情况会因为过滤而丢掉"另有 N 处被排除"的提示，看起来像"这个文件没有算子"。
+  const perOpAll = OPERATORS.map((op) => ({ op, ...findSites(original, masked, op) }));
+  const perOp = perOpAll.filter((s) => s.sites.length > 0);
+  const siteTotal = perOpAll.reduce((n, s) => n + s.sites.length, 0);
+  const maskedTotal = perOpAll.reduce((n, s) => n + s.maskedHits, 0);
+  const rawTotal = perOpAll.reduce((n, s) => n + s.rawHits, 0);
+
+  // 自洽校验：掩空只应"减少"命中，不应凭空增删。
+  if (siteTotal + maskedTotal !== rawTotal) {
+    throw new Error(
+      `掩空自洽校验失败：${target.file} 位点 ${siteTotal} + 掩掉 ${maskedTotal} ≠ 原文命中 ${rawTotal}`,
+    );
+  }
+
+  // 位点归零 = 这个目标对门禁**毫无贡献**（以前会静默地什么都不验证）。
+  if (siteTotal === 0) {
+    console.error(
+      `⚠️  ${target.file} 在可执行代码里没有任何算子位点（原文命中 ${rawTotal} 处，全在注释/字符串里）` +
+        `—— 该目标目前不验证任何东西。`,
+    );
+  }
+
+  /**
+   * 生成变异体列表。
+   *
+   * aggregate：每算子 1 个变异，`siteCount` 记录它压掉了多少位点 ——
+   *   这个数字进报告，让"聚合只证明至少一处"这件事对读者可见。
+   * site：每处 1 个变异，`siteCount` 恒为 1，`line` 记下位点行号。
+   */
+  let all;
+  if (mode === "site") {
+    all = [];
+    for (const s of perOp) {
+      for (const site of s.sites) {
+        // 等价变异白名单在逐位点口径下是**精确**匹配（算子 + 行号），
+        // 不像聚合口径需要"只触碰白名单行"那种近似判断。
+        if (excluded.some((e) => e.op === s.op.name && e.line === site.line)) continue;
+        all.push({
+          op: s.op.name,
+          source: siteMutant(original, site, s.op),
+          siteCount: 1,
+          line: site.line,
+        });
+      }
+    }
+  } else {
+    all = perOp
+      .map((s) => ({
+        op: s.op.name,
+        source: aggregateMutant(original, s.op),
+        siteCount: s.sites.length,
+        line: s.sites.length === 1 ? s.sites[0].line : undefined,
+      }))
+      .filter((m) => m.source !== original)
+      // 等价变异排除：只有当变异**只**触碰名单内的位点时才跳过；
+      // 同时命中非等价位点的变异照常参与判定。
+      .filter((m) => {
+        const sites = excluded.filter((e) => e.op === m.op);
+        if (sites.length === 0) return true;
+        const lines = changedLines(original, m.source);
+        return !lines.every((l) => sites.some((e) => e.line === l));
+      });
+  }
+  const mutants = all.slice(0, effectiveLimit);
 
   if (listOnly) {
+    const maskedNote = maskedTotal > 0 ? `，另有 ${maskedTotal} 处在注释/字符串里已排除` : "";
     console.log(
-      `${target.file} → ${mutants.length}/${all.length} 个变异：${mutants.map((m) => m.op).join(", ")}`,
+      `${target.file} → ${mode} 口径：${mutants.length}/${all.length} 个变异` +
+        `（位点 ${siteTotal}${maskedNote}）：${mutants
+          .map((m) => (m.siteCount > 1 ? `${m.op}(×${m.siteCount})` : m.op))
+          .join(", ")}`,
     );
     continue;
   }
@@ -489,7 +863,7 @@ for (const target of targets) {
     } finally {
       fs.writeFileSync(filePath, original, "utf8");
     }
-    ran.push({ op: m.op, killed });
+    ran.push({ op: m.op, killed, siteCount: m.siteCount, line: m.line });
     process.stdout.write(killed ? "." : "X");
   }
   pending.delete(filePath);
@@ -499,7 +873,7 @@ for (const target of targets) {
     console.error(`严重：${target.file} 未还原！`);
     process.exit(2);
   }
-  results.push({ target, baselineFailed: false, ran, ms: Date.now() - startedAt });
+  results.push({ target, baselineFailed: false, ran, ms: Date.now() - startedAt, siteTotal });
 }
 
 if (listOnly) process.exit(0);
@@ -509,6 +883,12 @@ console.log("");
 const fmtMs = (ms) => `${(ms / 1000).toFixed(1)}s`;
 let totalKilled = 0;
 let totalRan = 0;
+// 单点变异（siteCount === 1）被杀死 = 该位点确实有断言。
+// 聚合变异（siteCount > 1）被杀死只证明「至少一处有覆盖」，其余处仍未验证。
+let strictKilled = 0;
+let aggregateKilled = 0;
+let unverifiedSites = 0;
+let totalSites = 0;
 const survivors = [];
 const baselineFailures = results.filter((r) => r.baselineFailed);
 
@@ -520,6 +900,16 @@ for (const r of results) {
   const killed = r.ran.filter((m) => m.killed).length;
   totalKilled += killed;
   totalRan += r.ran.length;
+  totalSites += r.siteTotal ?? 0;
+  for (const m of r.ran) {
+    if (m.siteCount === 1) {
+      if (m.killed) strictKilled += 1;
+    } else if (m.killed) {
+      aggregateKilled += 1;
+      // 聚合变异身上：只有「至少一处」被证明，其余 siteCount-1 处没被逐点验证。
+      unverifiedSites += m.siteCount - 1;
+    }
+  }
   const rate = r.ran.length === 0 ? 0 : Math.round((killed / r.ran.length) * 100);
   // Per-mutation cost = (1 baseline + N mutants) vitest subprocesses, so the
   // wall clock is dominated by process startup, not by the assertions. The
@@ -529,14 +919,37 @@ for (const r of results) {
   console.log(`${r.target.file}   杀死 ${killed}/${r.ran.length}（${rate}%）   ${fmtMs(r.ms ?? 0)}`);
   const survived = r.ran.filter((m) => !m.killed);
   if (survived.length > 0) {
-    console.log(`  存活：${survived.map((m) => m.op).join(", ")}`);
-    for (const m of survived) survivors.push({ file: r.target.file, op: m.op });
+    console.log(
+      `  存活：${survived
+        .map((m) => (m.line ? `${m.op} @${m.line} 行` : `${m.op}(聚合 ${m.siteCount} 处)`))
+        .join(", ")}`,
+    );
+    for (const m of survived) {
+      survivors.push({ file: r.target.file, op: m.op, line: m.line, siteCount: m.siteCount });
+      // 存活的多位于变异：它压掉的每一处都没被证明
+      if (m.siteCount > 1) unverifiedSites += m.siteCount;
+    }
   }
 }
 
 const overall = totalRan === 0 ? 0 : Math.round((totalKilled / totalRan) * 100);
 const totalMs = results.reduce((sum, r) => sum + (r.ms ?? 0), 0);
 console.log(`\n总计：杀死 ${totalKilled}/${totalRan}（${overall}%）   耗时 ${fmtMs(totalMs)}`);
+console.log(`  其中 单点杀死 ${strictKilled} · 聚合杀死 ${aggregateKilled}`);
+
+// ⚠️ 这一行是本次改动的核心：把「这个百分比究竟证明了什么」写清楚。
+// 聚合口径下 100% 只意味着「每个算子里至少有一处被覆盖」，不等于每处都被覆盖。
+if (mode === "aggregate" && totalSites > 0) {
+  const covered = totalSites - unverifiedSites;
+  const pct = Math.round((covered / totalSites) * 100);
+  console.log(
+    `口径：aggregate —— 源码共 ${totalSites} 处位点，本次**逐点证明**了约 ${covered} 处（${pct}%），` +
+      `其余 ${unverifiedSites} 处只落在"至少一处被覆盖"的聚合变异里，未单独验证。`,
+  );
+  console.log(`     要拿到「每一处都有断言」的结论，跑：npm run mutation:site（成本约 3.5 倍）`);
+} else if (mode === "site") {
+  console.log(`口径：site —— 本次为**逐位点**判定，${totalRan} 个变异各自只改一处。`);
+}
 
 // 最慢的三个目标点名 —— 全量跑一次要几分钟，瓶颈通常集中在一两个目标。
 const slowest = [...results].sort((a, b) => (b.ms ?? 0) - (a.ms ?? 0)).slice(0, 3);
@@ -567,9 +980,32 @@ if (baselineFailures.length > 0) {
 
 if (survivors.length > MAX_SURVIVORS) {
   console.error(`\nFAIL: ${survivors.length} 个变异存活 —— 这些行为没有断言覆盖：`);
-  for (const s of survivors) console.error(`  ${s.file}  ::  ${s.op}`);
-  console.error("\n处置：给对应行为补断言；若确认是等价变异（语义未变），在脚本里换掉该算子。\n");
+  for (const s of survivors) {
+    const where = s.line ? `@${s.line} 行` : `(聚合 ${s.siteCount} 处)`;
+    console.error(`  ${s.file}  ::  ${s.op} ${where}`);
+  }
+  console.error(
+    "\n处置：给对应行为补断言；若确认是等价变异（语义未变），" +
+      "在 EQUIVALENT_SITES 里加白名单并附理由。\n" +
+      (mode === "site"
+        ? ""
+        : "提示：这是 aggregate 口径。若存活项标着「聚合 N 处」，用 --audit 逐点定位是哪一处。\n"),
+  );
   process.exit(1);
 }
 
-console.log("\nPASS: 无存活变异，测试对目标模块的改动敏感");
+// PASS 也要分清口径 —— 「无存活」在两种口径下证明力不同。
+if (mode === "site") {
+  console.log(
+    `\nPASS: 无存活变异 —— 全部 ${totalRan} 处位点已**逐点**验证（每处单独变异都被断言发现）。`,
+  );
+} else {
+  console.log("\nPASS: 无存活变异 —— 每个算子至少有一处被断言覆盖。");
+  if (unverifiedSites > 0) {
+    console.log(
+      `  ⚠️ 这是 aggregate 口径：${totalSites} 处位点里约 ${unverifiedSites} 处**未逐点验证**，` +
+        `不能读成"每一处都有断言"。`,
+    );
+    console.log(`     需要完整结论时跑：npm run mutation:site`);
+  }
+}

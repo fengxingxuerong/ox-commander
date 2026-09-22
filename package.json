@@ -18,13 +18,16 @@
     "check:unwired": "node scripts/check-unwired.mjs",
     "check:scripts": "node scripts/check-syntax.mjs",
     "check:scripts-wired": "node scripts/check-script-wiring.mjs",
+    "check:masker": "node scripts/masker-selftest.mjs",
     "mutation": "node scripts/mutation-check.mjs --limit=8",
+    "mutation:site": "node scripts/mutation-check.mjs --mode=site --limit=8",
+    "mutation:audit": "node scripts/mutation-check.mjs --mode=site --limit=999",
     "mutation:quick": "node scripts/mutation-check.mjs --tier=1 --limit=1",
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json",
-    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import"
+    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import"
   },
   "dependencies": {
     "react": "^18.3.1",
