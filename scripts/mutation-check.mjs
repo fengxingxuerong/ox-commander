@@ -174,7 +174,14 @@ const TARGETS = [
   { file: "electron/sandbox/circuit-breaker.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
   { file: "electron/sandbox/timeout-gate.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
   { file: "electron/sandbox/file-journal.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
-  { file: "electron/sandbox/snapshot-store.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
+  // ⚠️ 2026-09-22 修正：原为 `test: "src/sandbox-journal.test.ts"`（单数），
+  // **漏挂了 `scheduler.test.ts`** —— batch-guard 的集成路径就在那条文件里，
+  // 未挂的那部分断言此前完全不参与判定（「漏挂测试文件 = 那部分逻辑没有门禁」）。
+  {
+    file: "electron/sandbox/snapshot-store.ts",
+    tests: ["src/sandbox-journal.test.ts", "src/scheduler.test.ts"],
+    tier: 2,
+  },
 
   // ---- 2026-09-22 第三批：引擎层路由/仲裁 + 安全存储 ----
   // 挑这三个的标准是「算子位密度」：router 15 个、keys-store 13 个、batch-guard 7 个

@@ -1248,6 +1248,136 @@ coverage 那边报出 `src/kill-tree.test.ts` 失败（`hasExited` 断言翻转�
 **刻意不纳入变异门禁** —— 它们是进程入口与 re-export barrel，
 纳入需要起 Electron / 独立进程，成本与收益不成比例。
 
-`electron/sandbox/snapshot-store.ts` 虽在门禁内且 2/2 全杀，但
-stmts 80.64% / branch 73.91% 是沙箱层最低，值得下一轮作为**覆盖补强**目标
-（注意：它的变异已全杀，缺口同样在行覆盖而非断言敏感度）。
+`electron/sandbox/snapshot-store.ts` 已在第十五章完成补强。
+
+---
+
+## 十五、第二轮盲区扫描：`snapshot-store.ts` 与**「聚合掩盖位点」**（2026-09-22 晚）
+
+### 15.1 起手：覆盖率反查（同 14.1 的方法，换了目标）
+
+`snapshot-store.ts` 是本轮唯一候选（沙箱层覆盖最低）。补强前：
+
+| 指标 | 前 |
+| --- | --- |
+| Stmts | 80.64% |
+| Branch | 73.91% |
+| Funcs | 76.92% |
+| Lines | 83.03% |
+
+用 JSON reporter 精确定位未覆盖行（面板的 `Uncovered Line #s` 列被截断，
+要么加宽终端，要么走 `--coverage.reporter=json` 自行解析 —— 后者可靠）。
+
+缺口分七组：4 处 catch 分支 · `newlyCreated` 的三重过滤 · `collect` 的
+`statSync` 单文件分支 · `include` 去重 · **两个零调用公开符号**。
+
+### 15.2 两个公开符号：`hasBackup` 与 `withinZones`
+
+- **`hasBackup`**：全仓 **零调用**（连测试都没有）。公开 API，无人使用。
+- **`withinZones`**：只在 `electron/sandbox/index.ts:54` 被 **re-export**，
+  而那个 barrel **没有任何模块 import** —— 生产代码全部走深路径直接引用
+  （`./path-policy`、`./file-journal`）。
+
+两者都不是 `check:unwired` 能抓的（`withinZones` 有 export 链，
+`hasBackup` 是类方法）。这是「**barrel 无人消费**」这一类盲区：
+barrel 本身 0% 覆盖被 14.7 列为"刻意不纳入"，但它**把模块内符号的覆盖拉低了**。
+
+处理：为两者补直接断言（`hasBackup` 含反斜杠/`./` 归一化；`withinZones` 含
+空数组恒假、`srcsibling` 与 `src` 前缀相同但不同目录）。是否删除 barrel 留给后续决策。
+
+### 15.3 🔑 本轮最重要发现：**变异门禁的「聚合掩盖位点」**
+
+`snapshot-store.ts` 的变异目标首跑 **2/2「全杀」** —— 但 **12 个 `continue;` 位点**
+只产生了 **2 个变异**。原因：`continue → break` 算子用 `replaceAll` 全局替换，
+**把 12 处一起改掉**，只要任意一处被杀死就报「杀死」。
+
+**拆单点后实测：5 个位点存活。** 即「2/2 全杀」是**聚合假象**。
+
+这与既有两条教训同族但形态不同：
+
+| 教训 | 形态 | 门禁是否可见 |
+| --- | --- | --- |
+| `check:unwired` 抓不到断言不敏感 | 调用了但没验证 | 否 |
+| **漏挂测试文件** | 挂了 A 文件，B 文件的断言不参与 | 否 |
+| **聚合掩盖位点**（本轮新增） | 算子同时命中 N 处，只报聚合结果 | **否** |
+
+**判别手法**：`--list` 看**算子数**，与源码里**算子字符的出现次数**比对。
+数量不符（本例 2 vs 12）就说明存在聚合。**算子数与位点数不一致 = 必须拆单点。**
+
+**拆单点的临时脚本要点**（`_tmp-snapshot-sites.mjs`，用完即删）：
+`cp` 备份 → 逐行号改一处 → 跑测试 → `cp` 回去 →
+末尾 md5 自校验「字节级一致」→ 打印杀死/存活清单。
+
+### 15.4 存活位点的分类判据
+
+5 个存活位点里 **4 真缺口 + 1 次误判**：
+
+| 行 | 代码 | 判定 | 依据 |
+| --- | --- | --- | --- |
+| 217 | `walk(abs); continue;` | **真缺口** | 父目录里先有子目录时，改 break 会让**其余同级项全丢** |
+| 253 | 同上（`collect` 里） | **真缺口** | 同形代码，必须独立断言 |
+| 279 | `if (seen.has(rel)) continue;` | **真缺口** | `include` 里重复项永远是最后一项 |
+| 280 | `if (!existsSync(...)) continue;` | **真缺口** | 不存在项永远是最后一项 |
+| 111 | `begin` 超预算 `continue` | **真缺口**（我最初判成等价变异） | 见下 |
+
+**⚠️ 111 那次误判值得记**：我第一反应是「`size >= maxFiles` 恒成立，改 break 等价」。
+**错在只看控制流，没看副作用的内容。** `continue` 会让 `skipped` 收集**每一个**
+超预算文件，`break` 只收第一个 —— `token.skipped` 是可观测输出。
+既有那条 `maxFiles: 1` 用例超预算后**只剩 1 个文件**，正好看不出差别。
+
+**判据修正**：判等价变异前，先列出该分支的**全部副作用**（不只是"是否执行"，
+还有"执行几次、收集了什么"）。**副作用是累积型的，continue 与 break 几乎不等价。**
+
+### 15.5 为补 6 处跨平台不可达路径：加 `fsImpl` 测试缝
+
+`readdirSync` 抛 EACCES · dirent 既非文件也非目录（fifo/socket）·
+`rmSync` 被权限拒绝 —— 这三类在 **Windows 上无法构造**，6 处分支长期零覆盖。
+
+`SnapshotStore` 原先用模块级 `import fs`，没有注入点。加了第二个构造参数：
+
+```ts
+constructor(opts: SnapshotStoreOptions, fsImpl: SnapshotFsLike = fs as unknown as SnapshotFsLike)
+```
+
+**与 `ZoneGuard` 的 `FsLike` 是同一既有模式**（`electron/engine/zone-guard.ts:74`）。
+`SnapshotFsLike` 需要 7 个方法（比 `FsLike` 多 `statSync`/`mkdirSync`/`copyFileSync`/`rmSync`），
+所以**没有复用** —— 各模块定义自己需要的子集，避免为了复用而扩大接口。
+
+这是**纯加法**：可选参数 + 默认真 fs，生产行为零变化（`tsc` 过、全量测试零回归）。
+**判断"加测试缝算不算改生产代码"**：只要默认值保持原行为、且不改变任何调用点，
+就属于测试基础设施而非逻辑改动。
+
+### 15.6 顺带修正：**一个目标漏挂了测试文件**
+
+`snapshot-store.ts` 的目标原为 `test: "src/sandbox-journal.test.ts"`（单数），
+**漏挂了 `scheduler.test.ts`** —— `batch-guard → snapshot-store` 的集成路径就在那里。
+这正是既有教训「漏挂测试文件 = 那部分逻辑没有门禁」的同一形态。
+
+改为 `tests: [...]` 数组（脚本支持 `tests` 优先于 `test`，见 `mutation-check.mjs:252`）。
+
+### 15.7 验证
+
+| 项 | 前 → 后 |
+| --- | --- |
+| `snapshot-store.ts` Stmts | 80.64 → **100** |
+| Branch | 73.91 → **95.74** |
+| Funcs | 76.92 → **100** |
+| Lines | 83.03 → **100** |
+| `continue → break` 拆单点 | **12/12 全杀**，源文件 md5 字节级一致 |
+| `&& → ||` 单点 | 注入 `||` 后 **8 条用例变红**（敏感） |
+| 该目标测试文件 | 24 → **80 passed**（+56） |
+| 全量 vitest | 736 → **757 passed** / 6 skipped |
+| 变异门禁 | 单目标 PASS（无存活） |
+
+`branch 95.74%` 的剩余 2 处（行 233/269 附近）是 V8 对**单行 `if` + `continue`**
+产生的隐式 else 分支，其位置报 `undefined`，两个方向实际都走到了 —— **不可消除、
+也不是缺口**。判定方法：把它当 `continue→break` 位点跑一次，能被杀死即证明断言敏感
+（15.7 的拆单点结果已证明）。
+
+### 15.8 仍未纳入（无变化）
+
+五个进程入口 / barrel 文件同 14.7。
+`electron/sandbox/index.ts` 的 barrel 是否该删（无人 import），
+与 14.7 那条合并为**一个待决策项** —— 删 barrel 需先确认无外部消费者
+（含打包配置与 headless 入口）。
+

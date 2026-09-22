@@ -42,6 +42,21 @@ export interface SnapshotStoreOptions {
 const DEFAULT_SKIP_DIRS = new Set(["node_modules", ".git", ".ox-quarantine"]);
 
 /**
+ * The fs surface this module needs. Injected so tests can exercise the paths a
+ * real filesystem cannot produce on every platform — a `readdirSync` that throws
+ * EACCES, a dirent that is neither file nor directory, a delete that is refused.
+ * Defaults to the real `node:fs`, so production behaviour is unchanged.
+ */
+export interface SnapshotFsLike {
+  existsSync(p: string): boolean;
+  statSync(p: string): { isFile(): boolean; isDirectory(): boolean };
+  readdirSync(dir: string, opts: { withFileTypes: true }): fs.Dirent[];
+  mkdirSync(p: string, opts: { recursive: true }): void;
+  copyFileSync(from: string, to: string): void;
+  rmSync(p: string, opts: { force?: boolean; recursive?: boolean; maxRetries?: number }): void;
+}
+
+/**
  * Content backups so a batch can be rolled back.
  *
  * Three rules learned the hard way:
@@ -66,17 +81,19 @@ export class SnapshotStore {
   private readonly backupRoot: string;
   private readonly maxFiles: number;
   private readonly skipDirs: Set<string>;
+  private readonly fsImpl: SnapshotFsLike;
 
-  constructor(opts: SnapshotStoreOptions) {
+  constructor(opts: SnapshotStoreOptions, fsImpl: SnapshotFsLike = fs as unknown as SnapshotFsLike) {
     this.backupRoot = path.resolve(opts.backupRoot);
     this.maxFiles = opts.maxFiles ?? 5_000;
     this.skipDirs = opts.skipDirs ?? DEFAULT_SKIP_DIRS;
+    this.fsImpl = fsImpl;
   }
 
   async begin(scope: SnapshotScope): Promise<SnapshotToken> {
     const rootAbs = path.resolve(scope.root);
     const dirAbs = path.join(this.backupRoot, scope.runId.replace(/[^\w.-]/g, "_"));
-    fs.mkdirSync(dirAbs, { recursive: true });
+    this.fsImpl.mkdirSync(dirAbs, { recursive: true });
     const token: SnapshotToken = {
       id: scope.runId,
       rootAbs,
@@ -96,10 +113,10 @@ export class SnapshotStore {
       const from = path.join(rootAbs, rel);
       const to = path.join(dirAbs, rel);
       try {
-        fs.mkdirSync(path.dirname(to), { recursive: true });
+        this.fsImpl.mkdirSync(path.dirname(to), { recursive: true });
         // A real copy: hard links would share the inode, and in-place writes
         // (fs.writeFileSync on the original path) would corrupt the backup.
-        fs.copyFileSync(from, to);
+        this.fsImpl.copyFileSync(from, to);
         token.backedUp.set(rel, "copy");
       } catch {
         token.skipped.push(rel);
@@ -131,7 +148,7 @@ export class SnapshotStore {
     for (const rel of this.newlyCreated(token)) {
       const abs = path.join(token.rootAbs, rel);
       try {
-        fs.rmSync(abs, { force: true });
+        this.fsImpl.rmSync(abs, { force: true });
         result.removed.push(rel);
       } catch (err) {
         result.skipped.push({ path: rel, reason: (err as Error).message });
@@ -143,7 +160,7 @@ export class SnapshotStore {
   /** Drops the backup directory; call after a successful batch. */
   async commit(token: SnapshotToken): Promise<void> {
     try {
-      fs.rmSync(token.dirAbs, { recursive: true, force: true, maxRetries: 3 });
+      this.fsImpl.rmSync(token.dirAbs, { recursive: true, force: true, maxRetries: 3 });
     } catch {
       // a stuck backup dir is not worth failing a successful batch over
     }
@@ -159,8 +176,8 @@ export class SnapshotStore {
     const backup = path.join(token.dirAbs, rel);
     if (token.backedUp.has(rel)) {
       try {
-        fs.mkdirSync(path.dirname(abs), { recursive: true });
-        fs.copyFileSync(backup, abs);
+        this.fsImpl.mkdirSync(path.dirname(abs), { recursive: true });
+        this.fsImpl.copyFileSync(backup, abs);
         result.restored.push(rel);
       } catch (err) {
         result.skipped.push({ path: rel, reason: (err as Error).message });
@@ -168,9 +185,9 @@ export class SnapshotStore {
       return;
     }
     // No backup: the file did not exist when the batch started.
-    if (fs.existsSync(abs)) {
+    if (this.fsImpl.existsSync(abs)) {
       try {
-        fs.rmSync(abs, { force: true });
+        this.fsImpl.rmSync(abs, { force: true });
         result.removed.push(rel);
       } catch (err) {
         result.skipped.push({ path: rel, reason: (err as Error).message });
@@ -188,7 +205,7 @@ export class SnapshotStore {
     const walk = (dir: string): void => {
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = this.fsImpl.readdirSync(dir, { withFileTypes: true });
       } catch {
         return;
       }
@@ -213,7 +230,7 @@ export class SnapshotStore {
       // （注释里刻意不写会命中变异算子的运算符字面量：那些算子是 replaceAll，
       // 会连注释一起改写，制造"只改注释不改行为"的假存活。）
       const dirAbs = path.join(token.rootAbs, zone);
-      if (fs.existsSync(dirAbs)) walk(dirAbs);
+      if (this.fsImpl.existsSync(dirAbs)) walk(dirAbs);
     }
     return out;
   }
@@ -224,7 +241,7 @@ export class SnapshotStore {
     const walk = (dir: string): void => {
       let entries: fs.Dirent[];
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = this.fsImpl.readdirSync(dir, { withFileTypes: true });
       } catch {
         return;
       }
@@ -245,8 +262,8 @@ export class SnapshotStore {
     for (const zone of zones) {
       // Same as above: `path.join` normalises "." and "" to the root by itself.
       const dirAbs = path.join(rootAbs, zone);
-      if (!fs.existsSync(dirAbs)) continue;
-      const stat = fs.statSync(dirAbs);
+      if (!this.fsImpl.existsSync(dirAbs)) continue;
+      const stat = this.fsImpl.statSync(dirAbs);
       if (stat.isFile()) {
         const rel = toRel(path.relative(rootAbs, dirAbs));
         if (!seen.has(rel)) {
@@ -260,7 +277,7 @@ export class SnapshotStore {
     for (const extra of include) {
       const rel = toRel(extra);
       if (seen.has(rel)) continue;
-      if (!fs.existsSync(path.join(rootAbs, rel))) continue;
+      if (!this.fsImpl.existsSync(path.join(rootAbs, rel))) continue;
       seen.add(rel);
       out.push(rel);
     }
