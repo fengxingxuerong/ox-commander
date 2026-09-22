@@ -1381,3 +1381,112 @@ constructor(opts: SnapshotStoreOptions, fsImpl: SnapshotFsLike = fs as unknown a
 与 14.7 那条合并为**一个待决策项** —— 删 barrel 需先确认无外部消费者
 （含打包配置与 headless 入口）。
 
+
+---
+
+## 十六、全量 site 审计：**真实覆盖率 84%，不是 100%**（2026-09-23）
+
+### 16.1 第一次拿到可比的数字
+
+第十五章修好工具（`fc14427`）之后，第一次跑通**全量逐位点审计**：
+
+```
+node scripts/mutation-check.mjs --mode=site --limit=999
+总计：杀死 486/581（84%）   耗时 1251.0s（20.9 min）
+```
+
+对照同一份代码的聚合口径：**152/152（100%）**。
+
+差值就是 `replaceAll` 造成的聚合：583 处位点被压成 153 个变异，
+"任一处被杀死"即报杀死。**84% 才是这个项目当前的真实断言敏感度。**
+
+| 口径 | 数字 | 证明力 |
+| --- | --- | --- |
+| `aggregate`（CI / verify） | 152/152（100%） | 每个算子**至少一处**被覆盖 |
+| `site`（周期性审计） | 486/581（**84%**） | 每一处分别验证 |
+
+### 16.2 成本与口径定位
+
+- 实测 **1.6–2.2s / 变异**，全量 581 个约 21 分钟。
+- CI 的 `mutation-full` job 是 `timeout-minutes: 20` → **`npm run mutation` 仍走 aggregate**。
+- `mutation:audit`（`--mode=site --limit=999`）定位为**周期性审计**，不进每次 push。
+- 因此：**aggregate 是快门禁，site 是审计**。两者的数字不可互换、不可混读。
+
+### 16.3 掩空器（`maskNonCode`）：三个实测踩坑
+
+定位位点前必须挖空注释 / 字符串 / 正则，否则注释里的算子字面量在 site 口径下
+是**永远存活**的假红。实现过程中踩的三坑：
+
+| # | 现象 | 根因 |
+| --- | --- | --- |
+| 1 | `Cannot assign to read only property` | `src.slice()` 是字符串（不可变），要 `split("")` + `join("")` |
+| 2 | `command-policy.ts` 位点 6 → **0** | `/[;&\|`$<>^!]/` **正则里含反引号** → 状态机进模板态后**跨行不闭合，吞掉整个文件** |
+| 3 | 模板 `${a === b}` 的真代码被挖掉 | 模板表达式要按代码处理 → 加 `tmplStack` 表达式栈（含 `{}` 嵌套深度） |
+
+坑 2 是本轮最有价值的发现：**它正是这个门禁要防的「静默归零」，发生在门禁自己身上。**
+
+三道防线：正则启发式识别（失败则回退为普通字符，损害限制在一行）·
+结束时状态未闭合则**抛错** · `位点数 + 掩掉数 === 原文命中数` 自洽校验。
+
+自测转正为 `scripts/masker-selftest.mjs`（**24 例**，含"未闭合注释必须抛错"），
+以 `check:masker` 接进 `verify`。
+
+### 16.4 ⚠️ 两个自踩的坑
+
+1. **门禁运行时连"读源文件"都不可靠**。后台审计跑着的时候 `sed` 读
+   `path-policy.ts` 得到 `return rel === z && rel.startsWith(...)`，
+   差点据此报一个不存在的 bug —— 那是**正在生效的变异体**（真源码是 `||`）。
+2. **审计结论会过时**。20:35 那份 tier 1 审计（25 存活）早于 `fc14427`，
+   而 22:19–00:26 的提交已修掉其中大部分。**引用审计数字前先核对时间戳。**
+
+### 16.5 已修（本轮与紧接的一批提交）
+
+| 文件 | site 口径 | 说明 |
+| --- | --- | --- |
+| `keys-store.ts` | 18/19 → **19/19** | `isEncryptedAtRest` 的 catch：探测失败不能谎报"已加密" |
+| `scoped-env.ts` | 3/5 → **5/5** | 两处 `continue`：被跳过项排在**最前**时后续变量不能丢 |
+| `schema.ts` | → **17/17** | `isObject` 守卫 |
+| `kill-tree.ts` | → **11/11** | |
+| `path-policy.ts` | → 27/33 | 仍有 6 处（见积压） |
+| `scheduler.ts` | → 11/15 | |
+| `batch-guard.ts` | → **10/10** | |
+
+沙箱核心已全绿：`command-policy` 6/6 · `snapshot-store` 13/13 ·
+`file-journal` 11/11 · `kill-tree` 11/11 · `verifier` 9/9 · `zone-guard` 6/6。
+
+### 16.6 剩余积压（95 处，按安全影响半径排序）
+
+| 文件 | 存活 | 性质 |
+| --- | --- | --- |
+| `electron/agents/manifest-schema.ts` | 14 | 清单校验（决定能否接单） |
+| `headless/protocol.ts` | 11 | 宿主↔进程契约面 |
+| `electron/engine/orchestrator.ts` | 9 | 调度主链路 |
+| `shared/http-clients.ts` | 7 | LLM 通信 + 响应体预算 |
+| `electron/agents/sensenova-api.ts` | 7 | 默认适配器（新装用户走这条） |
+| `electron/agents/http-bridge.ts` | 7 | |
+| `electron/sandbox/path-policy.ts` | **6** | **写入允许落在哪（安全边界）** |
+| `shared/glob.ts` | **5** | **zone 匹配依赖的路径匹配** |
+| `electron/engine/scheduler.ts` | 4 | |
+| `electron/engine/router.ts` | 4 | |
+| `shared/zone-coverage.ts` | **3** | **zone 强制执行** |
+| 其余 12 个文件 | ≤3 | |
+
+**建议下一轮顺序**：`path-policy` → `glob` → `zone-coverage` → `protocol`
+→ `orchestrator` → `manifest-schema`。
+
+### 16.7 ⚠️ 一个待解决的工具缺口：平台相关等价变异
+
+`path-policy.ts:54`：
+
+```ts
+const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform === "darwin";
+```
+
+在 Windows 上跑审计时，第二个 `===`（`=== "darwin"`）改成 `!==` 后整式仍为
+`true || true = true` —— **在 Windows 上与原文等价，但在 Linux CI 上会被杀死**。
+
+现有 `EQUIVALENT_SITES` 按 `{file, op, line}` 匹配，会**把同一行上两个位点一起
+白名单化**，其中一个是本机可杀的。需要给白名单加"该行第几个位点"（`occ`）才能精确表达。
+
+在此之前，平台相关分支的存活项**只能靠在另一 OS 上跑一次审计**来区分 ——
+这是 site 口径目前已知的最大盲区。
