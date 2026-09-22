@@ -91,6 +91,51 @@ describe("scopedEnv · explicit grants", () => {
     const env = scopedEnv({ parent: PARENT, extraKeys: ["OX_UNRELATED_SETTING"] });
     expect(env.OX_UNRELATED_SETTING).toBe("whatever");
   });
+
+  /**
+   * 下面两条是 site 口径实测出的存活位点（本文件此前 `continue → break` 分不开）。
+   * 共同根因与全仓多次出现的一样：**被跳过的项在既有用例里永远是最后一项**，
+   * 于是「跳过本项继续」与「直接终止循环」行为完全一致。
+   *
+   * 这里的后果比"少抄几个变量"严重：改成 break 之后，
+   * 只要**第一项**被跳过，后面**所有**环境变量都被丢弃 ——
+   * 子进程会拿到一个几乎空的环境（PATH 都没有）。
+   */
+  it("[122] 值为 undefined 的项排在前面时，后面的变量照常传递", () => {
+    // `if (value === undefined) continue;` —— 该分支此前零覆盖。
+    // 键顺序即断言：UNDEFINED_FIRST 必须排在 PATH / HOME 之前。
+    const env = scopedEnv({
+      parent: {
+        UNDEFINED_FIRST: undefined,
+        PATH: "/usr/bin:/bin",
+        HOME: "/home/op",
+        LANG: "en_US.UTF-8",
+      },
+    });
+    expect(env.PATH).toBe("/usr/bin:/bin");
+    expect(env.HOME).toBe("/home/op");
+    expect(env.LANG).toBe("en_US.UTF-8");
+    expect("UNDEFINED_FIRST" in env).toBe(false);
+  });
+
+  it("[129] 显式授予的项排在前面时，后续变量不会被丢弃", () => {
+    // grants 分支命中后的 `continue;` —— 此前该分支只出现在"授予项在最后"的用例里。
+    // 键顺序即断言：DB_PASSWORD（被授予）排在最前，后面还有普通变量。
+    const env = scopedEnv({
+      parent: {
+        DB_PASSWORD: "hunter2",
+        PATH: "/usr/bin:/bin",
+        HOME: "/home/op",
+        NODE_ENV: "production",
+      },
+      extraKeys: ["DB_PASSWORD"],
+    });
+    expect(env.DB_PASSWORD).toBe("hunter2");
+    // 授予项之后不能中断遍历 —— 否则这些进程基础变量全丢
+    expect(env.PATH).toBe("/usr/bin:/bin");
+    expect(env.HOME).toBe("/home/op");
+    expect(env.NODE_ENV).toBe("production");
+  });
 });
 
 describe("scopedEnv · diagnostics", () => {
