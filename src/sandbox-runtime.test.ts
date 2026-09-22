@@ -470,10 +470,18 @@ describe("CircuitBreaker", () => {
 describe("verifyProject sandbox gate", () => {
   const cmd = (command: string, args: string[]): VerificationCommand => ({ kind: "test", command, args });
 
-  /** Writes a throwaway script; verification runs script files, never inline eval. */
+  /**
+   * Writes a throwaway script; verification runs script files, never inline eval.
+   *
+   * 创建的**文件**也必须进 `dirs`，否则 `afterEach` 只收目录不收它 ——
+   * 实测本文件跑一轮就留下一个 `ox-verify-*.js`，累积到 1224 个（约 2.6MB）。
+   * 这类"清理只覆盖了一半资源"的漏网，比完全没有清理更隐蔽：
+   * `dirs` 的存在会让人以为清理已经覆盖了。
+   */
   function script(body: string): string {
     const file = path.join(os.tmpdir(), `ox-verify-${Math.random().toString(36).slice(2)}.js`);
     fs.writeFileSync(file, body, "utf8");
+    dirs.push(file);
     return file;
   }
 
