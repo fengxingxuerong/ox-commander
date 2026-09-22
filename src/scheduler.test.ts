@@ -341,6 +341,35 @@ describe("digest", () => {
   });
 });
 
+describe("Scheduler · 派单失败的错误分类", () => {
+  it("errorClass 取自 classifyFailure，而不是一律兜底 unknown", async () => {
+    // `errorClass: classifyFailure(msg) || "unknown"`
+    // 改成 `&&` 之后：分类**成功**时（返回真值字符串）反而被替成 "unknown"，
+    // 分类失败时（同样返回真值 "unknown"）也是 "unknown" —— 于是所有失败都记成 unknown，
+    // 运维侧按 errorClass 做统计 / 告警会全部失真。
+    //
+    // 所以这里必须用**能命中分类规则**的消息（"超时" → "timeout"）：
+    // 若用 "boom"（→ "unknown"），两个版本结果相同，看不出差别。
+    const boom = {
+      meta: { id: "a1", name: "a1", kind: "api" as const },
+      async probe() {
+        return true;
+      },
+      async dispatch() {
+        throw new Error("调用超时（timeout）");
+      },
+      async *collect() {
+        yield { kind: "failed" as const, text: "x", timestamp: Date.now() };
+      },
+      async abort() {},
+    } as unknown as AgentAdapter;
+    const sched = new Scheduler([boom], []);
+    const outcomes = await sched.runBatch([task("t1", "src/core")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.errorClass).toBe("timeout");
+  });
+});
+
 describe("Scheduler · 429 感知派发节流", () => {
   function rateLimitAdapter(state: { failNext: boolean }, dispatched: string[]): AgentAdapter {
     return {
