@@ -101,8 +101,17 @@ export const DEFAULT_DENIED_GIT_SUBCOMMANDS: readonly string[] = [
  * `shell: true`: on Windows, `.cmd`/`.bat` shims (npm, yarn, gradle …) are
  * executed through `cmd.exe` by libuv, which re-parses the argument string.
  * Rejecting them here is what makes that path safe.
+ *
+ * Windows-specific additions:
+ * - `^` is the cmd.exe escape character — it can splice tokens together after
+ *   this allow list has judged them.
+ * - `!` drives delayed expansion where the host has it enabled.
+ * - `%VAR%` (pair form) is expanded by cmd.exe re-parsing the shim command
+ *   line; e.g. `--key=%SENSENOVA_API_KEY%` would move the real secret into the
+ *   child's argv. A lone `%` with no closing pair (e.g. `100%`) is left alone
+ *   by cmd.exe and therefore stays allowed.
  */
-const SHELL_METACHARACTERS = /[;&|`$<>]|\$\(|\r|\n/;
+const SHELL_METACHARACTERS = /[;&|`$<>^!]|%[A-Za-z0-9_()#][^%]*%|\$\(|\r|\n/;
 
 /**
  * Inline-evaluation flags. `node -e`, `python -c` … turn a whitelisted

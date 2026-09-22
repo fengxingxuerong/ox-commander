@@ -80,6 +80,55 @@ describe("CommandPolicy", () => {
     }
   });
 
+  it("refuses the cmd.exe-only metacharacters ^ ! and %VAR% expansion", () => {
+    const p = createDefaultCommandPolicy();
+    const bad = [
+      // `%VAR%` is expanded by cmd.exe when it re-parses a .cmd/.bat shim —
+      // e.g. `--key=%SENSENOVA_API_KEY%` would put the real secret in the
+      // child's argv, where it leaks into process listings and logs.
+      ["npm", ["run", "build", "--key=%SENSENOVA_API_KEY%"]],
+      ["npm", ["run", "%PATH:~0,3%"]],
+      // `^` is the cmd escape character: it can splice tokens back together
+      // after this policy has allow-listed them.
+      ["npm", ["run", "bu^ild"]],
+      // `!` drives delayed expansion where the host enables it.
+      ["npm", ["run", "build!"]],
+      ["node", ["scripts/check.js", "a!b"]],
+    ] as const;
+    for (const [cmd, args] of bad) {
+      const d = p.check(cmd, [...args]);
+      expect(d.ok, `${cmd} ${args.join(" ")} should be rejected`).toBe(false);
+      if (!d.ok) expect(d.reason).toContain("元字符");
+    }
+    // A bare `%` with no closing pair (e.g. `100%`) is not an expansion —
+    // cmd.exe leaves it alone, so the policy does too.
+    expect(p.check("npm", ["run", "test", "--", "--coverage", "100%"]).ok).toBe(true);
+  });
+
+  it("keeps plain verification commands working (golden set)", () => {
+    // Pinned BEFORE tightening the metacharacter set: every line here is a
+    // command real repair/verification loops run. If a new character class
+    // ever breaks one of these, this is the test that screams.
+    const p = createDefaultCommandPolicy();
+    const golden: Array<[string, string[]]> = [
+      ["npm", ["test"]],
+      ["npm", ["run", "build"]],
+      ["npm", ["run", "test", "--", "--coverage"]],
+      ["node", ["ox-scripts/build.js"]],
+      ["node", ["--test", "tests/app.test.js"]],
+      ["node", ["scripts/check.js", "--max-old-space-size=4096"]],
+      ["npx", ["tsc", "-b"]],
+      ["tsc", ["-b", "tsconfig.electron.json"]],
+      ["git", ["diff", "--stat"]],
+      ["git", ["status", "--porcelain"]],
+      ["git", ["log", "--oneline", "-5"]],
+    ];
+    for (const [cmd, args] of golden) {
+      const d = p.check(cmd, [...args]);
+      expect(d.ok, `${cmd} ${args.join(" ")} should stay allowed`).toBe(true);
+    }
+  });
+
   it("refuses inline evaluation, which would sidestep the allow list entirely", () => {
     const p = createDefaultCommandPolicy();
     for (const [cmd, args] of [
