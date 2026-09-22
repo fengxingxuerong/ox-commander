@@ -4,7 +4,10 @@ import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { DEFAULT_FORBIDDEN_WRITE, PathPolicy } from "../electron/sandbox/path-policy";
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-policy-"));
+// Realpath with `.native` on purpose: mkdtemp may return an 8.3 short-name
+// path (e.g. `ADMIN~1` for a non-ASCII user directory), and PathPolicy now
+// resolves the root the same way — the test baseline must use the same form.
+const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ox-policy-")));
 
 afterAll(() => {
   try {
@@ -116,6 +119,65 @@ describe("PathPolicy.assertWritable", () => {
     const p = policy({ delegatedWrite: ["**"], zoneMode: "legacy" });
     // `**` delegation is broad, but the safety floor still wins.
     const d = p.assertWritable("package.json", "src");
+    expect(d.ok).toBe(false);
+    if (!d.ok) expect(d.reason).toContain("受保护路径");
+  });
+
+  it("refuses protected paths written in the wrong case (P1-5)", () => {
+    // On a case-insensitive filesystem `PACKAGE.JSON` IS `package.json`; a
+    // case-sensitive glob match lets the agent overwrite the manifest anyway.
+    const ci = process.platform === "win32" || process.platform === "darwin";
+    for (const p of ["PACKAGE.JSON", "Package.json", "PACKAGE-LOCK.JSON", ".ENV", ".Env.Local", "Node_Modules/x.js"]) {
+      const d = policy().assertWritable(p);
+      if (ci) {
+        expect(d.ok, `${p} should be rejected on a case-insensitive fs`).toBe(false);
+        if (!d.ok) expect(d.reason).toContain("受保护路径");
+      } else {
+        // A case-sensitive fs really does treat these as different files.
+        expect(d.ok, `${p} is a distinct name on a case-sensitive fs`).toBe(true);
+      }
+    }
+  });
+
+  it("refuses a junction that points outside the project (P1-5)", () => {
+    if (process.platform !== "win32") return; // junctions are a Windows concept
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-pathpolicy-out-"));
+    try {
+      fs.mkdirSync(path.join(root, "src"), { recursive: true });
+      fs.symlinkSync(outside, path.join(root, "src", "out-link"), "junction");
+      // A purely lexical check resolves this to root/src/out-link/x.js — inside.
+      // The real location is `outside`, and the write must be judged there.
+      const d = policy().assertWritable("src/out-link/escape.js");
+      expect(d.ok).toBe(false);
+      if (!d.ok) expect(d.reason).toContain("越出项目根目录");
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("still allows a junction that resolves back inside the project (golden)", () => {
+    if (process.platform !== "win32") return;
+    fs.mkdirSync(path.join(root, "real-dir"), { recursive: true });
+    fs.symlinkSync(path.join(root, "real-dir"), path.join(root, "in-link"), "junction");
+    const d = policy().assertWritable("in-link/ok.js");
+    expect(d.ok).toBe(true);
+    if (d.ok) {
+      // The decision must expose the REAL location, not the link path.
+      expect(d.abs.toLowerCase()).toBe(path.join(root, "real-dir", "ok.js").toLowerCase());
+    }
+  });
+
+  it("resolves 8.3 short names before the protected check (P1-5)", () => {
+    if (process.platform !== "win32") return;
+    fs.mkdirSync(path.join(root, "node_modules"), { recursive: true });
+    let short: string;
+    try {
+      short = fs.realpathSync.native(path.join(root, "NODE_M~1"));
+    } catch {
+      return; // this volume has 8.3 name generation disabled — nothing to test
+    }
+    expect(path.basename(short).toLowerCase()).toBe("node_modules");
+    const d = policy().assertWritable("NODE_M~1/pwn.js");
     expect(d.ok).toBe(false);
     if (!d.ok) expect(d.reason).toContain("受保护路径");
   });
