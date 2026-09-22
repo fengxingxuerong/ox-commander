@@ -42,6 +42,22 @@ describe("PathPolicy.assertWritable", () => {
     if (!d.ok) expect(d.reason).toContain("绝对路径");
   });
 
+  it("两种绝对路径形态都要拒绝，不能只认当前平台那一种", () => {
+    // 上一条用例只测了**平台对上号**的那一种，于是守卫
+    // `path.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath.trim())`
+    // 里的 `||` 改成 `&&` 之后照样通过：
+    //   win32 测 "C:/Windows/…" → 两个条件都成立 → `true && true` 仍为 true
+    //   posix 测 "/etc/passwd"  → 第一个条件成立 → 另一种形态根本没被覆盖
+    //
+    // 而两种形态**各自**都足以构成绝对路径，任何一个条件单独成立都必须拒绝 ——
+    // 漏掉的那一种就是"写穿沙箱根"的入口。
+    const p = policy();
+    for (const abs of ["C:/Windows/system32/x.dll", "/etc/passwd"]) {
+      const d = p.assertWritable(abs, ".");
+      expect(d.ok).toBe(false);
+    }
+  });
+
   it("rejects traversal, including the encoded-looking variants", () => {
     for (const p of ["../outside.js", "src/../../outside.js", "a/../../b.js"]) {
       const d = policy().assertWritable(p);

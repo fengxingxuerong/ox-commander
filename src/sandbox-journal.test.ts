@@ -156,6 +156,60 @@ describe("FileJournal", () => {
     expect(ops).toEqual(["create:src/a.js", "modify:src/z.js"]);
   });
 
+  it("有多个新增时不会在第一个就停止遍历", () => {
+    // 与上一条同源但更锋利：上一条只有 1 个 create，于是"在第一个 create 处停下"
+    // 与"继续遍历"看起来一样（后面只剩 1 个 modify，恰好也能被第二个循环补上）。
+    //
+    // 断言只数**数量**、不依赖遍历顺序 —— `walkStat` 的键序由 readdir 决定，
+    // 写死字典序会让用例在别的文件系统上变脆。
+    const root = scratch("journal-multi-create");
+    write(root, "src/base.js", "b");
+    const journal = new FileJournal();
+    const token = journal.begin(root, ["src"]);
+
+    write(root, "src/a.js", "1");
+    write(root, "src/m.js", "2");
+    write(root, "src/z.js", "3");
+    write(root, "src/base.js", "changed-longer");
+
+    const changes = journal.changed(token);
+    const count = (op: string) => changes.filter((c) => c.op === op).length;
+    // `continue → break` 会在第一个新文件处终止，后面两个 create 与那个 modify 全丢
+    expect(count("create")).toBe(3);
+    expect(count("modify")).toBe(1);
+    expect(changes).toHaveLength(4);
+  });
+
+  it("lastStats 的分类计数与 changes 实际内容一致", () => {
+    // `lastStats` 的三个计数是
+    //   `changes.filter((c) => c.op === "create").length`
+    // 这类表达式。任一 `===` 改成 `!==` 之后，计数变成"**不是**该类型的条数"。
+    //
+    // 场景特意让三类数量**互不相等**（3 / 1 / 0）：
+    // 若取 2 create + 1 modify + 1 delete，"非 create" 恰好也是 2，变异后会假绿。
+    const root = scratch("journal-stats");
+    write(root, "src/old.js", "o");
+    const journal = new FileJournal();
+    const token = journal.begin(root, ["src"]);
+
+    write(root, "src/new1.js", "a");
+    write(root, "src/new2.js", "b");
+    write(root, "src/new3.js", "c");
+    write(root, "src/old.js", "changed-and-longer");
+
+    const changes = journal.changed(token);
+    const stats = journal.stats();
+    const count = (op: string) => changes.filter((c) => c.op === op).length;
+
+    expect(count("create")).toBe(3);
+    expect(count("modify")).toBe(1);
+    expect(count("delete")).toBe(0);
+    // 关键：stats 必须与 changes 自身一致，而不是各算各的
+    expect(stats.create).toBe(3);
+    expect(stats.modify).toBe(1);
+    expect(stats.delete).toBe(0);
+  });
+
   it("detects create / modify / delete without reading file contents", () => {
     const root = scratch("journal");
     write(root, "src/a.js", "one");

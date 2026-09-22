@@ -163,6 +163,25 @@ describe("killTree · guards", () => {
     expect(() => killTree(child)).not.toThrow();
   });
 
+  it("does not even attempt to spawn a killer when the pid is missing", async () => {
+    // 上一条用例看不到这个：它让 `spawnImpl` 抛错，而 `killTree` 的 win32 分支
+    // 把 spawn 包在 try/catch 里（故意如此，"spawn 失败要落回可移植路径"），
+    // 于是"本不该 spawn 却 spawn 了"这件事被吞掉、测试照样绿。
+    //
+    // 守卫是 `if (!child || child.pid === undefined) return`。
+    // 改成 `&&` 后，`{pid: undefined}` 会一路走到 `spawn("taskkill", …)`，
+    // 带着字面量 "undefined" 去杀一个不存在的 PID。
+    //
+    // 固定为 win32：只有那条分支才会 spawn（非 Windows 直接走 portableKill）。
+    await withPlatform("win32", async () => {
+      h.spawnCalls.length = 0;
+      const child = fakeChild({ pid: undefined });
+      killTree(child);
+      expect(h.spawnCalls).toHaveLength(0);
+      expect(child.kill).not.toHaveBeenCalled();
+    });
+  });
+
   it("uses plain SIGTERM→SIGKILL escalation off Windows", async () => {
     await withPlatform("linux", async () => {
       const child = fakeChild();

@@ -344,6 +344,16 @@ function siteMutant(source, site, op) {
  */
 const EQUIVALENT_SITES = [
   { file: "electron/engine/router.ts", op: "&& → ||", line: 193 },
+  // `if (!title || !command) return;` —— 改成 `&&` 后，"只缺一个字段"的 smoke 条目
+  // 不再被提前 return，会带着 `undefined` 被 push 进 smoke 数组。
+  //
+  // 但**观察不到**：`requireString` 在缺字段时已经把问题写进 `issues`，
+  // 函数末尾 `if (issues.length) throw new SchemaValidationError(issues)` 必然抛错，
+  // 那个数组随之被丢弃。抛错的类型与消息在两种版本下完全一致。
+  //
+  // 换句话说这是"副作用发生了但被后续抛错抹掉"的等价 —— 要让它可观测，
+  // 得改生产代码（例如让校验失败也回传已解析的部分），代价不对。
+  { file: "shared/schema.ts", op: "|| → &&", line: 184 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

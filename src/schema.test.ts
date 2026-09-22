@@ -52,6 +52,17 @@ describe("parseTaskList", () => {
     expect(() => parseTaskList(bad)).toThrow(/unknown task/);
   });
 
+  it("tasks 不是数组时给出校验错误，而不是让 TypeError 冒出去", () => {
+    // 守卫是 `!Array.isArray(rawTasks) || rawTasks.length === 0`。
+    // 改成 `&&` 后：`tasks: "string"` 走 `true && undefined` → **假** → 不抛错，
+    // 紧接着 `rawTasks.map(...)` 抛 TypeError —— 调用方拿到运行时崩溃，
+    // 而不是可读的 "tasks must be a non-empty array"。
+    for (const bad of ["a-string", 42, {}, null]) {
+      expect(() => parseTaskList({ ...valid, tasks: bad })).toThrow(SchemaValidationError);
+    }
+    expect(() => parseTaskList({ ...valid, tasks: "a-string" })).toThrow(/non-empty array/);
+  });
+
   it("rejects path traversal zones", () => {
     const bad = {
       tasks: [{ ...valid.tasks[0], zone: "../etc" }],
