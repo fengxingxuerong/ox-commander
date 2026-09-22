@@ -172,6 +172,20 @@ const TARGETS = [
   { file: "electron/sandbox/timeout-gate.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
   { file: "electron/sandbox/file-journal.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
   { file: "electron/sandbox/snapshot-store.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
+
+  // ---- 2026-09-22 第三批：引擎层路由/仲裁 + 安全存储 ----
+  // 挑这三个的标准是「算子位密度」：router 15 个、keys-store 13 个、batch-guard 7 个
+  // —— 位点多意味着同样的接入成本能发现更多断言缺口。
+  // batch-guard 挂**全部**三个测试文件：一个模块被多文件覆盖时只挂一个，
+  // 另一半断言完全不参与判定（`store.ts` 上踩过这个坑）。
+  { file: "electron/engine/router.ts", test: "src/router.test.ts", tier: 2 },
+  { file: "electron/keys-store.ts", test: "src/keys-store.test.ts", tier: 2 },
+  {
+    file: "electron/engine/batch-guard.ts",
+    tests: ["src/sandbox-journal.test.ts", "src/scheduler.test.ts", "src/audit-log.test.ts"],
+    tier: 2,
+  },
+  { file: "shared/graph.ts", test: "src/graph.test.ts", tier: 2 },
 ];
 
 /**
@@ -207,6 +221,34 @@ const OPERATORS = [
   { name: "return false → true", apply: (s) => s.replaceAll("return false", "return true") },
   { name: "继续(continue) → 中断(break)", apply: (s) => s.replaceAll(/\bcontinue;/g, "break;") },
 ];
+
+/**
+ * 等价变异排除名单：这些位点替换后**语义不变**，存活不代表测试有缺口。
+ * 格式：`{ file, op, line }`，line 为源文件 1-based 行号。
+ *
+ * - `electron/engine/router.ts:193` `&& → ||`：该 `&&` 门控的 tie-break 只在
+ *   「两边 legacy 标记不同」时才有实际效果；换成 `||` 后分支会对
+ *   legacy-legacy 对提前返回，但 declared 候选在任何情况下都 pairwise 压过
+ *   legacy 候选，最终 winner 的 agentId/score/reason 均不变 —— 在公开 API
+ *   （RoutingDecision / onDecision）上不可观察，属于等价变异。
+ *
+ * ⚠️ 行号是锚点：router.ts 该行如果移动，变异会重新出现并让门禁变红 ——
+ * 那是故意的（fail-safe），届时重新评估是否仍是等价位点。
+ */
+const EQUIVALENT_SITES = [
+  { file: "electron/engine/router.ts", op: "&& → ||", line: 193 },
+];
+
+/** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
+function changedLines(original, mutant) {
+  const a = original.split("\n");
+  const b = mutant.split("\n");
+  const out = [];
+  for (let i = 0; i < Math.max(a.length, b.length); i++) {
+    if (a[i] !== b[i]) out.push(i + 1);
+  }
+  return out;
+}
 
 const args = process.argv.slice(2);
 const onlyFile = args.find((a) => a.startsWith("--file="))?.slice(7);
@@ -347,9 +389,17 @@ for (const target of targets) {
   const filePath = path.join(ROOT, target.file);
   const original = fs.readFileSync(filePath, "utf8");
 
-  const all = OPERATORS.map((op) => ({ op: op.name, source: op.apply(original) })).filter(
-    (m) => m.source !== original,
-  );
+  const excluded = EQUIVALENT_SITES.filter((e) => e.file === target.file);
+  const all = OPERATORS.map((op) => ({ op: op.name, source: op.apply(original) }))
+    .filter((m) => m.source !== original)
+    // 等价变异排除：只有当变异**只**触碰名单内的位点时才跳过；
+    // 同时命中非等价位点的变异照常参与判定。
+    .filter((m) => {
+      const sites = excluded.filter((e) => e.op === m.op);
+      if (sites.length === 0) return true;
+      const lines = changedLines(original, m.source);
+      return !lines.every((l) => sites.some((e) => e.line === l));
+    });
   const mutants = all.slice(0, limit);
 
   if (listOnly) {

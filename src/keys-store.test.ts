@@ -93,6 +93,18 @@ describe("KeysStore basics", () => {
     }
   });
 
+  it("reports configured when only the store has the key", () => {
+    // No env var involved: `configured` must come from the store value alone —
+    // the check is env ∪ store, not env ∩ store. (`get()` prefers env, so an
+    // env-set case can never distinguish the two sides of that operator.)
+    const file = scratchFile();
+    const store = new KeysStore(file, fakeCrypto());
+    store.set("OX_TEST_STORE_ONLY", "from-store");
+    expect(store.status(["OX_TEST_STORE_ONLY"])).toEqual([
+      { envVar: "OX_TEST_STORE_ONLY", configured: true, source: "store" },
+    ]);
+  });
+
   it("clears a key on a blank value and rejects a malformed name", () => {
     const file = scratchFile();
     const store = new KeysStore(file, fakeCrypto());

@@ -151,6 +151,17 @@ describe("CapabilityRouter.assign", () => {
     expect(createCapabilityRouter().assign(ctx).agentId).toBeUndefined();
   });
 
+  it("reports no agent for a legacy-only pool when fallback is disabled", () => {
+    // `fallback: "none"` must also govern the legacy short-circuit, not just
+    // the scored path — otherwise a v1-only registry keeps handing out
+    // round-robin assignments after the host asked the router to stop guessing.
+    const t = task("src/app", "backend-dev");
+    const { candidates } = build([{ id: "a1" }], t);
+    const d = createCapabilityRouter({ fallback: "none" }).assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBeUndefined();
+    expect(d.score).toBe(0);
+  });
+
   it("falls back to round-robin when every candidate is filtered out by scoring", () => {
     const t = task("src/app", "backend-dev");
     // Bypass the registry's hard filter on purpose: `list()` keeps the
