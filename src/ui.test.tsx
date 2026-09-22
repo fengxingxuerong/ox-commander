@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { AgentsPanel } from "./components/AgentsPanel";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -366,6 +367,100 @@ describe("PrdReviewPage", () => {
   });
 });
 
+describe("AgentsPanel interactions", () => {
+  it("probes, toggles and unregisters agents through the bridge", async () => {
+    render(<AgentsPanel />);
+    expect(await screen.findByText("SenseNova 执行器")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: /健康检查/ }));
+    await waitFor(() => expect(window.oxCommander.probeAgents).toHaveBeenCalled());
+    expect(await screen.findByText("可达")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "停用" }));
+    await waitFor(() =>
+      expect(window.oxCommander.toggleAgent).toHaveBeenCalledWith("sensenova-api", false),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "注销" }));
+    await waitFor(() =>
+      expect(window.oxCommander.unregisterAgent).toHaveBeenCalledWith("sensenova-api", 5000),
+    );
+    expect(await screen.findByText(/已注销 sensenova-api/)).toBeTruthy();
+  });
+
+  it("shows the unregister failure instead of pretending it worked", async () => {
+    vi.mocked(window.oxCommander.unregisterAgent).mockResolvedValue({
+      ok: false,
+      error: "drain 超时：仍有任务在跑",
+    } as never);
+    render(<AgentsPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "注销" }));
+    expect(await screen.findByText("drain 超时：仍有任务在跑")).toBeTruthy();
+  });
+
+  it("fills the example manifest, registers it and refreshes the pool", async () => {
+    const example = { id: "codex-cli", displayName: "Codex CLI", adapter: "cli" };
+    vi.mocked(window.oxCommander.exampleManifest).mockResolvedValue(example as never);
+    vi.mocked(window.oxCommander.registerAgent).mockResolvedValue({
+      ok: true,
+      id: "codex-cli",
+      replaced: false,
+    } as never);
+    render(<AgentsPanel />);
+    const textarea = (await screen.findByRole("textbox")) as HTMLTextAreaElement;
+    expect(textarea.value).toBe("");
+    // The register button is disabled while nothing has been pasted.
+    fireEvent.click(screen.getByRole("button", { name: "填入示例" }));
+    await waitFor(() => expect(textarea.value).toContain("codex-cli"));
+    fireEvent.click(screen.getByRole("button", { name: "注册智能体" }));
+    await waitFor(() => expect(window.oxCommander.registerAgent).toHaveBeenCalled());
+    expect(await screen.findByText(/已注册 codex-cli/)).toBeTruthy();
+    // Success triggers a pool refresh so the new agent shows up.
+    expect(vi.mocked(window.oxCommander.listAgents).mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it("reports a JSON parse failure without calling the bridge", async () => {
+    render(<AgentsPanel />);
+    const textarea = await screen.findByRole("textbox");
+    fireEvent.change(textarea, { target: { value: "{ not json" } });
+    fireEvent.click(screen.getByRole("button", { name: "注册智能体" }));
+    expect(await screen.findByText(/JSON 解析失败/)).toBeTruthy();
+    expect(window.oxCommander.registerAgent).not.toHaveBeenCalled();
+  });
+
+  it("surfaces the handler's rejection reason for a bad manifest", async () => {
+    vi.mocked(window.oxCommander.registerAgent).mockResolvedValue({
+      ok: false,
+      error: 'agent id "codex-cli" 已被内置或 agents.d 声明占用',
+    } as never);
+    render(<AgentsPanel />);
+    fireEvent.change(await screen.findByRole("textbox"), { target: { value: '{"id":"codex-cli"}' } });
+    fireEvent.click(screen.getByRole("button", { name: "注册智能体" }));
+    expect(await screen.findByText(/已被内置或 agents.d 声明占用/)).toBeTruthy();
+  });
+
+  it("shows an open circuit chip with its retry countdown", async () => {
+    vi.mocked(window.oxCommander.getAgentStats).mockResolvedValue({
+      circuits: {
+        "sensenova-api": {
+          state: "open",
+          consecutiveFailures: 3,
+          successes: 0,
+          failures: 3,
+          successRate: 0,
+          retryInMs: 42_000,
+        },
+      },
+    });
+    render(<AgentsPanel />);
+    expect(await screen.findByText("熔断中")).toBeTruthy();
+    expect(screen.getByText(/42s 后允许探测/)).toBeTruthy();
+  });
+
+  it("surfaces a pool-list failure as an inline message", async () => {
+    vi.mocked(window.oxCommander.listAgents).mockRejectedValue(new Error("agents.d 不可读"));
+    render(<AgentsPanel />);
+    expect(await screen.findByText("agents.d 不可读")).toBeTruthy();
+  });
+});
+
 describe("SettingsPage", () => {
   it("loads settings, lists pool providers and key rows with security notice", async () => {
     render(<SettingsPage />);
@@ -443,5 +538,31 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
     const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls[0]![0];
     expect(saved.maxRepairRounds).toBe(5);
+  });
+
+  it("drives the execution-strategy controls into the saved payload", async () => {
+    render(<SettingsPage />);
+    await screen.findByLabelText("提供商");
+    fireEvent.click(screen.getByLabelText(/按能力分派任务/));
+    fireEvent.click(screen.getByRole("checkbox", { name: "sensenova-api" }));
+    fireEvent.change(screen.getByLabelText("并行上限"), { target: { value: "4" } });
+    fireEvent.change(screen.getByLabelText("zone 越权处置"), { target: { value: "quarantine" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0];
+    expect(saved.agentRouter).toBe(false);
+    expect(saved.enabledAgents).toEqual([]);
+    expect(saved.maxParallelRuns).toBe(4);
+    expect(saved.arbitration).toBe("quarantine");
+  });
+
+  it("keeps the save failure visible instead of resetting the button silently", async () => {
+    vi.mocked(window.oxCommander.saveSettings).mockRejectedValue(new Error("settings.json 只读"));
+    render(<SettingsPage />);
+    const save = await screen.findByRole("button", { name: "保存设置" });
+    await waitFor(() => expect((save as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(save);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("settings.json 只读");
   });
 });
