@@ -40,7 +40,7 @@ typecheck（renderer / electron / headless 三套 tsconfig）
 → lint（eslint flat config，含 react-hooks 规则）
 → check:unwired（导出符号在生产代码里零调用 → FAIL）
 → check:scripts / check:scripts-wired / check:masker（工具脚本语法、接线、掩空器自测 24 例）
-→ vitest（888 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（930 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标逐点变异，~30s）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -55,17 +55,17 @@ typecheck（renderer / electron / headless 三套 tsconfig）
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 152/152（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **594/594（100%）**，13.1 min |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **590/590（100%）**，16.1 min（CI 实测） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
 CI（`.github/workflows/verify.yml`）两个 job：`verify`（ubuntu + windows 矩阵）、
-`mutation`（site 口径，35 min 上限）。仓库托管在 GitHub（私有仓库），
-两个 job 随每次 push 运行 —— CI 结论以 Actions 页为准。
+`mutation`（site 口径，35 min 上限）。仓库托管在 GitHub（公开仓库），
+两个 job 随每次 push 运行，当前**三 job 全绿** —— CI 结论以 Actions 页为准。
 
 > 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
-> （含 577 → 594 两轮快照与"白名单行号漂移"的发现-处置记录）。
+> （含 577 → 594 → 590 三轮快照、白名单行号漂移与平台相关等价的发现-处置记录）。
 
 真实链路冒烟（需密钥、消耗配额，不进门禁）：
 
@@ -110,7 +110,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 - [docs/2026-09-19-multi-agent-orchestration-plan.md](docs/2026-09-19-multi-agent-orchestration-plan.md) — 多智能体平台 P0–P6 设计与实施全记录
 - [docs/2026-09-20-fullstack-review.md](docs/2026-09-20-fullstack-review.md) — 全栈评审：架构 / 风险诊断 / 优化记录（§十七 为最近一轮复核）
-- [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577/577，含逐目标报告与适用边界）
+- [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577→594→590 三轮，含逐目标报告与适用边界）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）

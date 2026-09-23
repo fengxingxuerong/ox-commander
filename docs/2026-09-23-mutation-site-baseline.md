@@ -1,9 +1,28 @@
-# 变异门禁 site 口径基线（2026-09-23）
+# 变异门禁 site 口径基线（2026-09-23，2026-09-24 CI 全绿终章）
 
 **这条基线解决的问题**：`docs/2026-09-20-fullstack-review.md` §16.1 记录的
 `486/581（84%）` 是**积压清理之前**的快照，此后 8 个提交清掉了全部 95 处，
 但只做过 25 次逐目标审计、没有连续全量快照，产物也没有留存 ——
 于是"现在到底是多少"无法回答，引用 84% 又已经过时。本文件是第一次可复现的连续快照。
+
+## 终章：CI 三 job 首次全绿（2026-09-24，run 35888029233）
+
+上云首日 CI 十轮 runs：3 轮计费拒绝、6 轮问题迭代、**1 轮全绿**——问题全部收敛，无未解释失败。
+
+| 发现 | 处置 |
+| --- | --- |
+| 私有仓库 Actions 计费拒绝 ×3 | 转**公开仓库**（推送前完成泄漏扫描与提交作者占位复核） |
+| npm ci 失败：lock 失步（npm 11 给嵌套 vite@8 配错 esbuild，arborist reify 缺陷） | **vite 5→8 + plugin-react 6** 对齐 vitest 4 peer；esbuild 依赖随 vite rolldown 化整体消失（commit 168d93b） |
+| ubuntu 7 测试失败：spawn-plan 漏传 platform（真 bug）、portableKill 无预检查（pid 复用误杀，真缺口）、sandbox-journal 断言平台假设 | 逐案修复（commit e74af63） |
+| store 同毫秒 id 碰撞 flake | id 加单调序数 + list 平局决胜，假时钟用例钉死（commit f71ffbc） |
+| mutation 存活 4 → 1 → 0 | kill-tree @37/@32 补断言杀死（ee80eb2 / 11790fb）；path-policy @92 诊断定性 **POSIX 域不可达**（realpath(fs-root) 恒成功，仅 Windows 不存在盘符可达）入白名单（commit 4885690） |
+
+**位点总数 594 → 590**：白名单 +2（kill-tree @37 防御冗余等价化、path-policy @92 POSIX 不可达），
+最终以 **CI 实测 590/590（run 35888029233）** 为基线——Windows 本地与 CI-Linux 双口径合流。
+
+**工具沉淀**：`mutation-check.mjs` 存活位点现自动打印**变异 diff + 测试输出尾部**——
+"为什么没杀死"（平台差异 / 断言盲区 / 等价）从此远程可判读。path-policy @92 正是靠它在
+没有 Linux 本机的情况下完成定性。
 
 ## 命令与结果
 
@@ -13,11 +32,11 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 #   其中 单点杀死 577 · 聚合杀死 0
 ```
 
-| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） |
-| --- | --- | --- | --- |
-| aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 | 未重跑（verify 内 `mutation:quick` 持续参与门禁） |
-| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） |
-| 聚合杀死数 | 未区分 | **0**（全部逐点判定） | **0**（全部逐点判定） |
+| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） | **2026-09-24 CI 终章** |
+| --- | --- | --- | --- | --- |
+| aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 | 未重跑（verify 内 `mutation:quick` 持续参与门禁） | 同左 |
+| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） | **590/590（100%）· CI 三 job 首次全绿** |
+| 聚合杀死数 | 未区分 | **0**（全部逐点判定） | **0**（全部逐点判定） | **0**（全部逐点判定） |
 
 **位点总数 581 → 577 的原因**：这批清理里有若干处是按"简化源码"收口的
 （冗余合取项删除后位点本身消失，而不是被白名单挡住）。
@@ -59,10 +78,13 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 
 1. **只在 Windows 上成立**。`path-policy` 的平台判断已做成"平台参数化"
    （`isCaseInsensitiveFs(platform)`），但 `kill-tree` 的 taskkill 路径、
-   `.cmd` 启动等平台相关分支在 Linux 上的可杀性**未验证** ——
-   这正是 CI 里那个 site job 要回答的问题（`.github/workflows/verify.yml`）。
-2. **白名单 7 条不计入 577**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`）：
-   5 条一级（可证明等价／可证明不可达）、2 条二级（TOCTOU，构造不出输入）。
+   `.cmd` 启动等平台相关分支的可杀性——**CI ubuntu 矩阵已验证**（2026-09-24
+   首跑暴露 6 处平台假设后逐案修复，spawn-plan/kill-tree 现由 `withPlatform`
+   注入双端语义，Linux 上逐点可杀）。
+2. **白名单 9 条不计入 590**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`）：
+   7 条一级（可证明等价／可证明不可达）、2 条二级（TOCTOU，构造不出输入）。
+   2026-09-24 新增：kill-tree @37（portableKill 预检查使防御冗余等价化，双防线刻意保留）、
+   path-policy @92（POSIX 域不可达，realpath(fs-root) 恒成功）。
    它们是**已评审的排除项**，不是分母里的水分。
 3. `electron/main.ts` 的 5 处里，`if (!isPrimaryInstance)` 与 `if (!win)`
    **不在算子表内**（没有 `if (!x)` → `if (x)` 这个算子），靠行为测试保证。
