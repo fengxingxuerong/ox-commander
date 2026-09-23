@@ -299,7 +299,12 @@ export function parseSpec(rawText: string): ParseResult {
     ...DEFAULT_SETTINGS,
     ...(maxRepairRounds !== undefined ? { maxRepairRounds } : {}),
     ...(verificationCommands ? { verificationCommands } : {}),
-    ...(raw.agentRouter !== undefined && agentRouter !== undefined ? { agentRouter } : {}),
+    // 只需一个条件：`agentRouter` 只在上面 `if (raw.agentRouter !== undefined)`
+    // 的 else 分支里被赋值，所以 `agentRouter !== undefined ⟺ raw.agentRouter !== undefined`。
+    // 原先写成 `raw.agentRouter !== undefined && agentRouter !== undefined`，
+    // 两个条件互为蕴含 —— 逻辑上冗余，且让变异测试永远杀不掉那个 `&&`
+    // （改 `||` 后条件仍与原文等价）。按"能简化就简化"处理，不留冗余守卫。
+    ...(agentRouter !== undefined ? { agentRouter } : {}),
     ...(arbitration ? { arbitration } : {}),
   };
 

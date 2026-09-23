@@ -616,3 +616,121 @@ describe("headless entry point", () => {
     expect(events[0]!.type).toBe("hello");
   });
 });
+
+/**
+ * 下面这一组来自 site 逐位点审计（protocol.ts 11 处存活）。
+ *
+ * 全部是 `parseSpec` 的**多条件校验**。共同形态：条件用 `||` 串起来
+ * （"任一不满足即拒绝"），既有用例只触发了其中**一条** ——
+ * 因为 `||` 短路，前面成立时后面根本不求值。
+ *
+ * 改成 `&&`（"全部不满足才拒绝"）之后，**非法 spec 会被静默接受** ——
+ * 契约面失效，而且是往"放行"的方向失效。
+ */
+describe("parseSpec · 数值字段的三个条件各自生效", () => {
+  for (const field of ["maxRepairRounds", "maxParallelRuns"] as const) {
+    it(`${field} 拒绝非数字`, () => {
+      // 条件一：`typeof !== "number"`
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, [field]: "3" }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain(field);
+    });
+
+    it(`${field} 拒绝非有限数（JSON 的 1e999 会溢出成 Infinity）`, () => {
+      // 条件二：`!Number.isFinite`。这一条**只有非有限数能触发** ——
+      // 而 JSON 语法允许 `1e999`（解析结果就是 Infinity），所以它可达。
+      // 既有用例只测了 -1（条件三）与合法数，条件二从未被求值过。
+      const r = parseSpec(`{"requirement":"x","projectRoot":".","${field}":1e999}`);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain(field);
+    });
+
+    it(`${field} 拒绝负数`, () => {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, [field]: -1 }));
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.message).toContain(field);
+    });
+
+    it(`${field} 接受 0 与正数`, () => {
+      expect(parse(JSON.stringify({ ...LEGACY_SPEC, [field]: 0 }))).toBeTruthy();
+      expect(parse(JSON.stringify({ ...LEGACY_SPEC, [field]: 3 }))).toBeTruthy();
+    });
+  }
+});
+
+describe("parseSpec · arbitration 合法值必须被接受", () => {
+  it("显式传入合法模式时写进 settings", () => {
+    // 既有用例从不传 arbitration（LEGACY_SPEC 里没有这个字段），
+    // 报错分支那条用例传的是 "wishful"（合法的**字符串**、非法的模式）——
+    // 于是 `typeof raw.arbitration !== "string"` 改成 `===` 也照样全绿。
+    // 改坏后**任何合法模式都会被判成非法**，headless 入口直接不可用。
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, arbitration: "revert-batch" }));
+    expect(spec.settings.arbitration).toBe("revert-batch");
+  });
+
+  it("拒绝非字符串与未知模式", () => {
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, arbitration: 7 })).ok).toBe(false);
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, arbitration: "wishful" })).ok).toBe(false);
+  });
+});
+
+describe("parseSpec · llmPool 元素的两个条件", () => {
+  it("拒绝非字符串元素", () => {
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, llmPool: [7] })).ok).toBe(false);
+  });
+
+  it("拒绝纯空白元素", () => {
+    // 条件二 `p.trim() === ""`：既有用例只测了"非字符串"与"未知 provider"，
+    // 纯空白串既不是非字符串、也过不了 provider 查表 —— 但它在更早的
+    // 元素校验就该被拦下，否则会带着空白 id 走进后面的 provider 解析。
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, llmPool: ["   "] })).ok).toBe(false);
+  });
+
+  it("接受合法 provider 列表", () => {
+    expect(parse(JSON.stringify({ ...LEGACY_SPEC, llmPool: ["sensenova"] })).llmPool).toEqual([
+      "sensenova",
+    ]);
+  });
+});
+
+describe("parseSpec · prd 四个字段逐个校验", () => {
+  const good = { goal: "做一个待办", features: [], techStack: [], acceptanceCriteria: [] };
+
+  it("接受完整的 prd", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, prd: good }));
+    expect(spec.prd).toBeTruthy();
+  });
+
+  it("四个字段各自缺失时都要拒绝", () => {
+    // `bad` 由四个 `||` 串成。既有用例只覆盖其中一类缺失，
+    // 于是另外三处改成 `&&` 也看不出来 —— 改坏后缺字段的 prd 会被放行，
+    // 后面按 prd 派单/生成 zone 时会拿到 undefined。
+    for (const missing of ["goal", "features", "techStack", "acceptanceCriteria"]) {
+      const bad: Record<string, unknown> = { ...good };
+      delete bad[missing];
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, prd: bad }));
+      expect(r.ok, `prd 缺 ${missing} 时应当被拒绝`).toBe(false);
+    }
+  });
+
+  it("goal 为空串也算缺失", () => {
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, prd: { ...good, goal: "  " } })).ok).toBe(false);
+  });
+});
+
+describe("parseSpec · agentRouter 透传到 settings", () => {
+  it("true 与 false 都要原样写进 settings", () => {
+    // 第 302 行 `raw.agentRouter !== undefined && agentRouter !== undefined`。
+    // 两个 `!==` 分别改成 `===` 后，条件恒假 —— settings 会**丢掉 agentRouter**，
+    // 用户显式配置的能力路由被静默忽略，回落到 DEFAULT_SETTINGS 的值。
+    // 两种取值都断言，是为了不依赖 "默认值恰好等于其中一个"。
+    expect(parse(JSON.stringify({ ...LEGACY_SPEC, agentRouter: true })).settings.agentRouter).toBe(true);
+    expect(parse(JSON.stringify({ ...LEGACY_SPEC, agentRouter: false })).settings.agentRouter).toBe(
+      false,
+    );
+  });
+
+  it("非布尔值被拒绝", () => {
+    expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, agentRouter: "yes" })).ok).toBe(false);
+  });
+});
