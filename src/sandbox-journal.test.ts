@@ -1418,3 +1418,60 @@ describe("SnapshotStore · 注入 fs 替身覆盖真实 fs 造不出的分支", 
     expect([...token.backedUp.keys()]).toEqual(["src/b.js", "src/c.js"]);
   });
 });
+
+describe("FileJournal · 遍历与比对的跳过语义", () => {
+  it("[96] 未变化的文件被跳过后，排在后面的修改仍要被发现", () => {
+    // 第 96 行 `if (before.size === now.size && before.mtimeMs === now.mtimeMs) continue;`。
+    // 改成 `break` 之后，一旦遇到**第一个没动过的文件**，整个比对循环就结束 ——
+    // 排在它后面的改动全部漏报。表现是"改了文件但快照说没变"，
+    // 于是被沙箱拦下、回滚，而报告里看不出任何异常。
+    //
+    // 既有用例（"同样 3 字节"那条）只有一个文件，`continue` 之后再没有
+    // 兄弟项，所以两种写法结果相同。
+    const root = scratch("journal-unchanged-first");
+    write(root, "a-untouched.js", "same");
+    write(root, "z-modified.js", "old");
+    const journal = new FileJournal();
+    const token = journal.begin(root, []);
+    // 只改后面那个；前面那个完全不碰 → 命中"未变化"的 continue
+    write(root, "z-modified.js", "brand-new-content");
+
+    const ops = journal.changed(token).map((c) => c.op + ":" + c.path).sort();
+    expect(ops).toEqual(["modify:z-modified.js"]);
+  });
+
+  it("[135] 递归完子目录后，父目录后面的同级文件仍要被遍历", () => {
+    // 第 135 行是 `walk(abs)` 之后那句 `continue;`。改成 `break` 后，
+    // 父目录里**先出现一个目录**，它后面的同级文件就全部不进快照 ——
+    // 新增/修改都不再被发现。字母序能保证目录排在前面（a-sub < z-…）。
+    const root = scratch("journal-dir-first");
+    fs.mkdirSync(path.join(root, "a-sub"), { recursive: true });
+    write(root, "a-sub/keep.js", "k");
+    write(root, "z-sibling.js", "s");
+    const journal = new FileJournal();
+    const token = journal.begin(root, []);
+    write(root, "a-sub/added.js", "a");
+    write(root, "z-sibling2.js", "s2");
+
+    const ops = journal.changed(token).map((c) => c.op + ":" + c.path).sort();
+    expect(ops).toEqual(["create:a-sub/added.js", "create:z-sibling2.js"]);
+  });
+
+  it("[137] 既非文件也非目录的条目（junction）被跳过后，后面的同级文件仍要被遍历", () => {
+    // 第 137 行 `if (!entry.isFile()) continue;`。改成 `break` 后，
+    // 父目录里**先出现一个 junction / 符号链接**（实测
+    // `readdirSync({withFileTypes:true})` 给它 isFile=false isDirectory=false），
+    // 它后面的同级文件全部漏掉。创建 junction 不需要管理员权限（见 manifest 那批）。
+    const root = scratch("journal-link-first");
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-link-out-"));
+    roots.push(outside);
+    fs.symlinkSync(outside, path.join(root, "a-link"), "junction");
+    write(root, "z-after-link.js", "v1");
+    const journal = new FileJournal();
+    const token = journal.begin(root, []);
+    write(root, "z-after-link.js", "v2-longer-so-size-differs");
+
+    const ops = journal.changed(token).map((c) => c.op + ":" + c.path).sort();
+    expect(ops).toEqual(["modify:z-after-link.js"]);
+  });
+});
