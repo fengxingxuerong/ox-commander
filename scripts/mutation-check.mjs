@@ -843,8 +843,14 @@ process.on("SIGTERM", () => {
  * 跑一个目标对应的全部测试。任一失败即视为「杀死」。
  * 多文件的目标：只挂一个文件会让另一半逻辑没有门禁。
  */
-function testsPassAll(target, execTimeoutMs, vitestTestTimeoutMs) {
-  return testFilesOf(target).every((f) => testsPass(f, execTimeoutMs, vitestTestTimeoutMs));
+function testsPassAll(target, execTimeoutMs, vitestTestTimeoutMs, capture) {
+  return testFilesOf(target).every((f) => testsPass(f, execTimeoutMs, vitestTestTimeoutMs, capture));
+}
+
+/** 取字符串最后 limit 行 —— 存活诊断只用尾部，整份 vitest 输出太吵。 */
+function tailLines(text, limit = 30) {
+  const lines = String(text ?? "").split("\n").filter((l) => l.trim() !== "");
+  return lines.slice(-limit).join("\n");
 }
 
 /**
@@ -852,14 +858,20 @@ function testsPassAll(target, execTimeoutMs, vitestTestTimeoutMs) {
  *
  * 超时算「不通过」：一个挂住的变异体**没有**让测试照样绿，它就是被发现了。
  * 见 `MUTANT_TIMEOUT_MS` 的注释 —— 这正是省下 80% 时间的地方。
+ *
+ * `capture`（可选）：存活位点的诊断收集器。变异跑测试的输出默认被丢弃，
+ * 于是「为什么没杀死」只能靠猜 —— 2026-09-23 path-policy @92 在 Linux 上
+ * 存活而本地 Windows 实证可杀，远程无法判读。带上 capture 后，报告区对
+ * 存活位点打印变异 diff 与测试输出尾部，平台差异直接可见。
  */
 function testsPass(
   testFile,
   timeoutMs = MUTANT_TIMEOUT_MS,
   vitestTestTimeoutMs = MUTANT_VITEST_TEST_TIMEOUT_MS,
+  capture,
 ) {
   try {
-    execFileSync(
+    const stdout = execFileSync(
       process.execPath,
       [
         "./node_modules/vitest/vitest.mjs",
@@ -881,10 +893,25 @@ function testsPass(
         // 却毫无效果 —— 修完必须用"挂住的变异"实测超时信息真的变成 2000ms。
         `--testTimeout=${vitestTestTimeoutMs}`,
       ],
-      { cwd: ROOT, stdio: "pipe", timeout: timeoutMs, env: { ...process.env, CI: "1" } },
+      {
+        cwd: ROOT,
+        stdio: "pipe",
+        timeout: timeoutMs,
+        env: { ...process.env, CI: "1" },
+        maxBuffer: 32 * 1024 * 1024,
+      },
     );
+    if (capture) capture.outputs.push({ file: testFile, tail: tailLines(stdout, 20) });
     return true;
-  } catch {
+  } catch (err) {
+    if (capture) {
+      capture.outputs.push({
+        file: testFile,
+        tail: tailLines(err.stdout ?? "", 30) + tailLines(err.stderr ?? "", 15),
+        failed: true,
+        status: err.status ?? "timeout",
+      });
+    }
     return false;
   }
 }
@@ -986,16 +1013,26 @@ for (const target of targets) {
   }
 
   pending.set(filePath, original);
+  const origLines = original.split("\n");
   const ran = [];
   for (const m of mutants) {
     fs.writeFileSync(filePath, m.source, "utf8");
     let killed;
+    let diag;
     try {
-      killed = !testsPassAll(target);
+      diag = { outputs: [] };
+      killed = !testsPassAll(target, undefined, undefined, diag);
+      // 变异 diff（原行 vs 变异行）：变异只改一处、行数不变，按行号直接对齐。
+      if (m.line !== undefined) {
+        const idx = m.line - 1;
+        diag.diff =
+          `- ${m.line} | ${(origLines[idx] ?? "").trim()}\n` +
+          `+ ${m.line} | ${(m.source.split("\n")[idx] ?? "").trim()}`;
+      }
     } finally {
       fs.writeFileSync(filePath, original, "utf8");
     }
-    ran.push({ op: m.op, killed, siteCount: m.siteCount, line: m.line });
+    ran.push({ op: m.op, killed, siteCount: m.siteCount, line: m.line, diag });
     process.stdout.write(killed ? "." : "X");
   }
   pending.delete(filePath);
@@ -1060,6 +1097,18 @@ for (const r of results) {
       survivors.push({ file: r.target.file, op: m.op, line: m.line, siteCount: m.siteCount });
       // 存活的多位于变异：它压掉的每一处都没被证明
       if (m.siteCount > 1) unverifiedSites += m.siteCount;
+      // 存活诊断：变异体跑测试时捕获的输出尾部 + 变异 diff。
+      // 存活 = 测试在变异下全绿 —— 打印「绿报告说了什么」和「改了哪一行」，
+      // 让「为什么没杀死」（平台差异 / 断言盲区 / 等价）可以远程判读，
+      // 不再需要猜。本地与 CI 的判定分歧（path-policy @92 案）就是靠它定位的。
+      if (m.diag) {
+        if (m.diag.diff) console.log(`    ${m.diag.diff.split("\n").join("\n    ")}`);
+        for (const o of m.diag.outputs ?? []) {
+          const mark = o.failed ? "失败输出" : "通过输出";
+          console.log(`    ── ${o.file}（${mark}${o.status !== undefined ? ` status=${o.status}` : ""}）──`);
+          if (o.tail) console.log(`    ${o.tail.split("\n").join("\n    ")}`);
+        }
+      }
     }
   }
 }
