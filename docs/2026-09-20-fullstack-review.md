@@ -1243,10 +1243,16 @@ coverage 那边报出 `src/kill-tree.test.ts` 失败（`hasExited` 断言翻转�
 
 ### 14.7 剩余未纳入
 
-`electron/engine/index.ts` · `electron/sandbox/index.ts` · `electron/main.ts` ·
+`electron/engine/index.ts` · `electron/sandbox/index.ts` ·
 `electron/preload.ts` · `headless/headless-main.ts` 仍是 0% 覆盖，
 **刻意不纳入变异门禁** —— 它们是进程入口与 re-export barrel，
 纳入需要起 Electron / 独立进程，成本与收益不成比例。
+
+> **2026-09-23 更正**：`electron/main.ts` 已从本清单移出并纳入 tier 1（见 §16.14）。
+> 理由是该清单的前提被证伪了一半 —— 起不来的只是 Electron **运行时**，
+> 不是入口逻辑；`src/__fakes__/electron.ts` 长出有行为的替身之后，
+> 入口可以在 vitest 里跑完装配再断言。**"需要起 Electron"不是入口不能被门禁覆盖的理由**，
+> 剩下的四个是 re-export barrel 与 IO 胶水，性质不同，仍留在本清单。
 
 `electron/sandbox/snapshot-store.ts` 已在第十五章完成补强。
 
@@ -1646,3 +1652,189 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 
 **剩余 4 处**：`orchestrator` @413 / @419 / @444 / @456（批次筛选、摘要兜底文案、
 跳过后的 continue、是否仍有人失败）。其余 21 个目标已达 site 口径 100%。
+
+> **2026-09-23 更正（文档滞后一个提交）**：上面「剩余 4 处」在本节写完（14:02）后
+> 已被 `8d9398c`（14:12）收口，即 **25 个目标全部达 site 口径 100%**。
+> 本节保留原文不改，是因为它记录了当时的真实状态；错误在于**结论没有被同步更新** ——
+> 引用本节时必须先 `git log --date=iso -1` 对一下时间。同类错误在 §16.4 第 2 条已犯过一次
+> （引用 20:35 的旧审计描述现状），这是第二次，说明"文档里的数字需要带时间戳"不是提醒、
+> 而是格式要求。
+
+## 十七、评审复核：入口层从"刻意不纳入"变成门禁目标（2026-09-23）
+
+### 17.1 起点：一次外部评审给出的四条排序
+
+对项目做完整评审（`npm run verify` / 覆盖率 / CI 真实性 / 分发能力逐项实测）后，
+得到四条按收益排序的欠账。本轮先做**不需要外部账号**的两条，另外两条留在 17.5。
+
+| 优先级 | 欠账 | 证据 | 本轮 |
+| --- | --- | --- | --- |
+| P0 | CI 是纸面的 | `git remote -v` 为空 → `verify.yml` 从未真跑 | 只做本地能做的（见 17.3） |
+| P0 | site 口径无连续快照 | 84% 是 8/22 旧数字，审计产物没落盘 | ✅ 17.4 |
+| P1 | 入口层 0% 覆盖且不在门禁内 | `main.ts` / `preload.ts` 均 0% | ✅ 17.2 |
+| P1 | `usageTokens` 零消费方 | `http-clients.ts` 采集、无任何读取方 | ❌ 留 17.5（需设计） |
+
+### 17.2 入口层：单实例锁 + 首次进入断言与变异门禁
+
+**先说一个真实缺陷**（不是"补覆盖"，是补功能）：`main.ts` 没有
+`requestSingleInstanceLock`。两个实例驱动同一 projectRoot 时，两边各自建快照、
+各自在越权时回滚，审计里出现两份互相矛盾的 run 记录；而 `store.ts` /
+`keys-store.ts` 都是"整体重写文件"，`atomic-file` 只保证单次写不撕裂，
+**不保证并发写不互相覆盖**。现在第二个实例直接 `app.quit()`，
+并把已有窗口 `restore()` + `focus()`。
+
+**再说方法**：本章清单（§14.7）把 `main.ts` 归为"刻意不纳入"，理由是"需要起 Electron"。
+这个理由被证伪了一半 —— 起不来的只是 Electron **运行时**，不是入口逻辑。
+`src/__fakes__/electron.ts` 长出 `whenReady` / `requestSingleInstanceLock` /
+有行为的 `BrowserWindow`（`loadFile`/`loadURL`/`on`/`close`，并把加载目标与
+focus 次数记下来）之后，入口可以在 vitest 里**跑起来**再断言。
+
+`src/main-wiring.test.ts`（9 例）钉住的行为：
+
+| 断言 | 为什么这条断言值得写 |
+| --- | --- |
+| 拿不到锁 → **`whenReady` 未被调用** | 只断言"没开窗"的话，"开了窗再退出"照样过 |
+| 拿到锁 → `registerIpc` 一次 + 开窗 + `attachWindow` 收到那个窗口 | 事件汇点必须是同一个窗口，否则 UI 永远收不到事件 |
+| 加载路径 == `../../dist/index.html` | 跳级数写错在源码里毫无症状，打包后是白屏 |
+| `OX_DEV_SERVER` → 加载 dev server 且**不等于**产物路径 | 两个分支各自成立，不是"至少一条路通" |
+| 窗口已关闭时 `second-instance` 不抛错 | 去掉 `if (!win) return;` 会 TypeError |
+| `activate` 只在无窗口时开新窗 | 顺手钉住"重复开窗"这类回归 |
+| `.env` 只补缺失项，宿主已设的值不被覆盖 | 这条直接把 `&&` 变异杀掉（见下） |
+
+**必须记录的两个坑（都卡过一次）**：
+
+1. **导入顺序**：入口的副作用在模块顶层，所以「先 import 再改替身」永远改不动。
+   正确顺序是 `vi.resetModules()` → 取**新**替身实例 → 复位 → 改状态 → **最后** `import` 入口
+   → 等一拍（`whenReady().then(...)` 是微任务）。顺序错了的表现是"9 个用例全红但原因看不懂"。
+2. **相对路径不可断言绝对值**：入口在产物里是 `dist-electron/electron/main.js`，
+   单测里跑的是源码 `electron/main.ts`，同样跳两级会落到仓库**上一级**。
+   最后改成断言 `path.join(__dirname, "..", "electron", "..", "..", "dist", "index.html")`
+   —— 锁的是"跳几级 + 文件名"，这才是会错的那部分。
+
+**纳入门禁**：`mutation-check.mjs` 的 `TARGETS` 加
+`{ file: "electron/main.ts", test: "src/main-wiring.test.ts", tier: 1 }`，
+site 口径 **5/5 逐点杀死**（`--file=main --mode=site --limit=99`，5.9s）。
+
+> ⚠️ **已知边界（写进目标注释了）**：算子表里没有 `if (!x)` → `if (x)`，
+> 所以 `if (!isPrimaryInstance)` 与 `if (!win)` 这两处**靠行为测试保证、不靠变异**。
+> 加这个算子会同时命中其余 26 个目标，属独立排期。
+
+**顺带修掉的第三件事**：替身新导出会触发 `check:unwired`（"生产零调用"）。
+正确处理不是往 `ACCEPTED` 加三条，而是把 `__fakes__` 加进扫描的 `SKIP_DIR` ——
+与 `vitest.config.mts` 的 `coverage.exclude` 同一判定：**测试替身不是生产代码**，
+它的导出天然只被测试引用（那正是它的用途）。改门禁后做了反向注入实测：
+往 `shared/glob.ts` 注入一个未接线导出 → `exit 1` 且精确点名 `shared/glob.ts :: __unwired_probe__`，
+还原后 `git diff --stat shared/glob.ts` 为空且门禁 PASS。
+
+### 17.3 CI：从 aggregate 改成 site 口径（job 仍未真跑）
+
+`verify.yml` 的 `mutation-full` job 跑的是 `npm run mutation`（aggregate）。
+但 §15.3 已经证明 aggregate 会**掩盖位点**（`snapshot-store` 报 2/2 全杀、实际 5 处存活），
+即那个 job 一直在验证一个"看起来 100%"的数字。已改为 `npm run mutation:audit`
+（site 口径、逐位点），`timeout-minutes` 20 → 35（实测全量 ~21 分钟）。
+
+**诚实交代**：仓库**仍无远端**，这个 job 依然一次都没跑过 —— 本节只把"跑的是错口径"
+改成"跑的是对口径"，**没有**解决"根本没跑"。另外 Linux 侧是否会出现 Windows 上
+不存在的存活项，本地无法判定（平台相关等价变异只能在另一个 OS 上区分），
+首次真跑若报红，按 §16.8 的"能补断言就补、构造不出输入才白名单"处置。
+
+### 17.4 全量 site 复测：**577/577（100%）**，第一次有连续快照与落盘
+
+§16.1 的 84% 是积压清理**之前**的数字，此后 8 个提交清掉了全部 95 处，
+但只做过 25 次**逐目标**审计，没有一次连续全量快照，产物也没留存 ——
+引用"100%"时说不出它是怎么来的。本轮补上：
+
+```bash
+node scripts/mutation-check.mjs --mode=site --limit=999 > logs/mutation-site-2026-09-23.log
+# 总计：杀死 577/577（100%）   耗时 1371.2s（22.9 min）
+#   其中 单点杀死 577 · 聚合杀死 0
+```
+
+完整逐目标报告已**收进版本库**：`docs/2026-09-23-mutation-site-baseline.md`
+（`logs/` 在 `.gitignore` 里，把基线留在那儿等于没留）。
+
+| 口径 | 8/22（§16.1） | 2026-09-23 本轮 |
+| --- | --- | --- |
+| aggregate | 152/152（100%） | — （verify 内 `mutation:quick` 10/10） |
+| **site（逐位点）** | 486/581（**84%**） | **577/577（100%）** |
+| 聚合杀死数 | 未区分 | **0**（全部逐点判定） |
+| 产物留存 | 无 | `docs/2026-09-23-mutation-site-baseline.md` |
+
+**位点总数为什么从 581 降到 577**：这批清理里有若干处是按"简化源码"收口的
+（§16.9 的 `while (done.size < len && progressed)`、`scope && guard` 打成 pair 等），
+冗余合取项被删掉后**位点本身消失**，而不是被白名单挡住。净变化是
+`-9 处删除 + 5 处新增（`electron/main.ts`）= 577`。
+
+**这份数字的边界（必须一起引用）**：
+
+1. **只在 Windows 上成立**。`path-policy` 的平台判断已按 §16.8 做成
+   "平台参数化"（`isCaseInsensitiveFs(platform)`），不再靠白名单回避，
+   但其余平台相关分支（`kill-tree` 的 taskkill 路径、`.cmd` 启动）在 Linux 上的
+   可杀性仍未验证 —— 这正是 17.3 那个 CI job 要回答的。
+2. **白名单仍有 7 条**（`EQUIVALENT_SITES`），按 §16.10 的两级口径：
+   - **5 条一级**（给出不变量链或可证明不可达）：`router:193`、`schema:184`、
+     `http-bridge:309`、`sensenova:317`、`context:177`
+   - **2 条二级**（经验性，"活不到能测那一步"）：`spawn-plan:96`、`sensenova:323`
+     （都是 TOCTOU），两条都标注了"将来给该模块加 fs 注入点后应删掉白名单改补注入用例"
+
+   它们不计入 577，是**已评审的排除项**，不是"100% 里的水分"。
+3. **17.2 新增的 5 处里有 2 个守卫不在算子表内**（`if (!isPrimaryInstance)` /
+   `if (!win)`），"5/5"指算子能表达的那 5 处。
+
+### 17.5 一处失实更正：preload 的"契约漂移"风险被高估了
+
+评审初稿把 `electron/preload.ts` 的 0% 覆盖写成"渲染层与主进程唯一契约面，
+一旦漂移是全站失效"。**这句是错的**，`src/ipc.test.ts` 早就在守它，而且是双向的：
+
+| 已有断言 | 守住什么 |
+| --- | --- |
+| `channelsExposedToRenderer()`（**静态解析 preload.ts**）逐通道比对 `ipcMain.handlers` | 通道改名/写错一侧 → 当场红 |
+| 反向：注册的通道必须都能从 preload 到达 | 复制粘贴出的死 handler |
+| 每个通道只注册一次（替身按 Electron 语义抛错） | 重复注册 |
+| **显式列出全部 26 个通道名** | 改名无法悄悄通过 |
+
+`preload.ts` 本身仍是 0% 覆盖，但"契约漂移"这条风险已经有了门禁。残余风险只剩两点，
+且都不是"全站失效"量级：
+
+- **参数形状/顺序**不匹配（handler 读 `(a, b)` 而 preload 传 `(b, a)`）—— 通道级契约抓不到；
+- `onEvent` 的**退订语义**（返回值必须能移除监听器）—— 只有渲染层集成才碰得到。
+
+教训与 §16.4 第 2 条同族：**覆盖率低 ≠ 门禁缺位**。写"某文件 0% 覆盖"时，
+必须再问一句"它的契约是否已被别处的静态断言守住"，否则会把已有防线当成缺口报出去。
+
+### 17.6 剩余欠账（按优先级，每条都给"下一步最小可验证动作"）
+
+**① 推远端，让两个 job 真跑**（唯一需要账号，其余都已就绪）
+
+```bash
+git remote add origin <仓库地址>
+git push -u origin master
+# 之后自动跑：verify（ubuntu + windows 矩阵）、mutation（site 口径，≤35min）
+```
+
+两个已知注意项：本机 CLI **不能直连 GitHub**（需走 `127.0.0.1:7890` 代理，
+可 `git -c http.proxy=http://127.0.0.1:7890 push ...`），或直接推 Gitee / 私有 GitLab；
+首次 site job 若在 Linux 上报红，按"能补断言就补"处置，别先白名单。
+
+**② `usageTokens` 成本治理**（当前唯一"采了不用"的字段）
+
+- 现状：`shared/http-clients.ts:212/245` 采集 → `shared/providers.ts:16` 声明 → **全仓无读取方**。
+  既没有汇总，也没有上限，长跑会静默烧配额。`check:unwired` 抓不到它（它只看导出符号，
+  这是"**字段级零消费**"，门禁的一个新维度）。
+- 设计要点：咽喉只有一处 —— `shared/build-llm.ts` 的两个工厂（Electron 与 headless 共用），
+  在那里包一层 metering 装饰器即可覆盖大脑层；出口走 headless `run`/`done` 事件
+  与设置页；上限用 `settings.maxTokensPerRun`（缺省 0 = 不限，纯加法）。
+- 最小可验证动作：`shared/usage-meter.ts` + 单测（跨 call 累加、超限只报一次、
+  缺 `usage` 字段时不记 NaN），先只做**可见性**，上限另起一轮。
+
+**③ 分发（"能给别人装上跑"）**：无 electron-builder / forge、无 LICENSE / CHANGELOG，
+`version 0.1.0` 且 `.env` 要手工放。最小动作是先加打包配置与 `build:dist` 脚本，
+**注意真实打包会下载签名工具链，本机需代理**，建议交给 CI 出产物而不是本地跑。
+
+**④ UI/E2E 与 `pages/*` 断言**：`src/pages` funcs 75.6%、`platform.ts` funcs 47%，
+是覆盖率最低的实逻辑层；Electron GUI 无自动化 E2E（只有 jsdom 组件测试）。
+最小动作：先给 `SettingsPage` 的线路池勾选加"保存后回读一致"的断言。
+
+**本轮没做的诚实交代**：Linux 侧的 site 结果、CI 两个 job 的真实执行、
+打包产物可用性 —— 这三项**都不可能在本机验证**（无远端、需真实打包工具链），
+所以本文只声明"本地 Windows 上 577/577"，不声明"全平台 100%"。

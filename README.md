@@ -19,6 +19,10 @@ npm run dev:electron  # 桌面端开发模式
 npm start             # 运行已构建的桌面端
 ```
 
+> 桌面端是**单实例**应用：重复启动不会开第二个指挥台，而是把已有窗口提到前台。
+> 这是有意为之 —— 两个实例驱动同一个 projectRoot 会各建快照、各自回滚，
+> 审计里会出现互相矛盾的 run 记录。
+
 headless（供外部宿主以 JSONL 协议驱动整个平台）：
 
 ```bash
@@ -29,18 +33,37 @@ echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-head
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（实测 EXIT 0 / ~1m50s，14 步）：
 
 ```
 typecheck（renderer / electron / headless 三套 tsconfig）
 → lint（eslint flat config，含 react-hooks 规则）
-→ vitest（400+ 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ check:unwired（导出符号在生产代码里零调用 → FAIL）
+→ check:scripts / check:scripts-wired / check:masker（工具脚本语法、接线、掩空器自测 24 例）
+→ vitest（888 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ mutation:quick（tier 1 目标逐点变异，~30s）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
+→ smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import（四条集成链路）
 ```
 
-覆盖率：`npm run test:coverage`（v8 provider，模块级报告）。
+覆盖率：`npm run test:coverage`（v8 provider，模块级报告；当前 91.4% stmts / 86.0% branch）。
+
+**变异门禁有两个口径，数字不可互换**：
+
+| 口径 | 命令 | 含义 | 最近实测 |
+| --- | --- | --- | --- |
+| aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 152/152（会掩盖位点，见下） |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **577/577（100%）**，22.9 min |
+
+aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
+所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
+
+CI（`.github/workflows/verify.yml`）两个 job：`verify`（ubuntu + windows 矩阵）、
+`mutation`（site 口径，35 min 上限）。
+
+> **注意：仓库目前没有远端**，这两个 job 一次都没跑过 —— 本地绿不等于 CI 绿。
 
 真实链路冒烟（需密钥、消耗配额，不进门禁）：
 
@@ -84,6 +107,8 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 ## 文档索引
 
 - [docs/2026-09-19-multi-agent-orchestration-plan.md](docs/2026-09-19-multi-agent-orchestration-plan.md) — 多智能体平台 P0–P6 设计与实施全记录
+- [docs/2026-09-20-fullstack-review.md](docs/2026-09-20-fullstack-review.md) — 全栈评审：架构 / 风险诊断 / 优化记录（§十七 为最近一轮复核）
+- [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577/577，含逐目标报告与适用边界）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）
