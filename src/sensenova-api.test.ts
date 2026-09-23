@@ -107,10 +107,16 @@ describe("parseFilePayload", () => {
     //
     // `null` is the sharpest case: `typeof null === "object"`, so only the
     // middle clause catches it. With `&&` it slips straight through.
-    expect(() => parseFilePayload(null)).toThrowError(/files/);
-    expect(() => parseFilePayload("a string")).toThrowError(/files/);
-    expect(() => parseFilePayload({})).toThrowError(/files/);
-    expect(() => parseFilePayload({ files: "not-an-array" })).toThrowError(/files/);
+    //
+    // ⚠️ 断言必须匹配**我们抛的那句话**，不能只匹配 `/files/`：
+    // 改 `&&` 之后 `null.files` 会抛 TypeError，而那条消息是
+    // `Cannot read properties of null (reading 'files')` —— **里面也有 "files"**。
+    // 用宽正则等于把这个变异放过去（实测：第一版写 `/files/` 时它存活）。
+    const RE = /模型 JSON 缺少/;
+    expect(() => parseFilePayload(null)).toThrowError(RE);
+    expect(() => parseFilePayload("a string")).toThrowError(RE);
+    expect(() => parseFilePayload({})).toThrowError(RE);
+    expect(() => parseFilePayload({ files: "not-an-array" })).toThrowError(RE);
   });
 });
 
@@ -399,5 +405,84 @@ describe("SensenovaApiAdapter", () => {
       if (saved === undefined) delete process.env.SENSENOVA_API_KEY;
       else process.env.SENSENOVA_API_KEY = saved;
     }
+  });
+});
+
+/**
+ * 快照遍历里的六处 `continue`（site 逐位点审计里全存活）。
+ *
+ * 共同形态与前几轮一致：**被跳过的条目在既有用例里永远是最后一个**，
+ * 于是「跳过本项继续」与「直接终止循环」结果相同。
+ * 真实后果是**后续文件的正文整段不进 prompt** —— 模型看不到它们，
+ * 生成的补丁就会基于不完整的上下文，而且不报任何错。
+ *
+ * 这些跳过的方向各自都是安全/成本考量（凭据不外发、二进制不灌 prompt），
+ * 但"跳过"绝不能退化成"到此为止"。
+ */
+async function promptFor(root: string): Promise<string> {
+  const { client, prompts } = scriptedClient(['{"files":[{"path":"src/add.js","content":"x"}]}']);
+  const adapter = new SensenovaApiAdapter(client);
+  const handle = await run(adapter, root);
+  await terminalText(adapter, handle);
+  return prompts[0] ?? "";
+}
+
+describe("SensenovaApiAdapter · 快照遍历的跳过不能中断后续", () => {
+  it("[278] 递归完一个子目录后，父目录的其余同级文件仍要进快照", async () => {
+    // 第 278 行是 `walkStat(abs)` 之后那句 `continue;`，语义是
+    // 「处理完这个子目录，继续父目录的下一个同级项」。改成 break 后，
+    // 只要父目录里**先出现一个目录**，它后面的同级文件全部丢失。
+    const root = tmpRoot();
+    fs.mkdirSync(path.join(root, "a-sub"), { recursive: true });
+    fs.writeFileSync(path.join(root, "a-sub", "x.js"), "// sub", "utf8");
+    fs.writeFileSync(path.join(root, "z-sibling.js"), "// sibling", "utf8");
+
+    const p = await promptFor(root);
+    expect(p).toContain("a-sub/x.js");
+    expect(p).toContain("z-sibling.js");
+  });
+
+  it("[280] 既非文件也非目录的条目（junction）被跳过，但不中断后续文件", async () => {
+    // 第 280 行 `if (!entry.isFile()) continue;`。实测 Windows 上
+    // `fs.symlinkSync(target, path, "junction")` 产生的目录联接在
+    // `readdirSync({withFileTypes:true})` 里是 isFile=false / isDirectory=false /
+    // isSymbolicLink=true —— 正好落进这一支，且**创建 junction 不需要管理员权限**。
+    const root = tmpRoot();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-outside-"));
+    dirs.push(outside);
+    fs.symlinkSync(outside, path.join(root, "a-link"), "junction");
+    fs.writeFileSync(path.join(root, "z-after-link.js"), "// after", "utf8");
+
+    const p = await promptFor(root);
+    // junction 本身不能被当成文件读（否则会把外部目录的内容灌进 prompt）
+    expect(p).not.toContain("a-link");
+    // 但它后面的同级文件必须照常进快照
+    expect(p).toContain("z-after-link.js");
+  });
+
+  it("[284] 凭据类文件被跳过，但不中断后续文件", async () => {
+    // 第 284 行 `if (isSecretLikeFile(rel)) continue;`。
+    // `.env` 命中 `^\.env(\..+)?$`，且按字典序排在字母开头的文件之前 ——
+    // 正是"被跳过的项排在前面"的最小场景。
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, ".env"), "SECRET_TOKEN=leak-me", "utf8");
+    fs.writeFileSync(path.join(root, "z-after-secret.js"), "// after", "utf8");
+
+    const p = await promptFor(root);
+    expect(p).not.toContain("leak-me"); // 凭据正文绝不能进 prompt
+    expect(p).toContain("z-after-secret.js"); // 但不能因此截断后面的文件
+  });
+
+  it("[325] 二进制文件被跳过，但不中断后续文件", async () => {
+    // 第 325 行 `if (looksBinary(content)) continue;`（判定是「含 \\u0000」）。
+    // 改成 break 后，遇到第一个二进制文件就停止收集 ——
+    // 排在它后面的所有源码都不进 prompt。
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "a-bin.dat"), Buffer.from([0x00, 0x01, 0x02]));
+    fs.writeFileSync(path.join(root, "z-after-bin.js"), "// after", "utf8");
+
+    const p = await promptFor(root);
+    expect(p).not.toContain("a-bin.dat");
+    expect(p).toContain("z-after-bin.js");
   });
 });

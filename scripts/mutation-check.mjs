@@ -387,6 +387,33 @@ const EQUIVALENT_SITES = [
    * 正说明差别不可观测。保留该用例（它仍是对 drained 路径的有效断言）。
    */
   { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 309 },
+  /**
+   * `electron/agents/sensenova-api.ts:317` `if (isSecretLikeFile(rel)) continue;`
+   * 的 `continue → break` —— **可证明不可达**（一级）。
+   *
+   * 这一行自称"二次防线：即使上层 walk 漏过某个凭据文件，这里也不读它的正文"。
+   * 但 `statEntries` **只在 `walkStat` 里被 push**（287 行），而 walk 在 284 行
+   * 用**同一个纯函数 `isSecretLikeFile`** 在**同一个 `rel`** 上已经过滤过一次 ——
+   * 所以进得了 `statEntries` 的条目必然不满足该谓词，这行永远不执行。
+   *
+   * 换句话说它是**防御性冗余**，注释里承诺的"二次防线"在当前结构下不成立。
+   * 保留它没有坏处（万一将来多出别的 statEntries 来源），但门禁不该为一条
+   * 不可达分支永远挂红 —— 故白名单，并把"为什么不可达"写在这里备查。
+   */
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 317 },
+  /**
+   * `electron/agents/sensenova-api.ts:323` `catch { continue; }`（读文件失败）—— 二级。
+   *
+   * 要触发它需要「walk 阶段 statSync 成功、内容阶段 readFileSync 失败」——
+   * 即两次系统调用之间文件被删（TOCTOU）。测试里构造不出确定性的触发：
+   * walk 与 read 在同一个方法调用里紧邻（303 行循环调用 `readSnapshotContents`），
+   * 没有任何可插桩的间隙；Windows 上也没有"可写但不可读"的稳定文件状态。
+   *
+   * ⚠️ 二级判定（经验性，不是证明）。若将来给该模块加 fs 注入点
+   * （同 `zone-guard` / `snapshot-store` 的 `FsLike` 模式），
+   * **应删掉这条白名单**并补一条注入用例 —— 那时正确做法是让分支可测。
+   */
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 323 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
