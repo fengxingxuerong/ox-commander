@@ -5,6 +5,7 @@ import path from "node:path";
 import { AllRoutesCoolingError } from "../shared/http-clients";
 import {
   CancelledError,
+  isCancelled,
   OrchestratorEngine,
   type OrchestratorDeps,
   type RunSnapshot,
@@ -756,6 +757,135 @@ describe("OrchestratorEngine · 分解校验失败带反馈重试", () => {
       /src\/cli\.test\.js/,
     );
     expect(calls).toBe(3); // 首次 + 2 次重试
+  });
+});
+
+/**
+ * 下面这一组来自 site 逐位点审计（orchestrator.ts 9 处存活里的 4 处）。
+ *
+ * 这个模块是调度主链路（478 行、有状态、有 IO），改坏的共同特征是
+ * **不抛错、只是行为悄悄变了** —— 所以断言的落点必须是可观测的外部事实：
+ * 回调收到了什么、日志里写了什么、批次派给了谁。
+ */
+describe("OrchestratorEngine · 取消信号 / 任务时长 / 警告闸门", () => {
+  it("[91] isCancelled 认得鸭子类型的取消信号", () => {
+    // 第 91 行 `err instanceof CancelledError || (err as {name?})?.name === "CancelledError"`。
+    // 两侧各自承载一半语义，改坏方向相反但后果都是"取消信号被当成普通失败"：
+    //  - `||` 改 `&&`：鸭子类型那一侧（跨 realm 的实例、经结构化克隆后
+    //    失去原型的错误）认不出来 → 批次继续往下跑而不是停下；
+    //  - `===` 改 `!==`：`{name:"CancelledError"}` 判 false，而
+    //    `{name:"TypeError"}` 反而判 true —— 判断整个反了。
+    expect(isCancelled(new CancelledError())).toBe(true);
+    expect(isCancelled({ name: "CancelledError" })).toBe(true);
+    expect(isCancelled({ name: "TypeError" })).toBe(false);
+    expect(isCancelled(null)).toBe(false);
+    expect(isCancelled(undefined)).toBe(false);
+  });
+
+  it("[186] 首次分解就命中冷却等待时，日志说的是「任务分解」而不是「第 0 次重试」", () => {
+    // 第 186 行 `attempt === 0 ? "任务分解" : \`任务分解（第 ${attempt} 次校验修正重试）\``。
+    // 这个 label 只作为 `brainCall(what, …)` 的第一参出现，而 `what` 只在
+    // **冷却等待**的日志里露面 —— 所以触发条件就写成"第一次调用就撞上全线冷却"。
+    // 改成 `!==` 后首次尝试被标成"第 0 次校验修正重试"：日志看像是重试，
+    // 而实际上一次都还没重试过，运维会去翻不存在的上一轮。
+    const events: string[] = [];
+    let calls = 0;
+    const plan = {
+      tasks: [
+        {
+          id: "t1",
+          title: "x",
+          description: "x",
+          zone: "src",
+          dependencies: [],
+          suggestedRole: "backend-dev",
+        },
+      ],
+      smoke: [],
+    };
+    const llm: LlmClient = {
+      async chat() {
+        calls += 1;
+        if (calls === 1) throw new AllRoutesCoolingError(20);
+        return { content: JSON.stringify(plan), provider: "fake", model: "fake" };
+      },
+    };
+    const deps: OrchestratorDeps = {
+      llm,
+      scheduler: fakeScheduler(false),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    return (async () => {
+      const eng = new OrchestratorEngine(deps, {
+        onStage: () => {},
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+      });
+      await eng.decompose({
+        goal: "g",
+        features: [],
+        techStack: ["Node.js"],
+        acceptanceCriteria: ["npm test 通过"],
+      });
+      const coolLog = events.find((e) => e.includes("冷却中")) ?? "";
+      expect(coolLog).toContain("任务分解");
+      expect(coolLog).not.toContain("第 0 次");
+    })();
+  });
+
+  it("[375] 任务结果里的 durationMs 要透传给 onTaskOutcome", () => {
+    // 第 375 行 `...(o.durationMs !== undefined ? { durationMs: o.durationMs } : {})`。
+    // 改成 `===` 后**给出时反而被丢掉** —— 看板上的"每个任务耗时"整列变空。
+    // 这个字段是运营侧唯一的耗时来源（结果对象里的 durationMs 只到批次级）。
+    const events: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          return tasks.map((t: Task) => ({
+            taskId: t.id,
+            ok: true,
+            logDigest: "log",
+            events: [],
+            durationMs: 42,
+          }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    return (async () => {
+      const eng = new OrchestratorEngine(deps, {
+        onStage: () => {},
+        onLog: () => {},
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+        onTaskOutcome: (_id, _ok, _digest, extra) => events.push(JSON.stringify(extra)),
+      });
+      await eng.execute([TASKS], ".");
+      expect(events.join("\n")).toContain('"durationMs":42');
+    })();
+  });
+
+  it("[408] 验证没过但开发任务也失败时，不许打「即使构建通过」的警告", () => {
+    // 第 408 行 `if (anyDevFailure && report.passed)`。改成 `||` 后，
+    // **"开发任务失败 + 验证也没过"**这种最需要如实报告的情形反而会打上
+    // "即使构建通过也不允许交付" —— 日志把结论说反了（构建明明没过），
+    // 运维据此判断会得出错误结论。
+    //
+    // 触发条件：`anyDevFailure=true` 且 `report.passed=false`。
+    // 注意第 402 行的提前 return 是 `!anyDevFailure && report.passed`，
+    // 所以这条警告只在"走到修复轮"时可见 —— 而那一轮恰恰是 passed=false。
+    const events: string[] = [];
+    const eng = engine({ failFirstRound: true, events });
+    return (async () => {
+      await eng.execute([TASKS], ".");
+      expect(events.join("\n")).not.toContain("即使构建通过");
+    })();
   });
 });
 
