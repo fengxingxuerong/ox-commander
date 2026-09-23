@@ -1523,4 +1523,26 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 `sensenova-api` 7 · `http-bridge` 7 · `scheduler` 4 · `router` 4 · `registry` 3 ·
 `store` 2 · `llm-client` 2 · `context` 2 · `cli-agent` 2 · 其余零散。
 
-全量测试 785 → **820 passed** / 6 skipped。
+全量测试 785 → **839 passed** / 6 skipped。
+
+### 16.9 继续清理（2026-09-23 第三批，累计 45 / 95）
+
+| 文件 | site 口径 | 收口方式 |
+| --- | --- | --- |
+| `electron/engine/router.ts` | **20/20** | 4 处补断言：候选复查（注册表已滤过，只能直接构造 `candidates`）+ 等分 tie-break |
+| `electron/agents/registry.ts` | **20/20** | 3 处补断言：`ui` 适配器推断（两个函数各一处，须分别验）|
+| `shared/llm-client.ts` | **15/15** | 2 处补断言：残缺 JSON 块跳过 + system 消息非首位 |
+| `electron/engine/scheduler.ts` | **14/14** | 2 处补断言（失败事件被后续 completed 洗白 / 熔断兜底找不到人）+ 1 处简化源码 |
+
+**第四类死代码：「同生共死的守卫」**（`a && b` 中两条件互为蕴含）——
+已见三例（`protocol` / `scheduler` / `graph`），**处理一律是简化源码**。
+`scheduler` 那例的写法最通用：把同源的两个值打成 `{ guard, scope }` pair，
+判一次真值即可，且不需要类型断言。
+
+**补断言前先问「既有用例为什么走不到这一支」**，三种成因各有对策：
+① 前面有别的校验先返回 → 补上前置条件的合法值；
+② 排序恒定（如 system 消息恒在首位）→ 把目标项挪到非首位；
+③ 两种写法结果恰好相同 → 构造能区分它们的最小场景。
+
+**剩余 ~50 处**：`manifest-schema` 14 · `orchestrator` 9 · `http-clients` 7 ·
+`sensenova-api` 7 · `http-bridge` 7 · `store` 2 · `context` 2 · `cli-agent` 2 · 其余零散。
