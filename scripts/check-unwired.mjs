@@ -24,7 +24,17 @@ import { fileURLToPath } from "node:url";
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SCAN_DIRS = ["shared", "electron", "src", "headless"];
 const EXT = new Set([".ts", ".tsx", ".mts"]);
-const SKIP_DIR = /(^|[\\/])(node_modules|dist|dist-electron|dist-headless|coverage|\.git)([\\/]|$)/;
+/**
+ * `__fakes__/` 是**测试替身**，不是生产代码 —— 与 `vitest.config.mts` 的
+ * `coverage.exclude` 同一判定。替身里的导出天然只被测试引用（那正是它的用途），
+ * 让本门禁去要求它们"有生产调用"只会逼人把测试基础设施写进 ACCEPTED 表。
+ *
+ * 注意这条不放宽门禁的**语义**：本门禁问的是"生产代码有没有调用"，
+ * 而测试替身从来不是生产代码。真生产模块（shared / electron / headless / src
+ * 下的非 __fakes__ 文件）一律照旧扫描。
+ */
+const SKIP_DIR =
+  /(^|[\\/])(node_modules|dist|dist-electron|dist-headless|coverage|\.git|__fakes__)([\\/]|$)/;
 
 /**
  * 已评审、明确接受「生产零调用」的项 —— 键为 `文件::符号`。

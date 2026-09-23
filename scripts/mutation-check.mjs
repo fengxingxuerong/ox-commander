@@ -275,6 +275,19 @@ const TARGETS = [
     tests: ["src/zone-guard.test.ts", "src/scheduler.test.ts"],
     tier: 2,
   },
+
+  // ---- 2026-09-23 第六批：进程入口（此前 0% 覆盖、且不在任何门禁内）----
+  // main.ts 是唯一"错了整个应用都不可用"的文件：单实例锁守卫、窗口装配、
+  // .env 装载优先级。它此前被列进"刻意不纳入"（需要起 Electron），但依赖是
+  // 假的就成立 —— `src/__fakes__/electron.ts` 长出 whenReady / 单实例锁 /
+  // 有行为的 BrowserWindow 之后，入口可以在 vitest 里**跑起来**再断言。
+  // 挂 tier 1：整份测试 ~80ms，且算子是"守卫消失"型，坏了必须当场红。
+  //
+  // ⚠️ 已知覆盖边界：入口里两个最关键的守卫是 `if (!isPrimaryInstance)` 与
+  // `if (!win)`，而算子表里**没有对应的取反算子**（只有 && / === / !==）——
+  // 即这两处靠行为测试保证，不靠变异。要纳入得先给算子表加 `if (!x)` → `if (x)`，
+  // 那会同时命中其余 26 个目标，属独立排期。
+  { file: "electron/main.ts", test: "src/main-wiring.test.ts", tier: 1 },
 ];
 
 /**

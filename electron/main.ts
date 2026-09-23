@@ -16,7 +16,9 @@ function loadEnvFile(): void {
   }
 }
 
-function createWindow() {
+let mainWindow: BrowserWindow | null = null;
+
+function createWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1440,
     height: 900,
@@ -28,6 +30,13 @@ function createWindow() {
     },
   });
 
+  // Hold the reference for `second-instance`; drop it on close, otherwise a
+  // later second launch would focus a destroyed window and throw.
+  mainWindow = win;
+  win.on("closed", () => {
+    if (mainWindow === win) mainWindow = null;
+  });
+
   attachWindow(win);
 
   if (process.env.OX_DEV_SERVER) {
@@ -35,13 +44,39 @@ function createWindow() {
   } else {
     win.loadFile(path.join(__dirname, "../../dist/index.html"));
   }
+
+  return win;
 }
 
-app.whenReady().then(() => {
-  loadEnvFile();
-  registerIpc();
-  createWindow();
-});
+/**
+ * Single-instance lock.
+ *
+ * Why: two instances driving the same project root each build their own
+ * snapshots and each roll back on a zone violation, so the audit ends up with
+ * two contradictory run records for one workspace. The stores make it worse —
+ * `store.ts` / `keys-store.ts` rewrite the whole file per save, and
+ * `atomic-file` only guarantees a single write is not torn, not that concurrent
+ * writers cannot lose each other's update. The second launch therefore hands
+ * focus to the existing window instead of opening a second commander.
+ */
+const isPrimaryInstance = app.requestSingleInstanceLock();
+
+if (!isPrimaryInstance) {
+  app.quit();
+} else {
+  app.on("second-instance", () => {
+    const win = mainWindow;
+    if (!win) return;
+    if (win.isMinimized()) win.restore();
+    win.focus();
+  });
+
+  app.whenReady().then(() => {
+    loadEnvFile();
+    registerIpc();
+    createWindow();
+  });
+}
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
