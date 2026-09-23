@@ -383,6 +383,23 @@ const EQUIVALENT_SITES = [
    * 届时按新行号校回，并重新确认双层防线仍在。
    */
   { file: "electron/sandbox/kill-tree.ts", op: "&& → ||", line: 37 },
+  /**
+   * `electron/sandbox/path-policy.ts:92` 的 `parent === cur` → `!==`
+   * —— **POSIX 域可证明不可达**（一级）。
+   *
+   * 92 行在 `resolveExistingReal` 的上溯循环 catch 里：realpath(cur) 抛错后
+   * 取 parent，若 `parent === cur`（cur 已是 fs 根）则词法返回 target。
+   * 它可达的前提是 **realpath(fs-root) 本身抛错** ——
+   *   POSIX：`/` 恒可解析，不存在"根不可达"的输入，分支事实不可达；
+   *   Windows：仅当盘符不存在（realpath("Q:\\") → ENOENT）才进入，
+   *   本地 Windows 实测该场景可杀此位点（故 Windows 基线 33/33）。
+   *
+   * CI ubuntu 首跑暴露此存活（Linux 上 27/27 全绿），诊断输出
+   * （diff + 变异下通过报告）确认变异体在 POSIX 上从未被执行 ——
+   * 平台相关等价的又一实锤，与 workflow 注释里"两个 OS 合起来才是全集"
+   * 的设计互为印证。行号 92 在两端一致，无漂移风险。
+   */
+  { file: "electron/sandbox/path-policy.ts", op: "=== → !==", line: 92 },
   { file: "electron/engine/router.ts", op: "&& → ||", line: 193 },
   // `if (!title || !command) return;` —— 改成 `&&` 后，"只缺一个字段"的 smoke 条目
   // 不再被提前 return，会带着 `undefined` 被 push 进 smoke 数组。
