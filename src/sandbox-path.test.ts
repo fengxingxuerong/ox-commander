@@ -58,6 +58,22 @@ describe("PathPolicy.assertWritable", () => {
     }
   });
 
+  it("中途目录尚不存在时，realpath 回退路径必须把剩余层级拼回去", () => {
+    // 这条钉住 resolveExistingReal 的 catch 分支：target 的中途层级不存在时
+    // `realpathSync.native` 抛错，逐级上溯后靠 `suffix.length === 0 ? real
+    // : join(real, ...suffix)` 把尚未存在的层级接回真实根。这个场景是
+    // **平台无关**的 —— CI ubuntu 首跑时，旧的杀死场景（8.3 短名/junction）
+    // 在 Linux 上不可达，于是 `=== → !==` 变异存活；这条用例让两端都能杀它：
+    // 变异后 suffix 非空时返回裸 `real`（丢掉全部剩余层级），abs 断言即挂。
+    fs.mkdirSync(path.join(root, "fresh-dir"), { recursive: true });
+    const d = policy().assertWritable("fresh-dir/deep/nested/file.txt");
+    expect(d.ok).toBe(true);
+    if (d.ok) {
+      expect(d.abs).toBe(path.join(root, "fresh-dir", "deep", "nested", "file.txt"));
+    }
+    fs.rmSync(path.join(root, "fresh-dir"), { recursive: true, force: true });
+  });
+
   it("rejects traversal, including the encoded-looking variants", () => {
     for (const p of ["../outside.js", "src/../../outside.js", "a/../../b.js"]) {
       const d = policy().assertWritable(p);

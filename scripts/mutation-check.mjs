@@ -363,6 +363,26 @@ function siteMutant(source, site, op) {
  * 那是故意的（fail-safe），届时重新评估是否仍是等价位点。
  */
 const EQUIVALENT_SITES = [
+  /**
+   * `electron/sandbox/kill-tree.ts:37` 的 `&& → ||` —— **可证明等价**（一级）。
+   *
+   * 37 行是 win32 分支 post-grace double-check 的守卫
+   * `if (child.exitCode === null && child.signalCode === null) portableKill(child, 0)`。
+   * 2026-09-23 跨平台轮给 `portableKill` 开头补了 `if (hasExited(child)) return`
+   * 预检查（修 POSIX 直接路径的 pid 复用误杀，CI ubuntu 首跑抓到的真缺口）——
+   * 此后这个 `&&` 变 `||` 就是纯等价：变异把条件从 `!hasExited` 放宽成它的
+   * 任意超集，而超集里多出来的部分（至少一个退出标志非 null）必然被
+   * portableKill 的预检查拦下，**对 child.kill 的调用次数恒等**。
+   *
+   * 37 行的条件因此成了防御冗余 —— 但**刻意保留**：它是 win32 路径的
+   * belt-and-braces（taskkill 报成功后的补刀守卫，36 行注释言明），与
+   * portableKill 的预检查是两层独立防线，去掉任何一层都让"已退出误杀"防护
+   * 只剩单点。等价变异白名单在这里的语义正是"防御冗余，有意保留"。
+   *
+   * ⚠️ 行号是锚点：kill-tree.ts 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认双层防线仍在。
+   */
+  { file: "electron/sandbox/kill-tree.ts", op: "&& → ||", line: 37 },
   { file: "electron/engine/router.ts", op: "&& → ||", line: 193 },
   // `if (!title || !command) return;` —— 改成 `&&` 后，"只缺一个字段"的 smoke 条目
   // 不再被提前 return，会带着 `undefined` 被 push 进 smoke 数组。

@@ -39,7 +39,7 @@ export interface BuildSpawnSpecOptions {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   /** Resolver override for tests. */
-  resolve?: (command: string, env: NodeJS.ProcessEnv) => string;
+  resolve?: (command: string, env: NodeJS.ProcessEnv, platform: NodeJS.Platform) => string;
 }
 
 const CMD_EXTENSIONS = [".cmd", ".bat"];
@@ -122,7 +122,10 @@ export function buildSpawnSpec(
     return { file: command, args: [...args], windowsVerbatimArguments: false, note: "posix direct" };
   }
   const resolve = opts.resolve ?? resolveCommand;
-  const resolved = resolve(command, env);
+  // platform 必须显式传下去：resolveCommand 的第三参默认 `process.platform`，
+  // 漏传会让「注入 win32 的测试/宿主」在 POSIX 机器上走 POSIX 解析分支 ——
+  // PATHEXT 查找整个失效，2026-09-23 CI ubuntu 矩阵首跑抓到。
+  const resolved = resolve(command, env, platform);
   if (!needsCmdWrapper(resolved, platform)) {
     return { file: resolved, args: [...args], windowsVerbatimArguments: false, note: "windows direct" };
   }

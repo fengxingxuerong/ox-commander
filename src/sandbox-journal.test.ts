@@ -993,7 +993,10 @@ describe("SnapshotStore · runId 归一化", () => {
     // `scope.runId.replace(/[^\w.-]/g, "_")` —— 斜杠与空格等被换成 `_`。
     // 注意 `.` 在白名单内（字符类里是字面量），所以 ".." 会原样留下；
     // 真正挡逃逸的是**斜杠被换掉** —— 没有分隔符，`..` 就只是目录名的一部分。
-    expect(token.dirAbs).not.toContain("/");
+    // 平台无关写法：断言打在 basename（归一化 runId 本身）上 —— Linux 的
+    // dirAbs 必然含 `/`（POSIX 分隔符），对绝对路径断言 not.toContain("/")
+    // 在 Linux 上恒假，那是在断言平台而不是断言行为。
+    expect(path.basename(token.dirAbs)).not.toMatch(/[/\\]/);
     expect(path.resolve(token.dirAbs).startsWith(path.resolve(backupRoot) + path.sep)).toBe(true);
     // 单层目录，不会因为 ../ 多跳出去
     expect(path.relative(backupRoot, token.dirAbs)).not.toContain(path.sep);

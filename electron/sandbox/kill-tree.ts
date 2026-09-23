@@ -47,6 +47,11 @@ export function killTree(child: ChildProcess, opts: { graceMs?: number } = {}): 
 
 /** SIGTERM → SIGKILL escalation; the only path available off Windows. */
 function portableKill(child: ChildProcess, graceMs: number): void {
+  // 与 win32 分支的 post-grace double-check 同一条契约：已退出的进程不再杀。
+  // POSIX 上这不只是礼貌 —— 退出的 pid 可能已被系统复用给无关进程，对着它
+  // 发 SIGTERM 是实打实的误杀。win32 分支调用前已自查，这里是第二道防线，
+  // 也是 POSIX 直接路径（killTree 的 fall-through）的唯一一道。
+  if (hasExited(child)) return;
   try {
     child.kill("SIGTERM");
     const timer = setTimeout(() => {
