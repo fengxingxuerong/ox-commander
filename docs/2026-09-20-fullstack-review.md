@@ -1838,3 +1838,59 @@ git push -u origin master
 **本轮没做的诚实交代**：Linux 侧的 site 结果、CI 两个 job 的真实执行、
 打包产物可用性 —— 这三项**都不可能在本机验证**（无远端、需真实打包工具链），
 所以本文只声明"本地 Windows 上 577/577"，不声明"全平台 100%"。
+
+## 十八、分发轮：公开仓库之后，补上"别人装上就能跑"（2026-09-24）
+
+### 18.1 起点：仓库已公开，但分发能力为零
+
+推上 GitHub 公开仓库之后，欠账清单里**唯一还卡在"你能跑、别人不能"**的一项
+浮到了最前：无 LICENSE（默认"保留所有权利"）、无 CHANGELOG、无打包配置、
+`.env` 要手工放。前三件是纯文件，第四件在 18.3 里被证明**不只是文档问题**。
+
+### 18.2 做了什么
+
+| 项 | 内容 |
+| --- | --- |
+| `LICENSE` | MIT（宽松、允许商用；若要换 Apache-2.0 或保留所有权利，一行改动） |
+| `CHANGELOG.md` | 0.1.0 首个公开版本，含"已知限制"一节（不粉饰） |
+| `electron-builder.yml` + `build:dist` | Windows（nsis + portable）/ Linux（AppImage + deb） |
+| `.github/workflows/release.yml` | 打 `v*` tag 打包并用预装 `gh` 建 Release；支持 `workflow_dispatch` |
+
+**macOS 故意不产出。** 没有签名凭据，未签名 `.app` 在较新 macOS 上会被
+Gatekeeper 直接拦下 —— 出一个"用户打不开"的产物比不出更糟。
+连 mac 配置块都不留，是为了避免让人误读成"支持 mac，只是没人试过"。
+
+`release.yml` 里**不能**设 `ELECTRON_SKIP_BINARY_DOWNLOAD`：`verify.yml` 设它
+是因为"只要类型定义、从不启动 Electron"，而打包恰恰需要那个二进制。
+同一变量名在两个 workflow 里语义相反，靠注释钉住。
+
+### 18.3 一个真缺陷：打包后用户无法配置密钥（不是文档问题）
+
+`loadEnvFile()` 只从 `app.getAppPath()` 读 `.env`。**打包后它指向
+`resources/app.asar` —— 归档内部，用户放不进任何文件。**
+
+- 后果：安装版用户根本没法配密钥；而开发态（源码树里 `.env` 就在项目根）
+  一切正常。
+- 这正是项目自己的 `smoke:artifact` 想抓的那类问题：**源码全绿、产物坏了**。
+  而产物冒烟此前只查"dist 存在性 + 语法 + headless 退出码"，查不到这类
+  "路径在打包后失效"的语义问题。
+
+改为按优先级查 asar **之外**的位置：
+
+1. `app.getAppPath()` —— 开发态（项目根），也是既有用例的路径
+2. `userData` —— 安装版：per-user、可写，settings/keys 也在这
+3. exe 所在目录 —— portable 版：解压即用，配置跟包走
+
+只采用**第一个存在**的文件：多处各放一份时，结果不该取决于合并顺序。
+
+### 18.4 门禁代价与验证
+
+`electron/main.ts` 是 tier-1 变异目标，改动后 **6/6（100%）** ——
+新增的 `continue` 与 `if (exe)` 两处也由新断言钉住
+（打包态读 userData、portable 态读 exe 目录、只采用第一个存在的文件）。
+
+### 18.5 仍未验证的部分（诚实标注）
+
+- **打包产物本身尚未产出过**：`electron-builder` 装在最后一步，装完由 CI 出产物。
+  首次验证方式：Actions 页手动触发 `release`（**不需要打 tag**）。
+- 若 CI 打包报红，按"能补断言就补"处置，不要先放宽配置。
