@@ -16,6 +16,9 @@ interface ProjectRecord {
   updatedAt: string;
 }
 
+/** 同毫秒内 create 的单调序数：见 ProjectStore.create 的 id 拼接处。 */
+let idSeq = 0;
+
 /** JSON-file persistence under userData; swap for SQLite without touching callers. */
 export class ProjectStore {
   constructor(private dataDir: string) {
@@ -38,7 +41,10 @@ export class ProjectStore {
 
   create(name: string, requirement: string): ProjectRecord {
     const rec: ProjectRecord = {
-      id: `p-${Date.now()}`,
+      // 同毫秒单调序数：Date.now 只有毫秒粒度，同一毫秒内连建两个项目时
+      // 裸时间戳 id 必然碰撞（CI ubuntu flake），序数让 id 恢复唯一性；
+      // list() 的平局决胜也依赖它（同毫秒时后建者 id 更大）。
+      id: `p-${Date.now()}-${(idSeq += 1)}`,
       name,
       requirement,
       stage: "PRD",
@@ -52,7 +58,11 @@ export class ProjectStore {
   }
 
   list(): ProjectRecord[] {
-    return this.readAll().sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+    // newest first；createdAt 同毫秒的平局用 id 决胜（序数大 = 后建 = 更新），
+    // 否则 sort 稳定性把顺序交给插入序 —— 那不是"最新在前"的语义。
+    return this.readAll().sort(
+      (a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id),
+    );
   }
 
   update(id: string, patch: Partial<Omit<ProjectRecord, "id" | "createdAt">>): void {

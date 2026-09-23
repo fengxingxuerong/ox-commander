@@ -3,7 +3,7 @@
  * Runs in plain node against a temp dir; pins the BOM tolerance, the
  * defaults-merge semantics and the CRUD contract the IPC layer relies on.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -49,6 +49,26 @@ describe("ProjectStore", () => {
     expect(store.remove(a.id)).toBe(true);
     expect(store.get(a.id)).toBeUndefined();
     expect(store.remove(a.id)).toBe(false);
+  });
+
+  it("同一毫秒内连建两个项目：id 不碰撞，newest-first 平局可分", () => {
+    // CI ubuntu 首跑 flake（e74af63 前）：id 与 createdAt 都是 Date.now 毫秒
+    // 精度，同毫秒连建两个项目时 id 碰撞（p-<ts> 相同）、排序平局随机 ——
+    // "newest first" 断言时挂时不挂。用假时钟钉住同毫秒场景，把
+    // 「id 唯一性」与「平局决胜」变成确定性断言。
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+    try {
+      const store = new ProjectStore(dir);
+      const a = store.create("先建", "r1");
+      const b = store.create("后建", "r2");
+      expect(b.id).not.toBe(a.id);
+
+      const listed = store.list();
+      expect(listed.map((r) => r.id)).toEqual([b.id, a.id]); // 平局：后建者在前
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("rejects updates for unknown ids", () => {
