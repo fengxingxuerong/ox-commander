@@ -55,15 +55,17 @@ typecheck（renderer / electron / headless 三套 tsconfig）
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 152/152（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **577/577（100%）**，22.9 min |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **594/594（100%）**，13.1 min |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
 CI（`.github/workflows/verify.yml`）两个 job：`verify`（ubuntu + windows 矩阵）、
-`mutation`（site 口径，35 min 上限）。
+`mutation`（site 口径，35 min 上限）。仓库托管在 GitHub（私有仓库），
+两个 job 随每次 push 运行 —— CI 结论以 Actions 页为准。
 
-> **注意：仓库目前没有远端**，这两个 job 一次都没跑过 —— 本地绿不等于 CI 绿。
+> 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
+> （含 577 → 594 两轮快照与"白名单行号漂移"的发现-处置记录）。
 
 真实链路冒烟（需密钥、消耗配额，不进门禁）：
 
