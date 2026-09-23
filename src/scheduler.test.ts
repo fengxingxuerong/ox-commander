@@ -214,6 +214,28 @@ describe("Scheduler.runBatch", () => {
     expect(outcomes[0].logDigest).toBe("no agent available");
     expect(dispatched).toEqual([]);
   });
+
+  it("[267] 首选 agent 熔断时，兜底找到的必须是「别人」而不是它自己", async () => {
+    // 第 267 行 `available.find((a) => a.meta.id !== wanted.meta.id && breaker.allow(a.meta.id))`。
+    // 把 `!==` 改成 `===` 之后，find 会在**首选 agent 自己**身上找 ——
+    // 而它刚刚因为 allow 为假才被兜底，所以永远匹配不上，find 恒返回 undefined。
+    // 于是「熔断一个、还有别的可用」的场景下任务直接判成 no agent available，
+    // 能力池里的其它 agent 被白白闲置。
+    //
+    // 既有用例（both open）两种写法结果相同（都是找不到），所以看不出来。
+    const { CircuitBreaker } = await import("../electron/sandbox/circuit-breaker");
+    const breaker = new CircuitBreaker({ failureThreshold: 1 });
+    breaker.record("a1", false); // 只打开 a1，a2 仍可用
+    const dispatched: string[] = [];
+    const sched = new Scheduler(
+      [adapterWith("a1", true, { dispatched }), adapterWith("a2", true, { dispatched })],
+      [],
+      { breaker },
+    );
+    const outcomes = await sched.runBatch([task("t1", "z")], ".");
+    expect(dispatched).toEqual(["a2"]);
+    expect(outcomes[0]!.ok).toBe(true);
+  });
 });
 
 describe("Scheduler capability routing (P1)", () => {
@@ -474,5 +496,106 @@ describe("Scheduler · 平台契约模板注入", () => {
     await sched.runBatch([t], ".");
     const desc = captured[0]!.description;
     expect((desc.match(/\[平台契约条款\]/g) ?? []).length).toBe(1);
+  });
+});
+
+describe("Scheduler · 事件流的终止判定", () => {
+  /** 按给定事件序列回报的适配器（`adapterWith` 只能给"成功/失败"两段固定流）。 */
+  function eventAdapter(id: string, events: Array<{ kind: string; text: string }>): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        for (const e of events) {
+          yield { ...e, timestamp: Date.now() } as never;
+        }
+      },
+      async abort() {},
+    };
+  }
+
+  it("[383] failed 之后又来 completed 时仍算失败 —— 失败不能被后续事件洗白", async () => {
+    // 第 383 行 `event.kind === "failed" || event.kind === "aborted"` 里的第一个 `===`。
+    // 改成 `!==` 之后，`failed` 事件不再命中这一支：循环不 break，继续读到后面的
+    // `completed` 并把 `terminalOk` 置真 —— **失败的任务被报成成功**，
+    // 于是 verifier 放行、坏产物进入交付。既有用例的失败流里没有后续事件，
+    // 两种写法都是 ok=false，所以看不出来。
+    const sched = new Scheduler(
+      [eventAdapter("a1", [{ kind: "failed", text: "boom" }, { kind: "completed", text: "done" }])],
+      [],
+    );
+    const outcomes = await sched.runBatch([task("t1", "src/core")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+  });
+
+  it("[383] 未知类型的事件不中断收集 —— 后面真正的 completed 不能被丢掉", async () => {
+    // 同一行的第二个 `===`（`aborted`）。改成 `!==` 后，任何**不是** aborted 的
+    // 事件（比如进度事件）都会命中这一支并 break —— 收集提前结束，
+    // 后面那个 completed 读不到，`terminalOk` 停在 false → **成功的任务被报成失败**。
+    const sched = new Scheduler(
+      [
+        eventAdapter("a1", [
+          { kind: "progress", text: "50%" },
+          { kind: "completed", text: "done" },
+        ]),
+      ],
+      [],
+    );
+    const outcomes = await sched.runBatch([task("t1", "src/core")], ".");
+    expect(outcomes[0]!.ok).toBe(true);
+  });
+});
+
+describe("Scheduler · 探针缓存失效的粒度", () => {
+  /** 记录 probe() 被真实调用了几次。 */
+  function countingAdapter(id: string, counts: Record<string, number>): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        counts[id] = (counts[id] ?? 0) + 1;
+        return true;
+      },
+      async dispatch(payload) {
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  it("[142] forgetProbe(id) 只失效那一个 agent，不能清掉整张缓存", () => {
+    // 第 142 行 `if (agentId === undefined) this.probeCache.clear();`。
+    // 把 `===` 改成 `!==` 之后**两个分支对调**：
+    //   - 传了 id → 走 `clear()`，**整张缓存被清空**，所有 agent 都要重新探测；
+    //   - 不传 id → 走 `delete(undefined)`，真正的"清全部"反而什么都不做。
+    // 后者会让注销后的探针结果永远残留（探测到一个已下线的 agent）。
+    //
+    // 断言落在**可观测事实**上：另一个 agent 的 probe() 被真实调用的次数。
+    return (async () => {
+      const counts: Record<string, number> = {};
+      const sched = new Scheduler([countingAdapter("a1", counts), countingAdapter("a2", counts)], []);
+      await sched.runBatch([task("t1", "src/core")], ".");
+      expect(counts).toEqual({ a1: 1, a2: 1 });
+
+      sched.forgetProbe("a1");
+      await sched.runBatch([task("t2", "src/core")], ".");
+
+      // a1 必须被重新探测，a2 必须仍命中缓存
+      expect(counts.a1).toBe(2);
+      expect(counts.a2).toBe(1);
+
+      // 不带参数时才是"清全部"
+      sched.forgetProbe();
+      await sched.runBatch([task("t3", "src/core")], ".");
+      expect(counts.a1).toBe(3);
+      expect(counts.a2).toBe(2);
+    })();
   });
 });

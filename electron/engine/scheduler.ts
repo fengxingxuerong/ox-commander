@@ -280,8 +280,21 @@ export class Scheduler {
 
     const agentPool = await this.planPool(tasks, opts?.preferredAgentId);
     const guard = this.opts.guard;
-    const scope = guard
-      ? await guard.begin(`batch-${Date.now().toString(36)}-${tasks.map((t) => t.id).join("_")}`, projectRoot, zones)
+    // `guard` 与它开出的 `scope` 是同生共死的：要么都有，要么都没有。
+    // 打成一对之后，收尾处只需要判一次真值。
+    //
+    // 原先写成 `if (scope && guard)`，两个条件互为蕴含（guard 存在则 scope
+    // 必是 `begin` 返回的对象），属于冗余合取项 —— 改成 `||` 与原文完全等价，
+    // 于是变异测试永远杀不掉它。按「能简化就简化」处理。
+    const settlement = guard
+      ? {
+          guard,
+          scope: await guard.begin(
+            `batch-${Date.now().toString(36)}-${tasks.map((t) => t.id).join("_")}`,
+            projectRoot,
+            zones,
+          ),
+        }
       : null;
 
     const jobs = tasks.map(async (task, i) => {
@@ -360,8 +373,8 @@ export class Scheduler {
     // Without one there is no post-batch check at all: the sandbox still
     // fail-closes every individual write, but nothing can attribute an
     // unauthorized write to the batch that caused it.
-    if (scope && guard) {
-      const verdict = await guard.settle(scope, outcomes);
+    if (settlement) {
+      const verdict = await settlement.guard.settle(settlement.scope, outcomes);
       return verdict.outcomes;
     }
     return outcomes;
