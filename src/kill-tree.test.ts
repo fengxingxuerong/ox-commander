@@ -96,12 +96,18 @@ describe("killTree · success path (real taskkill)", () => {
 
 describe("killTree · fallback paths", () => {
   it("falls back to a portable kill when taskkill cannot even spawn", () => {
-    const killer = fakeKiller();
-    h.spawnImpl = () => killer as never;
-    const child = fakeChild();
-    expect(() => killTree(child, { graceMs: 5 })).not.toThrow();
-    killer.emit("error", new Error("taskkill blocked by policy"));
-    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    // 锁 win32 + 断言 taskkill 确实被 spawn：@32 行 `process.platform === "win32"`
+    // 的 `!== → ===` 变异会让 win32 宿主在 Linux CI 上走 POSIX 直调（无
+    // taskkill 记录），这条断言立刻暴露路径走错。
+    withPlatform("win32", () => {
+      const killer = fakeKiller();
+      h.spawnImpl = () => killer as never;
+      const child = fakeChild();
+      expect(() => killTree(child, { graceMs: 5 })).not.toThrow();
+      killer.emit("error", new Error("taskkill blocked by policy"));
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(h.spawnCalls.some((c) => c.cmd === "taskkill")).toBe(true);
+    });
   });
 
   it("falls back when taskkill exits non-zero (tree may still be alive)", () => {
@@ -138,19 +144,27 @@ describe("killTree · fallback paths", () => {
 
 describe("killTree · post-grace double-check", () => {
   it("escalates to SIGKILL when the child is still alive after the grace window", async () => {
-    h.spawnImpl = () => fakeKiller() as never;
-    const child = fakeChild();
-    killTree(child, { graceMs: 10 });
-    await sleep(60);
-    expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    // withPlatform("win32") 是这条用例的灵魂：post-grace double-check（37 行
+    // 的 verify timer）只存在于 win32 分支里。不锁平台的话，Linux CI 上这条
+    // 用例走 POSIX 直调（同样会 SIGKILL），对 double-check 的三个 `===`
+    // 完全不可观察 —— 2026-09-23 CI 首跑抓到的三处存活正是这么来的。
+    await withPlatform("win32", async () => {
+      h.spawnImpl = () => fakeKiller() as never;
+      const child = fakeChild();
+      killTree(child, { graceMs: 10 });
+      await sleep(60);
+      expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+    });
   });
 
   it("does not re-kill a child that already exited within the grace window", async () => {
-    h.spawnImpl = () => fakeKiller() as never;
-    const child = fakeChild({ exitCode: 0 });
-    killTree(child, { graceMs: 10 });
-    await sleep(60);
-    expect(child.kill).not.toHaveBeenCalled();
+    await withPlatform("win32", async () => {
+      h.spawnImpl = () => fakeKiller() as never;
+      const child = fakeChild({ exitCode: 0 });
+      killTree(child, { graceMs: 10 });
+      await sleep(60);
+      expect(child.kill).not.toHaveBeenCalled();
+    });
   });
 });
 
