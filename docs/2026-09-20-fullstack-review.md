@@ -1808,7 +1808,7 @@ node scripts/mutation-check.mjs --mode=site --limit=999 > logs/mutation-site-202
 
 ```bash
 git remote add origin <仓库地址>
-git push -u origin master
+git push -u origin main        # ⚠️ 实际分支名是 main，不是 master（2026-09-24 更正）
 # 之后自动跑：verify（ubuntu + windows 矩阵）、mutation（site 口径，≤35min）
 ```
 
