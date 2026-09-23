@@ -132,3 +132,21 @@ describe("catalog coverage", () => {
     }
   });
 });
+
+describe("createLlmClient 的协议分发", () => {
+  it("[260] anthropic 协议建 AnthropicClient，其余建 OpenAI 兼容客户端", () => {
+    // 第 260 行 `config.protocol === "anthropic"`。改成 `!==` 之后两个分支**对调**：
+    // anthropic 的 provider 会拿 OpenAI 的报文格式去请求 —— 字段名不同、
+    // system 不是独立参数，表现为对方返回 400 或响应解析失败，
+    // 而不是明确的"协议不支持"。反过来 OpenAI 兼容的 provider 会走 Anthropic 报文。
+    // 既有用例都是直接 new 具体类，没走这个工厂，所以一直没有断言。
+    const anthropic = createLlmClient({ ...getProvider("sensenova"), protocol: "anthropic" }, "sk-x");
+    expect(anthropic).toBeInstanceOf(AnthropicClient);
+
+    const openai = createLlmClient(
+      { ...getProvider("sensenova"), protocol: "openai-compatible" },
+      "sk-x",
+    );
+    expect(openai).toBeInstanceOf(OpenAiCompatibleClient);
+  });
+});

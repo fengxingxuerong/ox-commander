@@ -12,6 +12,7 @@ import {
   countPoolRoutes,
   FailoverLlmClient,
   HttpLlmError,
+  createFailoverClient,
   createMultiProviderFailover,
   type FailoverGroup,
 } from "../shared/http-clients";
@@ -292,5 +293,100 @@ describe("buildLlmPool", () => {
     // as one provider, so auth failures stay fail-fast there.
     const onlyAmd = buildLlmPool({ env: { AMD_API_KEY: "x" }, providers: ["sensenova", "amd-radeon"] });
     expect(onlyAmd).toBeDefined();
+  });
+});
+
+/**
+ * 下面几条来自 site 逐位点审计（http-clients.ts 7 处存活）。
+ *
+ * 观察面说明：`FailoverLlmClient` 的 `constructor(private groups)` 里 private
+ * 只是编译期约束，运行时它就是实例上持有的组数组；而工厂返回的是 `LlmClient`
+ * 接口，没有公开的组访问器。要断言"某个 key / 某条 route 到底有没有建组"，
+ * 读这个字段是唯一能落到事实上的办法。
+ */
+function groupsOf(client: LlmClient): FailoverGroup[] {
+  return (client as unknown as { groups: FailoverGroup[] }).groups;
+}
+
+function poolRoute(providerId: string, keyVars: string[], models: string[]) {
+  return { providerId, keyVars, models };
+}
+
+describe("多 provider 池的组构造", () => {
+  it("[495] 无 key 的 provider（本地 Ollama 之类）仍要建组，label 用 nokey", () => {
+    // 第 495 行 `if (keyVar !== "" && apiKey === "") continue;` 的 `&&`。
+    // 改成 `||` 后，无 key 的 route（keyVar 为空串）会被当成"缺 key"跳过 ——
+    // 本地无鉴权的 provider 整条从池子里消失。第 496 行的 label
+    // `keyVar || "nokey"` 也一并要验（见下一条）。
+    const routes = [poolRoute("amd-radeon", [""], ["m1"])];
+    const groups = groupsOf(createMultiProviderFailover(routes, { env: {} }));
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.label).toBe("amd-radeon:nokey");
+  });
+
+  it("[495] 有 key 时照常建组，label 用 key 变量名", () => {
+    // 同一个 `&&` 的另一个方向：`apiKey === ""` 改成 `!==` 之后，
+    // **有 key 的 route 反而被跳过**，池子直接空掉（chat() 会抛
+    // "failover client has no groups"）。
+    const routes = [poolRoute("sensenova", ["SENSENOVA_API_KEY"], ["m1"])];
+    const groups = groupsOf(
+      createMultiProviderFailover(routes, { env: { SENSENOVA_API_KEY: "k" } }),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.label).toBe("sensenova:SENSENOVA_API_KEY");
+  });
+
+  it("[496] label 不能把 key 名和 nokey 弄反", () => {
+    // 第 496 行 `keyVar || "nokey"`。改成 `&&` 后两个方向都错：
+    // 无 key 时 label 变成空的（丢掉 nokey），有 key 时反而写成 nokey ——
+    // 冷却键 `${label}#${ci}` 随之错配，两组 route 会互相污染冷却状态。
+    const keyless = groupsOf(
+      createMultiProviderFailover([poolRoute("amd-radeon", [""], ["m1"])], { env: {} }),
+    );
+    const keyed = groupsOf(
+      createMultiProviderFailover([poolRoute("sensenova", ["SENSENOVA_API_KEY"], ["m1"])], {
+        env: { SENSENOVA_API_KEY: "k" },
+      }),
+    );
+    expect(keyless[0]!.label).toBe("amd-radeon:nokey");
+    expect(keyed[0]!.label).toBe("sensenova:SENSENOVA_API_KEY");
+  });
+
+  it("[495] 某个 key 变量缺失时只跳过它，排在后面的 key 仍要建组", () => {
+    // 第 495 行尾部的 `continue`。改成 `break` 之后，一旦遇到缺失的 key
+    // 就**跳出整个 keyVars 循环** —— 后面那几个已配置的 key 全部作废。
+    // sensenova 有 3 个 key 变量，只要第一个没配，池子就只剩 0 组。
+    const routes = [
+      poolRoute("sensenova", ["SENSENOVA_MISSING_KEY", "SENSENOVA_API_KEY"], ["m1"]),
+    ];
+    const groups = groupsOf(
+      createMultiProviderFailover(routes, { env: { SENSENOVA_API_KEY: "k" } }),
+    );
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.label).toBe("sensenova:SENSENOVA_API_KEY");
+  });
+
+  it("[523] countPoolRoutes：缺失的 key 排在前面时，后面的 key 仍要计入", () => {
+    // 第 523 行同形的 `continue`。既定用例（SENSENOVA 三 key）里
+    // **已配置的那个恰好排在第一位**，所以 break 与 continue 结果相同；
+    // 把缺失的排到前面才分得出来。
+    const routes = [
+      poolRoute("sensenova", ["SENSENOVA_MISSING_KEY", "SENSENOVA_API_KEY"], ["a", "b"]),
+    ];
+    expect(countPoolRoutes(routes, { SENSENOVA_API_KEY: "k" })).toBe(2);
+  });
+
+  it("[439] createFailoverClient：缺失的 key 之后仍继续处理后续 key", () => {
+    // 第 439 行 `if (!apiKey) continue;` 的两个方向：改成 break 后
+    // 第一个未配置的 key 就会终止整轮 —— 已配置的 key 一个组都建不出来。
+    const client = createFailoverClient(
+      "sensenova",
+      ["SENSENOVA_MISSING_KEY", "SENSENOVA_API_KEY"],
+      ["m1"],
+      { env: { SENSENOVA_API_KEY: "k" } },
+    );
+    const groups = groupsOf(client);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.label).toBe("SENSENOVA_API_KEY");
   });
 });
