@@ -1565,5 +1565,32 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 「构造不出输入」（如 96 行的 TOCTOU）属经验性判断，应视为待复查。
 判等价前先试着一级 —— 能证就不用写测试。
 
-**剩余 ~36 处**：`manifest-schema` 14 · `orchestrator` 9 · `sensenova-api` 7 ·
-`store` 2 · `context` 2 · `cli-agent` 2。
+**剩余 29 处**（第五批后）。
+
+### 16.11 第五批：默认适配器 `sensenova-api.ts`（2026-09-23，累计 64 / 95）
+
+22/31 → **29/29**（补 5 处断言 + 2 处白名单）。这一批全在**快照遍历**里：
+改 `break` 会让**后续文件的正文整段不进 prompt** —— 模型基于不完整上下文生成补丁，
+不报任何错。跳过方向本身都合理（凭据不外发、二进制不灌 prompt），
+但「跳过」不能退化成「到此为止」。
+
+| 位点 | 触发手段 |
+| --- | --- |
+| @278 递归后继续同级 | 目录排在兄弟文件之前 |
+| @280 非文件非目录条目 | **junction**（`symlinkSync(t, p, "junction")`，Windows 免管理员） |
+| @284 凭据文件 | `.env` 排在字母开头文件之前 |
+| @325 二进制文件 | 写入含 NUL 的文件 |
+| @401 `parseFilePayload` 三条件 `||` | 见下 |
+
+**新坑：断言正则太宽。** 原断言 `toThrowError(/files/)` —— 改 `&&` 后 `null.files`
+会抛 `Cannot read properties of null (reading 'files')`，**消息里也有 "files"**，
+宽正则一并吞掉。改用 `/模型 JSON 缺少/`（我们自己抛的那句话）即杀掉。
+**断言错误消息要用「我们抛的那句话」的特征词，不要用字段名/类型名。**
+
+**「defense in depth」注释要核对上游谓词。** @317 自称"二次防线"，但
+`statEntries` 只在 walk 里 push，walk 已用**同一个纯函数、同一个参数**过滤过 →
+该行恒不可达（一级白名单）。**同一谓词 + 同一输入 = 下游是死代码；
+不同谓词（上游按名字、下游按内容）才是真防线。**
+
+**剩余 29 处**：`manifest-schema` 14 · `orchestrator` 9 · `store` 2 ·
+`context` 2 · `cli-agent` 2。
