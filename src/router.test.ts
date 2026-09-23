@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter, DEFAULT_ROUTER_WEIGHTS, type RouteContext } from "../electron/engine/router";
-import type { AgentCapabilities, AgentDescriptor } from "../shared/agent-contract";
+import { DEFAULT_AGENT_LIMITS, type AgentCapabilities, type AgentDescriptor } from "../shared/agent-contract";
 import type { Task } from "../shared/types";
 import { fakeAgent } from "./agent-registry.test";
 
@@ -182,5 +182,103 @@ describe("CapabilityRouter.assign", () => {
       candidates,
     });
     expect(seen).toEqual(["a1:0"]);
+  });
+});
+
+/**
+ * 候选过滤循环里的三处 `continue`（137 / 139 / 141）此前从未被触发。
+ *
+ * 为什么既有用例覆盖不到：`AgentRegistry.candidates()` **已经**按
+ * required tags / role / zone 过滤过一遍，所以走注册表这条路的候选
+ * 全部能通过路由器的复查 —— 那三行是注释里写的"defensive re-check
+ * （注册表通常会先滤掉）"，也就一直没人验证过它到底做不做功。
+ *
+ * 改成 `break` 之后：**第一个被滤掉的候选会让整个评分循环提前终止**，
+ * 后面的候选一个都不参与评分 → `scored` 为空或残缺 → 静默退化到
+ * legacy round-robin。症状是"能力路由时灵时不灵"，而不是报错。
+ *
+ * 这里直接构造 `candidates` 喂给 `assign` —— `RouteContext.candidates`
+ * 本来就是公开入参，路由器也明确承诺会复查，所以这是合法路径。
+ */
+function descriptor(
+  id: string,
+  partial: Partial<AgentCapabilities> = {},
+  inferredLegacy = false,
+): AgentDescriptor {
+  const c = caps(partial);
+  return {
+    manifest: { id, displayName: id, adapter: "local-llm", capabilities: c },
+    capabilities: c as Required<AgentCapabilities>,
+    limits: DEFAULT_AGENT_LIMITS,
+    adapter: fakeAgent(id, c) as unknown as AgentDescriptor["adapter"],
+    inferredLegacy,
+    enabled: true,
+    priority: 0,
+  };
+}
+
+describe("CapabilityRouter · 候选复查（被滤掉的候选不能中断后面的评分）", () => {
+  it("[137] 第一个候选不支持 required tag 时，后面的候选仍被评分并胜出", () => {
+    const t = task("src/x", "backend-dev");
+    const candidates = [
+      // 默认 required 是 ["edit"]：第一个候选不支持 edit，必须被跳过而非终止
+      descriptor("no-edit", { supports: ["read"] }),
+      descriptor("can-edit", { supports: ["edit"], roles: ["*"], zoneGlobs: ["**"] }),
+    ];
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("can-edit");
+    expect(d.reason).not.toContain("round-robin");
+  });
+
+  it("[139] 第一个候选角色不匹配时，后面的候选仍被评分并胜出", () => {
+    const t = task("src/x", "backend-dev");
+    const candidates = [
+      descriptor("wrong-role", { roles: ["test-writer"] }),
+      descriptor("right-role", { roles: ["backend-dev"] }),
+    ];
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("right-role");
+  });
+
+  it("[141] 第一个候选的 zone 覆盖不到时，后面的候选仍被评分并胜出", () => {
+    const t = task("tests/unit", "backend-dev");
+    const candidates = [
+      descriptor("wrong-zone", { zoneGlobs: ["src/**"] }),
+      descriptor("right-zone", { zoneGlobs: ["tests/**"] }),
+    ];
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("right-zone");
+  });
+
+  it("全部候选都被滤掉时才回落 round-robin（复查不是「有候选就收」）", () => {
+    const t = task("tests/unit", "backend-dev");
+    const candidates = [
+      descriptor("no-edit", { supports: ["read"] }),
+      descriptor("wrong-zone", { zoneGlobs: ["src/**"] }),
+    ];
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    // 全部不匹配 → 走 legacy 回落，而不是硬选一个不合格的
+    expect(d.reason).toContain("round-robin");
+  });
+});
+
+describe("CapabilityRouter · 等分时的声明优先 tie-break", () => {
+  it("[193] 分数相同时，声明了能力的候选必须压过推断（legacy）候选", () => {
+    // 第 193 行 `a.descriptor.inferredLegacy !== b.descriptor.inferredLegacy`。
+    // 改成 `===` 之后这个分支只在"两边同为声明或同为 legacy"时进入 ——
+    // 而那时下面的 `if (a.inferredLegacy) return 1` 两边都不成立，整块白跑。
+    // 真正需要它的"一真一假"组合反而被跳过，于是排序退回按分数比较；
+    // 分数相等时稳定排序保持输入顺序 → **legacy 候选会赢**。
+    //
+    // 构造要点：两个候选的分数必须**相等**，否则分数差会盖过 tie-break，
+    // 改坏也看不出来（既有用例正是这种情况：专门用一个高分 specialist 对比）。
+    const t = task("src/x", "backend-dev");
+    const candidates = [
+      // legacy 推断候选排在前面 —— 稳定排序下它会赢，除非 tie-break 生效
+      descriptor("legacy-generalist", { roles: ["*"], zoneGlobs: ["**"] }, true),
+      descriptor("declared", { roles: ["*"], zoneGlobs: ["**"] }, false),
+    ];
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("declared");
   });
 });

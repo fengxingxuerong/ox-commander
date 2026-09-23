@@ -264,3 +264,51 @@ describe("withCooldownRetry", () => {
     expect(sleeps).toEqual([]);
   });
 });
+
+/**
+ * 下面两条来自 site 逐位点审计（llm-client.ts 2 处存活）。
+ */
+describe("chatJson · 扫描与 system 消息定位", () => {
+  it("跳过非平衡的 JSON 块后继续扫描，不能被第一个残缺块截断", () => {
+    // 第 86 行 `if (slice === null) continue;`。改成 break 之后，
+    // 遇到第一个**残缺**的 `{`（后面的整段都没有配对的 `}`）就停止扫描 ——
+    // 后面那些真正合法的 JSON 块一个都不再被考虑，报文直接判成"无法解析"。
+    //
+    // 既有用例（"extracts balanced JSON object embedded in prose"）的散文里
+    // 只有一个**平衡**的块，所以 `slice === null` 那一支从未被走过。
+    const { client } = clientWith(['说明文字 { 这里是残缺的说明\n真正的结果：{"ok":true}']);
+    return expect(
+      chatJson(client, { messages: [] }, {
+        schemaName: "t",
+        validate: (raw) => raw as { ok: boolean },
+        maxRetries: 1,
+      }),
+    ).resolves.toEqual({ ok: true });
+  });
+
+  it("system 消息不在首位时，指令仍追加到 system 消息上", () => {
+    // 第 129 行 `request.messages.find((m) => m.role === "system")`。
+    // 改成 `!==` 后会取到**第一条非 system** 消息（这里是 user）——
+    // 于是 JSON 指令被拼到用户消息上、真正的 system 消息原样留着，
+    // 模型看到的是"指令在用户侧"的错位报文。既有用例的 system 消息都在首位，
+    // 两种写法取到同一条，所以看不出来。
+    const { client, calls } = clientWith(['{"ok":true}']);
+    return chatJson(
+      client,
+      {
+        messages: [
+          { role: "user", content: "USER-ONLY" },
+          { role: "system", content: "SYS-PROMPT" },
+        ],
+      },
+      { schemaName: "t", validate: (raw) => raw as { ok: boolean }, maxRetries: 1 },
+    ).then(() => {
+      const sent = calls[0]!.messages;
+      const sys = sent.find((m) => m.role === "system")!;
+      expect(sys.content.startsWith("SYS-PROMPT")).toBe(true);
+      expect(sys.content).toContain("Respond with exactly ONE valid JSON value");
+      // 用户消息必须原样保留，不能被动过
+      expect(sent.find((m) => m.role === "user")!.content).toBe("USER-ONLY");
+    });
+  });
+});

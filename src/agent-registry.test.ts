@@ -202,3 +202,53 @@ describe("AgentRegistry dynamic registration", () => {
     expect(reg.activeAdapters()).toHaveLength(1);
   });
 });
+
+/** 把 fakeAgent 的 meta.kind 改成 ui —— `fakeAgent` 硬编码 "api"，撑不到 ui 分支。 */
+function uiAgent(id: string, declared?: AgentCapabilities): AgentAdapter {
+  return Object.assign(fakeAgent(id, declared), {
+    meta: { id, name: id, kind: "ui" as const },
+  });
+}
+
+describe("AgentRegistry · adapter 字段的推断与校验", () => {
+  it("[109] 有 id 但 adapter 缺失时返回明确错误，而不是抛 TypeError", () => {
+    // 第 109 行 `if (!spec.adapter || typeof spec.adapter.dispatch !== "function")`。
+    // 改成 `&&` 之后，`!spec.adapter` 为真会继续求值右侧的
+    // `spec.adapter.dispatch` —— 在 undefined 上取属性直接 **TypeError**，
+    // 而不是返回那句"adapter 必须实现 dispatch()"。
+    //
+    // 既有用例为什么盖不到：`register({ adapter: undefined })` 会因为
+    // **第 108 行的 id 校验先返回**（id 也取不到），根本走不到这里。
+    // 必须带上 id 才到得了 109 行。
+    const reg = new AgentRegistry([]);
+    const res = reg.register({ manifest: { id: "has-id" } as never, adapter: undefined as never });
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.error).toContain("dispatch");
+  });
+
+  it("[69] meta.kind 为 ui 的适配器推断成 http-bridge（声明路径）", () => {
+    // 第 69 行 `adapter.meta.kind === "ui" ? "http-bridge" : "local-llm"`。
+    // 改成 `!==` 后 ui 适配器被标成 local-llm、api 适配器被标成 http-bridge ——
+    // 适配器类型错配，调度时会按错误的协议去调用。
+    const reg = new AgentRegistry([{ adapter: uiAgent("ui-declared", caps({})) }]);
+    expect(reg.get("ui-declared")!.manifest.adapter).toBe("http-bridge");
+  });
+
+  it("[199] wrapLegacyDescriptor 把 ui 适配器标成 http-bridge（legacy 推断路径）", () => {
+    // 第 199 行与第 69 行是同一表达式的两处，但**在不同的函数里**：
+    // 69 在注册表的 normalize 路径，199 在导出的 `wrapLegacyDescriptor()` 里。
+    // 走 `new AgentRegistry([...])` 根本到不了 199 —— 必须直接调它。
+    const ui = wrapLegacyDescriptor(uiAgent("ui-legacy"));
+    expect(ui.inferredLegacy).toBe(true);
+    expect(ui.manifest.adapter).toBe("http-bridge");
+
+    // 反方向也要断言：只测 ui → http-bridge 会让 `===` 与 `!==` 中有一侧无人验证
+    expect(wrapLegacyDescriptor(fakeAgent("api-legacy")).manifest.adapter).toBe("local-llm");
+  });
+
+  it("kind 不是 ui 时保持 local-llm（两个分支都要断言）", () => {
+    // 只断言"ui → http-bridge"的话，`===` 与 `!==` 里总有一侧无人验证。
+    const reg = new AgentRegistry([{ adapter: fakeAgent("api-agent", caps({})) }]);
+    expect(reg.get("api-agent")!.manifest.adapter).toBe("local-llm");
+  });
+});
