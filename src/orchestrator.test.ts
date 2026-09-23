@@ -887,6 +887,184 @@ describe("OrchestratorEngine · 取消信号 / 任务时长 / 警告闸门", () 
       expect(events.join("\n")).not.toContain("即使构建通过");
     })();
   });
+
+  /**
+   * 升级决策相关的两处存活位点（`@444` 的 `continue` / `@456` 的 `&&`）。
+   *
+   * 断言用的是**时间线**而不是最终状态：这两个位点都会让流程"多绕一轮"或
+   * "少问一个任务"，只看最终有没有交付会被绕行掩盖过去。
+   */
+  function escalateEngine(o: {
+    timeline: string[];
+    decisions: Map<string, "skip" | "abort" | "redispatch">;
+    verifyPassed: boolean;
+    okIds?: Set<string>;
+  }): OrchestratorEngine {
+    let schedulerCalls = 0;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          schedulerCalls += 1;
+          o.timeline.push("sched:" + String(schedulerCalls));
+          return tasks.map((t: Task) => ({
+            taskId: t.id,
+            ok: o.okIds?.has(t.id) ?? false,
+            logDigest: t.id + " 的失败日志",
+            events: [],
+          }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => makeReport(o.verifyPassed),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: (s) => o.timeline.push("stage:" + s),
+      onLog: () => {},
+      onTaskStatus: () => {},
+      onVerification: () => {},
+      onEscalation: (id, summary) => o.timeline.push("esc:" + id + " " + summary),
+      requestEscalationDecision: async (id) => {
+        o.timeline.push("ask:" + id);
+        return o.decisions.get(id) ?? "skip";
+      },
+    });
+  }
+
+  const TWO_TASKS: Task[][] = [
+    [
+      { id: "t1", title: "core", description: "", zone: "src/core", dependencies: [], suggestedRole: "backend-dev" },
+      { id: "t2", title: "cli", description: "", zone: "src/cli", dependencies: [], suggestedRole: "backend-dev" },
+    ],
+  ];
+
+  it("[444] 同一轮里每个失败任务都要问用户，跳过一个不能中断后面的", () => {
+    // 第 444 行是 skip 分支里的 `continue;` —— 语义是"这个任务跳过了，
+    // 继续问下一个失败任务"。改成 `break` 后，**第一个被跳过的任务之后
+    // 所有失败任务都不再询问用户**，直接被下一轮重新派发出去。
+    // 用户点了"跳过"，却看到它又被跑了一遍。
+    //
+    // 断言用时间线：要求 `ask:t2` 出现在**第二次调度之前**。
+    // 只断言"最终两个都被问过"不够 —— 改坏后 t2 会在下一轮被问到，
+    // 结果集合相同、只有次序不同（这正是"聚合掩盖"在时间维度上的翻版）。
+    const timeline: string[] = [];
+    const decisions = new Map<string, "skip" | "abort" | "redispatch">([
+      ["t1", "skip"],
+      ["t2", "skip"],
+    ]);
+    return (async () => {
+      const eng = escalateEngine({ timeline, decisions, verifyPassed: true });
+      await eng.execute(TWO_TASKS, ".");
+      // 只看"第二次调度之前"这一段：正常实现里两个任务在同一轮被问完，
+      // 跳完即交付（根本不会有 sched:2）；改 `break` 后 t2 被跳过询问，
+      // 只能等下一轮重新派发时才被问到 —— 于是 sched:2 会先出现。
+      const second = timeline.indexOf("sched:2");
+      const firstPass = second === -1 ? timeline : timeline.slice(0, second);
+      expect(firstPass).toContain("ask:t1");
+      expect(firstPass).toContain("ask:t2");
+    })();
+  });
+
+  it("[456] t1 已完成、t2 被跳过后要能交付，不能被已完成的任务挡住", () => {
+    // 第 456 行 `.some((t) => !allDone.has(t.id) && !skipped.has(t.id))`。
+    // 改成 `||` 之后，**任何一个"已完成但没被跳过"的任务都会让
+    // stillFailing 为真**（allDone 真 ⟹ `!allDone` 假，但 `!skipped` 真）。
+    // 于是"失败任务全被跳过、验证也过了"这种完全可以交付的收尾，
+    // 会退回 `round += 1; continue` 绕圈，永远走不到 DELIVERY/DONE。
+    //
+    // 注意必须有一个**成功**的任务：如果所有任务都是"被跳过"的，
+    // `!allDone || !skipped` 两侧同为假，改坏也看不出来。
+    const timeline: string[] = [];
+    const decisions = new Map<string, "skip" | "abort" | "redispatch">([["t2", "skip"]]);
+    return (async () => {
+      const eng = escalateEngine({
+        timeline,
+        decisions,
+        verifyPassed: true,
+        okIds: new Set(["t1"]),
+      });
+      await eng.execute(TWO_TASKS, ".");
+      expect(timeline).toContain("stage:DONE");
+    })();
+  });
+
+  it("[419] 升级摘要要带真实失败日志，不能只剩兜底文案", () => {
+    // 第 419 行 `[...lastFailedLogs.values()].join("\n\n") || "开发任务执行失败（无验证错误，可能是 API 调用失败）"`。
+    // 改成 `&&` 之后**两个方向都错**：
+    //  - 有失败日志时 → `"真实日志" && "兜底文案"` 得到**兜底文案**
+    //    （把"可能是 API 调用失败"这种猜测盖在确凿的失败原因上）；
+    //  - 没有失败日志时 → `"" && ...` 得到**空串**，摘要里那一栏直接是空白。
+    // 这里覆盖第一个方向。
+    const timeline: string[] = [];
+    const decisions = new Map<string, "skip" | "abort" | "redispatch">([["t2", "skip"]]);
+    return (async () => {
+      const eng = escalateEngine({
+        timeline,
+        decisions,
+        verifyPassed: true,
+        okIds: new Set(["t1"]),
+      });
+      await eng.execute(TWO_TASKS, ".");
+      const escalation = timeline.filter((t) => t.startsWith("esc:")).join("\n");
+      expect(escalation).toContain("t2 的失败日志");
+      expect(escalation).not.toContain("可能是 API 调用失败");
+    })();
+  });
+
+  it("[413] 待修任务只算「没完成且没跳过」的，已完成的任务不能被算进去", () => {
+    // 第 413 行 `batches.flat().filter((t) => !allDone.has(t.id) && !skipped.has(t.id))`。
+    // 改成 `||` 之后**已完成的任务也被当成待修**，于是
+    // `routeVerificationErrors` 会把「错误文件所属 zone」归属给那些已经交付的任务，
+    // 真正的待修任务反而分不到错误、`unattributed` 变空 ——
+    // 下一轮修复拿到的不是"哪里错了"，而是回落成"上次失败的日志"。
+    //
+    // 构造：t1（zone src/core）已完成；t2（zone src/cli）失败；
+    // 验证错误提到 `src/core/a.js` —— 它属于 t1 的 zone、不属于 t2 的。
+    const seen: Array<Map<string, { errorLogDigest: string }>> = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[], _root: string, opts?: { repairOf?: Map<string, { errorLogDigest: string }> }) {
+          if (opts?.repairOf) seen.push(opts.repairOf);
+          return tasks.map((t: Task) => ({
+            taskId: t.id,
+            ok: t.id === "t1",
+            logDigest: t.id + " 的失败日志",
+            events: [],
+          }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => ({
+        passed: false,
+        results: [
+          {
+            kind: "build",
+            ok: false,
+            exitCode: 1,
+            // ⚠️ 格式有讲究：`extractErrorFiles` 的两条正则要求
+            // `文件:行:列`（**两个**数字）或 node 栈帧；写成 `a.js:12` 提取不出来，
+            // 于是两种写法都会走 unattributed，差异观察不到（我第一版就踩了这个）。
+            logDigest: "src/core/a.js:12:5 - error TS2322: Type 'string' is not assignable",
+            durationMs: 1,
+          },
+        ],
+      }),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    return (async () => {
+      const eng = new OrchestratorEngine(deps, {
+        onStage: () => {},
+        onLog: () => {},
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+      });
+      await eng.execute(TWO_TASKS, ".").catch(() => undefined);
+      // 修复轮发给 t2 的错误摘要必须带上验证错误里那条真实线索
+      const digest = seen[0]?.get("t2")?.errorLogDigest ?? "";
+      expect(digest).toContain("src/core/a.js");
+    })();
+  });
 });
 
 describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => {
