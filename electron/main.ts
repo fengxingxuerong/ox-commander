@@ -7,12 +7,45 @@ import { registerIpc, attachWindow } from "./ipc";
 // alive on VMs / remote desktops where the GPU process dies on startup.
 app.disableHardwareAcceleration();
 
+/**
+ * `.env` 的候选位置，按优先级排列。
+ *
+ * ⚠️ 为什么不能只查 `app.getAppPath()`：它在**打包后**指向 `resources/app.asar`
+ * —— 归档内部，用户放不进任何文件。于是安装版用户**根本无法配置密钥**，
+ * 而开发态一切正常（源码树里 `.env` 就在项目根），是典型的
+ * "源码全绿、打包后坏"。
+ *
+ * 所以打包场景必须查 asar **之外**的位置：
+ *   1. `app.getAppPath()`  开发态（项目根），也是既有用例的路径
+ *   2. `userData`          安装版：per-user、可写，桌面端的 settings/keys 也在这
+ *   3. exe 所在目录        portable 版：解压即用，配置跟着包走
+ */
+function envFileCandidates(): string[] {
+  const dirs: string[] = [];
+  try {
+    dirs.push(app.getAppPath());
+  } catch {
+    // 未就绪时取不到就跳过这个候选位置；不是错误
+  }
+  try {
+    dirs.push(app.getPath("userData"));
+    const exe = app.getPath("exe");
+    if (exe) dirs.push(path.dirname(exe));
+  } catch {
+    // 同上
+  }
+  return dirs.map((d) => path.join(d, ".env"));
+}
+
 function loadEnvFile(): void {
-  const envPath = path.join(app.getAppPath(), ".env");
-  if (!fs.existsSync(envPath)) return;
-  for (const line of fs.readFileSync(envPath, "utf-8").split(/\r?\n/)) {
-    const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+  for (const envPath of envFileCandidates()) {
+    if (!fs.existsSync(envPath)) continue;
+    for (const line of fs.readFileSync(envPath, "utf-8").split(/\r?\n/)) {
+      const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+      if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2];
+    }
+    // 只采用**第一个存在**的文件：多处各放一份时，结果不该取决于合并顺序。
+    return;
   }
 }
 

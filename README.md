@@ -1,5 +1,8 @@
 # OxCommander
 
+[![verify](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml/badge.svg)](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 **总指挥智能体**：把项目需求拆解为 PRD → 任务 → zone 互斥批次，按能力路由并行下发给执行器
 （SenseNova API 池 / Codex 等 CLI / HTTP 桥接智能体），经 build + typecheck + test 多轮硬性验证后交付。
 Electron 桌面端 + headless CLI 双入口。
@@ -30,6 +33,47 @@ npm run build:headless
 echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-headless/headless/headless-main.js
 # 协议字段、事件与退出码见 docs/headless-protocol.md
 ```
+
+## 获取与安装
+
+**方式一：下载安装包**（推荐，不用装 Node）
+
+到 [Releases](https://github.com/fengxingxuerong/ox-commander/releases) 取对应平台的产物，
+或到 [Actions 页](https://github.com/fengxingxuerong/ox-commander/actions) 取任意一次
+`release` 运行的 artifact（手动触发也会产出，不需要打 tag）：
+
+| 平台 | 产物 | 说明 |
+| --- | --- | --- |
+| Windows | `OxCommander-<ver>-x64.exe`（nsis 安装版）/ `…-x64.exe`（portable 免安装） | 两种都出，portable 解压即用 |
+| Linux | `OxCommander-<ver>-x64.AppImage` / `.deb` | AppImage 直接 `chmod +x` 后运行 |
+| macOS | **不产出** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺 |
+
+⚠️ **首次运行前要自备 `.env`**（放在项目根目录；桌面端也可以在「设置」里填，
+走 OS keychain 加密落盘）。至少给一把商汤的 key：
+
+```dotenv
+SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
+# SENSENOVA_API_KEY_2=sk-...      # 选填：多把 key = 12 条线路，429 时可 failover
+# SENSENOVA_API_KEY_3=sk-...
+# AMD_API_KEY=...                 # 选填：加第 13 条（DeepSeek-V4-Flash）
+```
+
+规则：`.env` **只补缺失项**，宿主环境里已设的值不会被覆盖；无 key 的 provider
+（本地 Ollama 之类）照样保留其线路。
+
+**方式二：从源码跑**（开发者）
+
+见上方「快速开始」的四条命令；headless CLI 用法也在那一节。
+
+**方式三：自己打包**
+
+```bash
+npm run build:dist    # → release/（Windows + Linux）
+```
+
+首次打包会下载 Electron 二进制与各平台工具链（几百 MB，本机需代理），
+所以**推荐让 CI 出产物**：推 `v*` tag 会自动建 Release 并挂上安装包，
+也可以在 Actions 页手动触发 `release` 来验证打包配置本身。
 
 ## 质量门禁
 
@@ -114,3 +158,8 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）
+
+## 许可证
+
+[MIT](LICENSE) © 2026 fengxingxuerong —— 可自由使用、修改、分发与商用，
+唯一要求是保留版权与许可声明。本项目的贡献者许可与第三方依赖各自遵循其原有许可。

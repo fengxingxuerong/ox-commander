@@ -175,6 +175,56 @@ describe("electron 入口 · .env 装载", () => {
     await expect(loadEntry((f) => f.app.getAppPath.mockReturnValue(dir))).resolves.toBeDefined();
   });
 
+  it("[打包态] appPath 在 asar 内拿不到 .env 时，改从 userData 读取", async () => {
+    // 打包后 `app.getAppPath()` 指向 `resources/app.asar` —— 归档内部，
+    // 用户放不进文件。原来只查这一个位置，**安装版用户根本无法配置密钥**，
+    // 而开发态（源码树里 .env 就在项目根）一切正常。
+    const appPath = tempDir(); // 故意不放 .env
+    const userData = tempDir();
+    fs.writeFileSync(path.join(userData, ".env"), "OX_MAIN_TEST_USERDATA=from-userdata\n", "utf8");
+
+    await loadEntry((f) => {
+      f.app.getAppPath.mockReturnValue(appPath);
+      f.app.getPath.mockImplementation((name: string) => (name === "userData" ? userData : appPath));
+    });
+
+    expect(process.env.OX_MAIN_TEST_USERDATA).toBe("from-userdata");
+  });
+
+  it("[portable 态] userData 也没有时，从 exe 所在目录读取", async () => {
+    const appPath = tempDir();
+    const userData = tempDir();
+    const portable = tempDir(); // 解压即用的目录，.env 跟包走
+    fs.writeFileSync(path.join(portable, ".env"), "OX_MAIN_TEST_PORTABLE=from-exe-dir\n", "utf8");
+    const exe = path.join(portable, "OxCommander.exe");
+
+    await loadEntry((f) => {
+      f.app.getAppPath.mockReturnValue(appPath);
+      f.app.getPath.mockImplementation((name: string) => {
+        if (name === "userData") return userData;
+        if (name === "exe") return exe;
+        return appPath;
+      });
+    });
+
+    expect(process.env.OX_MAIN_TEST_PORTABLE).toBe("from-exe-dir");
+  });
+
+  it("只采用第一个存在的 .env，后面的不再读（结果不依赖合并顺序）", async () => {
+    const first = tempDir();
+    const second = tempDir();
+    fs.writeFileSync(path.join(first, ".env"), "OX_MAIN_TEST_FIRST=yes\n", "utf8");
+    fs.writeFileSync(path.join(second, ".env"), "OX_MAIN_TEST_SECOND=yes\n", "utf8");
+
+    await loadEntry((f) => {
+      f.app.getAppPath.mockReturnValue(first);
+      f.app.getPath.mockImplementation((name: string) => (name === "userData" ? second : first));
+    });
+
+    expect(process.env.OX_MAIN_TEST_FIRST).toBe("yes");
+    expect(process.env.OX_MAIN_TEST_SECOND).toBeUndefined();
+  });
+
   it("OX_DEV_SERVER 时加载 dev server，而不是打包产物", async () => {
     setEnv("OX_DEV_SERVER", "1");
     const { fake } = await loadEntry();

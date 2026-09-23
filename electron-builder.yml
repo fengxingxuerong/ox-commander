@@ -1,0 +1,46 @@
+# Electron 打包配置（`npm run build:dist` → 产出 release/）
+
+# ⚠️ 产物口径（重要）
+# 只产出 **Windows（nsis + portable）与 Linux（AppImage + deb）**。
+# macOS **不产出** —— 没有可用的代码签名凭据，而 macOS 未签名的 .app 在较新系统上
+# 会被 Gatekeeper 直接拦下；出一个"用户打不开"的产物，比不出更糟。
+# 脚本侧用 `--win --linux` 显式限制，不靠"默认包含当前平台"这种隐式行为。
+#
+# 为什么连 mac 配置块都不留：留一个空/残缺的 mac 段，会让读的人以为
+# "支持 mac，只是没人试过"。等真有签名凭据时再加，并在 CHANGELOG 里记一笔。
+
+appId: com.fengxingxuerong.oxcommander
+productName: OxCommander
+copyright: Copyright © 2026 fengxingxuerong
+
+directories:
+  output: release
+
+# 三份编译产物都要带：
+#   dist          渲染层（vite 产物）
+#   dist-electron 主进程 + shared 编译产物（package.json 的 main 指向这里）
+#   dist-headless headless CLI 的编译产物 —— 一并带上，用户不必再自己 build:headless
+# agents.d 是声明式智能体接入的说明与示例（运行时实际读 %APPDATA% 下的目录）。
+files:
+  - "dist/**/*"
+  - "dist-electron/**/*"
+  - "dist-headless/**/*"
+  - "agents.d/**/*"
+  - "package.json"
+  - "LICENSE"
+  - "CHANGELOG.md"
+
+asar: true
+
+win:
+  target:
+    - nsis
+    - portable
+  artifactName: "${productName}-${version}-${arch}.${ext}"
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Utility
+  artifactName: "${productName}-${version}-${arch}.${ext}"

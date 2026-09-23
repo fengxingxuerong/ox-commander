@@ -1,0 +1,60 @@
+name: release
+
+# 产出可安装的分发包（Windows / Linux）。
+#
+# 为什么不放在 verify.yml 里：verify 是"每次 push 都要跑的快门禁"，
+# 打包要下载 Electron 二进制 + 各平台工具链，一次几分钟到十几分钟，
+# 塞进去会把门禁拖慢到没人愿意等。
+#
+# 触发方式两种：
+#   - 打 tag（v*）：打包并**建 GitHub Release**、把安装包挂上去
+#   - workflow_dispatch：只打包、上传为 workflow artifact
+#     用途是在不打 tag 的前提下**验证打包配置本身**（新配置第一次就该这么试）
+#
+# ⚠️ 这里不能设 ELECTRON_SKIP_BINARY_DOWNLOAD：verify.yml 设它是因为
+# "只需要类型定义、从不启动 Electron"，而打包恰恰需要那个二进制。
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: package (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Package
+        run: npm run build:dist
+
+      - name: Upload installers (artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: release/*
+          if-no-files-found: error
+
+      # 只在打 tag 时建 Release。用 runner 预装的 gh，不引第三方 action。
+      - name: Create release and attach installers
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" --generate-notes release/*
