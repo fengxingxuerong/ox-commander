@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BRAIN_POOL_TIMEOUT_MS, createFileJournal, createPlatform } from "../electron/platform";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
+import { UsageMeter } from "../shared/usage-meter";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -151,15 +152,103 @@ describe("createPlatform · brain client grade", () => {
     expect(BRAIN_POOL_TIMEOUT_MS).toBe(300_000);
   });
 
-  it("returns the injected llm untouched", () => {
-    const fake = { chat: async () => ({ text: "x", model: "m" }) };
+  it("注入的 brain 客户端仍被使用，且它的用量被计入 platform.usage()", async () => {
+    // 这条以前断言 `platform.buildLlm() === fake`（身份相等）。身份相等其实
+    // 证明不了"它被用了" —— 换成**行为断言**：调用确实转到了注入的客户端，
+    // 响应原样返回，用量进了 meter。加计量装饰器后 `buildLlm()` 返回的是包装层，
+    // 而"没有被换成别的 provider 的客户端"这件事由前两条断言保证。
+    const seen: number[] = [];
+    const fake = {
+      async chat() {
+        seen.push(1);
+        return { content: "{}", provider: "injected", model: "m", usageTokens: 120 };
+      },
+    };
     const platform = createPlatform({
       settings: settings(),
       promptDir: tempDir(),
       llm: fake as never,
       host: { log: () => undefined },
     });
-    expect(platform.buildLlm()).toBe(fake);
+
+    const res = await platform.buildLlm().chat({ messages: [] });
+
+    expect(seen).toHaveLength(1);
+    expect(res).toEqual({ content: "{}", provider: "injected", model: "m", usageTokens: 120 });
+    expect(platform.usage()).toEqual({
+      totalTokens: 120,
+      calls: 1,
+      measuredCalls: 1,
+      byModel: { "injected/m": 120 },
+    });
+  });
+
+  it("用量在同一个平台内跨多次 buildLlm() 累加（每次包一层，不重复计数）", async () => {
+    // `buildLlm` 是**工厂**：ipc/context 每次调用都会得到新的包装层。
+    // 只要每次都指向同一个 meter，总量就不会漏；而"没有重复计数"由 totalTokens
+    // 精确等于两次响应的和来保证（各 60 → 120，不是 240）。
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "p", model: "m", usageTokens: 60 };
+      },
+    };
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: () => undefined },
+    });
+
+    await platform.buildLlm().chat({ messages: [] });
+    await platform.buildLlm().chat({ messages: [] });
+
+    expect(platform.usage().totalTokens).toBe(120);
+    expect(platform.usage().calls).toBe(2);
+  });
+
+  it("可以自带 meter：宿主想复用同一个计数器时，platform.usage() 就是它的快照", async () => {
+    // `config.meter` 这个缝的用途：宿主（或测试）自建计数器并观察同一份数据，
+    // 而不是让 platform 自己藏一个。断言两者指向同一份计数，而不是各自一份。
+    const meter = new UsageMeter();
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      meter,
+      llm: { chat: async () => ({ content: "{}", provider: "p", model: "m", usageTokens: 9 }) } as never,
+      host: { log: () => undefined },
+    });
+
+    await platform.buildLlm().chat({ messages: [] });
+
+    expect(meter.snapshot().totalTokens).toBe(9);
+    expect(platform.usage()).toEqual(meter.snapshot());
+  });
+
+  it("未上报用量的调用不污染总量（provider 沉默时的可见边界）", async () => {
+    let call = 0;
+    const fake = {
+      async chat() {
+        call += 1;
+        // 第一条不给 usageTokens（有的兼容层就是不返回 usage）。
+        return call === 1
+          ? { content: "{}", provider: "p", model: "m" }
+          : { content: "{}", provider: "p", model: "m", usageTokens: 30 };
+      },
+    };
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: () => undefined },
+    });
+
+    await platform.buildLlm().chat({ messages: [] });
+    await platform.buildLlm().chat({ messages: [] });
+
+    const s = platform.usage();
+    expect(s.totalTokens).toBe(30);
+    expect(s.calls).toBe(2);
+    expect(s.measuredCalls).toBe(1);
   });
 });
 

@@ -10,14 +10,18 @@ import { BatchGuard, type BatchVerdict } from "../engine/batch-guard";
 import { SnapshotStore } from "../sandbox/snapshot-store";
 import { FileJournal } from "../sandbox/file-journal";
 import type { SchedulerOptions } from "../engine/scheduler";
+import type { UsageMeter } from "../../shared/usage-meter";
 
 /**
  * Agent registry: the SenseNova API executor is the default worker. Failover
  * across 3 API keys × 3 models happens inside its LlmClient layer, so the
  * scheduler has exactly one adapter to talk to unless more are registered.
+ *
+ * `meter` 只影响内置执行器自己构造的那个客户端 —— 外部声明的 CLI / HTTP
+ * 桥接智能体跑在别的进程里，它们的用量不由本进程记账（桥接侧自己知道）。
  */
-export function createDefaultAdapters(): AgentAdapter[] {
-  return [new SensenovaApiAdapter()];
+export function createDefaultAdapters(meter?: UsageMeter): AgentAdapter[] {
+  return [new SensenovaApiAdapter(undefined, meter ? { meter } : undefined)];
 }
 
 export function findAdapter(adapters: AgentAdapter[], agentId: string): AgentAdapter | undefined {
@@ -56,6 +60,11 @@ export interface AgentLayerOptions {
   onVerdict?: (verdict: BatchVerdict) => void;
   /** Routing decision sink (board log). */
   onRouting?: SchedulerOptions["onRouting"];
+  /**
+   * Token 用量汇总器，转给**内置**执行器（见 `createDefaultAdapters`）。
+   * 注入 `adapters` / `layer` 时不经此处 —— 那种情况下用量由注入方负责。
+   */
+  meter?: UsageMeter;
 }
 
 export interface AgentLayer {
@@ -77,7 +86,7 @@ export interface AgentLayer {
  * original single-adapter, round-robin setup.
  */
 export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
-  const builtin = opts.adapters ?? createDefaultAdapters();
+  const builtin = opts.adapters ?? createDefaultAdapters(opts.meter);
   const loaded = opts.manifestDir ? loadManifestDir(opts.manifestDir) : { manifests: [], errors: [] };
   const declared: AgentManifest[] = [
     ...(opts.manifests ?? []).map((m) => (m.source ? m : { ...m, source: "declared" as const })),

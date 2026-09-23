@@ -111,6 +111,20 @@ export type HeadlessEvent =
       results: Array<{ kind: string; ok: boolean; exitCode: number | null; logDigest?: string }>;
     }
   | { type: "escalation"; taskId: string; summary: string }
+  /**
+   * 本次运行的 token 用量（进程内：大脑层 + 内置执行器）。在 `done` / `error`
+   * **之前**发一次，成功、取消、抛错三条路径都会到。
+   * `calls - measuredCalls` 是服务商没在响应里上报用量的次数 ——
+   * 宿主据此判断这份数字可信到什么程度。外部 CLI / HTTP 桥接智能体
+   * 跑在别的进程里，不计入。
+   */
+  | {
+      type: "usage";
+      totalTokens: number;
+      calls: number;
+      measuredCalls: number;
+      byModel: Record<string, number>;
+    }
   | { type: "done"; passed: boolean; report: unknown }
   /** `exhausted: true` means the repair budget ran out (exit code 2), not a crash (1). */
   | { type: "error"; message: string; exhausted?: boolean };

@@ -3,6 +3,7 @@ import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../../shared/zone-coverage";
+import type { UsageSnapshot } from "../../shared/usage-meter";
 import { runSmokeChecks } from "./verifier";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches } from "../../shared/graph";
@@ -29,6 +30,12 @@ export interface OrchestratorDeps {
    * 每轮升级处理完成时调用 save。宿主重启后把快照经 execute 的 resume 参数喂回。
    */
   journal?: { save(snapshot: RunSnapshot): void };
+  /**
+   * 用量快照提供者（可选）。engine 自己不管计数 —— 它只负责在 `execute`
+   * 结束时**取一次**快照交给宿主，计数逻辑留在拥有 LLM 客户端的那一层
+   * （`platform.ts` 的 meter）。成功、取消、抛错三条路径都会触发。
+   */
+  usage?: () => UsageSnapshot;
 }
 
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
@@ -77,6 +84,11 @@ export interface OrchestratorCallbacks {
    */
   onEscalation(taskId: string, summary: string): void;
   requestEscalationDecision?(taskId: string, summary: string): Promise<EscalationAction>;
+  /**
+   * 一次 `execute` 结束时回报用量（成功 / 取消 / 抛错都会到）。
+   * 只在宿主提供了 `deps.usage` 时触发；没有它就什么都不做。
+   */
+  onUsage?(snapshot: UsageSnapshot): void;
 }
 
 export class CancelledError extends Error {
@@ -254,6 +266,11 @@ export class OrchestratorEngine {
         }
       }
       throw err;
+    } finally {
+      // 三条出口（交付 / 取消 / 抛错）都要报用量 —— 失败的运行一样烧了 token，
+      // 只在成功路径上报会让"最贵的那次"恰好看不见。
+      const snapshot = this.deps.usage?.();
+      if (snapshot) this.cb.onUsage?.(snapshot);
     }
   }
 

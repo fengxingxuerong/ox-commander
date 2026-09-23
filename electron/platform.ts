@@ -22,6 +22,7 @@ import type { BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import type { LlmClient } from "../shared/llm-client";
+import { formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -85,6 +86,8 @@ export interface PlatformConfig {
   llm?: LlmClient;
   layer?: AgentLayer;
   verify?: (cwd: string) => Promise<VerificationReport>;
+  /** 自带用量汇总器（测试观察点，或宿主想复用同一个计数器）。 */
+  meter?: UsageMeter;
 }
 
 export interface Platform {
@@ -97,6 +100,14 @@ export interface Platform {
   buildLlm(seedKeys?: (envVars: Set<string>) => void): LlmClient;
   /** Scheduler options shared by both hosts (exposed for parity assertions). */
   schedulerOptions(): NonNullable<ConstructorParameters<typeof Scheduler>[2]>;
+  /**
+   * 本次平台生命周期内的 token 用量快照（大脑层 + 内置执行器）。
+   *
+   * 只在**本进程**有效：外部 CLI / HTTP 桥接智能体跑在别的进程里，
+   * 它们的用量不在这里。`calls - measuredCalls` 是服务商没在响应里
+   * 上报用量的次数 —— 那个差值就是这份数字的可信边界。
+   */
+  usage(): UsageSnapshot;
 }
 
 /**
@@ -107,6 +118,10 @@ export interface Platform {
 export function createPlatform(config: PlatformConfig): Platform {
   const { settings, host } = config;
   const log = host.log;
+  // 用量汇总：大脑层在 `buildLlm` 里包一层、执行器在 `createAgentLayer` 里包一层
+  // （它是 token 大头，且不走大脑层工厂）。两处都指向同一个 meter，所以
+  // `usage()` 拿到的是这次平台生命周期的总和。
+  const meter = config.meter ?? new UsageMeter();
 
   const layer =
     config.layer ??
@@ -117,6 +132,7 @@ export function createPlatform(config: PlatformConfig): Platform {
       promptDir: config.promptDir,
       ...(config.snapshotRoot ? { snapshotRoot: config.snapshotRoot } : {}),
       arbitration: config.arbitration ?? settings.arbitration,
+      meter,
       onRouting: (decision, task) => log(agentRoutingLogLine(decision, task)),
       onEvent: (text) => log(`[sandbox] ${text}`),
       breakerOptions: { onEvent: (text) => log(`[breaker] ${text}`) },
@@ -141,14 +157,14 @@ export function createPlatform(config: PlatformConfig): Platform {
    * from `process.env`, and the Electron host keeps them encrypted on disk.
    */
   const buildLlm = (seedKeys?: (envVars: Set<string>) => void): LlmClient => {
-    if (config.llm) return config.llm;
+    if (config.llm) return meteredLlm(config.llm, meter);
     // The host's seeder mutates `process.env` (it owns the key store); the set
     // it receives is just the list of vars worth resolving.
     if (seedKeys) seedKeys(new Set<string>());
     const pool = config.llmPool ?? settings.llmPool ?? [];
     return pool.length > 0
-      ? buildLlmPool({ providers: pool, timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log })
-      : buildLlmClient(settings.llmProvider, { timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log });
+      ? buildLlmPool({ providers: pool, timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log, meter })
+      : buildLlmClient(settings.llmProvider, { timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log, meter });
   };
 
   const callbacks: OrchestratorCallbacks = {
@@ -157,6 +173,8 @@ export function createPlatform(config: PlatformConfig): Platform {
     onTaskStatus: (taskId, status, attempts) => log(`[task] ${taskId} → ${status}（第 ${attempts} 次）`),
     onVerification: () => undefined,
     onEscalation: () => undefined,
+    // 默认落一行日志；宿主（headless）覆盖它改成发协议事件。
+    onUsage: (snapshot) => log(formatUsageLine(snapshot)),
     ...(host.requestEscalationDecision
       ? { requestEscalationDecision: host.requestEscalationDecision }
       : {}),
@@ -171,12 +189,13 @@ export function createPlatform(config: PlatformConfig): Platform {
         config.verify ??
         ((cwd: string) => verifyProject(settings.verificationCommands, { cwd: () => cwd, onEvent: log })),
       settings,
+      usage: () => meter.snapshot(),
       ...(config.journal ? { journal: config.journal } : {}),
     },
     callbacks,
   );
 
-  return { engine, layer, schedulerOptions, buildLlm };
+  return { engine, layer, schedulerOptions, buildLlm, usage: () => meter.snapshot() };
 }
 
 export interface FileJournalHandle {

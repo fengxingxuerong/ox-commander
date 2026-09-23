@@ -1,6 +1,7 @@
 import { getProvider, providerKeyEnvVars, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, DEFAULT_LLM_POOL } from "./providers";
 import { BRAIN_TIMEOUT_MS, createFailoverClient, createLlmClient, createMultiProviderFailover, type PoolRoute } from "./http-clients";
 import type { LlmClient } from "./llm-client";
+import { meteredLlm, type UsageMeter } from "./usage-meter";
 
 export interface BuildLlmOptions {
   /** Key resolution env; defaults to process.env (callers may pre-seed it from their key store). */
@@ -9,6 +10,16 @@ export interface BuildLlmOptions {
   timeoutMs?: number;
   /** Failover decision sink (rotation failures, cooldown skips); wired to the caller's log stream. */
   onEvent?: (text: string) => void;
+  /**
+   * Token 用量汇总器。工厂是**唯一**的构造点（Electron 与 headless 共用），
+   * 所以在这里包一层就能覆盖两个宿主的大脑层调用 —— 而不是在调用点各记一次。
+   */
+  meter?: UsageMeter;
+}
+
+/** `meter` 是可选的，包一层只是"多一个观察者"，不改变任何行为。 */
+function withMeter(client: LlmClient, meter: UsageMeter | undefined): LlmClient {
+  return meter ? meteredLlm(client, meter) : client;
 }
 
 /**
@@ -21,14 +32,17 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
   const provider = getProvider(providerId);
   const timeoutMs = opts.timeoutMs ?? BRAIN_TIMEOUT_MS;
   if (provider.id === "sensenova") {
-    return createFailoverClient(provider, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
-      env,
-      timeoutMs,
-      onEvent: opts.onEvent,
-    });
+    return withMeter(
+      createFailoverClient(provider, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
+        env,
+        timeoutMs,
+        onEvent: opts.onEvent,
+      }),
+      opts.meter,
+    );
   }
   const apiKey = provider.apiKeyEnvVar ? (env[provider.apiKeyEnvVar] ?? "") : "";
-  return createLlmClient(provider, apiKey, timeoutMs);
+  return withMeter(createLlmClient(provider, apiKey, timeoutMs), opts.meter);
 }
 
 export interface BuildPoolOptions extends BuildLlmOptions {
@@ -59,9 +73,12 @@ export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
       models: id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel],
     };
   });
-  return createMultiProviderFailover(routes, {
-    env,
-    timeoutMs: opts.timeoutMs ?? BRAIN_TIMEOUT_MS,
-    ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
-  });
+  return withMeter(
+    createMultiProviderFailover(routes, {
+      env,
+      timeoutMs: opts.timeoutMs ?? BRAIN_TIMEOUT_MS,
+      ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
+    }),
+    opts.meter,
+  );
 }

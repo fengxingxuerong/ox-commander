@@ -385,6 +385,80 @@ describe("runSpec", () => {
     expect(hello.agentRouter).toBe(true);
   });
 
+  it("用量事件：在 done 之前发一次，金额等于大脑两次调用的和", async () => {
+    // 走完整链路（真实 platform 装配 + 真解析），只把 LLM 换成会报用量的假件。
+    // 这样断言的是"宿主真的能拿到用量"，而不是"某个函数被调过"。
+    const root = scratch("headless-usage");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+    const inner = tasksResponse([fakeTask("t1", "src")]);
+    const metered: LlmClient = {
+      async chat(req) {
+        return { ...(await inner.chat(req)), usageTokens: 100 };
+      },
+    };
+
+    const code = await runSpec(spec, {
+      emit,
+      llm: metered,
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+
+    expect(code).toBe(0);
+    const usage = events.find((e) => e.type === "usage") as
+      | Extract<HeadlessEvent, { type: "usage" }>
+      | undefined;
+    expect(usage).toBeDefined();
+    // PRD 一次 + 分解一次；两条都上报了用量，所以 measuredCalls === calls。
+    expect(usage!.totalTokens).toBe(200);
+    expect(usage!.calls).toBe(2);
+    expect(usage!.measuredCalls).toBe(2);
+    expect(usage!.byModel).toEqual({ "fake/fake-1": 200 });
+    // 顺序也是契约：宿主按行处理事件，用量必须在终态之前到。
+    expect(events.findIndex((e) => e.type === "usage")).toBeLessThan(
+      events.findIndex((e) => e.type === "done"),
+    );
+  });
+
+  it("用量事件在失败路径上也发（未上报用量体现在 measuredCalls 的差上）", async () => {
+    const root = scratch("headless-usage-fail");
+    // `escalationPolicy: "exhaust"` 是唯一能拿到退出码 2 的策略（见协议文档 §3），
+    // 这里正好把"预算耗尽"那条终态路径也走一遍。
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        projectRoot: root,
+        verificationCommands: [],
+        maxRepairRounds: 0,
+        escalationPolicy: "exhaust",
+      }),
+    );
+    const { events, emit } = collect();
+    const failingVerify: VerificationReport = {
+      passed: false,
+      results: [{ kind: "test", ok: false, exitCode: 1, logDigest: "boom", durationMs: 5 }],
+    };
+
+    const code = await runSpec(spec, {
+      emit,
+      // `tasksResponse` 的响应里没有 usageTokens —— 正是"服务商没上报"那一格。
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => failingVerify,
+    });
+
+    expect(code).toBe(2);
+    const usage = events.find((e) => e.type === "usage") as Extract<HeadlessEvent, { type: "usage" }>;
+    expect(usage).toBeDefined();
+    expect(usage.totalTokens).toBe(0);
+    expect(usage.calls).toBeGreaterThan(0);
+    expect(usage.measuredCalls).toBe(0);
+    expect(events.findIndex((e) => e.type === "usage")).toBeLessThan(
+      events.findIndex((e) => e.type === "error"),
+    );
+  });
+
   it("断点续跑：journal 匹配需求时跳过规划（LLM 零调用），恢复执行", async () => {
     const root = scratch("headless-resume");
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));

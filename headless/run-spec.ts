@@ -55,6 +55,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     onLog: (text) => io.emit({ type: "log", text }),
     onTaskStatus: (taskId, status, attempts) => io.emit({ type: "task", taskId, status, attempts }),
     onEscalation: (taskId, summary) => io.emit({ type: "escalation", taskId, summary }),
+    // 用量走协议事件而不是日志行：宿主可能要对账，而解析自由文本不如读字段。
+    // （桌面端的默认实现是落一行 `[usage] …` 到看板日志，见 platform.ts。）
+    onUsage: (snapshot) => io.emit({ type: "usage", ...snapshot }),
     onVerification: (report) =>
         io.emit({
           type: "verification",

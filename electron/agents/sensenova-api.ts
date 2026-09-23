@@ -11,6 +11,7 @@ import { chatJson, JsonParseError } from "../../shared/llm-client";
 import { createFailoverClient, EXECUTOR_TIMEOUT_MS } from "../../shared/http-clients";
 import { withCooldownRetry } from "../../shared/llm-client";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
+import { meteredLlm, type UsageMeter } from "../../shared/usage-meter";
 import { AGENT_PROTOCOL_VERSION, type AgentCapabilities } from "../../shared/agent-contract";
 import { PathPolicy } from "../sandbox/path-policy";
 import { RunSession } from "./run-session";
@@ -65,6 +66,15 @@ function looksBinary(content: string): boolean {
 export interface SensenovaAdapterOptions {
   /** Cap on concurrently in-flight LLM calls; default: number of configured SenseNova keys (injected client: unlimited). */
   maxConcurrent?: number;
+  /**
+   * Token 用量汇总器，只用于**自己构造**的那个 failover 客户端（见 `client()`）。
+   *
+   * 为什么只包自建的那一个：执行器是全项目 token 消耗的大头（整文件代码生成），
+   * 它不走 `build-llm.ts`（那是大脑层工厂），所以必须在这里单独接一次。
+   * 而外部注入的 `llm` 由注入方负责自己的用量 —— 在这一层再包一次，
+   * 当注入的恰好是宿主自己的 metered 客户端时会重复计数。
+   */
+  meter?: UsageMeter;
 }
 
 export class SensenovaApiAdapter implements AgentAdapter {
@@ -92,6 +102,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private sessions = new Map<string, RunSession>();
   private llm: LlmClient | undefined;
   private readonly maxConcurrentOverride: number | undefined;
+  private readonly meter: UsageMeter | undefined;
   /** Shared failover client with decision logging wired to live sessions. */
   private sharedFailover: LlmClient | undefined;
   /** Semaphore state: in-flight LLM calls + FIFO waiters. */
@@ -103,6 +114,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
   constructor(llm?: LlmClient, opts?: SensenovaAdapterOptions) {
     this.llm = llm;
     this.maxConcurrentOverride = opts?.maxConcurrent;
+    this.meter = opts?.meter;
   }
 
   private concurrencyLimit(): number {
@@ -133,10 +145,12 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private client(): LlmClient {
     if (this.llm) return this.llm;
     if (!this.sharedFailover) {
-      this.sharedFailover = createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
+      const failover = createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
         timeoutMs: EXECUTOR_TIMEOUT_MS,
         onEvent: (text) => this.broadcastFailoverEvent(text),
       });
+      // 包在**最外层**：routes 由 FailoverLlmClient 内部自建，包在里面会按线路重复计数。
+      this.sharedFailover = this.meter ? meteredLlm(failover, this.meter) : failover;
     }
     return this.sharedFailover;
   }

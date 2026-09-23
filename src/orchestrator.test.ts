@@ -1363,3 +1363,100 @@ describe("OrchestratorEngine.decompose · 【规划校验】zone 覆盖", () => 
     expect(logs.some((l) => l.includes("[规划校验]"))).toBe(false);
   });
 });
+
+/**
+ * `onUsage` 是一次 `execute` 结束时回报的用量快照。三条出口（交付 / 取消 /
+ * 抛错）都必须到 —— 只在成功路径上报，会让"最贵的那次运行"恰好看不见：
+ * 反复重修的失败运行通常比一次顺利交付贵得多。
+ */
+describe("OrchestratorEngine · 用量回报", () => {
+  const SNAPSHOT = {
+    totalTokens: 321,
+    calls: 2,
+    measuredCalls: 2,
+    byModel: { "sensenova/deepseek-v4-flash": 321 },
+  };
+
+  function build(opts: {
+    scheduler: Scheduler;
+    usage?: () => typeof SNAPSHOT;
+    onUsage?: (s: typeof SNAPSHOT) => void;
+    maxRounds?: number;
+  }): OrchestratorEngine {
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: opts.scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: opts.maxRounds ?? 0 },
+      ...(opts.usage ? { usage: opts.usage } : {}),
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+      ...(opts.onUsage ? { onUsage: opts.onUsage } : {}),
+    });
+  }
+
+  it("交付路径：回报一次，内容是依赖给的快照", async () => {
+    const seen: Array<typeof SNAPSHOT> = [];
+    const eng = build({
+      scheduler: fakeScheduler(false),
+      usage: () => SNAPSHOT,
+      onUsage: (s) => seen.push(s),
+    });
+
+    await eng.execute([TASKS], ".");
+
+    expect(seen).toEqual([SNAPSHOT]);
+  });
+
+  it("预算耗尽抛错的路径也要回报（失败的运行一样烧了 token）", async () => {
+    const seen: Array<typeof SNAPSHOT> = [];
+    const alwaysFail = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const eng = build({
+      scheduler: alwaysFail,
+      usage: () => SNAPSHOT,
+      onUsage: (s) => seen.push(s),
+      maxRounds: 0,
+    });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    expect(seen).toEqual([SNAPSHOT]);
+  });
+
+  it("取消的路径也要回报", async () => {
+    const seen: Array<typeof SNAPSHOT> = [];
+    const cancelled = {
+      async runBatch() {
+        throw new CancelledError();
+      },
+    } as unknown as Scheduler;
+    const eng = build({
+      scheduler: cancelled,
+      usage: () => SNAPSHOT,
+      onUsage: (s) => seen.push(s),
+    });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toBeInstanceOf(CancelledError);
+
+    expect(seen).toEqual([SNAPSHOT]);
+  });
+
+  it("宿主没提供 usage 依赖时 onUsage 不被调用（可选能力不能变成必需）", async () => {
+    // 两者缺一都不该触发：`deps.usage` 缺失（宿主不管计量）时回调必须安静。
+    const seen: Array<typeof SNAPSHOT> = [];
+    const eng = build({ scheduler: fakeScheduler(false), onUsage: (s) => seen.push(s) });
+
+    await eng.execute([TASKS], ".");
+
+    expect(seen).toEqual([]);
+  });
+});

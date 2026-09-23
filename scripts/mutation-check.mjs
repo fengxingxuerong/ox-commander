@@ -288,6 +288,13 @@ const TARGETS = [
   // 即这两处靠行为测试保证，不靠变异。要纳入得先给算子表加 `if (!x)` → `if (x)`，
   // 那会同时命中其余 26 个目标，属独立排期。
   { file: "electron/main.ts", test: "src/main-wiring.test.ts", tier: 1 },
+
+  // ---- 2026-09-23 第七批：token 用量采集（此前零消费方）----
+  // usageTokens 采集了很久却没有任何读取方（无汇总、无上限），长跑烧配额
+  // 只能靠翻服务商账单。本模块是纯逻辑的累加器 + 装饰器，脏数据处理
+  // （NaN/负数/缺字段不能污染总量）是它的全部价值所在 —— 这类"算错了也不报错"
+  // 的逻辑正该进变异门禁。tier 1：整份测试 9ms。
+  { file: "shared/usage-meter.ts", test: "src/usage-meter.test.ts", tier: 1 },
 ];
 
 /**
