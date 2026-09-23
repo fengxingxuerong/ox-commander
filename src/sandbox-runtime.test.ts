@@ -450,6 +450,19 @@ describe("CircuitBreaker", () => {
     expect(stats.failures).toBe(1);
     expect(stats.successRate).toBeCloseTo(2 / 3, 5);
     expect(b.statsProvider()("a").circuit).toBe("closed");
+    // `statsProvider` 里 `s.successRate !== undefined ? { successRate } : {}`
+    // 那个三目此前**只断言了 circuit** —— 把它改成 `===` 之后
+    // successRate 会被静默丢掉，而能力路由正是靠它做择优的：
+    // 拿不到 successRate 就会退化成"所有 agent 等权"，路由形同虚设。
+    expect(b.statsProvider()("a").successRate).toBeCloseTo(2 / 3, 5);
+  });
+
+  it("没有任何样本时不返回 successRate（而不是返回 0）", () => {
+    // 非零分支要断言"在"，零分支要断言"不在" —— 只测一边会让
+    // `!== undefined` 与 `=== undefined` 中有一侧永远无人验证。
+    const { b } = breaker();
+    expect(b.statsProvider()("never-seen").successRate).toBeUndefined();
+    expect(b.statsProvider()("never-seen").circuit).toBe("closed");
   });
 
   it("keeps agents independent and can be reset", () => {

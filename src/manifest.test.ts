@@ -165,6 +165,34 @@ describe("buildAdaptersFromManifests", () => {
     expect(adapters[0]).toBeInstanceOf(HttpBridgeAdapter);
   });
 
+  it("把 entry 上的可选字段透传给 HTTP 适配器（pollMs 等）", () => {
+    // manifest-loader 用一长串 `...(x ? { x } : {})` 构造适配器选项。
+    // `pollMs` 那一条此前没有任何断言：改成 `===` 后它会被静默丢掉，
+    // 适配器回落默认轮询间隔 —— 远端进度到看板的延迟被悄悄改掉，不报任何错。
+    //
+    // 断言方式说明：`HttpBridgeAdapter` 没有公开读取选项的访问器，
+    // 而 `constructor(private opts)` 的 private 只是编译期约束，
+    // 运行时该字段就是适配器持有的配置 —— 直接读它是这里唯一能落到
+    // "manifest 的值真的到了适配器"这一事实上的办法。
+    const m = parseAgentManifest({
+      id: "workbuddy",
+      displayName: "WorkBuddy",
+      adapter: "http-bridge",
+      entry: {
+        kind: "http",
+        baseUrl: "http://127.0.0.1:9999",
+        runsPath: "/v1/runs",
+        pollMs: 250,
+      },
+      capabilities: validCodex().capabilities,
+    });
+    const { adapters } = buildAdaptersFromManifests([m]);
+    const opts = (adapters[0] as unknown as { opts: Record<string, unknown> }).opts;
+    expect(opts.pollMs).toBe(250);
+    expect(opts.runsPath).toBe("/v1/runs");
+    expect(opts.baseUrl).toBe("http://127.0.0.1:9999");
+  });
+
   it("skips local-llm manifests: those adapters are compiled in", () => {
     const m = parseAgentManifest({
       id: "local",

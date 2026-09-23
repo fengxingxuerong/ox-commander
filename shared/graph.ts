@@ -44,8 +44,15 @@ export function planBatches(tasks: Task[]): Task[][] {
   const batches: Task[][] = [];
   const done = new Set<string>();
 
+  // 循环只由「这一轮有没有进展」驱动。
+  //
+  // 原条件写成 `done.size < sorted.length && progressed`，但第一个合取项是**冗余的**：
+  // 没有进展时循环必然退出，而紧跟其后的 `throw new CycleError()` 正好覆盖
+  // "还有任务没排上"的情况。两个条件互为蕴含，多余的合取项对输出没有任何影响。
+  // 删掉它而不是留着：它看着承重，实际不做功，还会让变异测试永远杀不掉那个 `&&`
+  //（改成 `||` 后只在"全部完成"时多跑一轮空迭代，batches 完全一致）。
   let progressed = true;
-  while (done.size < sorted.length && progressed) {
+  while (progressed) {
     progressed = false;
     const batch: Task[] = [];
     const zonesInBatch = new Set<string>();

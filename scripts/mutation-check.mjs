@@ -354,6 +354,23 @@ const EQUIVALENT_SITES = [
   // 换句话说这是"副作用发生了但被后续抛错抹掉"的等价 —— 要让它可观测，
   // 得改生产代码（例如让校验失败也回传已解析的部分），代价不对。
   { file: "shared/schema.ts", op: "|| → &&", line: 184 },
+  /**
+   * `electron/sandbox/spawn-plan.ts:96` `return false → true`（`isFile` 的 catch）。
+   *
+   * 该分支只在「`fs.existsSync(p)` 为真、紧接着 `fs.statSync(p)` 抛错」时可达 ——
+   * 两次系统调用之间文件消失，典型 TOCTOU 竞态。它在测试里**无法构造**：
+   * Windows 与 Linux 上都不存在"exists 为真但 stat 必抛"的稳定路径
+   * （悬空符号链接会让 exists 直接返回 false，权限错误会让 exists 也返回 false）。
+   *
+   * 判定为等价的理由**不是"这个分支不重要"**，而是**"活不到能测的那一步"**：
+   * `return false` 是安全方向（"不是可执行文件"，于是继续找下一个候选），
+   * 改成 `return true` 只在竞态窗口内会误判。
+   *
+   * ⚠️ 若将来给 `spawn-plan` 加上 fs 注入点（同 `zone-guard` / `snapshot-store`
+   * 的 `FsLike` 模式），**应删掉这条白名单**并补一条注入用例 ——
+   * 那时的正确做法是让分支可测，而不是继续白名单。
+   */
+  { file: "electron/sandbox/spawn-plan.ts", op: "return false → true", line: 96 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
