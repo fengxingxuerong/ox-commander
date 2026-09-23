@@ -119,6 +119,23 @@ describe("killTree · fallback paths", () => {
     expect(child.kill).toHaveBeenCalledWith("SIGTERM");
   });
 
+  it("taskkill 报成功（exit 0）时不触发 fallback —— 补刀只由 double-check 决定", async () => {
+    // 钉 @32 行 `if (code !== 0) fallback()`：`!== → ===` 变异会让 taskkill
+    // **报成功**时反而立即 fallback 杀。最终 kill 次数被 post-grace
+    // double-check 兜底到相同，唯一可观察差异是**时机** —— exit 0 的同步
+    // 窗口内原版绝不杀（等宽限期），变异版立即杀。同步断言无竞态地把两者分开。
+    await withPlatform("win32", async () => {
+      const killer = fakeKiller();
+      h.spawnImpl = () => killer as never;
+      const child = fakeChild();
+      killTree(child, { graceMs: 50 });
+      killer.emit("exit", 0);
+      expect(child.kill).not.toHaveBeenCalled(); // 变异版这里就挂
+      await sleep(100);
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM"); // double-check 补刀
+    });
+  });
+
   it("never registers a second fallback after the first one fired", () => {
     const killer = fakeKiller();
     h.spawnImpl = () => killer as never;
