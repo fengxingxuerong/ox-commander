@@ -292,3 +292,50 @@ describe("store · settings 错误路径", () => {
     expect(useApp.getState().settings?.maxParallelRuns).toBe(2);
   });
 });
+
+describe("项目删除与规划失败的状态收尾", () => {
+  function bridge(): Record<string, unknown> {
+    const g = globalThis as { oxCommander?: Record<string, unknown> };
+    return (g.oxCommander ??= {});
+  }
+
+  it("[55] 删除的是当前项目时 activeProjectId 必须清空，删别的项目时不受影响", async () => {
+    // 第 55 行 `activeProjectId: s.activeProjectId === projectId ? undefined : s.activeProjectId`。
+    // 改成 `!==` 之后这个三元**整体取反**：
+    //   - 删掉当前项目 → activeProjectId 仍指向一个已经不存在的 id，
+    //     后续 runPlanning / 看板刷新都会拿着悬空 id 去打 IPC；
+    //   - 删掉别的项目 → 反而把当前项目清空（界面莫名回到"未选中"）。
+    bridge().deleteProject = async () => undefined;
+
+    useApp.setState({ projects: [{ id: "p1" }, { id: "p2" }] as never, activeProjectId: "p1" });
+    await useApp.getState().deleteProject("p1");
+    expect(useApp.getState().projects.map((p) => p.id)).toEqual(["p2"]);
+    expect(useApp.getState().activeProjectId).toBeUndefined();
+
+    // 反向：删一个不是当前的项目，activeProjectId 必须保留
+    useApp.setState({ projects: [{ id: "p3" }, { id: "p4" }] as never, activeProjectId: "p3" });
+    await useApp.getState().deleteProject("p4");
+    expect(useApp.getState().projects.map((p) => p.id)).toEqual(["p3"]);
+    expect(useApp.getState().activeProjectId).toBe("p3");
+  });
+
+  it("[116] 规划失败时必须结束 planning 并记下 planningError", async () => {
+    // 第 116 行是 catch 里的 `if (seq !== planningSeq) return;` —— 用来丢弃
+    // **过期**请求的结果。改成 `===` 后判断反了：这次失败的序列号正是当前序列号，
+    // 于是**当场 return**，`planning` 永远是 true、`planningError` 永远不写。
+    // 症状是界面卡在"正在规划…"，没有任何报错可看。
+    //
+    // 注意第 113 行（成功分支）有同形的一句，两处必须各自有断言。
+    bridge().runPlanning = async () => {
+      throw new Error("PRD 生成失败：无可用线路");
+    };
+
+    useApp.setState({ activeProjectId: "p1" });
+    await useApp.getState().runPlanning();
+
+    const s = useApp.getState();
+    expect(s.planning).toBe(false);
+    expect(s.planningError).toContain("无可用线路");
+    expect(s.logs.join("\n")).toContain("规划失败");
+  });
+});

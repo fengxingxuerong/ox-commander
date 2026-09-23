@@ -414,6 +414,23 @@ const EQUIVALENT_SITES = [
    * **应删掉这条白名单**并补一条注入用例 —— 那时正确做法是让分支可测。
    */
   { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 323 },
+  /**
+   * `electron/ipc/context.ts:177` 的 `settingsValue.agentRouter !== false` → `=== false`
+   * —— **可证明等价**（一级）。
+   *
+   * 那一行只把取值拼进一个**仅用于相等比较**的缓存键：
+   *   `const signature = \`router=${settingsValue.agentRouter !== false};arbitration=…\``
+   * 下游只有 `if (agentLayer && layerSignature === signature)` 一处比较。
+   *
+   * 取反是 {true,false} 上的**双射**，因此"两组 settings 是否产生同一个键"
+   * 这一等价关系完全不变 —— 缓存命中的边界一模一样，行为不可能有差异。
+   *（同一行里的 `arbitration` 分量同理。）
+   *
+   * ⚠️ 注意区别：**同一表达式在 216 行是承重的**（那里它直接决定 enableRouter），
+   * 所以 216 行必须是真断言、不能一起白名单。这正是"同一写法在不同位置
+   * 语义不同"的例子 —— 判等价要按**使用点**判，不能按表达式形状判。
+   */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 177 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

@@ -246,3 +246,40 @@ describe("killTree", () => {
     expect(signals).toContain("SIGKILL");
   });
 });
+
+describe("CliAgentAdapter · 看门狗原因与失败分类", () => {
+  it("[219] 超总时限触发的看门狗说明是「超出总时限」，不是「空闲无输出」", () => {
+    // 第 219 行 `reason === "deadline" ? "超出总时限" : "空闲无输出"`。
+    // 改成 `!==` 后两种原因的**文案对调** —— 排障时被引向错误方向：
+    // 明明是整个 run 超过硬上限，日志却说"空闲无输出"，于是去查远端
+    // 为什么不输出，而不是去查为什么跑这么久。
+    //
+    // 触发手段：把 idle 超时设得远大于 deadline，确保是 deadline 这一支
+    //（否则静默的子进程会先命中 idle，两种写法都会说"空闲无输出"）。
+    return (async () => {
+      const adapter = cli(["-e", "setTimeout(() => {}, 5000)"], {
+        limits: { runDeadlineMs: 80, idleTimeoutMs: 60_000 },
+      });
+      const handle = await adapter.dispatch(payload());
+      const text = (await drainEvents(adapter, handle)).map((e) => e.text).join("\n");
+      expect(text).toContain("超出总时限");
+      expect(text).not.toContain("空闲无输出");
+    })();
+  });
+
+  it("[333] 带真实退出码的失败不能被标成 timeout", () => {
+    // 第 333 行 `lastKind === "failed" && run.exitCode === null`。
+    // `exitCode === null` 的含义是"进程没正常退出"（被看门狗杀掉），
+    // 改成 `!==` 之后**方向反了**：真正跑完但返回非 0 的失败（编译错误、
+    // 断言失败）会被标成 `errorClass: "timeout"`。重修策略会按"超时"去重试，
+    // 而真实错误从未被处理 —— 表现为"同一处反复重修、每轮都超时"。
+    return (async () => {
+      const adapter = cli(["-e", "console.error('boom');process.exit(3)"]);
+      const handle = await adapter.dispatch(payload());
+      await drainEvents(adapter, handle);
+      const result = await adapter.lastResult(handle);
+      expect(result?.status).toBe("failed");
+      expect(result?.errorClass).not.toBe("timeout");
+    })();
+  });
+});

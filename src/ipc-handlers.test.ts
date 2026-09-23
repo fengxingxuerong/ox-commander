@@ -174,6 +174,7 @@ import { app, shell } from "electron";
 import { attachWindow, buildEngine, registerIpc } from "../electron/ipc";
 import {
   buildLlm,
+  buildPlatformLayer,
   dynamicAgentMap,
   enginesOf,
   getRunningProjectId,
@@ -185,7 +186,7 @@ import {
 import { exampleManifest } from "../electron/agents/manifest-schema";
 import { HttpLlmError } from "../shared/http-clients";
 import type { AgentCapabilities, AgentDescriptor } from "../shared/agent-contract";
-import type { Task } from "../shared/types";
+import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
 
 function caps(partial: Partial<AgentCapabilities>): AgentCapabilities {
   return {
@@ -842,5 +843,39 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
     expect("agentId" in call).toBe(false);
     expect("durationMs" in call).toBe(false);
     expect("errorClass" in call).toBe(false);
+  });
+});
+
+describe("buildPlatformLayer · agentRouter 的第三态", () => {
+  it("[216] 未设置 agentRouter（缺省）时 enableRouter 仍须为 true", () => {
+    // 第 216 行 `enableRouter: settingsValue.agentRouter !== false` 是**三态**判断：
+    // true / false / 缺省。改成 `=== false` 之后，**缺省会变成 false** ——
+    // 即"从没碰过这个开关的用户"会**静默失去能力路由**：任务不再按
+    // capabilities / zone 择优派发，退回 pre-router 的 round-robin，且不报任何错。
+    //
+    // 既有用例的 settings 里 `agentRouter` 恒为显式布尔（fixture 里写死 true，
+    // 「caches the agent layer…」那条写死 false），第三态从来没人覆盖 ——
+    // 这正是三态写法最容易漏掉的一格。
+    //
+    // 类型上 `agentRouter: boolean` 是**必需**的，但磁盘上的旧 settings 文件可以
+    // 根本没有这个字段 —— `!== false` 这个写法本身就是为那一格存在的
+    //（否则直接写 `settingsValue.agentRouter` 就够了）。这里用一次显式收窄
+    // 还原那个运行时状态，而不是改生产代码的类型。
+    const legacy = {
+      ...DEFAULT_SETTINGS,
+      arbitration: "deny-all" as const,
+      agentRouter: undefined,
+    } as unknown as ProjectSettings;
+
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer(legacy, { log: () => {} });
+    expect(lastPlatformConfig().enableRouter).toBe(true);
+
+    // 反向也要断言：显式 false 必须真的关掉
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS, arbitration: "quarantine", agentRouter: false }, {
+      log: () => {},
+    });
+    expect(lastPlatformConfig().enableRouter).toBe(false);
   });
 });
