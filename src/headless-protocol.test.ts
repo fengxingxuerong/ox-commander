@@ -317,6 +317,16 @@ describe("parseSpec · maxTokensPerRun", () => {
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, maxTokensPerRun: 100.9 }));
     expect(spec.settings.maxTokensPerRun).toBe(100);
   });
+
+  it("1e999 这类合法 JSON 超大数（parse 出 Infinity）同样被拒绝", () => {
+    // 这条是为 site 口径的 `|| → &&` 变异准备的：三段条件里只有
+    // `!Number.isFinite` 能拦住 Infinity，而 JSON 可表达的 Infinity
+    // 恰恰只出现在这里（1e999 解析溢出）—— 缺了它，前两段合取后的
+    // 变异对全部普通输入都与原文等价，门禁杀不掉。
+    const r = parseSpec('{"requirement":"x","projectRoot":".","maxTokensPerRun":1e999}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("maxTokensPerRun");
+  });
 });
 
 describe("runSpec", () => {

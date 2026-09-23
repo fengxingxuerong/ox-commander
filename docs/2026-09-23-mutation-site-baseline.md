@@ -13,15 +13,47 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 #   其中 单点杀死 577 · 聚合杀死 0
 ```
 
-| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） |
-| --- | --- | --- |
-| aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 |
-| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** |
-| 聚合杀死数 | 未区分 | **0**（全部逐点判定） |
+| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） |
+| --- | --- | --- | --- |
+| aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 | 未重跑（verify 内 `mutation:quick` 持续参与门禁） |
+| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） |
+| 聚合杀死数 | 未区分 | **0**（全部逐点判定） | **0**（全部逐点判定） |
 
 **位点总数 581 → 577 的原因**：这批清理里有若干处是按"简化源码"收口的
 （冗余合取项删除后位点本身消失，而不是被白名单挡住）。
 净变化 = `-9 处删除 + 5 处新增（electron/main.ts）`。
+
+## 二轮快照：usage 两轮代码后的全量 audit（同日）
+
+usage 可见性轮（`7f853ed`）与 maxTokensPerRun 闸门轮（`3b4d513`）落地后重跑全量：
+
+```bash
+node scripts/mutation-check.mjs --mode=site --limit=999
+# 处置前实测：杀死 591/594（99%）   耗时 787.5s（13.1 min）
+# 处置后三目标复测全杀 → 最终口径 594/594（100%）
+```
+
+分母 577 → 594 的构成：usage-meter 新模块 9 处（tier 1，第七批）、
+`headless/protocol.ts` 协议字段校验 +5、其余零散 3 处（platform 等）。
+
+**这一轮最大的价值是抓到 3 个真问题**——逐目标跑单文件全绿掩盖不了它们，
+只有全量才暴露：
+
+1. **白名单行号漂移（2 处）**：`sensenova-api.ts` 的两条白名单
+   （317/323 行，"可证明不可达" + "TOCTOU 构造不出"）因 usage 轮插入
+   14 行漂移到 331/337，按行号匹配失配 → 位点重新计入分母且无断言 → 存活。
+   两条例由经核对**依然成立**（walkStat 仍在 298 行用同一谓词过滤后才 push；
+   模块仍无 fs 注入点），处置即校回行号并在 `EQUIVALENT_SITES` 注释里
+   记下"漂移曾被抓到"备查。
+2. **可杀而未杀的等价错觉（1 处）**：`headless/protocol.ts:250`
+   `|| → &&`——三段条件对**普通输入**全部等价，但 `1e999` 是合法 JSON
+   且 `JSON.parse` 产出 `Infinity`，只有 `!Number.isFinite` 段能拦住它。
+   补一条 1e999 断言后变异被杀。教训：判断"等价"必须枚举**输入域的边界**
+   （JSON 数字溢出），不能只看常规取值。
+
+**流程教训**：改了 TARGETS 内文件的行号分布后，白名单是按行号精确匹配的
+——一轮收口时应当把受影响文件的 `EQUIVALENT_SITES` 行号一并核对；
+否则只有全量 audit 能兜底，而它一次要十几分钟。
 
 ## 适用边界（引用本基线时必须一起说）
 
@@ -85,3 +117,12 @@ electron/main.ts   杀死 5/5（100%）   5.2s
 最慢：electron/engine/orchestrator.ts 129.9s · electron/sandbox/snapshot-store.ts 113.3s · electron/sandbox/file-journal.ts 113.3s
 
 PASS: 无存活变异 —— 全部 577 处位点已**逐点**验证（每处单独变异都被断言发现）。
+
+## 二轮原始报告（处置后三目标复测）
+
+electron/agents/sensenova-api.ts   杀死 29/29（100%）   73.4s
+headless/protocol.ts   杀死 55/55（100%）   63.6s
+shared/usage-meter.ts   杀死 9/9（100%）   6.2s
+
+（其余 39 个目标处置前实测即全杀，逐目标行见一轮报告；处置只触碰上述三处，
+未改动其他目标的源码与测试，故不重复罗列。）
