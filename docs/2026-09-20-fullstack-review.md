@@ -1592,5 +1592,27 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 该行恒不可达（一级白名单）。**同一谓词 + 同一输入 = 下游是死代码；
 不同谓词（上游按名字、下游按内容）才是真防线。**
 
-**剩余 29 处**：`manifest-schema` 14 · `orchestrator` 9 · `store` 2 ·
-`context` 2 · `cli-agent` 2。
+**剩余 23 处**（第六批后）。
+
+### 16.12 第六批：状态机 / 装配层 / CLI 适配器（2026-09-23，累计 70 / 95）
+
+`store` 13/13 · `context` 7/7 · `cli-agent` 15/15（6 处断言 + 1 处一级白名单）。
+
+| 位点 | 改坏的后果 |
+| --- | --- |
+| `store@55` 三元取反 | 删当前项目后 `activeProjectId` 仍指向悬空 id；删别的项目反把当前清空 |
+| `store@116` 过期判断反了 | catch 当场 return → **planning 永远 true、planningError 永不写**，界面卡住 |
+| `context@216` 三态塌缩 | **缺省 config 静默失去能力路由**（退回 round-robin） |
+| `context@177` 缓存键取反 | **可证明等价**（键只用于相等比较，取反是双射）→ 白名单 |
+| `cli-agent@219` 看门狗文案对调 | 排障被引向错误方向 |
+| `cli-agent@333` 方向反了 | 有退出码的真实失败被标成 `timeout` → 重修按超时重试，真错误永不被处理 |
+
+**⚠️ 我定位错了一次**：`context.ts` 里 `agentRouter !== false` 出现**三次**
+（177 / 180 / 216），我按清单的 `@216` 去测 `ensureAgentLayer` —— 而 216 在
+`buildPlatformLayer()` 里。**纪律：拿到行号先 `grep -n` 出全部同形出现，
+再按行号确认归属。**
+
+**判等价要按使用点判，不能按表达式形状判** —— 同一个 `!== false`，
+177 行是纯缓存键（等价）、216 行承重（真缺口）。按形状判会把 216 一起放过。
+
+**剩余 23 处**：`manifest-schema` 14 · `orchestrator` 9（两个大集成层）。
