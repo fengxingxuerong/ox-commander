@@ -371,6 +371,22 @@ const EQUIVALENT_SITES = [
    * 那时的正确做法是让分支可测，而不是继续白名单。
    */
   { file: "electron/sandbox/spawn-plan.ts", op: "return false → true", line: 96 },
+  /**
+   * `electron/agents/http-bridge.ts:309` `if (settled === "timeout")` 的 `=== → !==`。
+   *
+   * **可证明的等价**（不是"测不出来"）：
+   * 该条件是 `drain()` 里 `Promise.race([Promise.all(pending), timeout])` 的结果。
+   * 走到 `drained` 一侧 ⟹ **每个 run 的 `done` 都已 resolve**；
+   * 而 `markTerminal` 是先置 `run.session.finished = true` **再** `resolveDone()`，
+   * 所以 done 已 resolve ⟹ `session.finished` 已为真。
+   * 而 `abort(handle)` 的第一行就是 `if (!run || run.session.finished) return;` ——
+   * 于是改 `!==` 后新增的那圈 abort 循环**每个都当场返回**，不产生任何请求。
+   *
+   * 已验证：`http-bridge.test.ts` 的「宽限期内成功收敛时不得中止任何 run」
+   * 断言 drained 路径不发任何 /abort 请求 —— 该用例在两种写法下都通过，
+   * 正说明差别不可观测。保留该用例（它仍是对 drained 路径的有效断言）。
+   */
+  { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 309 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
