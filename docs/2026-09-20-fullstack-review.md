@@ -1490,3 +1490,37 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 
 在此之前，平台相关分支的存活项**只能靠在另一 OS 上跑一次审计**来区分 ——
 这是 site 口径目前已知的最大盲区。
+
+### 16.8 积压清理进度（2026-09-23 续）
+
+按 16.6 的顺序推进，已清 **32 / 95** 处。当前状态：
+
+| 文件 | site 口径 | 收口方式 |
+| --- | --- | --- |
+| `electron/sandbox/path-policy.ts` | **33/33** | 5 处补断言（strict 分支 + `via` 语义）；1 处**平台判断可测化** |
+| `shared/glob.ts` | **23/23** | 5 处补断言（分支互斥，需构造"只有一个成立"的输入） |
+| `shared/zone-coverage.ts` | **18/18** | 3 处补断言（`describeZoneGaps` 此前零断言） |
+| `headless/protocol.ts` | **50/50** | 10 处补断言（多条件校验只触发第一条）；1 处**简化冗余守卫** |
+| `electron/keys-store.ts` | **19/19** | 1 处补断言（加密探测失败不能谎报已加密） |
+| `electron/agents/scoped-env.ts` | **5/5** | 2 处补断言（被跳过项排最前） |
+| `shared/graph.ts` | **5/5** | **简化源码**（循环条件冗余合取项） |
+| `electron/sandbox/spawn-plan.ts` | **7/7** | **白名单**（`isFile` catch 是 TOCTOU，测不到） |
+| `electron/sandbox/circuit-breaker.ts` | **15/15** | 1 处补断言（只断言了兄弟字段） |
+| `electron/agents/manifest-loader.ts` | **11/11** | 1 处补断言（`pollMs` 透传） |
+
+**存活变异的三类处理（本轮定型，值得后续沿用）**：
+
+1. **能加断言 → 加断言**（首选）
+2. **条件冗余 / 死代码 → 简化源码**，不要白名单（`graph.ts` 是范例：
+   删掉冗余合取项后位点直接消失）
+3. **分支可达但测试构造不出来 → 白名单 + 写清"不是不重要，是活不到能测那一步"**，
+   并注明将来什么条件下应删掉它
+
+**平台相关一律"可测化"，不白名单** —— 白名单按 `{file, op, line}` 生效，
+在另一个 OS 上会把可杀的位点一起排除（16.7）。
+
+**剩余 ~63 处**：`manifest-schema` 14 · `orchestrator` 9 · `http-clients` 7 ·
+`sensenova-api` 7 · `http-bridge` 7 · `scheduler` 4 · `router` 4 · `registry` 3 ·
+`store` 2 · `llm-client` 2 · `context` 2 · `cli-agent` 2 · 其余零散。
+
+全量测试 785 → **820 passed** / 6 skipped。
