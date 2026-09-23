@@ -1544,5 +1544,26 @@ const CASE_INSENSITIVE_FS = process.platform === "win32" || process.platform ===
 ② 排序恒定（如 system 消息恒在首位）→ 把目标项挪到非首位；
 ③ 两种写法结果恰好相同 → 构造能区分它们的最小场景。
 
-**剩余 ~50 处**：`manifest-schema` 14 · `orchestrator` 9 · `http-clients` 7 ·
-`sensenova-api` 7 · `http-bridge` 7 · `store` 2 · `context` 2 · `cli-agent` 2 · 其余零散。
+**剩余 ~36 处**（第四批后）。
+
+### 16.10 第四批：LLM 通信层（2026-09-23，累计 59 / 95）
+
+| 文件 | site 口径 | 收口方式 |
+| --- | --- | --- |
+| `shared/http-clients.ts` | **39/39** | 7 处补断言：协议分发 + 池/组的构造（含一行三处） |
+| `electron/agents/http-bridge.ts` | **27/27** | 6 处补断言 + 1 处**可证明等价**（白名单） |
+
+**这一层的改坏方向统一是「静默降级」** —— 池子变小/变空、事件被降级、
+状态被错记，都不抛错。与沙箱层的"放行"同类，但更难察觉。
+
+**新判据：断言"某效果发生了"前，先列出它的全部产生路径。**
+`http-bridge.ts:236` 的 `|| → &&` 起初测不出来，是因为桥会从 poll 的 `status`
+**合成**终态事件 —— 把 `status` 钉死成 `running`、只让事件 kind 给终态，
+改坏后才没有东西能结束那个 run。
+
+**白名单理由分两级**：「可证明等价」（给出不变量链，如 309 行）可以长期信任；
+「构造不出输入」（如 96 行的 TOCTOU）属经验性判断，应视为待复查。
+判等价前先试着一级 —— 能证就不用写测试。
+
+**剩余 ~36 处**：`manifest-schema` 14 · `orchestrator` 9 · `sensenova-api` 7 ·
+`store` 2 · `context` 2 · `cli-agent` 2。
