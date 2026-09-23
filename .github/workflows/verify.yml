@@ -41,18 +41,23 @@ jobs:
       - name: Verify (typecheck + tests + builds)
         run: npm run verify
 
-  # 变异门禁的**全量**档单独一个 job：verify 里跑的是 `mutation:quick`
-  # （tier 1 目标、每文件 1 个变异，~25s），而 tier 2 目标（沙箱层等慢目标）
-  # 只在全量档跑 —— 2026-09-22 的教训：tier 2 出现 8 个存活变异时
-  # `npm run verify` 依然是绿的，缺口长期挂着不阻塞任何门禁。
-  # 放在 CI 而不是 verify 里，是为了守住"verify 是快门禁"这条成本分层：
-  # 全量 ~285s，本地每次改动都跑它太重，但每次 push 跑一次完全值得。
+  # 变异门禁的**全量**档单独一个 job。
+  #
+  # 为什么不是 `npm run mutation`（aggregate）：aggregate 用 `replaceAll` 一次改掉
+  # 该算子的**全部**位点，"任一处被杀死"就报杀死 —— 2026-09-23 实测
+  # `snapshot-store.ts` 报 2/2 全杀，而源码里有 12 个 `continue`，拆单点后
+  # 5 处存活。所以 aggregate 只能证明"每个算子至少被碰过"，site 口径才回答
+  # "每一处位点是否真有断言"（同一份代码：aggregate 152/152 vs site 486/581）。
+  #
+  # 成本：实测 ~21 分钟（581 个位点），故 timeout 给 35 分钟。verify 里跑的仍是
+  # `mutation:quick`（tier 1、每文件 1 个变异、~30s），守住"verify 是快门禁"。
   mutation-full:
-    name: mutation (all targets)
-    # 只在 Linux 跑：全量档是纯逻辑变异，不碰 Windows 特有的 taskkill / .cmd 分支，
-    # 那部分由上面 verify 的 windows-latest 覆盖。
+    name: mutation (site, every site)
+    # 只在 Linux 跑：site 审计的存活清单里会混进"平台相关等价变异"
+    # （如 `process.platform === "win32"` 在本机恒真），在另一个 OS 上跑一次
+    # 才能把它们和真缺口分开。CI 用 Linux，本机是 Windows，两边合起来才是全集。
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
 
@@ -64,5 +69,5 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Mutation (every target, all tiers)
-        run: npm run mutation
+      - name: Mutation (site 口径，逐位点)
+        run: npm run mutation:audit
