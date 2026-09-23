@@ -317,6 +317,22 @@ export function SettingsPage() {
           这个上限防止一个大批次把 API 配额打成 429。
         </p>
         <div className="form-row">
+          <label htmlFor="max-tokens-per-run">Token 预算上限</label>
+          <input
+            id="max-tokens-per-run"
+            type="number"
+            min={0}
+            value={draft.maxTokensPerRun ?? 0}
+            onChange={(e) =>
+              patch({ maxTokensPerRun: Math.max(0, Math.floor(Number(e.target.value) || 0)) })
+            }
+          />
+        </div>
+        <p className="muted">
+          本次运行累计 token 的软上限（0 表示不限）。达到上限后下一次 LLM 调用在发出前被拒，
+          已发生的那一次照常记录 —— 总量始终能和服务商账单对上。
+        </p>
+        <div className="form-row">
           <label htmlFor="arbitration">zone 越权处置</label>
           <select
             id="arbitration"

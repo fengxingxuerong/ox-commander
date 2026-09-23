@@ -121,7 +121,11 @@ export function createPlatform(config: PlatformConfig): Platform {
   // 用量汇总：大脑层在 `buildLlm` 里包一层、执行器在 `createAgentLayer` 里包一层
   // （它是 token 大头，且不走大脑层工厂）。两处都指向同一个 meter，所以
   // `usage()` 拿到的是这次平台生命周期的总和。
-  const meter = config.meter ?? new UsageMeter();
+  // 预算上限从 settings 流入（headless 协议字段与桌面端设置页都会落到这）；
+  // `config.meter` 显式传入时（测试 / 宿主自建）尊重传入值，不再二次包配置。
+  const meter =
+    config.meter ??
+    new UsageMeter(settings.maxTokensPerRun !== undefined ? { maxTokensPerRun: settings.maxTokensPerRun } : undefined);
 
   const layer =
     config.layer ??

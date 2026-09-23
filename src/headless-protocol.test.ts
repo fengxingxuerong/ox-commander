@@ -292,6 +292,33 @@ describe("parseCommands · 逐项校验不中途放弃（变异测试发现的�
   });
 });
 
+describe("parseSpec · maxTokensPerRun", () => {
+  it("合法正数流进 settings；缺省时不出现该字段，也不产生警告（KNOWN_FIELDS 已注册）", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, maxTokensPerRun: 120_000 }));
+    expect(spec.settings.maxTokensPerRun).toBe(120_000);
+    expect(spec.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.maxTokensPerRun).toBeUndefined();
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("0 / 负数 / 非数字都被拒绝（宿主显式传坏值是 bug，不能静默解释成不限）", () => {
+    // 与 UsageMeter 内核口径刻意不同：协议层面向宿主程序，错误要立刻暴露；
+    // NaN 在 JSON 里序列化成 null，同样落在"非数字"分支。
+    for (const bad of [0, -5, Number.NaN, "many"]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, maxTokensPerRun: bad }));
+      expect(r.ok, `maxTokensPerRun=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("maxTokensPerRun");
+    }
+  });
+
+  it("小数向下取整（token 数是整数）", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, maxTokensPerRun: 100.9 }));
+    expect(spec.settings.maxTokensPerRun).toBe(100);
+  });
+});
+
 describe("runSpec", () => {
   function fakeTask(id: string, zone: string, role = "backend-dev"): Task {
     return { id, title: `任务 ${id}`, description: "做点事", zone, dependencies: [], suggestedRole: role };

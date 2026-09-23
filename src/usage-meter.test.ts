@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
+import {
+  BudgetExceededError,
+  formatUsageLine,
+  meteredLlm,
+  UsageMeter,
+  type UsageSnapshot,
+} from "../shared/usage-meter";
 import type { ChatRequest, ChatResponse } from "../shared/providers";
 import type { LlmClient } from "../shared/llm-client";
 
@@ -128,6 +134,83 @@ describe("meteredLlm · 只当观察者", () => {
 
     expect(calls).toBe(2);
     expect(meter.snapshot().totalTokens).toBe(2);
+  });
+});
+
+describe("UsageMeter · maxTokensPerRun 预算闸门", () => {
+  it("达到上限后拒绝下一次调用，错误带已用/上限数字", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 100 });
+    meter.record(sample({ usageTokens: 100 }));
+    expect(() => meter.assertWithinBudget()).toThrow(BudgetExceededError);
+    try {
+      meter.assertWithinBudget();
+      expect.unreachable("应当抛出 BudgetExceededError");
+    } catch (err) {
+      const e = err as BudgetExceededError;
+      expect(e.used).toBe(100);
+      expect(e.limit).toBe(100);
+      // message 必须可行动：宿主看到数字就知道该调大上限还是分拆运行。
+      expect(e.message).toContain("100");
+      expect(e.message).toContain("maxTokensPerRun");
+    }
+  });
+
+  it("未达上限不拦截；恰好等于上限即拒绝（闸门是 >= 语义）", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 100 });
+    meter.record(sample({ usageTokens: 99 }));
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+    meter.record(sample({ usageTokens: 1 }));
+    expect(() => meter.assertWithinBudget()).toThrow(BudgetExceededError);
+  });
+
+  it("未配置上限时永不拦截", () => {
+    const meter = new UsageMeter();
+    meter.record(sample({ usageTokens: 10_000_000 }));
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+  });
+
+  it("0 / 负数 / 非有限数的上限一律不启用（配置笔误不能放大成拒绝服务）", () => {
+    // 这条与 headless 协议层"显式传坏值直接拒绝"刻意不同：协议层面向宿主
+    // 程序（错误应该立刻暴露），这里面向 settings 透传（UI 里 0 就是"不限"），
+    // 闸门 宁可放行也不能把一次配置失误变成整轮 run 全部失败。
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const meter = new UsageMeter({ maxTokensPerRun: bad });
+      meter.record(sample({ usageTokens: 100 }));
+      expect(() => meter.assertWithinBudget(), `maxTokensPerRun=${String(bad)}`).not.toThrow();
+    }
+  });
+
+  it("软上限：单次调用可以穿透上限，如实记录，下一跳才被拦", () => {
+    // 闸门只能在调用前判定 —— 已经发生的那一次没法撤回；强行不给记录
+    // 反而会让 totalTokens 与服务商账单对不上，违背可见性的初衷。
+    const meter = new UsageMeter({ maxTokensPerRun: 100 });
+    meter.record(sample({ usageTokens: 150 }));
+    expect(meter.snapshot().totalTokens).toBe(150);
+    expect(() => meter.assertWithinBudget()).toThrow(BudgetExceededError);
+  });
+
+  it("snapshot 带上限配置；未配置时不出该字段（快照字段即承诺）", () => {
+    const limited = new UsageMeter({ maxTokensPerRun: 500 });
+    expect(limited.snapshot().limit).toBe(500);
+    expect("limit" in new UsageMeter().snapshot()).toBe(false);
+  });
+});
+
+describe("meteredLlm · 预算闸门", () => {
+  it("达到上限后下一次调用直接抛 BudgetExceededError，且不再透传给内层（闸门在最外层）", async () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 50 });
+    let innerCalls = 0;
+    const inner: LlmClient = {
+      async chat() {
+        innerCalls += 1;
+        return { content: "x", provider: "p", model: "m", usageTokens: 50 };
+      },
+    };
+    const wrapped = meteredLlm(inner, meter);
+
+    await wrapped.chat({ messages: [] }); // 第一次：正好用满预算
+    await expect(wrapped.chat({ messages: [] })).rejects.toBeInstanceOf(BudgetExceededError);
+    expect(innerCalls).toBe(1); // 第二次根本没有烧钱
   });
 });
 

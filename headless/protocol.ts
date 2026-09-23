@@ -70,6 +70,14 @@ export interface HeadlessSpec {
   arbitration?: ArbitrationMode;
   /** Concurrency ceiling; 0 means unlimited. */
   maxParallelRuns?: number;
+  /**
+   * Token budget for this run (soft ceiling). The next LLM call is rejected
+   * *before* it is sent once the total reaches the limit; a single call may
+   * overshoot and is still recorded. Must be a positive number — an explicit
+   * `0` / negative is treated as a host bug and rejected, not as "unlimited"
+   * (omit the field to express unlimited).
+   */
+  maxTokensPerRun?: number;
 }
 
 export interface ParsedSpec {
@@ -124,6 +132,8 @@ export type HeadlessEvent =
       calls: number;
       measuredCalls: number;
       byModel: Record<string, number>;
+      /** 本轮预算上限；settings 未配置时省略（字段即承诺）。 */
+      limit?: number;
     }
   | { type: "done"; passed: boolean; report: unknown }
   /** `exhausted: true` means the repair budget ran out (exit code 2), not a crash (1). */
@@ -145,6 +155,7 @@ const KNOWN_FIELDS = new Set<string>([
   "snapshotRoot",
   "arbitration",
   "maxParallelRuns",
+  "maxTokensPerRun",
 ]);
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
@@ -228,6 +239,18 @@ export function parseSpec(rawText: string): ParseResult {
       issues.push("maxParallelRuns 必须是不小于 0 的数字（0 表示不限）");
     } else {
       maxParallelRuns = Math.floor(raw.maxParallelRuns);
+    }
+  }
+
+  let maxTokensPerRun: number | undefined;
+  if (raw.maxTokensPerRun !== undefined) {
+    // 与 UsageMeter 内核口径刻意不同：协议层显式传 0/负数更像宿主的预算
+    // 计算出了 bug，静默解释成"不限"会让宿主以为闸在守而实际没有 ——
+    // 直接拒绝并报 issue，让宿主当场修。想表达"不限"就省略该字段。
+    if (typeof raw.maxTokensPerRun !== "number" || !Number.isFinite(raw.maxTokensPerRun) || raw.maxTokensPerRun <= 0) {
+      issues.push("maxTokensPerRun 必须是正数（token 数；不传表示不限）");
+    } else {
+      maxTokensPerRun = Math.floor(raw.maxTokensPerRun);
     }
   }
 
@@ -320,6 +343,7 @@ export function parseSpec(rawText: string): ParseResult {
     // （改 `||` 后条件仍与原文等价）。按"能简化就简化"处理，不留冗余守卫。
     ...(agentRouter !== undefined ? { agentRouter } : {}),
     ...(arbitration ? { arbitration } : {}),
+    ...(maxTokensPerRun !== undefined ? { maxTokensPerRun } : {}),
   };
 
   return {

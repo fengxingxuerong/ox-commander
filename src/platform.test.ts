@@ -4,7 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { BRAIN_POOL_TIMEOUT_MS, createFileJournal, createPlatform } from "../electron/platform";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
-import { UsageMeter } from "../shared/usage-meter";
+import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -249,6 +249,41 @@ describe("createPlatform · brain client grade", () => {
     expect(s.totalTokens).toBe(30);
     expect(s.calls).toBe(2);
     expect(s.measuredCalls).toBe(1);
+  });
+
+  it("settings.maxTokensPerRun 流入 meter：超限后 buildLlm 的客户端拒绝再调用", async () => {
+    // 预算从 settings 一路到闸门的接线断不得：断了两端宿主都以为设了上限，
+    // 实际照烧。断言的是行为（第二次调用被拒、内层不再被透传），不是结构。
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "p", model: "m", usageTokens: 60 };
+      },
+    };
+    const platform = createPlatform({
+      settings: settings({ maxTokensPerRun: 60 }),
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: () => undefined },
+    });
+
+    const client = platform.buildLlm();
+    await client.chat({ messages: [] }); // 第一次：正好用满预算
+    await expect(client.chat({ messages: [] })).rejects.toBeInstanceOf(BudgetExceededError);
+    expect(platform.usage().totalTokens).toBe(60); // 穿透的只有记录到的这一次
+  });
+
+  it("未配置 maxTokensPerRun 时闸门不启用（与旧行为一致）", async () => {
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      llm: { chat: async () => ({ content: "{}", provider: "p", model: "m", usageTokens: 9 }) } as never,
+      host: { log: () => undefined },
+    });
+
+    const client = platform.buildLlm();
+    await expect(client.chat({ messages: [] })).resolves.toBeTruthy();
+    await expect(client.chat({ messages: [] })).resolves.toBeTruthy();
+    expect(platform.usage().totalTokens).toBe(18);
   });
 });
 

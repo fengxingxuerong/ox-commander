@@ -169,6 +169,13 @@ export interface ProjectSettings {
    * Empty ⇒ fall back to the single `llmProvider`.
    */
   llmPool: string[];
+  /**
+   * 本次运行的 token 预算软上限（大脑层 + 内置执行器共用一道闸）。
+   * 达到上限后下一次 LLM 调用在发出前被拒（`BudgetExceededError`）；
+   * 单次调用本身可以穿透上限，但会如实记录。`undefined` / `0` 表示不限 ——
+   * 想禁用调用应走能力路由，而不是把预算设为 0。
+   */
+  maxTokensPerRun?: number;
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

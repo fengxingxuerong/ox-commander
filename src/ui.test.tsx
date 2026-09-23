@@ -556,6 +556,17 @@ describe("SettingsPage", () => {
     expect(saved.arbitration).toBe("quarantine");
   });
 
+  it("persists the token budget control into the saved payload", async () => {
+    render(<SettingsPage />);
+    const save = await screen.findByRole("button", { name: "保存设置" });
+    await waitFor(() => expect((save as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.change(screen.getByLabelText("Token 预算上限"), { target: { value: "250000" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0];
+    expect(saved.maxTokensPerRun).toBe(250000);
+  });
+
   it("keeps the save failure visible instead of resetting the button silently", async () => {
     vi.mocked(window.oxCommander.saveSettings).mockRejectedValue(new Error("settings.json 只读"));
     render(<SettingsPage />);
