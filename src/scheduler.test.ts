@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { digest, Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
@@ -168,6 +168,49 @@ describe("Scheduler.runBatch", () => {
       fs.rmSync(root, { recursive: true, force: true });
       fs.rmSync(backupRoot, { recursive: true, force: true });
     }
+  });
+
+  it("同毫秒内的两个批不会共用批号，runId 也不会碰撞", async () => {
+    // 批号被当快照**目录名**用（snapshots/<runId>），撞了就变成两个批抢同一份备份；
+    // runId 是适配器里会话表的键，撞了日志与结果就会串到别的任务上。
+    // Date.now 只有毫秒粒度，所以这里把时钟冻住 —— 不冻就测不到真正会撞的那一档。
+    const batchIds: string[] = [];
+    const runIds: string[] = [];
+    const guard = {
+      begin: async (runId: string) => {
+        batchIds.push(runId);
+        return { runId };
+      },
+      settle: async (_scope: unknown, outcomes: unknown[]) => ({ outcomes, conflicts: [], remedies: [] }),
+    };
+    const spy = vi.spyOn(Date, "now").mockReturnValue(1_700_000_000_000);
+    try {
+      const capturing = {
+        meta: { id: "a1", name: "a1", kind: "api" as const },
+        async probe() {
+          return true;
+        },
+        async dispatch(payload: { runId: string; taskId: string }) {
+          runIds.push(payload.runId);
+          return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
+        },
+        async *collect() {
+          yield { kind: "completed" as const, text: "done", timestamp: 0 };
+        },
+        async abort() {},
+      } as unknown as AgentAdapter;
+      const sched = new Scheduler([capturing], [], { guard: guard as never });
+      await sched.runBatch([task("t1", "src/a")], "root-a");
+      await sched.runBatch([task("t1", "src/a")], "root-b"); // 同一份计划、同一毫秒
+    } finally {
+      spy.mockRestore();
+    }
+    expect(batchIds).toHaveLength(2);
+    expect(new Set(batchIds).size).toBe(2);
+    // 目录是跨进程共享的，所以批号还必须带上 pid
+    expect(batchIds[0]).toContain(`-${process.pid}-`);
+    expect(new Set(runIds).size).toBe(runIds.length);
+    expect(runIds).toHaveLength(2);
   });
 
   it("records exactly one circuit-breaker failure per failed dispatch", async () => {

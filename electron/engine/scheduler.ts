@@ -28,6 +28,17 @@ export interface DispatchOutcome {
 export const DEFAULT_MAX_PARALLEL_RUNS = 4;
 
 /**
+ * 批号与 runId 的防碰撞后缀。`Date.now()` 只有毫秒粒度，裸时间戳派生的 id 会同毫秒相撞。
+ *
+ * 两者的作用域不一样，所以补的东西也不一样：
+ *   · 批号会被当快照**目录名**用（`BatchGuard.begin` → `snapshots/<runId>`），目录是
+ *     跨进程共享的，因此必须带 pid —— 只加进程内序数不够，两个进程都从 1 开始；
+ *   · runId 只活在**本进程**的适配器里（每个进程一套适配器实例），序数就够。
+ * 序数这一修法与 `electron/store.ts` 的项目 id 同源。
+ */
+let dispatchSeq = 0;
+
+/**
  * Optional multi-agent extensions. Omitted ⇒ behaviour identical to the
  * pre-router Scheduler (round-robin over probe-passing adapters).
  */
@@ -290,7 +301,7 @@ export class Scheduler {
       ? {
           guard,
           scope: await guard.begin(
-            `batch-${Date.now().toString(36)}-${tasks.map((t) => t.id).join("_")}`,
+            `batch-${Date.now().toString(36)}-${process.pid}-${(dispatchSeq += 1)}-${tasks.map((t) => t.id).join("_")}`,
             projectRoot,
             zones,
           ),
@@ -319,7 +330,7 @@ export class Scheduler {
         ? baseDesc
         : `${baseDesc}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
       const payload: TaskPayload = {
-        runId: `${task.id}-${Date.now()}-${i}`,
+        runId: `${task.id}-${Date.now()}-${i}-${(dispatchSeq += 1)}`,
         taskId: task.id,
         title: task.title,
         description,
