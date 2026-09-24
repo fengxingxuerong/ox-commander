@@ -16,6 +16,7 @@ import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
 import type { AgentAdapter } from "../shared/types";
 import type { AgentCapabilities } from "../shared/agent-contract";
+import { REMEDY_VERB } from "./store";
 
 const roots: string[] = [];
 
@@ -1113,15 +1114,19 @@ describe("BatchGuard arbitration", () => {
     expect(events.join("|")).not.toContain("越权");
   });
 
-  it("report-only leaves the files on disk (historic behaviour)", async () => {
+  it("report-only 只留痕：文件留在盘上、批次不改判、裁决报 pass", async () => {
+    // 这条以前叫 "historic behaviour" 并断言 `ok === false` + remedy "fail-batch"，
+    // 那正是它和 deny-all 分不出来的地方。设置页写的是「仅记录日志」，所以
+    // 不改判才是兑现承诺；deny-all 才负责"保留文件但判失败"。
     const root = scratch("guard-report");
     const guard = new BatchGuard({ mode: "report-only" });
     const scope = await guard.begin("r-report", root, ["src"]);
     write(root, "rogue/x.js", "rogue");
     const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
-    expect(verdict.outcomes[0]!.ok).toBe(false);
+    expect(verdict.outcomes[0]!.ok).toBe(true);
     expect(read(root, "rogue/x.js")).toBe("rogue");
-    expect(verdict.remedies[0]!.action).toBe("fail-batch");
+    expect(verdict.remedies[0]!.action).toBe("pass");
+    expect(verdict.conflicts).toHaveLength(1);
   });
 
   it("quarantine moves the evidence aside instead of deleting it", async () => {
@@ -1153,20 +1158,93 @@ describe("BatchGuard arbitration", () => {
     expect(source).toContain("Concurrent writes to the same file cannot happen inside a batch");
   });
 
-  it("report-only 的事件文案写明「未回滚」，不带 deny-all 的措辞", async () => {
-    // 文案里的三元是 `this.mode === "report-only" ? "，未回滚" : "，保留现场"`。
-    // 改成 `!==` 后两种 mode 的措辞**对调** —— report-only 反而声称"保留现场"，
-    // 让运维以为已经处置过。既有用例只断言了文件还在盘上，没读这段文案。
-    const root = scratch("guard-mode-text");
-    const events: string[] = [];
-    const guard = new BatchGuard({ mode: "report-only", onEvent: (t) => events.push(t) });
-    const scope = await guard.begin("r-mode-text", root, ["src"]);
-    write(root, "rogue/x.js", "rogue");
-    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+  it("report-only 的文案说「仅记录、不改判」，不冒充 deny-all 的「保留现场」", async () => {
+    // 两档各自一条文案（原来共用一个三元，翻成 `!==` 就会让措辞对调 ——
+    // report-only 反而声称"保留现场"，运维会以为已经处置过）。
+    // 现在两档是两条独立分支，所以两边都钉住。
+    const collect = async (mode: "report-only" | "deny-all"): Promise<string> => {
+      const root = scratch(`guard-text-${mode}`);
+      const events: string[] = [];
+      const guard = new BatchGuard({ mode, onEvent: (t) => events.push(t) });
+      const scope = await guard.begin(`r-text-${mode}`, root, ["src"]);
+      write(root, "rogue/x.js", "rogue");
+      await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+      return events.join("|");
+    };
+    const report = await collect("report-only");
+    expect(report).toContain("仅记录");
+    expect(report).not.toContain("保留现场");
+    const deny = await collect("deny-all");
+    expect(deny).toContain("保留现场");
+    expect(deny).not.toContain("仅记录");
+  });
 
-    const joined = events.join("|");
-    expect(joined).toContain("未回滚");
-    expect(joined).not.toContain("保留现场");
+  it("四档 = 四种裁决，且看板词表逐条认得（防「界面说一套、引擎做一套」）", async () => {
+    const actions: string[] = [];
+    for (const mode of ["revert-batch", "quarantine", "deny-all", "report-only"] as const) {
+      const root = scratch(`guard-vocab-${mode}`);
+      const backupRoot = scratch(`guard-vocab-${mode}-bk`);
+      write(root, "src/a.js", "a");
+      const guard = new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode });
+      const scope = await guard.begin(`r-vocab-${mode}`, root, ["src"]);
+      write(root, "rogue/x.js", mode);
+      const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+      const action = verdict.remedies[0]!.action;
+      actions.push(action);
+      // 生产端发出去的每个值，消费端都得有一个非空说法；否则界面上就是一片"仅记录"。
+      expect(REMEDY_VERB[action], `看板词表缺 ${action}`).toBeTruthy();
+    }
+    expect(new Set(actions).size).toBe(4);
+    expect(actions.sort()).toEqual(["fail-batch", "pass", "quarantine", "revert"]);
+  });
+
+  it("report-only 只记日志：裁决照常上报，但批次结果不改判", async () => {
+    const root = scratch("guard-report-only-pass");
+    const backupRoot = scratch("guard-report-only-pass-bk");
+    const verdicts: Array<{ conflicts: number; remedy: string }> = [];
+    const guard = new BatchGuard({
+      snapshots: new SnapshotStore({ backupRoot }),
+      mode: "report-only",
+      onVerdict: (v) => verdicts.push({ conflicts: v.conflicts.length, remedy: v.remedies[0]?.action ?? "-" }),
+    });
+    const scope = await guard.begin("r-report-pass", root, ["src"]);
+    write(root, "src/a.js", "a2");
+    write(root, "rogue/x.js", "rogue");
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "done", events: [] }]);
+    expect(verdict.conflicts[0]!.paths).toEqual(["rogue/x.js"]);
+    expect(verdict.outcomes[0]!.ok).toBe(true); // 不改判
+    expect(verdict.outcomes[0]!.logDigest).toBe("done"); // 也没往结果里塞越权说明
+    expect(verdicts).toEqual([{ conflicts: 1, remedy: "pass" }]); // 但裁决照常回流
+    expect(read(root, "rogue/x.js")).toBe("rogue"); // 文件留在盘上
+  });
+
+  it("deny-all 保留文件但整批判失败（与 report-only 的区别就在这一句）", async () => {
+    const root = scratch("guard-deny-all");
+    const backupRoot = scratch("guard-deny-all-bk");
+    const guard = new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode: "deny-all" });
+    const scope = await guard.begin("r-deny", root, ["src"]);
+    write(root, "rogue/x.js", "rogue");
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "done", events: [] }]);
+    expect(verdict.outcomes[0]!.ok).toBe(false);
+    expect(verdict.outcomes[0]!.logDigest).toContain("zone 越权");
+    expect(verdict.remedies[0]!.action).toBe("fail-batch");
+    expect(read(root, "rogue/x.js")).toBe("rogue");
+  });
+
+  it("不回滚的两档也必须收尾丢弃备份，否则每批泄漏一个快照目录", async () => {
+    for (const mode of ["report-only", "deny-all"] as const) {
+      const root = scratch(`guard-backup-${mode}`);
+      const backupRoot = scratch(`guard-backup-${mode}-bk`);
+      write(root, "src/a.js", "a");
+      const guard = new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode });
+      const scope = await guard.begin(`r-bk-${mode}`, root, ["src"]);
+      write(root, "src/a.js", "changed");
+      write(root, "rogue/x.js", "rogue");
+      await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+      expect(fs.readdirSync(backupRoot), `${mode} 之后备份根没清空`).toEqual([]);
+    }
   });
 
   it("冲突描述区分「越权写入」与「共享文件被改动」", async () => {

@@ -92,6 +92,26 @@ POST {baseUrl}{runsPath}/{id}/abort           → 2xx
 注册后立刻在智能体池里点「🩺 健康检查」，显示「可达」即接入成功；
 之后能力路由会自动把命中其 zone/角色的任务派给它。
 
+## 信任边界（先读这段再放文件进来）
+
+`agents.d` 里的 manifest **就是可执行配置**：加载器会按它 spawn 子进程或外发 HTTP 请求。
+平台对智能体产出的沙箱判定（路径七级、命令白名单、元字符与 eval-flag 拦截）作用在
+**任务执行**上，而有两处不经它：
+
+- `credential.kind === "execToken"`：取令牌命令由指挥机**直接** `spawn(command, args, {shell:false})`，
+  不经 `CommandPolicy`，也不经 `buildSpawnSpec` 的 Windows spawn 规划。含义两条：
+  **只放你自己写的 manifest 进这个目录**；以及 Windows 上这条命令**必须是真 `.exe`**——
+  2026-09-24 本机（Node 24 / win32）实测：裸名 `npm` 是 `ENOENT`，`npm.cmd` 是 `EINVAL`
+  （自 CVE-2024-27980 起，不带 `shell:true` 就不能起 `.cmd`/`.bat`）。也就是说批处理型取令牌脚本
+  在这里跑不起来，而它的失败是静默的（见下）。平台自己的 `cli` 适配器不受此限，因为它走
+  `cmd.exe /d /s /c` 包装 + `windowsVerbatimArguments`。
+- `adapter: "cli"`：`entry.command` 会过命令白名单与 spawn 规划；但被授权的解释器
+  （node / python / npx）能执行任意脚本，`npm run <script>` 更是把脚本内容整个放过去。
+  白名单拦的是"能不能跑这条命令"，不是"这条命令背后做了什么"。
+
+`execToken` 取不到令牌时**不会报错**：它返回 undefined，请求照发（只是没有凭证）。
+排查"接好了却 401"时先手动跑一遍那条命令，确认 stdout 第一行就是令牌。
+
 ## 示例
 
 - `codex.example.json` — 子进程型（Codex CLI）

@@ -130,10 +130,17 @@ export class BatchGuard {
       detail: describe(c),
     }));
 
-    if (this.mode === "report-only" || this.mode === "deny-all") {
-      this.onEvent?.(
-        `检测到 ${conflicts.length} 类越权变更（${this.mode}${this.mode === "report-only" ? "，未回滚" : "，保留现场"}）`,
-      );
+    // 四档各自的行为以设置页写下的那句为准：`report-only` 只记日志、不改判；
+    // `deny-all` 保留文件但整批判失败。此前两者共用一个分支，于是"四档"实际只有
+    // 三种行为 —— 而且这一支既不 commit 也不 drop，备份目录会一批留一份。
+    if (this.mode === "report-only") {
+      this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（report-only，仅记录，不改判）`);
+      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+      return this.hand(scope, { outcomes, conflicts, remedies });
+    }
+    if (this.mode === "deny-all") {
+      this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（deny-all，保留现场）`);
+      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
       return this.hand(scope, { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies });
     }
 
@@ -273,6 +280,9 @@ function remedyFor(mode: ArbitrationMode): Remedy["action"] {
       return "revert";
     case "quarantine":
       return "quarantine";
+    case "report-only":
+      // 什么都不做，所以裁决里也不假装做了什么。
+      return "pass";
     default:
       return "fail-batch";
   }

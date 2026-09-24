@@ -58,8 +58,10 @@ repair 循环 `while (round <= maxRounds + extraRounds)`（`:313`），默认 3 
 **manifest 校验只有三个入口**：`agents.d` 目录（`manifest-loader.ts:42`，单文件解析失败只跳过并计入 `manifestErrors`）、
 IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`（`protocol.ts:311`）。
 `AgentRegistry.register()` **不再校验**（`registry.ts:101-115`）→ 绕过那三处就没有任何校验。
-`createRegistry` 按 `adapter.meta.id` 配对 manifest，**id 不匹配的声明被静默丢弃**（`registry.ts:227-231`）——
-"我写了 manifest 怎么没反应"先查 id 拼写。
+`createRegistry` 按 `adapter.meta.id` 配对 manifest；**配不上的声明不是静默丢弃**：加载器把每条
+没能变成适配器的声明都记进 `skippedManifests`，`agents:list` 又把这份清单报给界面
+（2026-09-24 复核 `manifest-loader.ts:118-127` 后校正了本手册的旧说法）。真正静默的是
+`execToken` 取令牌失败——它返回 `undefined`，请求照发，只是没有凭证。
 
 ## 沙箱实际判据
 
@@ -140,8 +142,10 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | 说法 | 实际 | 证据 |
 | --- | --- | --- |
 | ~~桌面端 keychain 的 Key 进不了 run~~ | **已修**：播种器挂在 `PlatformConfig.seedKeys` 上，`createPlatform` 内部**无参**构造引擎大脑时也会播种 | `electron/platform.ts`（`const seed = seedKeys ?? config.seedKeys`）+ `electron/ipc/context.ts`（`buildPlatformLayer` 传 `seedKeysFromStore`）；由 `src/platform.test.ts` 与 `src/ipc-handlers.test.ts` 两侧分别钉住 |
-| README「回滚/隔离/报告四档」 | `deny-all` 与 `report-only` **行为相同**（都不回滚、都 `markBatchFailed`），差异只有日志文案 | `electron/engine/batch-guard.ts:133-138` |
+| ~~README「回滚/隔离/报告四档」~~ | **已修**：`deny-all` 与 `report-only` 曾走同一分支（都 `markBatchFailed`、都不回滚），四档只有三种行为。现在按设置页写下的那句分开：`report-only` 只记日志不改判（remedy `pass`），`deny-all` 保留文件但判批次失败。四档=四种行为由 `src/sandbox-journal.test.ts` 真跑四档钉住 | `electron/engine/batch-guard.ts` 的两条独立分支 |
+| 看板念出的处置 | `src/store.ts` 的 remedy 词表曾照抄成 `isolate` / `keep`，而生产端只发 `revert`/`quarantine`/`fail-batch`/`pass` —— 于是"移入隔离区"与"保留文件判失败"都被念成"仅记录"，而 `store.test.ts` 用的正是这套假词表（测试绿、链路坏）。现在词表导出为 `REMEDY_VERB`，四档对账放在引擎侧用例里 | `src/store.ts` + `src/sandbox-journal.test.ts` |
+| 不回滚的两档收尾 | `report-only` / `deny-all` 分支曾**既不 commit 也不丢**快照令牌 → 每批在 `userData/snapshots` 留一份备份目录。四档现在都在出口处 `commit` | `batch-guard.ts` 各分支末尾 |
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README「15 步 / 930 用例」 | 16 步 / 947 用例（2026-09-24 本机实测） | `package.json:35` |
+| README「15 步 / 930 用例」 | 16 步 / 951 用例（2026-09-24 本机实测） | `package.json:35` |

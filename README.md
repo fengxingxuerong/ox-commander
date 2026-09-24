@@ -104,7 +104,7 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ vitest（947 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（951 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -170,7 +170,8 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
   deadline/idle 双超时、连续失败熔断
   （注：内置执行器写入时不带 zone，zone 约束由事后仲裁兜，见 `docs/2026-09-24-consistency-review.md`）
 - zone 越权默认**回滚**（内容备份，不用 git stash），可选隔离区 / 保留 / 仅日志
-  （四档配置 `report-only`/`deny-all`/`revert-batch`/`quarantine`，其中前两档当前行为相同：标记批次失败但不回滚）
+  （四档 `report-only`/`deny-all`/`revert-batch`/`quarantine` 各自对应一种行为：仅记录不改判 /
+  保留文件但判批次失败 / 回滚越权路径 / 移入隔离区）
 - 构建/测试产物（`dist/`、`coverage/`、`__pycache__` …）不参与越权归因，也不进发给模型的工作区快照：
   它们排在 `src/` 之前，会占满快照的 32k 字符预算而把真实源码挤出去（`out`/`bin`/`target` 刻意不列入）
 - 全程 JSONL 审计（**按大小轮转**，单文件 2 MiB；文件名含日期但不跨天触发），run 与 agent 归因、冲突、回滚留痕

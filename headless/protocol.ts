@@ -3,8 +3,11 @@
  *
  * This module is the contract, not the runner: it turns a raw stdin payload
  * into a fully-defaulted `ParsedSpec`, and types every event the runner may
- * emit. Keeping it pure (no fs, no process) is what makes the protocol
- * testable — the runner can then be exercised with injected fakes.
+ * emit. The invariant that keeps it testable is **no fs, no spawning, no global
+ * mutation** — not purity in the strict sense: it does `import "node:path"`, and
+ * one default (`snapshotRoot`) reads `process.env.TMPDIR` / `TEMP`. Everything
+ * that actually touches the workspace lives in the runner, which hosts can
+ * exercise with injected fakes.
  *
  * Backwards compatibility is a promise here: unknown top-level fields are
  * reported as warnings, never as errors, and every field except

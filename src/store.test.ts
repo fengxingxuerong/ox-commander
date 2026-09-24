@@ -206,10 +206,15 @@ describe("handleEvent · conflict", () => {
   });
 
   it("renders the remedy in plain language", () => {
+    // 词表与生产端同源：这四个值就是 `BatchGuard.remedyFor` 的全部输出，
+    // 加上宿主在找不到裁决时发的 none。旧用例里的 isolate / keep 是凭空造的，
+    // 生产端从没发过 —— 它把错的映射"测绿"了。四档↔词表的对账放在
+    // src/sandbox-journal.test.ts（真跑四档再比对）。
     const cases: Array<[string, string]> = [
       ["revert", "已回滚"],
-      ["isolate", "已隔离"],
-      ["keep", "保留改动"],
+      ["quarantine", "已隔离"],
+      ["fail-batch", "保留文件、判批次失败"],
+      ["pass", "仅记录"],
       ["none", "仅记录"],
     ];
     for (const [remedy, verb] of cases) {

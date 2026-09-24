@@ -1,6 +1,6 @@
 # `npm run verify` 的 16 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、947 用例、约 2 分钟。
+顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、951 用例、约 2 分钟。
 README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
 
 | # | 步骤 | 实际执行 | 失败语义 |

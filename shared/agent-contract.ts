@@ -40,7 +40,18 @@ export interface AgentCapabilities {
   selfIsolated: boolean;
 }
 
-/** How an agent authenticates. Resolved in the main process only — never shipped over IPC. */
+/**
+ * How an agent authenticates. Resolved in the main process only — never shipped over IPC.
+ *
+ * `execToken` is the one credential kind that runs a command on the commander
+ * itself: `tokenResolver` spawns it directly, without `CommandPolicy` and without
+ * the Windows spawn planning, and a failure resolves to `undefined` rather than
+ * throwing (the request then goes out unauthenticated). Treat a manifest as
+ * executable configuration — load only ones you wrote. On Windows the command
+ * must be a real `.exe`: measured 2026-09-24 on Node 24 / win32, a bare `npm`
+ * throws `ENOENT` and `npm.cmd` throws `EINVAL` (batch files need `shell:true`
+ * since CVE-2024-27980), so `.cmd`/`.bat` token helpers cannot run here.
+ */
 export type AgentCredential =
   | { kind: "env"; envVar: string }
   | { kind: "bearerFile"; tokenFile: string }

@@ -14,6 +14,23 @@ const api = () => window.oxCommander;
  */
 let planningSeq = 0;
 
+/**
+ * 看板把一次越权裁决念成人话时用的词表。
+ *
+ * 键必须与**生产端**同词：`BatchGuard.remedyFor` 只会发 `revert` / `quarantine` /
+ * `fail-batch` / `pass`，两个宿主在找不到对应裁决时发 `none`。旧版这里写的
+ * `isolate` / `keep` 从来没人发过，于是"移入隔离区"和"保留文件判失败"两种处置
+ * 都被念成"仅记录"。防漂移的用例在 src/sandbox-journal.test.ts：它把四档真跑一遍，
+ * 拿实际产出的 action 来比对这张表。
+ */
+export const REMEDY_VERB: Record<string, string> = {
+  revert: "已回滚",
+  quarantine: "已隔离",
+  "fail-batch": "保留文件、判批次失败",
+  pass: "仅记录",
+  none: "仅记录",
+};
+
 export const useApp = create<AppState>((set, get) => ({
   page: "projects",
   projects: [],
@@ -278,14 +295,9 @@ export const useApp = create<AppState>((set, get) => ({
       }
       case "conflict": {
         const { kind, paths, remedy } = p as { kind?: string; paths?: string[]; remedy?: string };
-        const verb =
-          remedy === "revert"
-            ? "已回滚"
-            : remedy === "isolate"
-              ? "已隔离"
-              : remedy === "keep"
-                ? "保留改动"
-                : "仅记录";
+        // 词表与生产端同源，见 REMEDY_VERB 上的注释；未收录的值仍念"仅记录"，
+        // 但绝不把原始 token 打到界面上。
+        const verb = REMEDY_VERB[remedy ?? "none"] ?? "仅记录";
         set((s) => ({
           conflicts: [
             ...s.conflicts.slice(-49),
