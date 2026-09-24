@@ -26,6 +26,9 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
   `electron/ipc/context.ts`(:177)、`shared/schema.ts`(:184)。它们在 `scripts/mutation-check.mjs` 的
   `EQUIVALENT_SITES` 里以 **`{file, op, line}` 行号锚点**登记（op 是算子中文名的原文精确串）。
   在锚点行上方插/删行 → 白名单失配 → site 口径当场红。**处置是"按新行号校回并重新确认那两层防御仍在"，不是删表项。**
+- **但用例名里的 `[NNN]` 是标签、不是坐标**：`src/*.test.ts` 有几十个 `it("[375] …")`，数字编码的是
+  **写下那天**那一行的行号，代码一挪就过期（`[375]` 那段现在在 `orchestrator.ts:432`）。按名字读它，
+  别拿它定位；真正承重的行号只有上一条那一组，因为 site 审计会自动盯它。
 - **两张豁免表都有"失效即红"的双向检查**：`scripts/check-unwired.mjs` 的 `ACCEPTED`、
   `scripts/check-script-wiring.mjs` 的 `ACCEPTED`。新增未接线会 FAIL，**表项指向的符号/脚本已消失也 FAIL**。
   改完代码顺手清对应条目；`check:unwired` 有 `--list` 可维护。别复制出重复键（Map 字面量会静默覆盖）。
