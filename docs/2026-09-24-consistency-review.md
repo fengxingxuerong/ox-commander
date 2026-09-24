@@ -87,10 +87,11 @@
    恢复现场的唯一材料。所以改成两件事：`headless-main` 装 SIGINT/SIGTERM 处理器（发一条 `error`
    事件 + 置退出码 1，第二下才硬退出），回收放到**下一次运行启动时**
    （`run-spec.ts:pruneStaleBackups`，只认 `batch-*` 且超过 24h，宿主共享目录里的别的东西一个不碰）。
-   **覆盖边界（要说清）**：构建产物里确实带了这段（`dist-headless/headless/headless-main.js` 里
-   `process.on` 与那句提示都在），但**信号投递本身没有任何自动断言** —— Windows 上 `child.kill("SIGINT")`
-   走的是 TerminateProcess，被杀进程来不及发事件，所以这条只能在 Linux 侧断言。它因此也没进变异门禁
-   （`headless-main.ts` 不是 `TARGETS` 目标：它的测试只能通过已构建的二进制触及，变异源文件不会被观察到）。
+   **覆盖边界（第三轮更新）**：构建产物里确实带了这段（`dist-headless/headless/headless-main.js` 里
+   `process.on` 与那句提示都在）。信号**投递**在 win32 观测不到（`kill()` 即 TerminateProcess，
+   来不及发事件），所以离线 IT 场景 D 只在 POSIX 分支断言"最后一行是那条 `error`、且之后没有别的事件"，
+   Windows 分支改断"被杀的那次没有 `done`、journal 与备份留在盘上"并在日志里说明为什么跳过。
+   也就是说：**POSIX 那两条目前是"写了但本机没跑过"**，以 CI ubuntu 那次为准；本机也没把它当已证事实。
 10. **P4 · 发布流程**：`release.yml:44-45` 打 tag 直接 `build:dist`，**不先跑 verify**。
     **已修**：release 工作流加了 `verify` job（ubuntu，一次），`build` 改成 `needs: verify`。
     没有跨文件复用 verify.yml（它只有 push 触发器，`workflow_call` 要改那个文件），所以步骤重复了十行。

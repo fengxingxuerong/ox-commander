@@ -23,7 +23,7 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 | 11 | `build:headless` | `tsc -b tsconfig.headless.json` | |
 | 12 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 10/11 的产物 |
 | 13-16 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**三个场景**（27 项断言） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因；退出码 0 与 2 |
+| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
 
 **12-17 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 

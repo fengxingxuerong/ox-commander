@@ -13,10 +13,11 @@
  *   · 重修轮是否只重派越权的那个任务，而不是整批；
  *   · 退出码 0 / 2 的分野。
  *
- * 三个场景：
+ * 四个场景：
  *   clean     —— 两个任务都在自己 zone 内写 → 交付，exit 0；
  *   rogue      —— 实现任务顺手写 zone 外的 README.md → 判越权、回滚、重修一轮仍越权 → exit 2；
- *   prebroken —— 动手前就有一条验证命令是红的 → 基线归因必须出现在日志与每一份重修上下文里。
+ *   prebroken —— 动手前就有一条验证命令是红的 → 基线归因必须出现在日志与每一份重修上下文里；
+ *   interrupt —— 第一次派单刚落地就把进程杀掉 → journal 可续跑、遗留备份保留、到期才回收。
  *
  * 大脑层冒充方式：`ollama` 是 providers 表里唯一 `apiKeyEnvVar: ""` 的条目，
  * baseUrl 写死 `http://localhost:11434/v1`，所以本脚本必须占住 11434。
@@ -84,10 +85,8 @@ function listen(server, port) {
   });
 }
 
-/** 起一次完整 run：本地冒充大脑 + 假 http-bridge 智能体 + 临时目标项目。 */
-async function runOnce({ mode }) {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `ox-offline-e2e-${mode}-`));
-  const proj = path.join(tmp, "proj");
+/** 造一个待改造的目标项目（两个任务各自 zone 内写文件就能通过验证）。 */
+function makeProject(proj, mode) {
   fs.mkdirSync(path.join(proj, "src"), { recursive: true });
   fs.writeFileSync(path.join(proj, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0" }), "utf8");
   fs.writeFileSync(path.join(proj, "src", "add.js"), "module.exports.add = (a, b) => a + b;\n", "utf8");
@@ -96,10 +95,37 @@ async function runOnce({ mode }) {
     // "验证命令引用的路径无人认领"防线）会直接拒绝整份计划，根本到不了运行期。
     fs.writeFileSync(path.join(proj, "src", "broken.js"), "throw new Error('pre-existing host-project failure');\n", "utf8");
   }
+}
 
+/**
+ * 起一次完整 run：本地冒充大脑 + 假 http-bridge 智能体 + 临时目标项目。
+ *
+ * `reuse` 给定时不新建也不删项目目录 —— 断点续跑那组用例要在**同一份工作区**上
+ * 连跑多个进程。`interrupt` 给定时，第一次派单刚落到桥端就把子进程杀掉：
+ * POSIX 发 SIGTERM（走 headless 自己的中断处理器），Windows 只能 TerminateProcess
+ * （信号投不进去，这是平台事实，不是被测代码的分支）。
+ */
+async function runOnce({ mode, reuse = null, interrupt = false }) {
+  const owned = reuse === null;
+  const tmp = owned ? fs.mkdtempSync(path.join(os.tmpdir(), `ox-offline-e2e-${mode}-`)) : reuse.tmp;
+  const proj = owned ? path.join(tmp, "proj") : reuse.proj;
+  const snapshotRoot = owned ? path.join(tmp, "snaps") : reuse.snapshotRoot;
+  if (owned) makeProject(proj, mode);
+
+  let child = null;
+  let killedByUs = false;
+  const stopChild = () => {
+    if (killedByUs || !child) return;
+    killedByUs = true;
+    if (process.platform === "win32") child.kill();
+    else child.kill("SIGTERM");
+  };
+
+  let brainCalls = 0;
   const brain = http.createServer((req, res) => {
     req.resume();
     req.on("end", () => {
+      brainCalls += 1;
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
         JSON.stringify({
@@ -133,6 +159,9 @@ async function runOnce({ mode }) {
         const task = JSON.parse(body || "{}");
         dispatched.push({ taskId: String(task.taskId), zone: String(task.zone) });
         payloads.push(String(task.repairContext?.errorLogDigest ?? task.description ?? ""));
+        // 派单刚落地就动手杀进程：此刻计划期的 journal 已经写过（`save()` 在派单之前），
+        // 而这一批的产物还没写完整 —— 正是"被中断的一批"的形状。
+        if (interrupt) stopChild();
         if (/impl/.test(String(task.taskId))) {
           write("src/add.js", IMPL);
           // 越权场景：声明的 zone 只有 src 与 tests，README.md 在两者之外。
@@ -182,6 +211,8 @@ async function runOnce({ mode }) {
             ]
           : [{ kind: "test", command: "node", args: ["--test", "tests/add.test.js"] }],
       arbitration: "revert-batch",
+      // 备份目录钉在本次的 tmp 里：断点续跑那组用例要看它留没留、什么时候被回收。
+      snapshotRoot,
       agents: [
         {
           id: "e2e-bridge",
@@ -207,7 +238,9 @@ async function runOnce({ mode }) {
       ],
     };
 
-    const child = spawn(process.execPath, [RUNNER], { stdio: ["pipe", "pipe", "pipe"] });
+    // 赋给外层那个 `child`：桥端的回调闭包看到的是外层变量，这里若写成 `const`
+    // 就会遮蔽掉它，`stopChild()` 永远拿到 null（= 杀不掉，中断用例静默退化成正常跑完）。
+    child = spawn(process.execPath, [RUNNER], { stdio: ["pipe", "pipe", "pipe"] });
     let out = "";
     let err = "";
     child.stdout.on("data", (c) => (out += c));
@@ -232,11 +265,33 @@ async function runOnce({ mode }) {
         return null;
       }
     };
-    return { code, events, err, dispatched, payloads, impl: read("src/add.js"), readme: read("README.md") };
+    let backups = [];
+    try {
+      backups = fs.readdirSync(snapshotRoot).filter((n) => n.startsWith("batch-"));
+    } catch {
+      /* 还没有任何备份目录 */
+    }
+    return {
+      code,
+      events,
+      err,
+      dispatched,
+      payloads,
+      impl: read("src/add.js"),
+      readme: read("README.md"),
+      journal: read("ox-run-journal.json"),
+      brainCalls,
+      killedByUs,
+      backups,
+      tmp,
+      proj,
+      snapshotRoot,
+    };
   } finally {
     brain.close();
     bridge.close();
-    fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    // `reuse` 的项目由调用方收尾：续跑用例要在同一份工作区上连跑三个进程。
+    if (owned) fs.rmSync(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 }
 
@@ -341,6 +396,104 @@ async function main() {
     )}`,
   );
   check("仍然照常走完重修轮（基线红不短路引擎）", pre.dispatched.filter((d) => d.taskId === "t-impl").length === 2);
+
+  console.log("\n=== 场景 D：第一次派单刚落地就被杀 → 续跑、遗留备份保留、到期才回收 ===");
+  // 这条盯的是只有"多个真进程 + 真 fs"才成立的三件事：中断留下可读的 journal、
+  // 下一次启动真的跳过规划、以及备份**在不该删的时候没被删**（保留 24h 是给人工恢复留材料）。
+  const tmpD = fs.mkdtempSync(path.join(os.tmpdir(), "ox-offline-e2e-int-"));
+  const projD = path.join(tmpD, "proj");
+  const snapsD = path.join(tmpD, "snaps");
+  const reuseD = { tmp: tmpD, proj: projD, snapshotRoot: snapsD };
+  makeProject(projD, "clean");
+  try {
+    const first = await runOnce({ mode: "clean", reuse: reuseD, interrupt: true });
+    check(
+      "第一次确实是被杀的（不是自己跑完）",
+      first.killedByUs === true,
+      JSON.stringify({ killed: first.killedByUs, code: first.code, types: first.events.map((e) => e.type) }),
+    );
+    check(
+      "被杀的那次没有走到 done",
+      first.code !== 0 && !first.events.some((e) => e.type === "done"),
+      `code=${first.code}`,
+    );
+    check(
+      "续跑入口已经落盘（计划期就存过一次 journal）",
+      first.journal !== null && first.journal.includes("t-impl"),
+      String(first.journal?.slice(0, 60)),
+    );
+    check(
+      "中断那一批的快照备份留在盘上",
+      first.backups.length > 0,
+      JSON.stringify(first.backups),
+    );
+    if (process.platform === "win32") {
+      console.log("NOTE: win32 投不进 SIGTERM（kill 就是 TerminateProcess），下面两条只在 POSIX 侧断言");
+    } else {
+      const last = first.events.at(-1) ?? {};
+      check(
+        "SIGTERM 的终态事件是最后一条，且说清备份留在哪",
+        last.type === "error" && String(last.message ?? "").includes("快照备份保留在"),
+        JSON.stringify(last),
+      );
+      check(
+        "error 之后没有再发任何后续事件（终态就是终态）",
+        !first.events.some((e) => e.type === "done" || e.type === "verification"),
+        JSON.stringify(first.events.map((e) => e.type)),
+      );
+    }
+
+    const second = await runOnce({ mode: "clean", reuse: reuseD });
+    const secondLogs = second.events.filter((e) => e.type === "log").map((e) => e.text);
+    check(
+      "第二次当场说出「断点续跑：恢复快照」",
+      secondLogs.some((t) => t.includes("[journal] 断点续跑")),
+      JSON.stringify(secondLogs.filter((t) => t.includes("journal")).map((t) => t.slice(0, 44))),
+    );
+    check(
+      "续跑没有再叫大脑做规划（这一轮 LLM 零调用）",
+      second.brainCalls === 0,
+      `brainCalls=${second.brainCalls}`,
+    );
+    check(
+      "第二次跑完了：退出码 0 且终态是 done",
+      second.code === 0 && second.events.at(-1)?.type === "done",
+      `code=${second.code} types=${JSON.stringify(second.events.map((e) => e.type))}`,
+    );
+    check(
+      "产出齐了（sub 与测试文件都落盘）",
+      !!second.impl && second.impl.includes("sub") && fs.existsSync(path.join(projD, "tests", "add.test.js")),
+    );
+    check(
+      "没到保留期的遗留备份一个都没删，也没谎报回收",
+      second.backups.length > 0 && !secondLogs.some((t) => t.includes("[snapshots] 回收")),
+      JSON.stringify(second.backups),
+    );
+
+    // 第三次：把那几个遗留目录的 mtime 推到 48h 前 —— 回收该发生在启动时，且要说出来。
+    const aged = second.backups;
+    const when = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    for (const n of aged) fs.utimesSync(path.join(snapsD, n), when, when);
+    fs.rmSync(path.join(projD, "ox-run-journal.json"), { force: true });
+    fs.rmSync(path.join(projD, "tests"), { recursive: true, force: true });
+    makeProject(projD, "clean");
+    const third = await runOnce({ mode: "clean", reuse: reuseD });
+    const thirdLogs = third.events.filter((e) => e.type === "log").map((e) => e.text);
+    check(
+      `到期的遗留备份在第三次启动时被回收（${aged.length} 个）并被说出来`,
+      aged.length > 0 && thirdLogs.some((t) => t.includes("[snapshots] 回收")),
+      JSON.stringify(thirdLogs.filter((t) => t.includes("snapshots"))),
+    );
+    const stillThere = aged.filter((n) => fs.existsSync(path.join(snapsD, n)));
+    check("被点名回收的那几个目录真的没了", stillThere.length === 0, JSON.stringify(stillThere));
+    check(
+      "回收是卫生工作，不影响这一次正常交付",
+      third.code === 0 && third.events.at(-1)?.type === "done",
+      `code=${third.code}`,
+    );
+  } finally {
+    fs.rmSync(tmpD, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  }
 
 
   console.log(failures === 0 ? "\n=== 判定：IT PASS ✓（离线全链路，零配额）===" : `\n=== 判定：IT FAIL ✗（${failures} 项）===`);
