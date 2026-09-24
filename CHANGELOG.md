@@ -31,8 +31,38 @@
   这两个文件此前不在任何 npm script 里，改坏了要到 `vite build` 才暴露。接入时 verify 仍是 16 步
   （上面那条离线 E2E 才把它推到 17 步），实测 +1.7s；接入前先验过一次：现存配置干净，
   且故意注入的类型错误确实被抓出来
+- **`headless/run-spec.ts` 登记进变异门禁**（tier 2，测试挂 `src/headless-protocol.test.ts`）。
+  它此前不在 `TARGETS` 里，于是本轮新写的凭证闸与备份回收完全没机制保证"断言真的在看它们"。
+  **首跑 6/15（40%）**：`&& → ||` 存活说明"手里恰好有一条 Key"那格没人跑过（那正是离线 IT 上误挡的场景），
+  两处 `continue → break` 存活说明回收循环的"跳过这一条"从未与"到此为止"区分过，
+  `run` 事件的 `durationMs` 从没断过（同一模式在 `orchestrator.ts` 早有断言，分层各抄一遍不等于两层都有门禁）。
+  补 4 条用例后 **15/15**。为让"跳过"可跨平台判定，`pruneStaleBackups` 的遍历改成**显式排序** ——
+  `readdirSync` 在 Linux 是 hash 序、Windows 是字典序，而 `failed` 是要给宿主比对的列表，不该随平台变
+- **全仓 site 变异审计在 win32 本机复测：603/603（100%）· 14.3 min**。此前 README 引的是 CI 那一次的
+  590/590，本机没复现过；同日 aggregate 口径也复测为 162/162（两个口径不可互换）。分母净 +13
+  （新目标 `headless/run-spec.ts` 占 15 处，其余是这几轮新增与删除位点的净结果），**不是白名单放宽**——
+  `EQUIVALENT_SITES` 按 `{file, op, line}` 精确匹配，任何行号漂移都会让那个位点重新计入分母且无断言而变红，
+  所以一次全量绿同时兜住了那 9 条锚点当前仍然对得上
 
 ### 修正
+
+- **`typecheck` 不再吃增量缓存**：四套工程全改成 `tsc -p … --noEmit --incremental false`。
+  触发它的是实测到的假绿 —— 一个用了未导入标识符（`path`）的新函数被 `tsc -b` 放行，
+  非增量立刻报 `TS2304` 等三处。代价约 +6s。`build` / `build:headless` 仍用 `tsc -b`（要产出）
+- **headless 现在有信号处理了**。此前 `headless/` 一个 `process.on` 都没有：Ctrl-C 之后宿主只拿到
+  被截断的 JSONL、没有终态事件。现在 SIGINT/SIGTERM 会发一条 `error` 事件并置退出码 1（第二下才硬退），
+  **并且刻意不删快照备份** —— 被中断的那一批正停在"越界文件已写、还没仲裁"的状态，那份备份是人工
+  恢复现场的唯一材料。回收改到下一次运行启动时（`pruneStaleBackups`：只认 `batch-*` 且超过 24h，
+  宿主把 `snapshotRoot` 指到共享目录时别的东西一个都不碰），删不掉的会说出来而不是静默跳过
+- 原判"journal 泄漏"更正为**预期行为**：`ox-run-journal.json` 是断点续跑的入口（`load()` 读它），
+  成功后也不删，不算中断遗留
+- **批号与 runId 不再依赖毫秒唯一**：`Scheduler` 的批号（同时是 `snapshots/<runId>` 目录名）加上
+  `pid` 与进程内序数，runId 加上序数。原先 `batch-<ms36>-<taskIds>` 在两个进程同毫秒跑同一份需求时
+  会撞成同一个备份目录（序数不够，跨进程都从 1 开始，所以批号必须带 pid；runId 只活在本进程的
+  适配器里，序数即可）
+- **发布流水线加门禁**：`release.yml` 新增 `verify` job，`build` 改为 `needs: verify`。
+  此前打 tag 直接产出装进别人机器的 exe，且 tag 可以落在任何一次从未跑过 verify 的提交上。
+  两个 workflow 都过了 `js-yaml` 结构校验；但 CI 是否按预期变绿只能等下一次 tag/dispatch 实证
 
 - **headless 的 `llmProvider` 从此真的生效**。协议字段表写着"大脑层 provider"，但实现只把它
   echo 进 `hello` 事件，装配时用的仍是 `settings.llmProvider` 的默认值 —— 宿主写

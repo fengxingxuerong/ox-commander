@@ -81,17 +81,60 @@
    实测"进快照 12 个文件里 11 个是产物、真实源码 0/5"。两处改接同一张 `DEFAULT_SKIP_DIRS`，反证是把清单
    换回旧的三项 → 两条新用例各自变红。
 9. **P4 · headless 无信号处理**：Ctrl-C 之后快照备份目录与 `ox-run-journal.json` 都不清理（没有 `commit` 机会）。
+   **已修（并且其中一半原判不准）**：`ox-run-journal.json` 是**续跑记录**，留着是设计如此
+   （`load()` 靠它恢复），不算泄漏 —— 这条要从"泄漏"改记为"预期行为"。真正泄漏的是快照备份目录，
+   而"退出时删"是错的做法：被中断的那一批正停在"越界文件已写、还没仲裁"的状态，那份备份是人工
+   恢复现场的唯一材料。所以改成两件事：`headless-main` 装 SIGINT/SIGTERM 处理器（发一条 `error`
+   事件 + 置退出码 1，第二下才硬退出），回收放到**下一次运行启动时**
+   （`run-spec.ts:pruneStaleBackups`，只认 `batch-*` 且超过 24h，宿主共享目录里的别的东西一个不碰）。
+   **覆盖边界（要说清）**：构建产物里确实带了这段（`dist-headless/headless/headless-main.js` 里
+   `process.on` 与那句提示都在），但**信号投递本身没有任何自动断言** —— Windows 上 `child.kill("SIGINT")`
+   走的是 TerminateProcess，被杀进程来不及发事件，所以这条只能在 Linux 侧断言。它因此也没进变异门禁
+   （`headless-main.ts` 不是 `TARGETS` 目标：它的测试只能通过已构建的二进制触及，变异源文件不会被观察到）。
 10. **P4 · 发布流程**：`release.yml:44-45` 打 tag 直接 `build:dist`，**不先跑 verify**。
+    **已修**：release 工作流加了 `verify` job（ubuntu，一次），`build` 改成 `needs: verify`。
+    没有跨文件复用 verify.yml（它只有 push 触发器，`workflow_call` 要改那个文件），所以步骤重复了十行。
+    两个 workflow 都过了 `js-yaml` 解析（`jobs: verify,build` / `build.needs="verify"`）；
+    **但这只是语法与结构层面的验证，CI 是否真按预期变绿，要等下一次 tag 或手动 dispatch**。
+
+11. **P2 · 一批的越权删除只响一次，之后那个文件从台账上消失**（本轮新发现，已用构建产物实测）。
+    `FileJournal` 每批重建基线：批1 里 t1（zone `src/x`）删掉 `src/a.js` → 基线有它、现在没有 →
+    报 `delete:src/a.js` 越权，整批失败但**文件保留**（`report-only`/`deny-all` 都不回滚）。
+    批2 的基线里 `a.js` 本来就不存在 → 同一个删除不再产生任何冲突；实测两批输出为
+    `批1 conflicts:[unauthorized-write(src/a.js)]` 与 `批2 zones=["src/x"] conflicts:[]`，
+    盘上 `src/a.js` 已没了。于是被删的源文件可以一路带到交付，而后续验证报
+    `Cannot find module './a.js'` 时也没有任何任务的 zone 覆盖它（归属按任务自己的 zone 算）。
+    为什么本轮没顺手修：试过把越权路径并进 `scope.zones`，但它修不了归因（`routeVerificationErrors`
+    用的是任务自己的 zone），而且等于悄悄扩大 zone 集合 —— 正是本文档另一处"写入门比仲裁门严"
+    刻意保持的不对称反着来。需要拍板的是一句话：**被失败批次删掉的文件，此后归谁负责**。
+
+12. **P3 · 本轮新增的两段 headless 逻辑原本完全在变异门禁之外**（已登记为目标并补齐断言）。
+    `headless/run-spec.ts` 不在 `TARGETS` 里 → 凭证闸（`missingCredentials`）与备份回收（`pruneStaleBackups`）
+    两处"判错方向不报错"的逻辑没有任何机制保证断言真的在看它们。登记为 tier 2 目标后**首跑 6/15（40%）**，
+    9 处存活，全部补了断言后 **15/15（100%）**，其中三处值得记下：
+    - `&& → ||` @`wanted.length > 0 && present.length === 0`：存活原因就是旧用例只有"全缺"和"全不缺"两格，
+      手里恰好有一条 Key 的那一格没人跑过 —— 而那正是我自己在离线 IT 上撞到的误挡场景。
+    - `continue → break` @回收循环的两处跳过：`readdirSync` 在 Linux 是 hash 序、Windows 是字典序，
+      只要待删目录排在跳过项之前，两种写法就看不出区别。**修法是给遍历显式排序**（`failed` 是给宿主比对的
+      列表，本来就不该随平台变），再把用例里的目录名排成"两条跳过在前、两个待删在后"。
+    - `=== → !==` @`outcome.durationMs !== undefined ? …`：`run` 事件的耗时字段没断过，
+      而同一个模式在 `orchestrator.ts:375` 早就有断言（`[375]` 那条用例）—— 分层抄一遍不等于两层都有门禁。
 
 ## 适用边界
 
-- 所有数字（16 步 / 940 用例 / 92.06% stmts / 86.49% branch / 57.4s / mutation:quick 23.3s）都是
-  **2026-09-24 本机 Windows 实测**，换机器或换日期要重测；README 里那些 CI 数字（590/590、16.1 min）引自
-  `docs/2026-09-23-mutation-site-baseline.md`，本机**未复现**。
-- **本机没有 `gh`**，所以本文所有关于 CI 的说法都是从 workflow 文件推断的，不代表 CI 跑过或绿。
-- 本轮**没跑** `npm run mutation:audit`（site 全量，CI 实测 16 min）。所改文件均不在 `EQUIVALENT_SITES` 的
-  9 个行号锚点内（`kill-tree.ts` / `path-policy.ts` / `router.ts` / `shared/schema.ts` / `spawn-plan.ts` /
-  `http-bridge.ts` / `sensenova-api.ts` / `ipc/context.ts`），故白名单漂移风险为零；
-  若后续要引用「每处位点都有断言」，必须另跑 audit。
+- 所有数字（92.06% stmts / 86.49% branch / 57.4s / mutation:quick 23.3s）都是
+  **2026-09-24 本机 Windows 实测**，换机器或换日期要重测。
+  同日第二轮把门禁加到 **17 步**、用例加到 **962**（956 passed + 6 skipped），并按 `--mode=site` 逐目标复测了
+  本轮改到的两个文件：`electron/engine/scheduler.ts` **14/14**、`headless/run-spec.ts` **15/15**（补断言前 6/15）。
+  随后**全仓 site 全量也在 win32 复测过：603/603（100%）· 14.3 min**（分母从 CI 那次的 590 涨到 603，
+  涨的是新目标与新位点，不是断言变松）—— 数字与来路记在
+  `docs/2026-09-23-mutation-site-baseline.md` 的"三轮快照"一节。
+- **本机没有 `gh`**：CI 状态是用 GitHub 的 REST API（`repos/.../actions/runs`、`.../jobs`）查的，
+  只对**已推送**的提交有效；本地领先的提交 CI 没见过，那部分说法是从 workflow 文件推断的。
+- 第一轮**没跑** `npm run mutation:audit`，当时写的是"所改文件均不在 `EQUIVALENT_SITES` 的 9 个行号锚点内
+  （`kill-tree.ts` / `path-policy.ts` / `router.ts` / `shared/schema.ts` / `spawn-plan.ts` /
+  `http-bridge.ts` / `sensenova-api.ts` / `ipc/context.ts`），故白名单漂移风险为零"。**第二轮把全量跑了**
+  （603/603）—— 这一步顺带兜住了那个假设：白名单是按 `{file, op, line}` 精确匹配的，任何一次行号漂移
+  都会以"位点重新计入分母且无断言"的形式变红，全量绿即说明这 9 条锚点当前全部对得上。
 - 单平台结论：本轮全部实测在 win32。POSIX 侧（CI ubuntu）未本地验证，凡涉及 `kill-tree` POSIX 分支、
   `SHELL_METACHARACTERS` 对 `! %` 的过度拦截、大小写不敏感 `forbidden` 判定的结论，仍以 CI 矩阵为准。

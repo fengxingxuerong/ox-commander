@@ -14,10 +14,10 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 三条最容易踩的硬事实：
 
 1. **唯一验收入口是 `npm run verify`，只认退出码**（17 个 `npm run` 段 `&&` 串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 954 用例（948 passed + 6 skipped）/ 约 2 分钟。
+   本机实测基线：EXIT 0 / 962 用例（956 passed + 6 skipped）/ 约 2 分钟。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
-3. **README 的数字会过时**（它写 15 步 / 930 用例，实际 17 步 / 954）。任何数字现跑现查。
+3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 17 步 / 962）。任何数字现跑现查。
 
 ## 铁律
 
@@ -71,7 +71,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 
 | 症状 | 根因 | 处置 |
 | --- | --- | --- |
-| typecheck 本地绿、CI 红（或反之） | `tsc -b` 吃 `*.tsbuildinfo` 增量缓存；改过 tsconfig/删过文件会跳过重编假绿 | 删 `tsconfig.tsbuildinfo` 重跑 |
+| typecheck 绿但产物/运行不对 | 第 1 步已是 `--incremental false`（不再吃 tsbuildinfo 假绿），所以问题多半在 `build`/`build:headless`（仍用 `tsc -b` 产出） | 删 `*.tsbuildinfo` 重跑 build |
 | `check:unwired` 红，符号确实只有测试在用 | 设计如此 | 接到生产或进 `ACCEPTED` 写理由 |
 | `check:unwired` 红在"表项失效" | 你删/改了被豁免的符号 | 同步删该条 |
 | mutation 位点总数和你预期不符 | 注释/文档里留了算子字面量 | 改掉措辞，别去动基线 |

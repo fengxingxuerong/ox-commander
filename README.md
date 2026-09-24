@@ -106,7 +106,7 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ vitest（954 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（962 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -121,18 +121,19 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
-| aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 152/152（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **590/590（100%）**，16.1 min（CI 实测） |
+| aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 162/162（会掩盖位点，见下） |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **603/603（100%）**，14.3 min（2026-09-25 本机 win32 实测） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
-CI（`.github/workflows/verify.yml`）两个 job：`verify`（ubuntu + windows 矩阵）、
-`mutation`（site 口径，35 min 上限）。仓库托管在 GitHub（公开仓库），
-两个 job 随每次 push 运行，当前**三 job 全绿** —— CI 结论以 Actions 页为准。
+CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径 35 min 上限），
+`release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
+（公开仓库），`verify.yml` 随每次 push 运行。**最后一批已推送的提交（截至 `1acc3fc`）三跑全绿**；
+此后本地领先的提交 CI 还没见过 —— CI 结论以 Actions 页为准，别拿 README 当 CI 状态。
 
 > 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
-> （含 577 → 594 → 590 三轮快照、白名单行号漂移与平台相关等价的发现-处置记录）。
+> （含 577 → 594 → 590 → 603 四轮快照、白名单行号漂移与平台相关等价的发现-处置记录）。
 
 真实链路冒烟（需密钥、消耗配额，不进门禁）：
 

@@ -1,11 +1,16 @@
 # `npm run verify` 的 17 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、954 用例、约 2 分钟。
+顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、962 用例、约 2 分钟。
 README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
 | --- | --- | --- | --- |
-| 1 | `typecheck` | `tsc -b` ×3 套 tsconfig | 编译错即红 |
+| 1 | `typecheck` | `tsc -p <proj> --noEmit --incremental false` ×4 套（renderer / electron / headless / vite 配置） | 编译错即红 |
+
+> **为什么不是 `tsc -b`**：增量构建缓存会**跳过它认为没变的文件**并给绿。2026-09-24 实测：
+> 一个用了未导入标识符（`path`）的新函数，`tsc -b` 全绿放行，`tsc -p --noEmit --incremental false`
+> 立刻报 `TS2304: Cannot find name 'path'` 等三处。代价约 +6s（3.5s → 8.3s 三连）。
+> `build` / `build:headless` 仍用 `tsc -b`，因为它们要产出 `dist-electron`/`dist-headless`。
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
 | 4 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs` 逐个 `node --check` |
@@ -33,8 +38,10 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 三套**没有 `references`**，`tsc -b` 是三个独立工程。两套后端 tsconfig 的 `lib` 只有 `ES2022`（无 DOM）——
 这是 `shared/`  purity 唯一的机制保护。
 
-> **假绿来源**：`tsc -b` 吃 `*.tsbuildinfo`（已 gitignore）。改过 tsconfig、删过文件之后，本地可能跳过重编而绿，
-> CI 全新 checkout 不复现。怀疑时先删 buildinfo。
+> **曾经的假绿来源（2026-09-24 起已由门禁本身解决）**：`tsc -b` 吃 `*.tsbuildinfo`（已 gitignore），
+> 改过 tsconfig、删过文件之后本地可能跳过重编而绿，CI 全新 checkout 不复现。现在第 1 步走
+> `--incremental false`，所以**本地绿与 CI 绿是同一件事**。仍会产 `.tsbuildinfo` 的是
+> `build` / `build:headless`（它们要产出），怀疑产物脏就删 buildinfo 重跑。
 
 ## 2. lint 的覆盖面
 
@@ -88,8 +95,8 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 
 ## 9. 变异门禁：四个口径，数字不可互换
 
-`scripts/mutation-check.mjs`：`TARGETS` 是手工登记的 `{file, test|tests, tier}`（`:119-298`），7 个算子（`:332-340`），
-`MAX_SURVIVORS = 0`（`:315`，任何存活位点即红），还会做"掩空自洽校验"（`siteTotal + maskedTotal === rawTotal`，`:956`）。
+`scripts/mutation-check.mjs`：`TARGETS` 是手工登记的 `{file, test|tests, tier}`（`:119-303`），7 个算子（`:337-345`），
+`MAX_SURVIVORS = 0`（`:320`，任何存活位点即红），还会做"掩空自洽校验"（`siteTotal + maskedTotal === rawTotal`，`:964`）。
 
 | 命令 | 语义 | 强度 |
 | --- | --- | --- |
@@ -101,7 +108,7 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 `--limit=N` 是**每个目标** `all.slice(0,N)`，不是全局。aggregate 用 `replaceAll` 一次改掉某算子全部位点，
 "任一处被杀"就报杀死 → **它报的 100% 可能是假象**。
 
-**白名单 `EQUIVALENT_SITES`（`:365-496`，9 条）** 语义是"可证明等价 / 有意保留的防御冗余"，
+**白名单 `EQUIVALENT_SITES`（`:370-504`，9 条）** 语义是"可证明等价 / 有意保留的防御冗余"，
 条目形状 `{file, op, line}`，`op` 用算子**中文名原文精确串**匹配，**行号是锚点**：
 
 - site 模式精确匹配行号；aggregate 用 `changedLines` 近似
