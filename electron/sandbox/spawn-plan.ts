@@ -131,9 +131,17 @@ export function buildSpawnSpec(
   }
   const comspec = env.ComSpec ?? env.COMSPEC ?? "cmd.exe";
   const line = [quoteForCmd(resolved), ...args.map(quoteForCmd)].join(" ");
+  /*
+   * 外层必须再套一对引号。`/s` 的语义是"把这条命令行**首尾两个**引号字符去掉，
+   * 中间原样保留"，所以只给每个 token 加引号时，Node 安装在你预期的地方就必坏：
+   * `"C:\Program Files\nodejs\npm.cmd" run build` 被 cmd 去掉首尾引号后解析成
+   * 命令 `C:\Program`，报「不是内部或外部命令」（win32 + Node 24 + npm 11 实测）。
+   * 默认安装路径就带空格，于是**每一条**走 shim 的验证命令当场红，重修预算烧光。
+   * 套上外层引号后：带空格路径、无空格路径、含空格的 arg、空 arg 四种都实测通过。
+   */
   return {
     file: comspec,
-    args: ["/d", "/s", "/c", line],
+    args: ["/d", "/s", "/c", `"${line}"`],
     windowsVerbatimArguments: true,
     note: "windows cmd shim",
   };

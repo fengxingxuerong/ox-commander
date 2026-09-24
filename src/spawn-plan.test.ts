@@ -46,10 +46,50 @@ describe("buildSpawnSpec", () => {
     });
     expect(plan.file).toBe("C:\\Windows\\System32\\cmd.exe");
     expect(plan.args.slice(0, 3)).toEqual(["/d", "/s", "/c"]);
-    expect(plan.args[3]).toContain("npm.cmd");
-    expect(plan.args[3]).toContain("run build");
+    /*
+     * 断**整条形状**，不是断"含不含 npm.cmd"。旧断言只要子串命中就绿，所以
+     * `/s` 会把首尾引号吃掉的那一版（token 各自加引号、外层没有）也判通过 ——
+     * 单测全绿而 Windows 上每条 npm 命令必红，2026-09-25 真链路跑出来才发现。
+     */
+    expect(plan.args[3]).toBe(`"${quoteForCmd(shim)} run build"`);
     expect(plan.windowsVerbatimArguments).toBe(true);
     expect(plan.note).toBe("windows cmd shim");
+  });
+
+  /**
+   * 真跑一次，且**路径带空格** —— Node 的默认安装位置 `C:\Program Files\nodejs`
+   * 就是带空格的，这正是生产形态。上一条评论里那一版在这里 exit 1
+   * （cmd 报「'C:\Program' 不是内部或外部命令」）。POSIX 上没有 cmd 包装，早退。
+   */
+  it("Windows cmd shim 真跑得起来，即使解析出的路径含空格", async () => {
+    if (process.platform !== "win32") return;
+    const { spawn } = await import("node:child_process");
+    const base = scratch("shim space");
+    const dir = path.join(base, "with space");
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "shim.cmd"), "@echo off\r\necho SHIM-OK [%*]\r\n", "utf8");
+    const plan = buildSpawnSpec("shim", ["run", "a b"], {
+      platform: "win32",
+      env: { ...process.env, PATH: dir },
+    });
+    expect(plan.note).toBe("windows cmd shim");
+    const r = await new Promise<{ code: number | null; out: string }>((resolve) => {
+      const child = spawn(plan.file, plan.args, {
+        cwd: base,
+        shell: false,
+        windowsVerbatimArguments: true,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let out = "";
+      child.stdout.on("data", (c: Buffer) => (out += c.toString("utf8")));
+      child.stderr.on("data", (c: Buffer) => (out += c.toString("utf8")));
+      child.on("error", (e) => resolve({ code: null, out: out + String(e) }));
+      child.on("close", (code) => resolve({ code, out }));
+    });
+    // `a b` 是一个 arg：cmd 把它原样交给 shim，echo 打出带引号的两个 token
+    expect(r.code).toBe(0);
+    expect(r.out).toContain("SHIM-OK");
+    expect(r.out).toContain("a b");
   });
 
   it("does not wrap a Windows .exe", () => {

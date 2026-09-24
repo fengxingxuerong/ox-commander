@@ -8,6 +8,18 @@
 
 ### 修复
 
+- **Windows 上每一条走 `.cmd` shim 的验证命令都是红的**（`electron/sandbox/spawn-plan.ts`）。
+  cmd 包装过去只给每个 token 加引号：`/c "C:\Program Files\nodejs\npm.cmd" run build`。
+  而 `/s` 的语义正是"去掉首尾两个引号字符、中间原样保留"，于是 cmd 把它解析成命令
+  `C:\Program`，报「不是内部或外部命令」。Node 的**默认安装位置就带空格**，
+  而 `DEFAULT_SETTINGS.verificationCommands` 是 `npm run build` / `typecheck` / `test` ——
+  也就是桌面端开箱跑任何项目，第一次验证就必红、判"工作区受损"、全员重跑、重修预算烧光。
+  现在整条 line 外层再套一对引号（`""<shim>" run build"`），实测四种形态全通：
+  带空格路径、无空格路径、含空格的 arg、空 arg。
+  **为什么 970 条用例没抓到**：`src/spawn-plan.test.ts` 那条包装用例断的是
+  `args[3]` *包含* `npm.cmd` 子串，旧写法也包含；且它的 shim 建在没有空格的临时目录里。
+  现在断整条形状，并加一条**真 spawn** 的用例（临时目录里刻意建 `with space` 子目录）。
+  反证：把生产改动退回上一版，这两条当场红；还原后 16/16 绿
 - **验证与冒烟的子进程不再继承宿主的凭证环境**（`electron/engine/verifier.ts`）。`runOnce` 与
   `runSmokeChecks` 此前都不传 `env`，于是每一次 `npm run build`、每一条冒烟脚本都拿到完整的
   `process.env` —— 那里面装着 3 把 SenseNova Key 和其余 provider 的 Key（桌面端把 keychain
