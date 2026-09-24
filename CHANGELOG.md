@@ -62,6 +62,15 @@
   反证：注入一个语法坏的 `scripts/zz-probe.js` → `26/27` 且 exit 1 并打印 `SyntaxError`，删掉后 `26/26`
   （多出来的那 1 个就是它）。`.js` 按 CommonJS 解析，要 ESM 请改扩展名为 `.mjs` 而不是放宽门禁
 
+- **分层红线第一次有了机制**：`eslint.config.mjs` 给 `shared/**/*.ts` 加 `no-restricted-imports` ——
+  禁 `node:*` 与裸 node 内建、禁 `electron|react|react-dom|zustand`、禁 `../electron/**|../headless/**|../src/**`。
+  这条红线此前只活在注释里（`atomic-file.ts:13`），没有任何机制保证；现在违反即 lint 红。
+  落地时 `shared/` 对外 import 数为 **0**，所以是零违规的纯增量 —— 只拦未来，不改现状。
+  反证：`shared/` 里临时 `import fs from "node:fs"` → lint 点名该文件；换成 `from "../electron/platform"` →
+  两条规则同时红；删掉后 `npm run lint` EXIT 0。
+  **故意没给 `headless/**` 加同类规则**：`run-spec.ts` 现在经 `electron/platform` 拉进 `electron/sandbox`，
+  加了当场就红 —— 那条要先解依赖（或先承认它跨层），不能靠规则硬压下去
+
 ### 修正
 
 - **`typecheck` 不再吃增量缓存**：四套工程全改成 `tsc -p … --noEmit --incremental false`。

@@ -102,7 +102,8 @@ npm run build:dist    # → release/（Windows + Linux）
 
 ```
 typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
-→ lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/ 与 scripts/）
+→ lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/ 与 scripts/；
+  `shared/**` 另有分层红线：禁 node API、禁依赖宿主层与上层）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）

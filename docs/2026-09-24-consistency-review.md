@@ -86,7 +86,16 @@
    `scripts/src/{core,report,cli}`，本仓库没有那几个文件 → 它在本仓库跑不起来）——**理由写进白名单**，
    不再是"没人知道它靠什么跑"。
 
-   仍未修的只有前两条（tsconfig 的 include 与真实依赖脱节、分层红线无机制），后者要新增 eslint 规则，需授权。
+   **「`shared/` 不得碰 node API」这条已落成机制（2026-09-25）**：`eslint.config.mjs` 给
+   `shared/**/*.ts` 加了 `no-restricted-imports` —— 禁 `node:*` 与裸 node 内建、
+   禁 `electron|react|react-dom|zustand`、禁 `../electron/**|../headless/**|../src/**`。
+   落地时该层对外 import 数为 **0**（全是 `./` 相对引用）→ 零违规的纯增量，只拦未来、不改现状。
+   反证：`shared/` 里临时 `import fs from "node:fs"` → lint 红并点名；换成
+   `from "../electron/platform"` → 两条规则同时红；删掉后 `npm run lint` EXIT 0。
+   **故意没给 `headless/**` 加同类规则**：`run-spec.ts` 现在经 `electron/platform` 拉进
+   `electron/sandbox`，加了当场就红 —— 那条要先解依赖（或先承认它跨层），不能靠规则硬压。
+
+   仍未修的只有前两条（`tsconfig.headless.json` 的 include 与真实依赖脱节；`headless/**` 的分层红线仍无机制）。
 7. **P4 · 确定性**：`Date.now()` 派生 id 的碰撞面仍在（`scheduler.ts:293` 批号即快照目录名、`:322` runId、
    `file-journal.ts:74`、`atomic-file.ts:30` tmp 名无计数器）。已修的只有项目 id（`store.ts:47` 的 `idSeq`，commit `f71ffbc`）。
 8. **P4 · `file-journal` 把构建产物算成越权**：`walkStat` 的 skip 只跳 `node_modules/.git/.ox-quarantine`（`:6`），

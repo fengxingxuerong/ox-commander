@@ -49,6 +49,13 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 `eslint.config.mjs:16-23` 忽略 `docs/**` 与 `scripts/**` → **脚本层没有 lint，只有第 4 步的 `node --check` 一层保护**。
 `no-undef` 与 `no-explicit-any` 关掉；未用变量允许 `_` 前缀；`react-hooks` 只作用在 `src/**/*.tsx`。
 
+**`shared/**/*.ts` 有一条 `no-restricted-imports` 红线**（2026-09-25 立）：禁 `node:*` 与裸 node 内建、
+禁 `electron|react|react-dom|zustand`、禁 `../electron/**|../headless/**|../src/**`。
+落地时该层对外 import 数为 0，所以是零违规的纯增量，**只拦未来**。
+反向验证：`shared/` 里临时 `import fs from "node:fs"` 或 `from "../electron/platform"` → lint 立刻红并点名。
+**故意没给 `headless/**` 加同类规则**：`run-spec.ts` 现在经 `electron/platform` 拉进 `electron/sandbox`，
+加了当场就红 —— 那条要先解依赖，不能靠规则硬压。
+
 ## 3. `check:unwired` 的判据细节
 
 - 扫描目录 `["shared","electron","src","headless"]`（`:25`），跳过 `node_modules|dist*|coverage|.git|__fakes__`（`:38`）
