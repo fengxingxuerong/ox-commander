@@ -9,6 +9,18 @@ const { SensenovaApiAdapter } = require(
 
 (async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-snap-"));
+  /*
+   * 这个目录此前每跑一次留一份（本机实测 45 个 = 跑 verify 的次数），而里面写的是
+   * **长得像真 Key 的**哨兵字符串 —— 留在 %TEMP% 里既占盘又会被当成真泄漏。
+   * 挂在 exit 上：正常结束、判定失败、process.exit 三条路都会经过。
+   */
+  process.on("exit", () => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // 卫生工作不改判定
+    }
+  });
   fs.mkdirSync(path.join(root, "src"), { recursive: true });
   const SECRET = "sk-REAL-SECRET-abcdef123456";
   const NVIDIA = "nvapi-SECRET-abcd1234efgh5678";

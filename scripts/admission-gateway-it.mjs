@@ -21,6 +21,20 @@ const AGENTS_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "ox-agents-it-"));
 const ws = fs.mkdtempSync(path.join(os.tmpdir(), "ox-gw-it-"));
 fs.mkdirSync(path.join(ws, "src", "it"), { recursive: true });
 
+/*
+ * 这两个临时目录此前每跑一次各留一份（本机实测各 45 个 = 跑 verify 的次数）。
+ * 挂在 exit 上：判定通过、判定失败、process.exit 三条路都会经过这里。
+ */
+process.on("exit", () => {
+  for (const dir of [AGENTS_DIR, ws]) {
+    try {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    } catch {
+      // 卫生工作不改判定
+    }
+  }
+});
+
 const child = spawn(process.execPath, [path.join(root, "scripts", "admission-gateway.mjs")], {
   env: {
     ...process.env,
