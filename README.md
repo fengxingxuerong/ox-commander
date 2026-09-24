@@ -114,8 +114,8 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
 ```
 
-覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-24 实测 92.06% stmts / 86.49% branch，
-**不设阈值**，所以它不是门禁）。
+覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-25 复测 92.00% stmts（3843/4177）/
+86.68% branch（2356/2718），**不设阈值**，所以它不是门禁）。
 
 **变异门禁有两个口径，数字不可互换**：
 
@@ -129,8 +129,9 @@ aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被�
 
 CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径 35 min 上限），
 `release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
-（公开仓库），`verify.yml` 随每次 push 运行。**最后一批已推送的提交（截至 `1acc3fc`）三跑全绿**；
-此后本地领先的提交 CI 还没见过 —— CI 结论以 Actions 页为准，别拿 README 当 CI 状态。
+（公开仓库），`verify.yml` 随每次 push 运行。**已推送到 `77bc033`：run 14 三 job 全绿；run 15 的两个
+`verify` job 已绿，它的 `mutation` job 落笔时仍在跑** —— 这类状态数字落笔即过时，CI 结论以 Actions
+页为准，别拿 README 当 CI 状态。
 
 > 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
 > （含 577 → 594 → 590 → 603 四轮快照、白名单行号漂移与平台相关等价的发现-处置记录）。

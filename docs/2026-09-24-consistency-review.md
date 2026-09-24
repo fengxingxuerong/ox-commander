@@ -91,7 +91,9 @@
    `process.on` 与那句提示都在）。信号**投递**在 win32 观测不到（`kill()` 即 TerminateProcess，
    来不及发事件），所以离线 IT 场景 D 只在 POSIX 分支断言"最后一行是那条 `error`、且之后没有别的事件"，
    Windows 分支改断"被杀的那次没有 `done`、journal 与备份留在盘上"并在日志里说明为什么跳过。
-   也就是说：**POSIX 那两条目前是"写了但本机没跑过"**，以 CI ubuntu 那次为准；本机也没把它当已证事实。
+   也就是说：**POSIX 那两条本机跑不到**，交给 CI ubuntu job 验 —— **已验：run 15（`77bc033`）的
+   `verify (ubuntu-latest)` job 绿**，即"第一下 SIGTERM → `error` 是最后一条事件、之后再无 `verification`/`done`"
+   在真 Linux runner 上成立过一次。Windows job 走的是"没有终态事件、退出码 `null`"那条分支。
 10. **P4 · 发布流程**：`release.yml:44-45` 打 tag 直接 `build:dist`，**不先跑 verify**。
     **已修**：release 工作流加了 `verify` job（ubuntu，一次），`build` 改成 `needs: verify`。
     没有跨文件复用 verify.yml（它只有 push 触发器，`workflow_call` 要改那个文件），所以步骤重复了十行。
@@ -124,7 +126,9 @@
 ## 适用边界
 
 - 所有数字（92.06% stmts / 86.49% branch / 57.4s / mutation:quick 23.3s）都是
-  **2026-09-24 本机 Windows 实测**，换机器或换日期要重测。
+  **2026-09-24 本机 Windows 实测**，换机器或换日期要重测。（覆盖率在 09-25 复测为 **92.00% / 86.68%**，
+  README 用的是新值。**为什么变的没查**：两次都没有留下"哪些文件掉了几个点"的明细，
+  只凭这两个总数归因就是编故事 —— 要看归因得存一份模块级报告再比。
   同日第二轮把门禁加到 **17 步**、用例加到 **962**（956 passed + 6 skipped），并按 `--mode=site` 逐目标复测了
   本轮改到的两个文件：`electron/engine/scheduler.ts` **14/14**、`headless/run-spec.ts` **15/15**（补断言前 6/15）。
   随后**全仓 site 全量也在 win32 复测过：603/603（100%）· 14.3 min**（分母从 CI 那次的 590 涨到 603，
