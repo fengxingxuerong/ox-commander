@@ -108,6 +108,78 @@ describe("Scheduler.abortInFlight", () => {
     expect(log).toContain("abort:good");
     await batch;
   });
+
+  /**
+   * 登记表里可能留着**已不在池里的适配器**的句柄（跑到一半被注销，或适配器报回来
+   * 一个不属于池的 agentId）。这里钉的是"跳过它继续"而不是"到此为止"：把那句
+   * `continue` 改成 `break`，取消会在第一处残留句柄上静默收工，后面的 run 全都
+   * 跑满自己的时限 —— 而看板上已经写着"已取消"。
+   * site 口径实测：没有这条用例时该位点**存活**。
+   */
+  it("残留句柄的适配器不在池里时，跳过它并继续中止其余在跑的 run", async () => {
+    const log: string[] = [];
+    let releaseGoodDispatch!: () => void;
+    const goodDispatch = new Promise<void>((r) => (releaseGoodDispatch = r));
+    let releaseGoodCollect!: () => void;
+    const goodCollect = new Promise<void>((r) => (releaseGoodCollect = r));
+    let releaseGhostCollect!: () => void;
+    const ghostCollect = new Promise<void>((r) => (releaseGhostCollect = r));
+
+    // ghost：dispatch 立刻返回，但句柄挂在一个不在池里的 agentId 上
+    const ghost: AgentAdapter = {
+      meta: { id: "ghost", name: "ghost", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        log.push("dispatch:ghost");
+        return { runId: payload.runId, agentId: "already-deregistered", taskId: payload.taskId };
+      },
+      async *collect() {
+        await ghostCollect;
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {
+        log.push("abort:ghost");
+        releaseGhostCollect();
+      },
+    };
+    // good 的 dispatch 等我们放行 —— 这样它必然登记在 ghost **之后**，顺序是断言的一部分
+    const good: AgentAdapter = {
+      meta: { id: "good", name: "good", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        await goodDispatch;
+        log.push("dispatch:good");
+        return { runId: payload.runId, agentId: "good", taskId: payload.taskId };
+      },
+      async *collect() {
+        await goodCollect;
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {
+        log.push("abort:good");
+        releaseGoodCollect();
+      },
+    };
+
+    const sched = new Scheduler([ghost, good]);
+    const batch = sched.runBatch([task("t1", "src/a"), task("t2", "src/b")], ".");
+    for (let i = 0; i < 100 && !log.includes("dispatch:ghost"); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    releaseGoodDispatch();
+    await waitLive(sched, 2);
+
+    expect(await sched.abortInFlight()).toBe(1);
+    expect(log).toContain("abort:good");
+    expect(log).not.toContain("abort:ghost"); // 它不在池里，abort 无从下达（只能等它自己的时限）
+
+    releaseGhostCollect();
+    await batch;
+  });
 });
 
 describe("Scheduler.runBatch", () => {
