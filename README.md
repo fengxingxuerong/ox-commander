@@ -63,8 +63,7 @@ echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-head
 | Linux | `OxCommander-<ver>-x64.AppImage` / `.deb` | AppImage 直接 `chmod +x` 后运行 |
 | macOS | **不产出** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺 |
 
-⚠️ **首次运行前要自备 `.env`**（放在项目根目录；桌面端也可以在「设置」里填，
-走 OS keychain 加密落盘）。至少给一把商汤的 key：
+⚠️ **首次运行前要自备 `.env`**（放在项目根目录）。至少给一把商汤的 key：
 
 ```dotenv
 SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
@@ -75,6 +74,10 @@ SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
 
 规则：`.env` **只补缺失项**，宿主环境里已设的值不会被覆盖；无 key 的 provider
 （本地 Ollama 之类）照样保留其线路。
+
+> 桌面端「设置」里填的 key 会经 OS keychain 加密落盘，但**当前 run 只读进程环境**（keychain 只在
+> 「测试连接」那条路径上被读到），所以 `.env` 现在还不能省 —— 这条限制的原因与修法见
+> [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) 的 P1。
 
 **方式二：从源码跑**（开发者）
 
@@ -92,23 +95,24 @@ npm run build:dist    # → release/（Windows + Linux）
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（实测 EXIT 0 / ~55s，15 步）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-24 本机实测 EXIT 0 / 57s，16 步）：
 
 ```
 typecheck（renderer / electron / headless 三套 tsconfig）
-→ lint（eslint flat config，含 react-hooks 规则）
-→ check:unwired（导出符号在生产代码里零调用 → FAIL）
+→ lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/ 与 scripts/）
+→ check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ vitest（930 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
-→ mutation:quick（tier 1 目标逐点变异，~30s）
+→ vitest（940 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import（四条集成链路）
 ```
 
-覆盖率：`npm run test:coverage`（v8 provider，模块级报告；当前 91.4% stmts / 86.0% branch）。
+覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-24 实测 92.06% stmts / 86.49% branch，
+**不设阈值**，所以它不是门禁）。
 
 **变异门禁有两个口径，数字不可互换**：
 
@@ -146,7 +150,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 | `electron/engine/` | 编排器（六阶段 + repair loop）、调度器（批内 zone 互斥 + 并发闸）、能力路由、验证器、仲裁 |
 | `electron/agents/` | 统一适配层：`local-llm`（SenseNova 执行器）/ `cli`（Codex 等）/ `http-bridge`（WorkBuddy 等）+ 注册表 + manifest 校验 |
 | `electron/sandbox/` | PathPolicy / CommandPolicy / TimeoutGate / CircuitBreaker / FileJournal / SnapshotStore / spawn 规划 |
-| `shared/` | 双端共享大脑层：LLM 客户端与 failover、契约、glob、routing、prompt、schema（纯逻辑，不碰 node/DOM API） |
+| `shared/` | 双端共享大脑层：LLM 客户端与 failover、契约、glob、routing、prompt、schema（纯逻辑，不碰 node/DOM API —— 目前只是约定，无 lint/tsconfig 机制强制） |
 | `headless/` | JSONL 协议三层：protocol（契约）/ run-spec（执行）/ headless-main（胶水） |
 | `agents.d/` | 声明式智能体接入文档与示例（运行时读 `%APPDATA%\OxCommander\agents.d\`） |
 
@@ -160,14 +164,21 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 ## 安全边界
 
-- 所有智能体副作用强制过沙箱：路径七级判定（穿越/越根/受保护路径）、命令白名单 + 元字符拦截、
+- 所有智能体副作用强制过沙箱：路径七级判定（穿越/越根/受保护路径，realpath 后再判）、命令白名单 + 元字符拦截、
   deadline/idle 双超时、连续失败熔断
+  （注：内置执行器写入时不带 zone，zone 约束由事后仲裁兜，见 `docs/2026-09-24-consistency-review.md`）
 - zone 越权默认**回滚**（内容备份，不用 git stash），可选隔离区 / 保留 / 仅日志
-- 全程 JSONL 审计（按天轮转），run 与 agent 归因、冲突、回滚留痕
+  （四档配置 `report-only`/`deny-all`/`revert-batch`/`quarantine`，其中前两档当前行为相同：标记批次失败但不回滚）
+- 全程 JSONL 审计（**按大小轮转**，单文件 2 MiB；文件名含日期但不跨天触发），run 与 agent 归因、冲突、回滚留痕
 - API Key 经 OS keychain（Electron safeStorage）加密落盘，不可用时明确回退明文并告知
 
 ## 文档索引
 
+- [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
+  门禁 16 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
+  （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
+- [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
+  以及逐条带证据的**未修**缺陷清单
 - [docs/2026-09-19-multi-agent-orchestration-plan.md](docs/2026-09-19-multi-agent-orchestration-plan.md) — 多智能体平台 P0–P6 设计与实施全记录
 - [docs/2026-09-20-fullstack-review.md](docs/2026-09-20-fullstack-review.md) — 全栈评审：架构 / 风险诊断 / 优化记录（§十七 为最近一轮复核）
 - [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577→594→590 三轮，含逐目标报告与适用边界）

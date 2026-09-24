@@ -4,6 +4,23 @@
 版本号遵循语义化版本。**未发布前的版本只记"对用户/对维护者可见的变化"**，
 纯内部重构若改变了行为仍会记入。
 
+## [未发布]
+
+### 新增
+
+- `.qoder/skills/ox-commander-dev/`：给 agent 的仓库工作手册（`verify` 16 步逐条机制、变异白名单的
+  行号锚点、两张豁免表的双向失效规则、分层与放置约定、win32/POSIX 分支差异、红灯速查）
+- `docs/2026-09-24-consistency-review.md`：一致性复核，含 10 条带复现方式的未修缺陷清单
+
+### 修正
+
+- 设置页线路池两处互不相符的说明文案（一处写 4 模型、另一处写 3 模型）改为从
+  `SENSENOVA_KEY_VARS` / `SENSENOVA_MODELS` 派生，并加防漂移用例；`package.json` description 与
+  两处代码注释同步去掉写死的数字
+- README 门禁口径：16 步（原写 15）、940 用例（原写 930）、`mutation:quick` 是"每目标 1 个 aggregate 变异"
+  的最弱档、覆盖率标注为"不设阈值、不是门禁"、审计轮转正为**按大小 2 MiB**（原写按天）、
+  仲裁四档标注前两档行为相同、`shared/` 的纯逻辑约定标注"无机制强制"
+
 ## [0.1.0] — 2026-09-24（首个公开版本）
 
 从 2026-08-26 起、128 个提交的第一对外发布。仓库在 GitHub 公开，
@@ -26,7 +43,7 @@
 - 路径七级判定（穿越 / 越根 / 受保护路径）、命令白名单 + 元字符拦截、
   deadline/idle 双超时、连续失败熔断
 - 越权默认回滚（内容备份，不用 git stash），可选隔离区 / 保留 / 仅日志
-- JSONL 审计按天轮转；API Key 走 OS keychain（Electron safeStorage），
+- JSONL 审计按大小轮转（单文件 2 MiB）；API Key 走 OS keychain（Electron safeStorage），
   不可用时明确回退明文并告知
 
 **质量门禁**（本项目的核心差异化，见 README「质量门禁」）
