@@ -7,6 +7,21 @@
 （SenseNova API 池 / Codex 等 CLI / HTTP 桥接智能体），经 build + typecheck + test 多轮硬性验证后交付。
 Electron 桌面端 + headless CLI 双入口。
 
+> **设计定位（与同类编排器的差异）**
+>
+> 同类项目大多走「git worktree 隔离」路线——每个智能体在独立目录里互不干扰。
+> OxCommander 走的是**共享工作区 + zone 互斥**：智能体像真实团队一样在同一棵树里
+> 按目录分派并行，越权由仲裁层回滚/隔离。另一条路线，两种取舍：
+>
+> | 特征 | OxCommander |
+> | --- | --- |
+> | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
+> | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
+> | 验证 | build + typecheck + test 硬门禁 + repair loop 归因重修 + 产物冒烟 |
+> | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、快照回滚 |
+> | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门 |
+> | 协议 | headless JSONL 协议（外部宿主可编程驱动）|
+
 ```
 需求 → PRD → PLANNING → DEVELOPMENT（zone 互斥并行） → VERIFICATION（build/typecheck/test） → DELIVERY → DONE
                 ↑______________ repair loop（按 zone 归因重修）______________|
@@ -77,13 +92,14 @@ npm run build:dist    # → release/（Windows + Linux）
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（实测 EXIT 0 / ~1m50s，14 步）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（实测 EXIT 0 / ~55s，15 步）：
 
 ```
 typecheck（renderer / electron / headless 三套 tsconfig）
 → lint（eslint flat config，含 react-hooks 规则）
 → check:unwired（导出符号在生产代码里零调用 → FAIL）
-→ check:scripts / check:scripts-wired / check:masker（工具脚本语法、接线、掩空器自测 24 例）
+→ check:scripts / check:scripts-wired / check:packaged-paths / check:masker
+  （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → vitest（930 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标逐点变异，~30s）
 → vite build + tsc headless 构建

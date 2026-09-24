@@ -11,7 +11,7 @@
  *   3. the headless binary speaks its protocol: invalid stdin  → exit 1 + JSON
  *      error event; spec missing projectRoot → exit 1 with a named message
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -42,12 +42,24 @@ if (fs.existsSync(distElectron)) {
   walk(distElectron);
 }
 check("dist-electron has emitted files", cjsFiles.length > 0, `${cjsFiles.length} files`);
+// 并行 `node --check`（53 个文件串行约 3.5s，并行约 0.7s）——同 check-syntax
+// 的优化：产物冒烟每秒都跑，把常量时间省下来。输出按扫描序排回。
+const parseResults = await Promise.all(
+  cjsFiles.map(
+    (file) =>
+      new Promise((resolve) => {
+        const child = spawn(process.execPath, ["--check", file], { stdio: ["ignore", "ignore", "pipe"] });
+        let err = "";
+        child.stderr.on("data", (d) => (err += d));
+        child.on("close", (code) => resolve({ file, code, err }));
+      }),
+  ),
+);
 let parseErrors = 0;
-for (const file of cjsFiles) {
-  const res = spawnSync(process.execPath, ["--check", file], { encoding: "utf8" });
-  if (res.status !== 0) {
+for (const r of parseResults) {
+  if (r.code !== 0) {
     parseErrors += 1;
-    console.error(`  node --check ${path.relative(root, file)}\n${res.stderr}`);
+    console.error(`  node --check ${path.relative(root, r.file)}\n${r.err}`);
   }
 }
 check(`node --check across ${cjsFiles.length} dist-electron files`, parseErrors === 0, `${parseErrors} errors`);
