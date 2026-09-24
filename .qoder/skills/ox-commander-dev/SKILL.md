@@ -80,7 +80,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | mutation 位点总数和你预期不符 | 注释/文档里留了算子字面量 | 改掉措辞，别去动基线 |
 | site 口径冒出"等价位点未命中" | 白名单行号漂移 | 按新行号校回 + 确认防御仍在 |
 | `smoke:gateway` / `smoke:coze` 偶发红 | 固定端口被占 / 机器慢过固定 sleep | 单跑复现，别看一次就归因代码 |
-| `mutation-check` 中途被打断后工作区脏 | 它会临时改写源文件 | `git status` 必查，必要时 `git checkout --` 还原 |
+| `mutation-check` 中途被打断后工作区脏 | 它会临时改写源文件（SIGKILL 时还原钩子跑不到，**活体变异会留在盘上**，下一轮门禁红在无关文件上像假回归） | `git status` 必查；`git diff` 只有单处算子翻转即判定残留，`git checkout --` 还原。**别用后台跑全量 `mutation:audit`（约 15min > 后台 10min 上限），按 `--file=` 分档跑，单档 13–60s** |
 | 门禁跑不完就红在 `check:masker` | 它靠 `indexOf` 锚点从 `mutation-check.mjs` 抠函数 | 那两个锚点字符串不能改 |
 
 ## 别信文档，以代码为准（2026-09-24 逐条核过）
