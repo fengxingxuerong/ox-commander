@@ -75,6 +75,11 @@
    `file-journal.ts:74`、`atomic-file.ts:30` tmp 名无计数器）。已修的只有项目 id（`store.ts:47` 的 `idSeq`，commit `f71ffbc`）。
 8. **P4 · `file-journal` 把构建产物算成越权**：`walkStat` 的 skip 只跳 `node_modules/.git/.ox-quarantine`（`:6`），
    所以 `dist/`、`coverage/` 的变化会进 unauthorized-write 列表。
+   **已修，且实测比 P4 重**：用构建产物直接跑一遍真实 `BatchGuard`（默认 `revert-batch` 档）确认了两条后果——
+   ① 批内跑一次项目自带构建 → 整批 `ok:false` 且产物进回滚清单（任务本身完全没越界）；
+   ② 同名的第四份跳过清单在执行器快照里，而快照按路径序消耗 32k 预算、`coverage|dist` 正排在 `src` 前面 →
+   实测"进快照 12 个文件里 11 个是产物、真实源码 0/5"。两处改接同一张 `DEFAULT_SKIP_DIRS`，反证是把清单
+   换回旧的三项 → 两条新用例各自变红。
 9. **P4 · headless 无信号处理**：Ctrl-C 之后快照备份目录与 `ox-run-journal.json` 都不清理（没有 `commit` 机会）。
 10. **P4 · 发布流程**：`release.yml:44-45` 打 tag 直接 `build:dist`，**不先跑 verify**。
 

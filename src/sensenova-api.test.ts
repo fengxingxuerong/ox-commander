@@ -252,6 +252,37 @@ describe("SensenovaApiAdapter", () => {
     expect(seenPrompt).not.toContain("// dep");
   });
 
+  it("构建产物不得占满快照预算：真实源码必须进到 prompt 里", async () => {
+    // 快照按**路径序**消耗 32k 总预算，而 `coverage/` 与 `dist/` 都排在 `src/` 前面 ——
+    // 生成目录一旦被计进来，模型读到的就是整包 bundle，项目源码一个字节都进不去。
+    // 本机实测（改前）：12 个进快照的文件里 11 个是产物，src/ 命中 0 / 5。
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "src", "core.js"), "module.exports.real=1;", "utf8");
+    fs.mkdirSync(path.join(root, "dist"), { recursive: true });
+    for (let i = 0; i < 12; i++) {
+      fs.writeFileSync(path.join(root, "dist", `chunk-${i}.js`), "b".repeat(3000), "utf8");
+    }
+    fs.mkdirSync(path.join(root, "coverage"), { recursive: true });
+    fs.writeFileSync(path.join(root, "coverage", "lcov.info"), "SF:src/core.js\n".repeat(500), "utf8");
+    let seenPrompt = "";
+    const client: LlmClient = {
+      async chat(req: ChatRequest) {
+        seenPrompt = req.messages.map((m) => m.content).join("\n");
+        return {
+          content: '{"files":[{"path":"src/ok.js","content":"// fine"}]}',
+          provider: "test",
+          model: "m",
+        };
+      },
+    };
+    const adapter = new SensenovaApiAdapter(client);
+    const handle = await run(adapter, root);
+    await terminalText(adapter, handle);
+    expect(seenPrompt).toContain("=== src/core.js ===");
+    expect(seenPrompt).not.toContain("=== dist/");
+    expect(seenPrompt).not.toContain("=== coverage/");
+  });
+
   it("truncates oversized files in the snapshot", async () => {
     const root = tmpRoot();
     fs.writeFileSync(path.join(root, "src", "big.js"), "x".repeat(9000), "utf8");

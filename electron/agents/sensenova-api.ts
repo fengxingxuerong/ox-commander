@@ -8,6 +8,7 @@ import type {
 } from "../../shared/types";
 import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, JsonParseError } from "../../shared/llm-client";
+import { DEFAULT_SKIP_DIRS } from "../sandbox/file-journal";
 import { createFailoverClient, EXECUTOR_TIMEOUT_MS } from "../../shared/http-clients";
 import { withCooldownRetry } from "../../shared/llm-client";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
@@ -27,7 +28,12 @@ const SYSTEM_PROMPT = [
   "禁止输出 package.json、package-lock.json、ox-scripts/ 下的文件。",
 ].join("\n");
 
-const SNAPSHOT_SKIP_DIRS = new Set(["node_modules", ".git", "ox-scripts"]);
+// The snapshot is what the model gets to see of the project, and the budget is
+// spent in path order — `coverage/` and `dist/` sort before `src/`, so without
+// the shared generated-dir list the prompt is filled with bundles and the real
+// source never reaches the request at all. `ox-scripts` is this platform's own
+// helper directory, skipped here but not in the change journal.
+const SNAPSHOT_SKIP_DIRS = new Set([...DEFAULT_SKIP_DIRS, "ox-scripts"]);
 const SNAPSHOT_MAX_FILE_CHARS = 4000;
 const SNAPSHOT_MAX_TOTAL_CHARS = 32000;
 

@@ -14,15 +14,15 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 三条最容易踩的硬事实：
 
 1. **唯一验收入口是 `npm run verify`，只认退出码**（16 个 `npm run` 段 `&&` 串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 943 用例（937 passed + 6 skipped）/ 约 2 分钟。
+   本机实测基线：EXIT 0 / 947 用例（941 passed + 6 skipped）/ 约 2 分钟。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
-3. **README 的数字会过时**（它写 15 步 / 930 用例，实际 16 步 / 943）。任何数字现跑现查。
+3. **README 的数字会过时**（它写 15 步 / 930 用例，实际 16 步 / 947）。任何数字现跑现查。
 
 ## 铁律
 
 - **改这些文件前先查行号锚点**：`electron/sandbox/kill-tree.ts`(:37)、`path-policy.ts`(:92)、`spawn-plan.ts`(:96)、
-  `electron/engine/router.ts`(:193)、`electron/agents/http-bridge.ts`(:309)、`sensenova-api.ts`(:331,337)、
+  `electron/engine/router.ts`(:193)、`electron/agents/http-bridge.ts`(:309)、`sensenova-api.ts`(:337,343)、
   `electron/ipc/context.ts`(:177)、`shared/schema.ts`(:184)。它们在 `scripts/mutation-check.mjs` 的
   `EQUIVALENT_SITES` 里以 **`{file, op, line}` 行号锚点**登记（op 是算子中文名的原文精确串）。
   在锚点行上方插/删行 → 白名单失配 → site 口径当场红。**处置是"按新行号校回并重新确认那两层防御仍在"，不是删表项。**

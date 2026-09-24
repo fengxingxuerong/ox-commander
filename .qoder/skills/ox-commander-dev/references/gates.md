@@ -1,6 +1,6 @@
 # `npm run verify` 的 16 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、943 用例、约 2 分钟。
+顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、947 用例、约 2 分钟。
 README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
@@ -107,7 +107,7 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 - **在锚定文件里插行/删行使行号漂移 → 变异重新出现 → 门禁红**。处置是"按新行号校回 + 重新确认那两层防御仍在"，
   并保留条目里的论证注释（那些注释就是"为什么这条不该被杀"的唯一记录）
 - 当前锚定：`kill-tree.ts:37`、`path-policy.ts:92`、`router.ts:193`、`shared/schema.ts:184`、
-  `spawn-plan.ts:96`、`http-bridge.ts:309`、`sensenova-api.ts:331` / `:337`、`ipc/context.ts:177`
+  `spawn-plan.ts:96`、`http-bridge.ts:309`、`sensenova-api.ts:337` / `:343`、`ipc/context.ts:177`
 
 > `mutation-check` 会**临时改写源文件**再还原；中途被打断或崩溃可能留脏 → 跑完 `git status` 必查。
 

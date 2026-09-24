@@ -2,8 +2,39 @@ import fs from "node:fs";
 import path from "node:path";
 import { isPathInZone } from "../../shared/glob";
 
-/** Shared infra: churn in here is never attributed to a task. */
-const DEFAULT_SKIP_DIRS = new Set(["node_modules", ".git", ".ox-quarantine"]);
+/**
+ * Directories whose churn is never one task's business.
+ *
+ * Two kinds, matched by **directory name at any depth** (which is what a bare
+ * `dist/` line in `.gitignore` means as well):
+ *
+ * - shared infra: `node_modules`, the repository itself, the quarantine area;
+ * - machine-generated output: a batch that runs the project's own build or test
+ *   writes these **inside its own window**, so without this they would be
+ *   reported as `unauthorized-write` — failing the whole batch and (in the
+ *   default `revert-batch` mode) rolling the build output back, even though
+ *   every task stayed inside its zone.
+ *
+ * Deliberately narrow: `out` / `bin` / `target` are left out because authored
+ * source does live under those names in real projects.
+ */
+export const DEFAULT_SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".ox-quarantine",
+  "dist",
+  "build",
+  "coverage",
+  ".nyc_output",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".vite",
+  ".parcel-cache",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+]);
 
 export interface FileChange {
   path: string;

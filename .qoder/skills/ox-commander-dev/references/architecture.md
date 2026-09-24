@@ -50,10 +50,10 @@ repair 循环 `while (round <= maxRounds + extraRounds)`（`:313`），默认 3 
 | | local-llm | cli | http-bridge |
 | --- | --- | --- | --- |
 | 文件 | `electron/agents/sensenova-api.ts` | `electron/agents/cli-agent.ts` | `electron/agents/http-bridge.ts` |
-| 能力 | 只有 `read/edit/create`（注释言明**不跑命令**，`:80-100`） | 声明什么就跑什么 | 由宿主实现决定 |
-| 并发 | `maxConcurrency` = 已配 key 数（`:97,123`） | | 4 端点轮询，`pollMs` 默认 500 |
-| 超时 | **无 limits、无 TimeoutGate**，只有 per-request `EXECUTOR_TIMEOUT_MS`（`:149`） | TimeoutGate + `killTree`（`:209-223,293`） | |
-| 入参 | files-protocol JSON 输出（`:414-419`） | 走 prompt 文件不用 argv（`:359-399`），`shell:false` + `buildSpawnSpec`，env 经 `scopedEnv` 最小化，stdout 有字节预算 | `credential` 在这里才真被消费（`authHeaders` `:343-369`） |
+| 能力 | 只有 `read/edit/create`（注释言明**不跑命令**，`:86-106`） | 声明什么就跑什么 | 由宿主实现决定 |
+| 并发 | `maxConcurrency` = 已配 key 数（`:103,129`） | | 4 端点轮询，`pollMs` 默认 500 |
+| 超时 | **无 limits、无 TimeoutGate**，只有 per-request `EXECUTOR_TIMEOUT_MS`（`:155`） | TimeoutGate + `killTree`（`:209-223,293`） | |
+| 入参 | files-protocol JSON 输出（`:420-425`） | 走 prompt 文件不用 argv（`:359-399`），`shell:false` + `buildSpawnSpec`，env 经 `scopedEnv` 最小化，stdout 有字节预算 | `credential` 在这里才真被消费（`authHeaders` `:343-369`） |
 
 **manifest 校验只有三个入口**：`agents.d` 目录（`manifest-loader.ts:42`，单文件解析失败只跳过并计入 `manifestErrors`）、
 IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`（`protocol.ts:311`）。
@@ -75,7 +75,7 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
 
 两处必须知道的语义：
 
-- **写入门不传 zone**：内置执行器调的是 `policy.assertWritable(f.path)`（`sensenova-api.ts:368`），
+- **写入门不传 zone**：内置执行器调的是 `policy.assertWritable(f.path)`（`sensenova-api.ts:374`），
   `zoneMode` 默认 `legacy` → `undefined` zone 视同 `""` → 第 7 级恒 allow。
   即 zone 约束**完全靠事后 `BatchGuard`**。理由是**结构性的**而不是"等回滚"（旧注释那句 "until rollback
   lands (P4)" 已按实际判据改掉）：写入门用严格前缀，若在这里认 zone，模型按约定写的
@@ -112,9 +112,14 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
   `file-journal.ts:74`。已修的只有项目 id：`electron/store.ts:47` 加 `idSeq` 单调序数 + `:63-66` `list()` 用 id 决胜
   （commit `f71ffbc` 修的是 CI ubuntu 的 newest-first flake）。**新增 id 生成要么带序数要么带计数器。**
 - `atomic-file.ts:30` tmp 名只含 `pid + Date.now()`，无计数器（当前调用点都同步，未触发）。
-- **mtime 判据有已知盲区**：`file-journal.ts:96` 用 `size + mtimeMs`——同 size 同 mtime 的改动漏检，
-  `touch` 不改内容会误报（`:50-53` 注释承认）。`walkStat` 全树 stat，skip 只跳 `node_modules/.git/.ox-quarantine`，
-  所以 **`dist/`、`coverage/` 的构建产物会被算成 unauthorized-write**。
+- **mtime 判据有已知盲区**：`file-journal.ts:127` 用 `size + mtimeMs`——同 size 同 mtime 的改动漏检，
+  `touch` 不改内容会误报（`:81-84` 注释承认）。
+- **构建产物既不算越权、也不进快照**：跳过清单只有一张（`file-journal.ts` 导出的 `DEFAULT_SKIP_DIRS`，
+  2026-09-24 起内置执行器的快照也复用它）。此前是四张副本（journal / snapshot-store / 执行器快照 / zone-guard），
+  代价有两处：**批内跑一次 `npm run build` 会让整批被判 unauthorized-write 并被回滚删掉产物**；
+  以及执行器快照按路径序消耗 32k 预算、`coverage/` 与 `dist/` 排在 `src/` 前面，
+  本机实测修复前"12 个文件里 11 个是产物、真实源码进 prompt 0 个"，修复后 6 个文件全是要读的源码。
+  `out` / `bin` / `target` **刻意不在表里**（它们常是手写源码目录）。
 - 时钟/定时器注入点：`timeout-gate.ts:16-18`、`circuit-breaker.ts:9`、`audit-log.ts:41` 可注入；
   **`scheduler.ts` 的 throttle（`:156,169`）与 cli-agent / http-bridge 的 `Date.now()` 不可注入** → 测 429 退避只能靠假时钟。
 - headless **无任何 `process.on`**：Ctrl-C 之后快照备份目录与 `ox-run-journal.json` 都不清理（没有 `commit` 机会）。
@@ -139,4 +144,4 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README「15 步 / 930 用例」 | 16 步 / 943 用例（2026-09-24 本机实测） | `package.json:35` |
+| README「15 步 / 930 用例」 | 16 步 / 947 用例（2026-09-24 本机实测） | `package.json:35` |
