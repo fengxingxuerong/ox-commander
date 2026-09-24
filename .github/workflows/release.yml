@@ -23,8 +23,33 @@ permissions:
   contents: write
 
 jobs:
+  # 发布前先过一遍完整门禁。理由很直白：这条流水线产出的东西是**装进别人机器的 exe**，
+  # 而 tag 可以在任何一次提交上打（包括从没跑过 verify 的那次）。旧版本地实测过：
+  # 不打断也没人会发现——verify 绿与 release 绿此前是两件事。
+  #
+  # 为什么在这里重写一遍步骤而不是复用 verify.yml：那个文件只有 push 触发器，
+  # 没有 workflow_call，跨文件调用需要改它；重复十行比引入隐式耦合便宜。
+  # 只在 ubuntu 上跑一次：打包 job 自己会在 windows 上 tsc 构建，编译类问题在那里也会暴露。
+  verify:
+    name: verify (release gate)
+    runs-on: ubuntu-latest
+    env:
+      # 这个 job 同样不启动 Electron，只要类型定义。
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Verify
+        run: npm run verify
+
   build:
     name: package (${{ matrix.os }})
+    needs: verify
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
