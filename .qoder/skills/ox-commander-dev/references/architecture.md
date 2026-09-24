@@ -75,10 +75,11 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
 
 两处必须知道的语义：
 
-- **写入门不传 zone**：内置执行器调的是 `policy.assertWritable(f.path)`（`sensenova-api.ts:367`），
+- **写入门不传 zone**：内置执行器调的是 `policy.assertWritable(f.path)`（`sensenova-api.ts:368`），
   `zoneMode` 默认 `legacy` → `undefined` zone 视同 `""` → 第 7 级恒 allow。
-  即 zone 约束**完全靠事后 `BatchGuard`**。该处注释写的是"until rollback lands (P4)"，
-  而 `revert-batch` 如今已实现（`electron/engine/batch-guard.ts:139-150`）——**这条推迟理由可能已经过期**，动它之前先确认设计意图。
+  即 zone 约束**完全靠事后 `BatchGuard`**。理由是**结构性的**而不是"等回滚"（旧注释那句 "until rollback
+  lands (P4)" 已按实际判据改掉）：写入门用严格前缀，若在这里认 zone，模型按约定写的
+  `src/duration.js`（zone 为 `src/duration`）会在写入前就被拒 —— 那才是回归。
 - **两处 zone 判据故意不同**：写入门 `zoneAllows`（`:219-228`）用严格前缀 `rel===z || rel.startsWith(z+"/")`；
   仲裁门 `isPathInZone`（`shared/glob.ts:91-101`）**额外**认 `src/duration.js` 属于 zone `src/duration`
   （`glob.ts:85-89` 注释给了理由：否则模型写同名文件会被回滚、拖垮整批）。
@@ -125,15 +126,17 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
 加 AMD 1 条 = 13。`SENSENOVA_MODELS_EXTRA`（`:153`，kimi-k3）**刻意不进默认轮转**，有测试守着；
 NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 / 账号被锁推理）。
 **陈旧文案**：`package.json:7`、`electron/agents/index.ts:17`、`shared/build-llm.ts:28`、
-`src/pages/SettingsPage.tsx` 的界面文案曾长期写"3 密钥 × 3 模型"。
+`src/pages/SettingsPage.tsx` 的界面文案、以及 `README.md` 的「LLM 线路池」一节曾长期写死
+"3 密钥 × 3 模型"或"13 条线路"。现在这些都表述为"由 `shared/providers.ts` 的两张表决定"——
+**换成另一个数字只是把漂移推到下次扩池**。
 
 ## 已知不一致（改这些文件前先读）
 
 | 说法 | 实际 | 证据 |
 | --- | --- | --- |
-| 桌面端「设置」里填的 key 走 keychain 就能跑 run | **正式 run 的大脑层拿不到 keychain key**：`electron/ipc/context.ts:268-271` 的 `buildLlm()`（"测试连接"按钮）才传 seeder，`buildPlatformLayer`（`:202-221`，run 路径）不传，于是 `electron/platform.ts:190` 的 `buildLlm()` 无 seeder，`shared/build-llm.ts:63` 只读 `opts.env ?? process.env`。执行器侧同源：`sensenova-api.ts:123`（并发闸）与 `:167`（就绪判定）也只看 `process.env` | 本机被 `.env`（`electron/main.ts:45` 只补缺失项）掩盖 |
+| ~~桌面端 keychain 的 Key 进不了 run~~ | **已修**：播种器挂在 `PlatformConfig.seedKeys` 上，`createPlatform` 内部**无参**构造引擎大脑时也会播种 | `electron/platform.ts`（`const seed = seedKeys ?? config.seedKeys`）+ `electron/ipc/context.ts`（`buildPlatformLayer` 传 `seedKeysFromStore`）；由 `src/platform.test.ts` 与 `src/ipc-handlers.test.ts` 两侧分别钉住 |
 | README「回滚/隔离/报告四档」 | `deny-all` 与 `report-only` **行为相同**（都不回滚、都 `markBatchFailed`），差异只有日志文案 | `electron/engine/batch-guard.ts:133-138` |
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
-| `circuit-breaker.ts:113` 注释「`retryable: false` outcomes close nothing」 | `record(id, ok)` 只收 `ok: boolean`，**完全不看 `retryable`** → 认证失败照样计入连续失败并可开熔断。是注释描述了未实现的行为（行为本身是否要改是设计问题） | `electron/sandbox/circuit-breaker.ts:113-117` |
-| README「15 步 / 930 用例」 | 16 步 / 939 用例（2026-09-24 本机实测） | `package.json:35` |
+| ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
+| README「15 步 / 930 用例」 | 16 步 / 943 用例（2026-09-24 本机实测） | `package.json:35` |

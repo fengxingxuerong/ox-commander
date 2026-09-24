@@ -110,7 +110,12 @@ export class CircuitBreaker {
     }
   }
 
-  /** Feeds a terminal outcome; `retryable: false` outcomes (e.g. auth errors) close nothing. */
+  /**
+   * Feeds a terminal outcome. Only the boolean is read: a failure counts toward
+   * opening the circuit whether or not it was retryable, so an agent that is
+   * broken on credentials gets benched like any other failing one instead of
+   * being retried once per task.
+   */
   record(id: string, ok: boolean): void {
     if (ok) this.recordSuccess(id);
     else this.recordFailure(id);

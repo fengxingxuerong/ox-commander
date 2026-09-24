@@ -38,9 +38,8 @@ const SELF = "check-script-wiring.mjs";
  * 加项前必须能说清**它为什么不该进 verify**（多数是环境依赖：需要真实凭据、
  * 真实外部服务、或长跑靶场）。说不清就该接进入口，而不是加进这里。
  */
-const ACCEPTED = new Map([
+const ACCEPTED_ENTRIES = [
   ["marvis-bridge.mjs", "外部智能体桥，需对方真实服务在跑；由操作员手动启动"],
-  ["loomy-bridge.mjs", "同上（agents.d/onboarding-universal.md 记录了启动方式）"],
   ["run-multiagent-e2e.mjs", "长跑端到端（--max-minutes 可配），需真实 LLM 凭据，人工验收用"],
   ["probe-endpoints.cjs", "诊断工具，探测外部端点连通性，非验收判据"],
   ["gen-repair-smoke.cjs", "生成器：产出 smoke-repair / smoke-fullchain 的用例，人工按需运行"],
@@ -51,8 +50,21 @@ const ACCEPTED = new Map([
   ["bridge-smoke.mjs", "跨项目桥接冒烟：DSH 插件（外部仓库 dsh-oxcommander）→ headless runner"],
   ["smoke-fullchain.mjs", "全链路冒烟，需真实凭据；被 gen-repair-smoke.cjs 生成后人工跑（引用者自己也不在入口）"],
   ["smoke-repair.mjs", "重修循环冒烟，同上"],
-  ["loomy-bridge.mjs", "被 run-multiagent-e2e.mjs 引用，但该 runner 同样只在人工验收时跑 —— 链条未接到入口"],
-]);
+  [
+    "loomy-bridge.mjs",
+    "外部智能体桥，需对端服务在跑（启动方式记在 agents.d/onboarding-universal.md）；" +
+      "它被 run-multiagent-e2e.mjs 引用，而该 runner 同样只在人工验收时跑 —— 链条未接到入口",
+  ],
+];
+
+/**
+ * 先查重再建 Map：`new Map()` 对重复键是**静默覆盖**，被盖掉的那条理由就此消失，
+ * 而门禁本身看不见（它只读 Map）。本文件的旧版就同时登记过两次 loomy-bridge.mjs。
+ */
+const duplicateAccepted = ACCEPTED_ENTRIES.map(([name]) => name).filter(
+  (name, i, all) => all.indexOf(name) !== i,
+);
+const ACCEPTED = new Map(ACCEPTED_ENTRIES);
 
 const listOnly = process.argv.includes("--list");
 
@@ -132,6 +144,15 @@ console.log(
   `scripts 接线检查：${scripts.length} 个脚本，已接入 ${wired.length}，` +
     `已接受未接入 ${orphans.length - unaccepted.length}，未接受 ${unaccepted.length}`,
 );
+
+// 白名单自身的完整性先查：重复键在 Map 里是静默覆盖，第二条理由会顶掉第一条，
+// 于是"评审过的理由"变成另一条 —— 没有任何信号。
+if (duplicateAccepted.length > 0) {
+  console.error(`\nFAIL: ACCEPTED 里有 ${duplicateAccepted.length} 个重复键 —— Map 静默覆盖，只有一条理由生效：`);
+  for (const n of duplicateAccepted) console.error(`  ${n}`);
+  console.error("\n处置：把两条理由合并成一条，而不是删掉其中一条。\n");
+  process.exit(1);
+}
 
 // 白名单过期同样要报：条目指向已接线的脚本（或已删除的脚本）说明白名单在腐烂，
 // 而腐烂的白名单会让下一个人以为"这里有人管过"。

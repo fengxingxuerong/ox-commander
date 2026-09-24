@@ -63,7 +63,8 @@ echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-head
 | Linux | `OxCommander-<ver>-x64.AppImage` / `.deb` | AppImage 直接 `chmod +x` 后运行 |
 | macOS | **不产出** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺 |
 
-⚠️ **首次运行前要自备 `.env`**（放在项目根目录）。至少给一把商汤的 key：
+⚠️ **跑起来之前要有凭证**：桌面端可以在「设置」里填（加密进 OS keychain），也可以放一份 `.env`
+（headless CLI 只认这条）。至少给一把商汤的 key：
 
 ```dotenv
 SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
@@ -75,9 +76,9 @@ SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
 规则：`.env` **只补缺失项**，宿主环境里已设的值不会被覆盖；无 key 的 provider
 （本地 Ollama 之类）照样保留其线路。
 
-> 桌面端「设置」里填的 key 会经 OS keychain 加密落盘，但**当前 run 只读进程环境**（keychain 只在
-> 「测试连接」那条路径上被读到），所以 `.env` 现在还不能省 —— 这条限制的原因与修法见
-> [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) 的 P1。
+> 桌面端**可以不备 `.env`**：「设置」里填的 key 经 OS keychain 加密落盘，构建引擎时按池内 provider
+> 补回进程环境（大脑层与内置执行器同一来源）。优先级是 **进程环境 > `.env` > keychain**，三者都只补缺失项。
+> headless CLI 没有 key store，所以 `.env`（或宿主环境）仍是它的唯一入口。
 
 **方式二：从源码跑**（开发者）
 
@@ -103,7 +104,7 @@ typecheck（renderer / electron / headless 三套 tsconfig）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ vitest（940 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（943 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -158,7 +159,8 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 ## LLM 线路池
 
-13 条线路共享一张故障转移冷却表：商汤 3 密钥 × 4 模型 = 12 条 + AMD 1 条。
+线路池 = `shared/providers.ts` 里「每把 key × 每个模型」的笛卡尔积，再加不带多线路的 provider
+（当前实际条数由那两个表决定，界面文案同样从它们派生），全部共享一张故障转移冷却表。
 429 只冷却命中线路本身，请求立即落到同 key 其他模型 → 其他 key → 其他 provider；
 跨 provider 时认证失败不做整池 fail-fast。全部可在「设置 → 线路池」勾选配置。
 

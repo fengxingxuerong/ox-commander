@@ -77,6 +77,13 @@ export interface PlatformConfig {
   /** Explicit provider pool; falls back to `settings.llmPool`. */
   llmPool?: readonly string[];
   /**
+   * Host-side key seeding, applied before any brain client is built. The
+   * desktop keeps provider keys encrypted in its own store and only that store
+   * knows how to read them back, so the seeder has to reach the engine's own
+   * client too — not just the ones a caller asks for later.
+   */
+  seedKeys?: (envVars: Set<string>) => void;
+  /**
    * Durable checkpoint sink. When present the engine saves a snapshot at every
    * checkpoint and the host can resume a killed run instead of starting over.
    */
@@ -95,7 +102,8 @@ export interface Platform {
   layer: AgentLayer;
   /**
    * Builds the brain client. `seedKeys` lets the Electron host top up provider
-   * env vars from its encrypted key store first; headless omits it.
+   * env vars from its encrypted key store first; omit it and `config.seedKeys`
+   * applies (headless has no key store and passes neither).
    */
   buildLlm(seedKeys?: (envVars: Set<string>) => void): LlmClient;
   /** Scheduler options shared by both hosts (exposed for parity assertions). */
@@ -159,12 +167,16 @@ export function createPlatform(config: PlatformConfig): Platform {
   /**
    * Brain client builder. Seeding first matters: the pool reads provider keys
    * from `process.env`, and the Electron host keeps them encrypted on disk.
+   * A per-call seeder overrides `config.seedKeys`; when the caller passes
+   * nothing (the engine below does exactly that) the config seeder still runs,
+   * otherwise the key store would only be reachable from one-shot clients.
    */
   const buildLlm = (seedKeys?: (envVars: Set<string>) => void): LlmClient => {
     if (config.llm) return meteredLlm(config.llm, meter);
     // The host's seeder mutates `process.env` (it owns the key store); the set
     // it receives is just the list of vars worth resolving.
-    if (seedKeys) seedKeys(new Set<string>());
+    const seed = seedKeys ?? config.seedKeys;
+    if (seed) seed(new Set<string>());
     const pool = config.llmPool ?? settings.llmPool ?? [];
     return pool.length > 0
       ? buildLlmPool({ providers: pool, timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log, meter })

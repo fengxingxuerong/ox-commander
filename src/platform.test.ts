@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { BRAIN_POOL_TIMEOUT_MS, createFileJournal, createPlatform } from "../electron/platform";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
@@ -150,6 +150,39 @@ describe("createPlatform · brain client grade", () => {
     // Headless used to hard-code 300_000 while Electron passed nothing, so the
     // two hosts cut long generations off at different points.
     expect(BRAIN_POOL_TIMEOUT_MS).toBe(300_000);
+  });
+
+  it("config.seedKeys 在建平台时就播种：run 路径的引擎大脑不再漏掉密钥库", () => {
+    // 回归：播种器只能挂在 config 上。引擎自己的大脑客户端是在 `createPlatform`
+    // 内部**无参**构造的，把播种器留在某个调用点就等于「只有『测试连接』读得到
+    // Key」—— 桌面端把密钥加密存进 key store 后，正式 run 依然无凭证。
+    const seed = vi.fn();
+    createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      seedKeys: seed,
+      host: { log: () => undefined },
+    });
+    expect(seed).toHaveBeenCalledTimes(1);
+    // 播种器收到的是「值得解析的变量名」集合，它自己决定往哪写。
+    expect(seed.mock.calls[0][0]).toBeInstanceOf(Set);
+  });
+
+  it("调用点显式传入的播种器压过 config.seedKeys", () => {
+    const fromConfig = vi.fn();
+    const fromCall = vi.fn();
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      seedKeys: fromConfig,
+      host: { log: () => undefined },
+    });
+    fromConfig.mockClear();
+
+    platform.buildLlm(fromCall);
+
+    expect(fromCall).toHaveBeenCalledTimes(1);
+    expect(fromConfig).not.toHaveBeenCalled();
   });
 
   it("注入的 brain 客户端仍被使用，且它的用量被计入 platform.usage()", async () => {

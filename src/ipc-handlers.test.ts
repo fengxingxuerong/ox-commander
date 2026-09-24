@@ -30,7 +30,6 @@ const h = vi.hoisted(() => ({
   builtAdapter: null as any,
   buildAdapters: null as any,
   createAgentLayerFn: null as any,
-  llmSeeders: [] as any[],
   writeFileAtomic: null as any,
   generatePrd: null as any,
   decompose: null as any,
@@ -146,10 +145,7 @@ vi.mock("../electron/platform", () => ({
         pause: h.pauseEngine,
         resume: h.resumeEngine,
       },
-      buildLlm: vi.fn((seeder: unknown) => {
-        h.llmSeeders.push(seeder);
-        return { chat: h.llmChat };
-      }),
+      buildLlm: vi.fn(() => ({ chat: h.llmChat })),
     };
   }),
 }));
@@ -250,7 +246,6 @@ beforeEach(() => {
   dynamicAgentMap().clear();
   setRunningProjectId(null);
   h.createPlatformCalls.length = 0;
-  h.llmSeeders.length = 0;
   h.writeFileAtomic.mockClear();
   resetRegistryMocks();
   for (const store of h.projectInstances) {
@@ -781,16 +776,41 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
     }
   });
 
-  it("buildLlm wires the one-shot client and hands back the key-store seeder", async () => {
+  it("buildLlm 的一次性客户端由 config.seedKeys 播种，调用点不再各自传参", async () => {
     try {
       h.llmChat.mockResolvedValue({ content: "pong", provider: "sensenova", model: "m1" });
+      const keys = inst(h.keysInstances);
+      (keys.get as Mock).mockReturnValue("sk-store");
       const llm = buildLlm({ llmProvider: "sensenova", llmPool: [] } as never);
       const res = await llm.chat({ messages: [{ role: "user", content: "ping" }] });
       expect(res.model).toBe("m1");
-      expect(h.llmSeeders.length).toBe(1);
+
       const envVars = new Set<string>();
-      (h.llmSeeders[0] as (s: Set<string>) => void)(envVars);
+      lastPlatformConfig().seedKeys(envVars);
       expect(envVars.has("SENSENOVA_API_KEY")).toBe(true);
+      expect(process.env.SENSENOVA_API_KEY).toBe("sk-store");
+    } finally {
+      deleteSeededEnvVars();
+    }
+  });
+
+  it("run 路径的平台配置自带 keychain 播种器（P1 回归）", () => {
+    // 曾经只有「设置 → 测试连接」那条一次性路径把 seeder 传给 buildLlm，而 run
+    // 走的 buildEngine → buildPlatformLayer 不传，于是引擎的大脑客户端与内置执行器
+    // 都只看得见进程环境 —— key store 里存了 Key 也照样无凭证跑 run。
+    try {
+      deleteSeededEnvVars();
+      const keys = inst(h.keysInstances);
+      (keys.get as Mock).mockImplementation((v: string) => (v === "AMD_API_KEY" ? "amd-store" : "sk-store"));
+
+      buildEngine("p-seed-run");
+      const seedKeys = lastPlatformConfig().seedKeys;
+      expect(typeof seedKeys).toBe("function");
+
+      const envVars = new Set<string>();
+      seedKeys(envVars);
+      expect(envVars.has("SENSENOVA_API_KEY")).toBe(true);
+      expect(process.env.SENSENOVA_API_KEY).toBe("sk-store");
     } finally {
       deleteSeededEnvVars();
     }

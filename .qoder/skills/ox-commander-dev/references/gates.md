@@ -1,6 +1,6 @@
 # `npm run verify` 的 16 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、939 用例、约 2 分钟。
+顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、943 用例、约 2 分钟。
 README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
@@ -61,7 +61,8 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
   - 边 = **纯子串 `text.includes(另一个脚本名)`**（注释里提一句就成边；`docs/**` 的提及不算）
   - 从入口 BFS 求可达；门禁自身排除
   - 不可达脚本 FAIL（`:147-157`），失效 `ACCEPTED` FAIL（`:138-145`）
-  - ⚠️ 它的 `ACCEPTED` 字面量里有**重复键**（`:43` 与 `:54`），后者静默覆盖前者——抄模板别复制键
+  - 白名单以 `ACCEPTED_ENTRIES` 数组登记，建 Map **之前**先查重复键 → 重复即红
+    （旧版是 Map 字面量，里面同时登记过两次 `loomy-bridge.mjs`，被覆盖的那条理由静默消失）
 
 ## 6. `check:packaged-paths`
 

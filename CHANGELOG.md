@@ -14,6 +14,15 @@
 
 ### 修正
 
+- **桌面端 run 现在真的能用「设置」里存的 Key**（P1）。播种器改挂在 `PlatformConfig.seedKeys` 上，
+  `createPlatform` 内部构造引擎大脑时即生效；此前只有「设置 → 测试连接」那条一次性路径会读 keychain，
+  正式 run 的大脑层与内置执行器都只看进程环境（日常被根目录 `.env` 掩盖）。优先级仍是
+  进程环境 > `.env` > keychain，三者都只补缺失项。README 的凭证一节按此改写
+- `scripts/check-script-wiring.mjs` 的豁免表改以数组登记并在建 Map 前查重复键：旧字面量里
+  `loomy-bridge.mjs` 被写了两次，后一条理由静默顶掉前一条，而门禁本身察觉不到
+- 两处"注释描述了代码没做的事"：`circuit-breaker.ts` 的 `record` 不再被说成会放过 `retryable: false`
+  的失败（它只看布尔，行为本身保留）；`sensenova-api.ts` 写入不带 zone 的推迟理由从"等回滚落地"
+  换成真实理由（写入门是严格前缀，在这里认 zone 会误拒模型按约定写的模块文件）
 - 设置页线路池两处互不相符的说明文案（一处写 4 模型、另一处写 3 模型）改为从
   `SENSENOVA_KEY_VARS` / `SENSENOVA_MODELS` 派生，并加防漂移用例；`package.json` description 与
   两处代码注释同步去掉写死的数字

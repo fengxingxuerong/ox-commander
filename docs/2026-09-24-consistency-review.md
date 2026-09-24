@@ -49,6 +49,10 @@
    三种修法（**要先定哪种**）：① `PlatformConfig` 加 `seedKeys`，由 `createPlatform` 在建引擎前注入；
    ② 在 `buildPlatformLayer` 里先 `seedKeysFromStore` 再建平台（改动最小，但把副作用推给调用顺序）；
    ③ 给 `buildLlmPool` 传一个合并过 keychain 的 `env` 视图（最干净，但要同步覆盖执行器侧那两处 `process.env` 直读）。
+   **已按 ① 修**：`seedKeys` 挂在 `PlatformConfig` 上、`buildLlm` 内部按「调用点优先、否则用 config」取用，
+   `buildPlatformLayer` 传 `seedKeysFromStore`。执行器侧那两处仍读 `process.env`，但播种本身就是写
+   `process.env`（只补缺失项），所以并发闸与就绪判定同步拿到 Key。反证：分别切断 `config.seedKeys` 的
+   取用与 `buildPlatformLayer` 的传入，`src/platform.test.ts` / `src/ipc-handlers.test.ts` 各自变红。
 
 2. **P2 · `execToken` credential 不过 CommandPolicy**。`electron/agents/manifest-loader.ts:135-160` 直接
    `spawn(command, args, {shell:false})`，既不经命令白名单也不经 `buildSpawnSpec`（Windows 上 `.cmd` 还会 ENOENT）。
@@ -56,8 +60,11 @@
    要么在 `agents.d/README.md` 明示，要么给它过 CommandPolicy。
 3. **P2 · `sensenova-api.ts` 写入时不传 zone 的推迟理由可能已过期**。同处注释写 "until rollback lands (P4)"，
    而 `revert-batch` 如今已在 `batch-guard.ts:139-150` 实现。要么删掉这句陈旧理由，要么补上写入期 zone 强制（后者会改变行为面）。
+   **已按"改注释"处理**：那句推迟理由换成了真实理由——写入门用的是严格前缀判据，在这里认 zone 会把模型按约定写的
+   `src/duration.js`（zone 为 `src/duration`）在写入前就拒掉，而仲裁门刻意接受它（`shared/glob.ts:85-89` 给了理由）。
 4. **P3 · `circuit-breaker.ts:113` 注释描述了未实现的行为**：「`retryable: false` outcomes close nothing」，
    但 `record(id, ok)` 只收布尔，认证失败照样计入连续失败并可开熔断。改注释还是改行为，取决于是否希望认证失败触发熔断。
+   **已改注释、保留行为**：凭证坏掉的智能体同样关闸是想要的语义，否则它会在每个任务上再烧一次注定失败的请求。
 5. **P3 · `headless/protocol.ts:6-7` 自称 "pure: no fs, no process"**，同文件 `:14` import `node:path`、`:364` 读 `process.env`。
 6. **P3 · 分层红线仍无机制**：`tsconfig.headless.json` 的 include 已与真实依赖脱节（`run-spec.ts` 经
    `electron/platform` 拉进 `electron/sandbox`）；`tsconfig.node.json` 不在任何 script 里 → 两个 vite 配置文件从不 typecheck；

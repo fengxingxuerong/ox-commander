@@ -218,6 +218,11 @@ export function buildPlatformLayer(
     maxParallelRuns: settingsValue.maxParallelRuns,
     // The pool is a singleton so runtime registration survives engine rebuilds.
     layer: ensureAgentLayer(settingsValue),
+    // Every brain client this platform builds seeds from the key store, the
+    // engine's own included: `createPlatform()` constructs it with a no-argument
+    // `buildLlm()`, so a seeder passed only by the one-shot caller below would
+    // leave real runs reading an unseeded `process.env`.
+    seedKeys: (envVars) => seedKeysFromStore(settingsValue, envVars),
     ...(overrides.journal ? { journal: overrides.journal } : {}),
     host: {
       log: overrides.log,
@@ -267,7 +272,7 @@ export function buildPlatformLayer(
 /** Brain client for one-shot calls (the settings "test connection" button). */
 export function buildLlm(settingsValue: ProjectSettings): LlmClient {
   const platform = buildPlatformLayer(settingsValue, { log: logLine });
-  return platform.buildLlm((envVars) => seedKeysFromStore(settingsValue, envVars));
+  return platform.buildLlm();
 }
 
 /** Writes a checkpoint journal for one project. Best-effort: never breaks a run. */

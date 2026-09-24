@@ -359,8 +359,9 @@ export class SensenovaApiAdapter implements AgentAdapter {
   ): number {
     // Sandbox gate (P3): the path rules that used to be hard-coded here
     // (project root + protected paths) now live in PathPolicy, so every adapter
-    // shares one implementation. Zone enforcement is not applied at write time:
-    // it stays an after-the-fact judgement until rollback lands (P4).
+    // shares one implementation. Zone is deliberately left out: this gate uses a
+    // strict prefix, so honouring it here would reject `src/duration.js` for zone
+    // `src/duration` — a write the arbitration gate owns and must not roll back.
     const policy = new PathPolicy({ projectRoot });
     let count = 0;
     for (const f of files) {
