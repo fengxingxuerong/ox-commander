@@ -67,6 +67,18 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `done` | `passed, report` | 终态：交付 |
 | `error` | `message, exhausted?` | 终态：致命错误。`exhausted: true` 对应退出码 2 |
 
+### 2.1 被中断时宿主能看到什么
+
+收到 `SIGINT`/`SIGTERM` 时，进程把 `error` 作为**最后一条**事件发出（消息里写明快照备份留在哪）
+后以退出码 1 结束 —— 不会在终态之后再补 `verification`/`done`，也不会自己清备份：被中断的那一批
+可能正停在"越界文件已写、还没仲裁"的状态，那份备份是人工恢复现场的唯一材料。回收发生在**下一次**
+启动时，且只删 `snapshotRoot` 下形如 `batch-*` 且超过 24h 的目录。
+
+再按一次（第二个信号）不等 stdout 排空，直接退出。因此宿主"取消并想要现场"就发一次信号然后读
+`projectRoot/ox-run-journal.json`（下次同一份 spec 会跳过规划续跑），"取消并立刻要进程消失"就发两次。
+Windows 上信号投不进子进程（`kill()` 即 TerminateProcess），走的是"没终态事件"那条老路 ——
+宿主自己知道是自己杀的，退出码为 `null`。
+
 ## 3. escalationPolicy 语义与退出码
 
 | 取值 | 行为 | 退出码 |
