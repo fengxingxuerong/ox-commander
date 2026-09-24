@@ -555,4 +555,25 @@ describe("verifyProject sandbox gate", () => {
     expect(report.results[0]!.logDigest).toContain("终止进程树");
     expect(events.some((e) => e.includes("超过"))).toBe(true);
   });
+
+  /**
+   * 验证命令跑的是智能体刚写下的脚本，所以它是最宽的凭证面：
+   * 默认继承 process.env 时，桌面端 keychain 播种进去的每一把 key 都能被它读走。
+   * 这里在**父进程**埋一枚哨兵凭证，断言的是子进程**外部可观测**的输出，不是我们的对象。
+   */
+  it("verification subprocess sees neither the planted credential nor secret-shaped vars", async () => {
+    process.env.OX_VERIFY_SECRET_TOKEN = "canary";
+    try {
+      const file = script(
+        "const seen=Object.keys(process.env).filter((k)=>k.startsWith('OX_VERIFY')).sort().join(',');" +
+          "console.log('SEEN=['+seen+'] HASPATH='+(process.env.PATH?'yes':'no'));",
+      );
+      const report = await verifyProject([cmd(process.execPath, [file])], { cwd: () => process.cwd() });
+      expect(report.results[0]!.logDigest).toContain("SEEN=[]");
+      // 最小化不等于清空：没有 PATH 的子进程连构建都跑不起来。
+      expect(report.results[0]!.logDigest).toContain("HASPATH=yes");
+    } finally {
+      delete process.env.OX_VERIFY_SECRET_TOKEN;
+    }
+  });
 });

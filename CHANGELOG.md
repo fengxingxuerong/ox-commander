@@ -4,6 +4,34 @@
 版本号遵循语义化版本。**未发布前的版本只记"对用户/对维护者可见的变化"**，
 纯内部重构若改变了行为仍会记入。
 
+## [未发布]
+
+### 修复
+
+- **验证与冒烟的子进程不再继承宿主的凭证环境**（`electron/engine/verifier.ts`）。`runOnce` 与
+  `runSmokeChecks` 此前都不传 `env`，于是每一次 `npm run build`、每一条冒烟脚本都拿到完整的
+  `process.env` —— 那里面装着 3 把 SenseNova Key 和其余 provider 的 Key（桌面端把 keychain
+  播种进 `process.env`，`electron/main.ts` 还会加载 `.env`）。而验证命令跑的是**智能体刚写下的
+  项目脚本**：一句读环境的话就能把账单凭证带进它自己的输出。`cli-agent.dispatch` 早就用
+  `scopedEnv()` 关掉了这个面，`verifier` 是漏掉的那个。现在两处都传 `env: scopedEnv()`
+  （PATH / HOME / SystemRoot / TMP / `NPM_CONFIG_*` 仍透传；从**磁盘**读的 `.env`·`.npmrc` 不受影响）。
+  实测：修复前沙箱内子进程报出 7 个凭证变量名，修复后 0 个，同一条命令
+  （`src/sandbox-llm-call.smoke.test.ts`）就是复现方式。
+  代价当场兑现：验证脚本读不到白名单外的宿主变量了 —— `src/orchestrator.test.ts` 里那条
+  "用 `SMOKE_FIX` 环境变量翻转冒烟结果"的用例就是这么红的，已改成重修轮**改写样例脚本**，
+  这也更接近智能体真实的修法
+- **`CliAgentAdapter.probe()` 同样最小化环境**（`electron/agents/cli-agent.ts`）：探测就是拿
+  `--version` 真跑一次那个二进制，它此前也继承全部 Key —— `dispatch` 做了收缩、`probe` 没做
+
+### 新增
+
+- `src/sandbox-llm-call.smoke.test.ts`：**沙箱内的 LLM 可达性探针**（真实网络，刻意不进 `verify`，
+  跑法写在文件头）。子进程走的是生产同一条路：`planSpawn`（CommandPolicy 检查 → buildSpawnSpec
+  按平台包装）→ `spawn(shell:false, env: scopedEnv(...))`。它把"能不能调用"拆成三个各自成立的
+  事实：① 显式 `allowProviders: ["sensenova"]` 时沙箱子进程拿到真实 200 与 `pong`；
+  ② 默认最小化环境下凭证变量名为零，而端点仍回 401 —— 也就是**沙箱不掐网络**，
+  它管的是路径与命令，不是防火墙；③ `verifyProject` 起的子进程必须与 ② 同源（修复前是红的）
+
 ## [0.1.1] — 2026-09-25（首个带安装产物的发布）
 
 `0.1.0` 只在 CHANGELOG 里声明过、**从未打 tag 也从未产出安装包**，所以它描述的是

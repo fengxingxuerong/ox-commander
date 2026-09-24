@@ -117,6 +117,8 @@ export class CliAgentAdapter implements AgentAdapterV2 {
       try {
         child = spawn(plan.file, plan.args, {
           shell: false,
+          // 探测即真跑一次二进制：它同样拿不到凭证（dispatch 已如此，probe 曾漏）。
+          env: scopedEnv(),
           stdio: "ignore",
           ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         });

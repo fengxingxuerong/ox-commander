@@ -114,4 +114,29 @@ describe("CliAgentAdapter.dispatch · subprocess environment", () => {
     expect(env.SENSENOVA_API_KEY).toBeUndefined();
     expect(env.GITHUB_TOKEN).toBeUndefined();
   });
+
+  /**
+   * probe() 也是真跑一次那个二进制（`--version`），所以它和 dispatch 一样是凭证出口。
+   * 它 stdio 全 ignore，故让被探测的"CLI"把自身环境写进文件，再断言外部事实。
+   */
+  it("probe() does not hand the binary the operator's credentials either", async () => {
+    process.env.OX_PROBE_CANARY_TOKEN = "canary";
+    const file = path.join(promptDir, "probe-env.json");
+    try {
+      const adapter = new CliAgentAdapter({
+        id: "probe-env",
+        command: NODE,
+        argsTemplate: ["--version"],
+        probeArgs: ["-e", `require("fs").writeFileSync(${JSON.stringify(file)}, JSON.stringify(process.env))`],
+        promptDir,
+      });
+      expect(await adapter.probe()).toBe(true);
+      const env = JSON.parse(fs.readFileSync(file, "utf8")) as NodeJS.ProcessEnv;
+      expect(env.OX_PROBE_CANARY_TOKEN).toBeUndefined();
+      expect(env.SENSENOVA_API_KEY).toBeUndefined();
+      expect(env.PATH ?? env.Path).toBeTruthy();
+    } finally {
+      delete process.env.OX_PROBE_CANARY_TOKEN;
+    }
+  });
 });

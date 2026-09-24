@@ -15,6 +15,8 @@ interface FakeBehavior {
   /** close 延迟（毫秒）；undefined = 立即，null = 永不（配合超时测用 60ms 场景） */
   closeDelay?: number | null;
   onStdin?: (chunk: string) => void;
+  /** 拿到真正传给 spawn 的 env —— 断言"子进程看不到凭证"要用它，不能只测 scopedEnv 纯函数。 */
+  onSpawn?: (env: NodeJS.ProcessEnv | undefined) => void;
 }
 
 interface FakeChild {
@@ -29,7 +31,12 @@ interface FakeChild {
 }
 
 function fakeSpawnImpl(b: FakeBehavior) {
-  return (): FakeChild => {
+  return (
+    _file?: string,
+    _args?: readonly string[],
+    opts?: { env?: NodeJS.ProcessEnv },
+  ): FakeChild => {
+    b.onSpawn?.(opts?.env);
     const listeners: Record<string, Array<(...a: unknown[]) => void>> = {};
     const child: FakeChild = {
       pid: 99999,
@@ -97,6 +104,23 @@ describe("runSmokeChecks", () => {
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.exitCode).toBeNull();
     expect(results[0]!.logDigest).toMatch(/沙箱/);
+  });
+
+  it("冒烟子进程拿到的是最小化环境，不含任何凭证形状变量", async () => {
+    process.env.OX_SMOKE_CANARY_SECRET = "canary";
+    try {
+      let seen: NodeJS.ProcessEnv | undefined;
+      const results = await runSmokeChecks([check({ expectContains: [] })], {
+        cwd: ".",
+        spawnImpl: fakeSpawnImpl({ out: "", onSpawn: (env) => (seen = env) }) as never,
+      });
+      expect(results[0]!.ok).toBe(true);
+      expect(seen, "未显式传 env ⇒ 子进程继承宿主全部凭证").toBeDefined();
+      expect(Object.keys(seen!).filter((k) => /SECRET|TOKEN|API_KEY|PASSWORD/i.test(k))).toEqual([]);
+      expect(seen!.PATH).toBeTruthy();
+    } finally {
+      delete process.env.OX_SMOKE_CANARY_SECRET;
+    }
   });
 
   it("stdout 缺失期望片段 → 判定失败并注明缺失项", async () => {

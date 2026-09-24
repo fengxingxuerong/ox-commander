@@ -1247,7 +1247,14 @@ describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => 
 
   it("冒烟失败 → 拦截交付进重修 → 修复后交付", async () => {
     const script = path.join(root, "sample-smoke.js");
-    fs.writeFileSync(script, "console.log(process.env.SMOKE_FIX === '1' ? 'EXPECTED-OUTPUT' : 'nope');");
+    /**
+     * 首轮输出不合格、重修轮**改写脚本文件**后才合格 —— 刻意用文件而不是
+     * 宿主环境变量：验证/冒烟子进程走 `scopedEnv()` 最小化环境，那里读不到
+     * 测试进程自己 set 的变量，而"改文件"才是智能体真实的修法。
+     */
+    const writeSample = (fixed: boolean): void =>
+      fs.writeFileSync(script, fixed ? "console.log('EXPECTED-OUTPUT');" : "console.log('nope');");
+    writeSample(false);
     const smoke: SmokeCheck[] = [
       { title: "CLI 冒烟", command: process.execPath, args: ["sample-smoke.js"], expectContains: ["EXPECTED-OUTPUT"] },
     ];
@@ -1260,19 +1267,17 @@ describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => 
       settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
     };
     // 重修轮把样例脚本修好（模拟任务修复），冒烟二轮通过 → 才允许交付
-    process.env.SMOKE_FIX = "";
     const engine = new OrchestratorEngine(deps, {
       onStage: () => {},
       onLog: (l) => {
         events.push(l);
-        if (l.includes("重修第 1/1 轮")) process.env.SMOKE_FIX = "1";
+        if (l.includes("重修第 1/1 轮")) writeSample(true);
       },
       onTaskStatus: () => {},
       onVerification: (r) => events.push("verify:" + r.passed),
       onEscalation: () => {},
     });
     const report = await engine.execute(twoBatchTasks(), root, { smoke });
-    delete process.env.SMOKE_FIX;
     expect(events.filter((l) => l === "verify:false").length).toBe(1); // 首轮被冒烟拦截
     expect(report.passed).toBe(true);                                  // 修复后交付
     // 最终报告只携带末轮验证结果：冒烟修复后 ok=true（首轮的失败在 events 里）

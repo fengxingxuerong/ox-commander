@@ -4,6 +4,7 @@ import { digest } from "./scheduler";
 import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-policy";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
+import { scopedEnv } from "../agents/scoped-env";
 
 export interface VerifierDeps {
   cwd: () => string;
@@ -51,6 +52,9 @@ function runOnce(
       child = spawnImpl(plan.file, plan.args, {
         cwd,
         shell: false,
+        // 验证命令跑的是智能体刚写下的脚本。默认继承 process.env 会把手上的
+        // 每一把 provider key 交给它 —— 桌面端的 keychain 正是播种进 process.env 的。
+        env: scopedEnv(),
         ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
       });
     } catch (err) {
@@ -201,6 +205,8 @@ export async function runSmokeChecks(
         child = spawnImpl(plan.file, plan.args, {
           cwd: deps.cwd,
           shell: false,
+          // 同 runOnce：冒烟命令也是智能体写的代码，不给它看凭证。
+          env: scopedEnv(),
           ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
         });
       } catch (err) {
