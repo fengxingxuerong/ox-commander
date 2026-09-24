@@ -114,7 +114,7 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（962 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（984 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -181,6 +181,11 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - 所有智能体副作用强制过沙箱：路径七级判定（穿越/越根/受保护路径，realpath 后再判）、命令白名单 + 元字符拦截、
   deadline/idle 双超时、连续失败熔断
   （注：内置执行器写入时不带 zone，zone 约束由事后仲裁兜，见 `docs/2026-09-24-consistency-review.md`）
+- 沙箱**不管网络**：它是"能写哪个路径、能跑哪个程序"的判定层，不是防火墙。命令黑名单里有
+  `curl`/`wget`/`nc`，但 `node` 在白名单里——智能体自己发 HTTP 请求是拦不住的，
+  出网目标也不做任何限制。凭证侧的边界是：验证/冒烟子进程与 CLI 智能体都走最小化环境
+  （`scopedEnv`），默认拿不到宿主的其他 provider Key；要给它 Key 必须显式写 `allowProviders`
+  （探针与实测结论见 `src/sandbox-llm-call.smoke.test.ts`）
 - zone 越权默认**回滚**（内容备份，不用 git stash），可选隔离区 / 保留 / 仅日志
   （四档 `report-only`/`deny-all`/`revert-batch`/`quarantine` 各自对应一种行为：仅记录不改判 /
   保留文件但判批次失败 / 回滚越权路径 / 移入隔离区）

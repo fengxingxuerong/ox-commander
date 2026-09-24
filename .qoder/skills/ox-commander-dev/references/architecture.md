@@ -14,7 +14,7 @@
 
 **阶段**：6 个 Stage 定义在 `shared/types.ts:1-16`；PRD→PLANNING 由 `generatePrd` / `decompose` 各自 `onStage`
 （`electron/engine/orchestrator.ts:169,192`），DEVELOPMENT→VERIFICATION→DELIVERY→DONE 在 `runPipeline`（`:308,400,419-422`）。
-repair 循环 `while (round <= maxRounds + extraRounds)`（`:313`），默认 3 轮（`shared/types.ts:182`）。
+repair 循环 `while (round <= maxRounds + extraRounds)`（`:357`），默认 3 轮（`shared/types.ts:182`）。
 循环**之前**先跑一次基线验证（只在全新 run 上，断点续跑不跑）：目标项目本来就红的命令会随
 每一份重修上下文附上 `[本次运行前就已失败]`，避免智能体去修与自己无关的历史失败。代价是每次
 运行多一轮验证命令（`verifier` 是首败即停，所以基线只报出第一条红）。
@@ -99,11 +99,31 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
 `spawn(command, args, {shell:false})`，**不经 `CommandPolicy`、不经 `buildSpawnSpec`**（Windows 上 `.cmd` 会 ENOENT）。
 它的定位是"指挥机自己的取令牌命令"，所以红线是：**只加载自己写的 `agents.d`**，别把外来 manifest 放进目录。
 
+### 2026-09-25 加进来的三条不变量（别改回去）
+
+- **验证与冒烟的子进程走 `scopedEnv()`**（`electron/engine/verifier.ts` 的 `runOnce` 与
+  `runSmokeChecks`，`electron/agents/cli-agent.ts` 的 `probe()`）。它们跑的是**智能体刚写下的
+  项目脚本**，而桌面端把 keychain 播种进 `process.env`、`electron/main.ts` 还加载 `.env`，
+  不传 env 就等于把每一把 provider Key 交给模型代码（实测：修复前沙箱内子进程报出 7 个凭证变量名）。
+  副作用要知道：验证脚本读不到宿主自定义变量了 —— 依赖环境变量的构建/冒烟脚本会行为不同
+  （`src/orchestrator.test.ts` 里那条靠 `SMOKE_FIX` 翻转冒烟结果的旧用例就是这么红的，已改成改写文件）。
+- **Windows 的 cmd 包装必须给整条 line 再套一层引号**（`electron/sandbox/spawn-plan.ts` 的
+  win32 分支）。cmd 的 `/s` 语义是去掉首尾两个引号字符，所以"只给每个 token 加引号"时
+  `"C:\Program Files\nodejs\npm.cmd" run build` 被解析成命令 `C:\Program` 并报「不是内部或外部命令」。
+  Node 的默认安装路径就带空格 ⇒ 走 shim 的**每一条**验证命令必红；`.exe`（如 `node`）是直 spawn，
+  所以全套用例可以一直绿着。回归用例真 spawn 一个路径含空格的 `.cmd`（`src/spawn-plan.test.ts`，
+  POSIX 侧用例内早退）。
+- **回滚只删"有 create 证据"的文件**（`electron/sandbox/snapshot-store.ts` 的 `revertOne` +
+  `electron/engine/batch-guard.ts` 的 `begin`/`settle`）。快照只采集本批 zone，
+  "备份里没有"推不出"原本不存在"——旧逻辑据此把被模型改过的根级 `package.json` 当新增删掉，
+  且每轮重修再删一次。现在 `revert` 的删除要调用方传 `created`（来自 `FileJournal`，它看的是整棵树），
+  而 `begin` 把 `DEFAULT_SHARED_PATHS` 里的字面文件交给快照的 `include`，让"还原"而不是"删除"成为默认。
+
 ## 平台分支（写跨平台断言前必看）
 
 | 位置 | win32 | POSIX |
 | --- | --- | --- |
-| `spawn-plan.ts:121-139` | PATHEXT 解析 + `cmd.exe /d /s /c` + `windowsVerbatimArguments` | 直通 |
+| `spawn-plan.ts` 的 win32 分支 | PATHEXT 解析 + `cmd.exe /d /s /c "<整条 line 再套一层引号>"` + `windowsVerbatimArguments`（外层那对引号是承重的，见上面「三条不变量」） | 直通 |
 | `kill-tree.ts:13-45` | `taskkill /F /T` + post-grace double-check | `SIGTERM→SIGKILL`，开头 `hasExited` 预检查防 pid 复用误杀（`:49-64`） |
 | `path-policy.ts:66-70` | `isCaseInsensitiveFs(platform)` 已抽成可注入函数并导出；常量是 `CASE_INSENSITIVE_FS` | 构造期读常量，`forbiddenLower` 分支（`:148`）仍依赖真实 OS |
 
@@ -127,7 +147,8 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
   `out` / `bin` / `target` **刻意不在表里**（它们常是手写源码目录）。
 - 时钟/定时器注入点：`timeout-gate.ts:16-18`、`circuit-breaker.ts:9`、`audit-log.ts:41` 可注入；
   **`scheduler.ts` 的 throttle（`:156,169`）与 cli-agent / http-bridge 的 `Date.now()` 不可注入** → 测 429 退避只能靠假时钟。
-- headless **无任何 `process.on`**：Ctrl-C 之后快照备份目录与 `ox-run-journal.json` 都不清理（没有 `commit` 机会）。
+- headless 已装 SIGINT/SIGTERM 处理器（`headless/headless-main.ts:37`）；此前的"无任何 `process.on`、
+  中断后快照备份目录与 `ox-run-journal.json` 都不清理"已不成立，清理走启动期的 `pruneStaleBackups`。
 - `shared/glob.ts:54` 的 RegExp `cache` 无上限无淘汰，而 key 来自模型写的 glob。
 
 ## 线路池（README 这条核实为真）
@@ -151,4 +172,4 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README 旧版「15 步 / 930 用例」 | 17 步 / 962 用例（2026-09-25 本机实测） | `package.json:35` |
+| README 旧版「15 步 / 930 用例」 | 18 段 / 984 用例（975 passed + 9 skipped，2026-09-25 本机 win32 实测） | `package.json:36` |
