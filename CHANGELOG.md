@@ -49,6 +49,18 @@
   修的碰撞面）；第二次 → 断它当场说出「断点续跑：恢复快照」、**大脑零调用**（规划真的被跳过）、
   没到 24h 的遗留备份一个都没删也没谎报回收；第三次把遗留目录 mtime 推到 48h 前 → 断它被回收且
   在日志里点名，且回收不影响这一次正常交付。原先这些只在函数层用假件测过，进程边界之上没人验过
+- **`verify` 增加第 8 步 `check:tests-collected`：抓「盘上有、但 vitest 根本不收集」的测试文件**
+  （`scripts/check-tests-collected.mjs`）。起因是 `vitest.config.mts` 的 `test.include` 不含 `headless/**`
+  而 `coverage.include` 含它 —— 往 `headless/` 写一个测试文件会**一次都不执行**，却让 headless 的
+  覆盖率数字继续统计。判据取自 `vitest list --filesOnly` 的**真实输出**而不是自己解析 include 再匹配
+  glob（后者要重实现 picomatch 语义，一偏差门禁查的就不是它声称在查的东西，代价约 6s）。
+  `vitest list` 失败或产出空集合一律 **FAIL**，不当作"没有未收集项"放过。反证：往 `headless/` 放一个
+  `zz-probe.test.ts` → 门禁点名它并 exit 1；把 `headless/**/*.test.ts` 补进 include 后同一探针被收集，
+  且 `npx vitest run headless/zz-probe.test.ts` 真跑出 `1 passed`
+- **`check:scripts` 现在也检查 `.js`**（此前只认 `.mjs/.cjs`）。`scripts/acceptance/csvstat-acceptance.test.js`
+  此前两层都不覆盖：vitest 不收它、语法门禁也不认它，一个语法坏掉的验收套件要等验收方真拿去用那天才炸。
+  反证：注入一个语法坏的 `scripts/zz-probe.js` → `26/27` 且 exit 1 并打印 `SyntaxError`，删掉后 `26/26`
+  （多出来的那 1 个就是它）。`.js` 按 CommonJS 解析，要 ESM 请改扩展名为 `.mjs` 而不是放宽门禁
 
 ### 修正
 

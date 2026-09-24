@@ -1,6 +1,6 @@
 ---
 name: ox-commander-dev
-description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的 17 步机制、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
+description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的 18 步机制、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
 ---
 
 # OxCommander 开发
@@ -17,7 +17,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
    本机实测基线：EXIT 0 / 962 用例（956 passed + 6 skipped）/ 约 2 分钟。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
-3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 17 步 / 962）。任何数字现跑现查。
+3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 18 步 / 962）。任何数字现跑现查。
 
 ## 铁律
 
@@ -50,7 +50,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | 目的 | 命令 | 量级 |
 | --- | --- | --- |
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
-| 中档（脚本层改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker` | +5s |
+| 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
 | **验收** | `npm run verify` | ~2min |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
@@ -96,5 +96,5 @@ README/docs 与代码有几处口径不一致，动相关文件前先读
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 17 步逐条机制（每个检查脚本扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 18 步逐条机制（每个检查脚本扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致

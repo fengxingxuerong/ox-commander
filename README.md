@@ -98,7 +98,7 @@ npm run build:dist    # → release/（Windows + Linux）
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-24 本机实测 EXIT 0，17 步）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-25 本机实测 EXIT 0，18 步）：
 
 ```
 typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
@@ -106,6 +106,8 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
+→ check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
+  vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
 → vitest（962 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
@@ -184,7 +186,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 ## 文档索引
 
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
-  门禁 17 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
+  门禁 18 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
   （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
 - [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
   以及逐条带证据的**未修**缺陷清单

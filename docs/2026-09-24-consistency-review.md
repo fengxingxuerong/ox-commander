@@ -71,6 +71,22 @@
    `vitest.config.mts:16` 不收集 `headless/**/*.test.ts` 而 coverage 却统计它；`check-syntax.mjs:19` 不认 `.js`
    （`scripts/acceptance/csvstat-acceptance.test.js` 两层都不覆盖）。
    最小可行动作：给 eslint 加 `no-restricted-imports` 把 `shared/` 的 node API 拦成 error——**这是新增门禁，会让未来任何违规变红，需授权**。
+
+   **后两条已修（2026-09-25，各带反证）**——它们同属"漏挂"族，修法是把缺陷类变成门禁，而不是改一次：
+
+   | 缺口 | 修法 | 反证 |
+   | --- | --- | --- |
+   | `test.include` 不含 `headless/**`，而 `coverage.include` 含它 | include 补 `headless/**/*.test.ts` | 往 `headless/` 放一个 `zz-probe.test.ts` → 新门禁点名它且 **exit 1**；补上 glob 后同一探针被收集，且 `npx vitest run headless/zz-probe.test.ts` 真跑出 `1 passed`（证明"被收集"确实等于"被执行"，不只是 glob 对上了） |
+   | `check-syntax.mjs:19` 只认 `.mjs/.cjs` | 扩到 `.js`（按 CJS 解析；要 ESM 请改扩展名为 `.mjs`，而不是放宽门禁） | 往 `scripts/` 放一个语法坏的 `zz-probe.js` → `26/27 通过`、exit 1 并打印 `SyntaxError`；删掉后 `26/26`（多出来的那 1 个就是 `csvstat-acceptance.test.js`，它此前完全不在任何一层里） |
+   | 上面两条都只是"修一次"，下次再漏照样没人报 | 新增门禁 `scripts/check-tests-collected.mjs`（verify 第 8 步） | 见上一行第一格。另外它把「`vitest list` 失败或产出空集合」当 **FAIL** 而不是"没有未收集项"——收集过程坏了却报绿，是"基线失败被静默容忍"的同一类空转 |
+
+   该门禁的判据刻意取自 **`vitest list --filesOnly` 的真实输出**，而不是自己解析 include 再匹配 glob：
+   后者要重实现 picomatch 语义，任何偏差都会让门禁查的东西与 vitest 的真实行为分叉。代价 ~6s。
+   `scripts/acceptance/csvstat-acceptance.test.js` 进它的 `ACCEPTED`（它 require 的是**被验收项目**的
+   `scripts/src/{core,report,cli}`，本仓库没有那几个文件 → 它在本仓库跑不起来）——**理由写进白名单**，
+   不再是"没人知道它靠什么跑"。
+
+   仍未修的只有前两条（tsconfig 的 include 与真实依赖脱节、分层红线无机制），后者要新增 eslint 规则，需授权。
 7. **P4 · 确定性**：`Date.now()` 派生 id 的碰撞面仍在（`scheduler.ts:293` 批号即快照目录名、`:322` runId、
    `file-journal.ts:74`、`atomic-file.ts:30` tmp 名无计数器）。已修的只有项目 id（`store.ts:47` 的 `idSeq`，commit `f71ffbc`）。
 8. **P4 · `file-journal` 把构建产物算成越权**：`walkStat` 的 skip 只跳 `node_modules/.git/.ox-quarantine`（`:6`），

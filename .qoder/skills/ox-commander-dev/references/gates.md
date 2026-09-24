@@ -1,7 +1,7 @@
-# `npm run verify` 的 17 步逐条机制
+# `npm run verify` 的 18 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、962 用例、约 2 分钟。
-README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、962 用例、约 2 分钟。
+README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
 | --- | --- | --- | --- |
@@ -13,19 +13,20 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 > `build` / `build:headless` 仍用 `tsc -b`，因为它们要产出 `dist-electron`/`dist-headless`。
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
-| 4 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs` 逐个 `node --check` |
+| 4 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
 | 5 | `check:scripts-wired` | `scripts/check-script-wiring.mjs` | 不可达脚本 → 红；失效 `ACCEPTED` → 红 |
 | 6 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
 | 7 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
-| 8 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
-| 9 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
-| 10 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
-| 11 | `build:headless` | `tsc -b tsconfig.headless.json` | |
-| 12 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 10/11 的产物 |
-| 13-16 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
+| 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红** |
+| 9 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
+| 10 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
+| 11 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
+| 12 | `build:headless` | `tsc -b tsconfig.headless.json` | |
+| 13 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 11/12 的产物 |
+| 14-17 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
+| 18 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
 
-**12-17 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
+**13-18 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
 ## 1. typecheck：三套互不相干的工程
 
@@ -63,7 +64,8 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 
 ## 4-5. 脚本层的两道门
 
-- `check-syntax.mjs:19` 只认 `.mjs|.cjs` → **`scripts/**/*.js` 两层都不覆盖**（例：`scripts/acceptance/csvstat-acceptance.test.js`）
+- `check-syntax.mjs:19` 认 `.mjs|.cjs|.js`（`.js` 是 2026-09-25 加的，此前 `scripts/acceptance/csvstat-acceptance.test.js` 两层都不覆盖）。
+  `.js` 按 **CommonJS** 解析（本仓库 package.json 无 `"type":"module"`）→ `scripts/` 下要写 ESM 就**改成 `.mjs`**，别放宽门禁
 - `check-script-wiring.mjs`：
   - 入口 = package.json 各 script 值里出现的 `scripts/<name>.mjs|cjs`
   - 边 = **纯子串 `text.includes(另一个脚本名)`**（注释里提一句就成边；`docs/**` 的提及不算）
@@ -83,17 +85,31 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 用 `indexOf("function regexMayStartAt")` 和 `indexOf("/** 1-based 行号。 */")` 从 `mutation-check.mjs` 里抠函数体，
 锚点字符串一改就 **exit 2**；随后跑 24 个位点用例。**改 `mutation-check.mjs` 时这两个锚点不能动。**
 
-## 8. vitest
+## 8. `check:tests-collected`（2026-09-25 新增）
 
-- include 仅 `src/**/*.test.{ts,tsx}`、`shared/**/*.test.ts`、`electron/**/*.test.ts`
-  → **`headless/**/*.test.ts` 与 `scripts/*.test.js` 静默不被收集**，而 `coverage.include` 却含 `headless/**`
+扫 `src|shared|electron|headless|scripts` 下所有 `*.test.{ts,tsx,js,mjs,cjs}`（跳过 `node_modules|dist*|coverage|release|.git`），
+与 **`vitest list --filesOnly` 的真实输出**做差集。差集里的每一项必须在 `ACCEPTED`（当前 1 条：
+`scripts/acceptance/csvstat-acceptance.test.js`，理由是它 require 的是被验收项目的文件，在本仓库跑不起来），
+否则 FAIL。`ACCEPTED` 重复键 / 失效条目同样 FAIL。
+
+- 刻意**不**自己解析 `vitest.config.mts` 的 include 再匹配 glob：那要重实现 picomatch 语义，
+  一旦与 vitest 的真实行为分叉，这道门禁查的就不是它声称在查的东西。代价是 ~6s（spawn 一个 vitest）
+- **`vitest list` 失败或产出空集合 → FAIL**（不是"没有未收集项"）：收集过程坏了却报绿，
+  是"基线失败被静默容忍"的同一类空转
+- 与第 5 步同族：那边抓"写好的脚本没接进入口"，这边抓"写好的测试没进收集范围"
+
+## 9. vitest
+
+- include 为 `src/**/*.test.{ts,tsx}`、`shared/**/*.test.ts`、`electron/**/*.test.ts`、**`headless/**/*.test.ts`**
+  （最后一项 2026-09-25 补上；此前 `coverage.include` 含 `headless/**` 而 include 不含 →
+  往 headless 加测试会"不执行但计入覆盖率"）。`scripts/*.test.js` 仍不被收集，靠第 8 步的 ACCEPTED 兜住
 - **没有 `thresholds` / `enforceThresholds`** → 覆盖率永不致红，别把它当门禁
 - 没有 `setupFiles`、没有全局 environment；jsdom 靠文件首行 `// @vitest-environment jsdom`
 - `resolve.alias.electron` → `src/__fakes__/electron.ts`（否则测试里 `require("electron")` 拿到的是二进制路径字符串，`ipcMain` 为 undefined）
 - 真实 API 用例门控：`src/sensenova.smoke.test.ts` 要求 `OX_SMOKE==="1" && SENSENOVA_API_KEY`，`describe.skipIf` 默认跳过
 - 平台条件用例的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`
 
-## 9. 变异门禁：四个口径，数字不可互换
+## 10. 变异门禁：四个口径，数字不可互换
 
 `scripts/mutation-check.mjs`：`TARGETS` 是手工登记的 `{file, test|tests, tier}`（`:119-303`），7 个算子（`:337-345`），
 `MAX_SURVIVORS = 0`（`:320`，任何存活位点即红），还会做"掩空自洽校验"（`siteTotal + maskedTotal === rawTotal`，`:964`）。
@@ -127,7 +143,7 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 > 另一个同类陷阱：往重修上下文里**复制失败摘要**会冲掉"这条线索归谁"的断言依据，
 > 所以基线注记只报命令名与退出码，原因留在给操作者的日志里。
 
-## 12-16. 产物与集成 IT
+## 13-18. 产物与集成 IT
 
 - `artifact-smoke.mjs`：累计 `failed` 不早退；查 `dist/index.html` 存在、`dist-electron/**/*.js` 全量 `node --check`、
   headless 两次 stdin 协议退出码

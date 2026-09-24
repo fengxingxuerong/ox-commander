@@ -13,7 +13,15 @@ export default defineConfig({
     },
   },
   test: {
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "shared/**/*.test.ts", "electron/**/*.test.ts"],
+    // `headless/**` 的源码在 coverage.include 里（第 21 行），所以这里的 include 必须同步含它：
+    // 否则往 headless/ 下加测试文件会「不执行但计入覆盖率」。由 check-tests-collected.mjs 守着。
+    include: [
+      "src/**/*.test.ts",
+      "src/**/*.test.tsx",
+      "shared/**/*.test.ts",
+      "electron/**/*.test.ts",
+      "headless/**/*.test.ts",
+    ],
     exclude: ["node_modules", "dist", "dist-electron"],
     coverage: {
       provider: "v8",
