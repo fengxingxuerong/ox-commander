@@ -1549,6 +1549,46 @@ describe("OrchestratorEngine.decompose · 【规划校验】zone 覆盖", () => 
  * 抛错）都必须到 —— 只在成功路径上报，会让"最贵的那次运行"恰好看不见：
  * 反复重修的失败运行通常比一次顺利交付贵得多。
  */
+/**
+ * `verificationCommands: []` 是合法配置（headless 协议允许空集），而空集在 `verifyProject`
+ * 里恒为 passed。判定不改，改的是说法：零验证必须当场说出来，
+ * 否则看板与审计日志会显示"全部验证通过"，而那一次什么都没验过。
+ */
+describe("OrchestratorEngine · 零验证交付的口径", () => {
+  function verifyEngine(report: VerificationReport, logs: string[]): OrchestratorEngine {
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "log", events: [] }));
+      },
+    } as unknown as Scheduler;
+    return new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler, verify: async () => report, settings: { ...DEFAULT_SETTINGS } },
+      {
+        onStage: () => undefined,
+        onLog: (l) => logs.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+  }
+
+  it("空验证集：说「未经构建/测试验证」，而不是「全部验证通过」", async () => {
+    const logs: string[] = [];
+    const rep = await verifyEngine({ passed: true, results: [] }, logs).execute([TASKS], ".");
+    expect(rep.passed).toBe(true); // 判定本身不改
+    expect(logs.join(" | ")).toContain("未经构建/测试验证");
+    expect(logs.join(" | ")).not.toContain("全部验证通过");
+  });
+
+  it("有验证结果时仍然是原来那句", async () => {
+    const logs: string[] = [];
+    await verifyEngine(makeReport(true), logs).execute([TASKS], ".");
+    expect(logs.join(" | ")).toContain("全部验证通过，进入交付。");
+    expect(logs.join(" | ")).not.toContain("未经构建/测试验证");
+  });
+});
+
 describe("OrchestratorEngine · 用量回报", () => {
   const SNAPSHOT = {
     totalTokens: 321,

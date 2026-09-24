@@ -466,7 +466,17 @@ export class OrchestratorEngine {
       if (!anyDevFailure && report.passed) {
         this.cb.onStage("DELIVERY");
         const skippedNote = skipped.size > 0 ? `（用户跳过 ${skipped.size} 个任务）` : "";
-        this.cb.onLog(`全部验证通过，进入交付。${skippedNote}`);
+        /*
+         * `verificationCommands: []` 是合法配置（headless 协议允许空集），而空集在
+         * `verifyProject` 里恒为 passed —— 于是"全部验证通过"其实什么都没验。
+         * 判定刻意不改（纯文档类任务确实不需要构建），改的是**说法**：零验证当场说出来，
+         * 日志与审计里都留得下，看板不会显示成"验证通过"。
+         */
+        this.cb.onLog(
+          report.results.length === 0
+            ? "警告：没有配置任何验证命令，也没有冒烟样本运行过 —— 本次交付**未经构建/测试验证**，只按任务成功放行。"
+            : `全部验证通过，进入交付。${skippedNote}`,
+        );
         this.cb.onStage("DONE");
         return report;
       }

@@ -8,6 +8,13 @@
 
 ### 修复
 
+- **零验证不再被念成"验证通过"**（`electron/engine/orchestrator.ts`）。`verificationCommands: []`
+  是合法配置（headless 协议允许空集），而空集在 `verifyProject` 里恒为 `passed`，于是交付那一句日志
+  写的是"全部验证通过，进入交付。"——实际什么都没验。**判定刻意不改**（纯文档类任务确实不需要构建，
+  拒掉空集会让那类调用方红），改的是说法：`report.results` 为空时当场输出
+  「没有配置任何验证命令，也没有冒烟样本运行过 —— 本次交付**未经构建/测试验证**」。
+  冒烟样本算作验证（它会把条目落进 `results`），所以只有"命令为空且没有冒烟"才走这一句。
+  site 口径实测 orchestrator 28/28 全杀（新位点的两侧都有断言）
 - **取消现在会真的中止在跑的 run**（`electron/engine/scheduler.ts` + `electron/engine/orchestrator.ts`）。
   `cancel()` 过去只置一个 `cancelled` 标志，而那个标志只在下一个检查点生效；结果是用户点了取消，
   已经在跑的外部 CLI 智能体仍按自己的 `runDeadline`（默认 600s）跑完并继续改文件。
