@@ -8,6 +8,24 @@
 
 ### 修复
 
+- **取消现在会真的中止在跑的 run**（`electron/engine/scheduler.ts` + `electron/engine/orchestrator.ts`）。
+  `cancel()` 过去只置一个 `cancelled` 标志，而那个标志只在下一个检查点生效；结果是用户点了取消，
+  已经在跑的外部 CLI 智能体仍按自己的 `runDeadline`（默认 600s）跑完并继续改文件。
+  现在 Scheduler 登记在跑的句柄（`liveRuns`，出口在 `finally`），`cancel()` 下传
+  `abortInFlight()` 逐个 `adapter.abort(handle)`，并把中止数量播报成
+  `[取消] 已请求中止 N 个在跑的任务`（N=0 时不说这句话，不假装做了什么）；
+  某个适配器的 abort 抛错不影响其余的仍被中止
+- **内置执行器在中止之后不再落盘**（`electron/agents/sensenova-api.ts`）。模型那一回合是
+  **算完了**的（token 已花，这一条本次改不了），但 `writeFiles` 之前有了守卫：
+  生成物被丢弃并写日志。要真正省钱得把 `AbortSignal` 接进 HTTP 客户端，未做。
+  顺带把 `scripts/mutation-check.mjs` 里该文件的两条行号锚点按新行号校回（337→346、343→352），
+  site 口径实测 29/29 全杀；锚点旁散文里的旧坐标改成按构造点名，免得再漂一轮
+- **两个 IT 不再往 `%TEMP%` 扔目录**（`scripts/admission-gateway-it.mjs`、
+  `scripts/e2e-snapshot-secrets.cjs`）。它们建完目录没有任何清理，本机实测
+  `ox-agents-it-*` / `ox-gw-it-*` / `ox-snap-*` 各 **45 个** = 跑 `verify` 的次数，
+  其中 `ox-snap-*` 里还写着**长得像真 Key 的**哨兵字符串。现在都挂在 `process.on("exit")` 上，
+  判定通过/失败/`process.exit` 三条路都会经过。复现核对：
+  `npm run smoke:gateway` 前后各数一次 `ls -d $TEMP/ox-agents-it-* | wc -l`
 - **回滚不再删掉用户项目自己的 `package.json`**（`electron/sandbox/snapshot-store.ts` +
   `electron/engine/batch-guard.ts`）。默认档 `revert-batch` 的删除判据是"备份里没有 ⇒ 它是本批新建"，
   而快照只备份本批 zone 覆盖到的路径（通常 `src/`、`tests/`）—— 于是模型改根级 `package.json`

@@ -1357,6 +1357,7 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
         eng.cancel();
         throw new CancelledError();
       },
+      abortInFlight: async () => 0,
     } as unknown as Scheduler;
     const deps: OrchestratorDeps = {
       llm: fakeLlm(),
@@ -1376,6 +1377,70 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
     expect(statuses.at(-1)).toBe("t1:cancelled");
   });
 
+  /**
+   * `cancel()` 不只是设一个标志位：标志位只拦得住下一个检查点，已经在跑的 run
+   * （外部 CLI 进程、在途 HTTP 请求）必须被真的中止，否则用户点了取消，
+   * 智能体还会继续跑满自己的 runDeadline 并改文件。
+   */
+  it("cancel 会下传中止，并把中止数量播报出来", async () => {
+    let abortCalls = 0;
+    const scheduler = {
+      async runBatch() {
+        return [];
+      },
+      async abortInFlight() {
+        abortCalls += 1;
+        return 2;
+      },
+    } as unknown as Scheduler;
+    const logs: string[] = [];
+    const engine = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS },
+      },
+      {
+        onStage: () => undefined,
+        onLog: (l) => logs.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    engine.cancel();
+    // cancel 是同步 API，数量是在微任务里回来的
+    await new Promise((r) => setTimeout(r, 0));
+    expect(abortCalls).toBe(1);
+    expect(logs.join(" | ")).toContain("已请求中止 2 个在跑的任务");
+  });
+
+  it("一个都没中止时不播报（不假装做了什么）", async () => {
+    const logs: string[] = [];
+    const scheduler = {
+      async runBatch() {
+        return [];
+      },
+      async abortInFlight() {
+        return 0;
+      },
+    } as unknown as Scheduler;
+    const engine = new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler, verify: async () => makeReport(true), settings: { ...DEFAULT_SETTINGS } },
+      {
+        onStage: () => undefined,
+        onLog: (l) => logs.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    engine.cancel();
+    await new Promise((r) => setTimeout(r, 0));
+    expect(logs.join(" | ")).not.toContain("已请求中止");
+  });
+
   it("does not mark a task cancelled once it already reached a terminal state", async () => {
     const statuses: string[] = [];
     let eng!: OrchestratorEngine;
@@ -1384,6 +1449,7 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
       async runBatch(tasks: Task[]) {
         return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "log", events: [] }));
       },
+      abortInFlight: async () => 0,
     } as unknown as Scheduler;
     const deps: OrchestratorDeps = {
       llm: fakeLlm(),

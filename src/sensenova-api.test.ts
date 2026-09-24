@@ -121,6 +121,47 @@ describe("parseFilePayload", () => {
 });
 
 describe("SensenovaApiAdapter", () => {
+  /**
+   * 取消的语义收口：模型这一回合**算完了**（token 已经花掉，这一条改不了），
+   * 但往用户工作区落文件是不可逆副作用 —— 中止之后必须丢弃。
+   * 假客户端停在 chat 里等我们放行，正好复现"在途请求返回时 run 已经不在了"。
+   */
+  it("drops the generated files when the run was aborted while the model was still answering", async () => {
+    const root = tmpRoot();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const client: LlmClient = {
+      async chat(): Promise<ChatResponse> {
+        await gate;
+        return {
+          content: JSON.stringify({ files: [{ path: "src/add.js", content: "module.exports = 1;" }] }),
+          provider: "test",
+          model: "test-model",
+        };
+      },
+    };
+    const adapter = new SensenovaApiAdapter(client);
+    const handle = await run(adapter, root);
+    const pump = (async () => {
+      for await (const _e of adapter.collect(handle)) {
+        // 只是消费事件；断言看的是文件系统这个外部事实
+      }
+    })();
+    await new Promise((r) => setTimeout(r, 0)); // 让 dispatch 走进 chat
+    await adapter.abort(handle);
+    release(); // 模型**这才有答案** —— 此时 run 已经中止
+    await pump;
+    /*
+     * collect 在 abort 那一刻就收摊了（session.finished），"丢弃"那条 log 不经过这里，
+     * 所以断言只看外部事实。60ms 远大于那一回合的收尾（writeFiles 是同步的），
+     * 未修的实现此刻必然已经落盘。
+     */
+    await new Promise((r) => setTimeout(r, 60));
+    expect(fs.existsSync(path.join(root, "src", "add.js"))).toBe(false);
+  });
+
   it("writes model-returned files and completes", async () => {
     const root = tmpRoot();
     const adapter = new SensenovaApiAdapter(

@@ -139,6 +139,14 @@ export class OrchestratorEngine {
 
   cancel(): void {
     this.cancelled = true;
+    /*
+     * 标志位只拦得住下一个检查点。已经在跑的 run 必须被真的掐掉 —— 否则用户点了
+     * 取消之后，外部 CLI 智能体还会跑满自己的 runDeadline（默认 600s）继续改文件。
+     * `abortInFlight` 承诺永不 reject，所以这里接得住一个不处理的 Promise。
+     */
+    void this.deps.scheduler.abortInFlight().then((n) => {
+      if (n > 0) this.cb.onLog(`[取消] 已请求中止 ${n} 个在跑的任务`);
+    });
   }
 
   pause(): void {

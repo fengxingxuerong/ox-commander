@@ -209,11 +209,20 @@ export class SensenovaApiAdapter implements AgentAdapter {
         if (queued && !session.finished) {
           session.push("log", `[sensenova-api] LLM 并发槽位已满，本任务排队等待`);
         }
-        const written = this.writeFiles(
-          payload.projectRoot,
-          await this.generateWithCooldownRetry(client, userParts, session),
-          session,
-        );
+        const generated = await this.generateWithCooldownRetry(client, userParts, session);
+        if (session.finished) {
+          /*
+           * run 已被中止。模型这一回合是**算完了**的（token 已花），但写盘是不可逆
+           * 副作用 —— 取消之后再落文件，用户看到的是一份他叫停过的改动。
+           * 真正掐掉在途请求要把 AbortSignal 接进 HTTP 客户端，那是另一件事。
+           */
+          session.push(
+            "log",
+            `[sensenova-api] run 已中止，丢弃本回合生成的 ${generated.length} 个文件`,
+          );
+          return;
+        }
+        const written = this.writeFiles(payload.projectRoot, generated, session);
         if (!session.finished) {
           session.push("completed", `写入 ${written} 个文件（run ${payload.runId}）`);
         }

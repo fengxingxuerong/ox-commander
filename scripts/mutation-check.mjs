@@ -455,12 +455,12 @@ const EQUIVALENT_SITES = [
    */
   { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 309 },
   /**
-   * `electron/agents/sensenova-api.ts:337` `if (isSecretLikeFile(rel)) continue;`
-   * 的 `continue → break` —— **可证明不可达**（一级）。
+   * `electron/agents/sensenova-api.ts` 里 `readSnapshotContents` 的那行
+   * `if (isSecretLikeFile(rel)) continue;` 的 `continue → break` —— **可证明不可达**（一级）。
    *
    * 这一行自称"二次防线：即使上层 walk 漏过某个凭据文件，这里也不读它的正文"。
-   * 但 `statEntries` **只在 `walkStat` 里被 push**（307 行），而 walk 在 304 行
-   * 用**同一个纯函数 `isSecretLikeFile`** 在**同一个 `rel`** 上已经过滤过一次 ——
+   * 但 `statEntries` **只在同一个方法里的 `walkStat` 中被 push**，而那次 walk 在
+   * push 之前用**同一个纯函数 `isSecretLikeFile`** 对**同一个 `rel`** 已经过滤过一次 ——
    * 所以进得了 `statEntries` 的条目必然不满足该谓词，这行永远不执行。
    *
    * 换句话说它是**防御性冗余**，注释里承诺的"二次防线"在当前结构下不成立。
@@ -470,16 +470,20 @@ const EQUIVALENT_SITES = [
    * 2026-09-23：usage 可见性轮在上方插入 14 行（meter 接线），行号 317 → 331，
    * 白名单曾因行号失配短暂失效、被全量 audit 抓到存活 —— 处置即校回行号。
    * 2026-09-24：快照跳过清单改接 file-journal 的共享表，上方插入 6 行 → 331 → 337。
+   * 2026-09-25：中止守卫轮在 `dispatch` 里插入 9 行 → 337 → 346。
+   *   （这一轮起把描述改成**按构造点名**而不是"307 行/304 行"：锚点行号是机器判的，
+   *    而散文里的行号没人判，上一轮就是这么漂掉两处还留着旧坐标。）
    * 两层防御仍在：walkStat 用**同一个** `isSecretLikeFile` 在同一个 rel 上先过滤过一次。
    */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 337 },
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 346 },
   /**
-   * `electron/agents/sensenova-api.ts:343` `catch { continue; }`（读文件失败）—— 二级。
+   * `readSnapshotContents` 中读文件失败的 `catch { continue; }` —— 二级。
    *
    * 要触发它需要「walk 阶段 statSync 成功、内容阶段 readFileSync 失败」——
    * 即两次系统调用之间文件被删（TOCTOU）。测试里构造不出确定性的触发：
-   * walk 与 read 在同一个方法调用里紧邻（323 行调用 `readSnapshotContents`），
-   * 没有任何可插桩的间隙；Windows 上也没有"可写但不可读"的稳定文件状态。
+   * walk 与 read 在同一个方法调用里紧邻（`readSnapshot` 直接调
+   * `readSnapshotContents`），没有任何可插桩的间隙；
+   * Windows 上也没有"可写但不可读"的稳定文件状态。
    *
    * ⚠️ 二级判定（经验性，不是证明）。若将来给该模块加 fs 注入点
    * （同 `zone-guard` / `snapshot-store` 的 `FsLike` 模式），
@@ -487,8 +491,9 @@ const EQUIVALENT_SITES = [
    *
    * 2026-09-23：同上，usage 轮行号漂移 323 → 337，audit 抓到后校回。
    * 2026-09-24：快照跳过清单轮再下移 6 行 → 343；TOCTOU 在测试里仍构造不出。
+   * 2026-09-25：中止守卫轮在其上方插入 9 行 → 343 → 352。
    */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 343 },
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 352 },
   /**
    * `electron/ipc/context.ts:177` 的 `settingsValue.agentRouter !== false` → `=== false`
    * —— **可证明等价**（一级）。

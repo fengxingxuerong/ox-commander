@@ -99,6 +99,11 @@ export class Scheduler {
   private probeCache = new Map<string, Promise<boolean>>();
   /** Platform-wide concurrency gate (see `SchedulerOptions.maxParallelRuns`). */
   private running = 0;
+  /**
+   * 正在跑的 run → 它的句柄。`cancel()` 要能把它们真的掐掉，只设标志位的话
+   * 外部 CLI 智能体会继续跑满自己的 runDeadline（默认 600s）并改文件。
+   */
+  private readonly liveRuns = new Map<string, RunHandle>();
   private slotWaiters: Array<() => void> = [];
   /** 429 节流：此前派发必须等到的时间戳（epoch ms）。 */
   private throttleUntil = 0;
@@ -137,6 +142,28 @@ export class Scheduler {
   /** Runs currently holding a slot; surfaced by the agents panel. */
   activeRuns(): number {
     return this.running;
+  }
+
+  /**
+   * 请求中止所有在跑的 run（`OrchestratorEngine.cancel()` 的下游）。
+   *
+   * 逐个适配器单独处理：一个 abort 抛错不该让其余的继续跑。返回值是**成功请求
+   * 中止的数量**，且本方法永不 reject —— 调用方是同步的 cancel，接不住异常。
+   */
+  async abortInFlight(): Promise<number> {
+    let aborted = 0;
+    for (const handle of [...this.liveRuns.values()]) {
+      const adapter = this.findAdapter(handle.agentId);
+      if (!adapter) continue;
+      try {
+        await adapter.abort(handle);
+        aborted += 1;
+      } catch {
+        // abort 失败没有能收着它的地方：适配器自己不收口的话，run 会按自己的
+        // 时限跑完。这里不报错是为了让其余在跑的 run 仍被中止。
+      }
+    }
+    return aborted;
   }
 
   private probeCached(adapter: AgentAdapter): Promise<boolean> {
@@ -343,9 +370,11 @@ export class Scheduler {
       // Platform-wide concurrency cap: the pool may be wide, but the provider
       // quota is not. Held for the whole run, released in `finally`.
       await this.acquireSlot();
+      let handle: RunHandle | undefined;
       try {
         await this.awaitThrottle();
-        const handle = await agent.dispatch(payload);
+        handle = await agent.dispatch(payload);
+        this.liveRuns.set(handle.runId, handle);
         const outcome = await this.collectToTerminal(handle, task.id);
         const withMeta: DispatchOutcome = {
           ...outcome,
@@ -375,6 +404,7 @@ export class Scheduler {
         this.opts.onRunComplete?.(failed, task);
         return failed;
       } finally {
+        if (handle) this.liveRuns.delete(handle.runId);
         this.releaseSlot();
       }
     });

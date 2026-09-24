@@ -41,6 +41,75 @@ function adapterWith(id: string, ok: boolean, opts?: { probe?: boolean; dispatch
   };
 }
 
+describe("Scheduler.abortInFlight", () => {
+  /**
+   * "卡住不返回"的适配器：collect 等在 gate 上，只有 abort 放行 ——
+   * 这样才有真正"在跑"的窗口可以观察登记表。
+   */
+  function stuckAdapter(id: string, log: string[], failAbort = false): AgentAdapter {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        log.push(`dispatch:${id}`);
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        await gate;
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {
+        // 无论这次 abort 算不算失败，run 都得收摊 —— 否则用例自己挂死在 collect 上。
+        release();
+        if (failAbort) throw new Error(`abort refused by ${id}`);
+        log.push(`abort:${id}`);
+      },
+    };
+  }
+
+  async function waitLive(sched: Scheduler, n: number): Promise<void> {
+    for (let i = 0; i < 100 && sched.activeRuns() < n; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    // activeRuns 数的是槽位；再让出一拍，确保 dispatch 已经返回、句柄已登记
+    await new Promise((r) => setTimeout(r, 10));
+  }
+
+  it("掐掉在跑的 run；收摊之后登记表是干净的", async () => {
+    const log: string[] = [];
+    const sched = new Scheduler([stuckAdapter("a1", log)]);
+    const batch = sched.runBatch([task("t1", "src/a")], ".");
+    await waitLive(sched, 1);
+
+    expect(await sched.abortInFlight()).toBe(1);
+    expect(await batch).toHaveLength(1);
+    expect(log).toContain("abort:a1");
+    // finally 已经把它从 liveRuns 摘掉：再 abort 一次既不能计数也不能重复打扰适配器
+    expect(await sched.abortInFlight()).toBe(0);
+    expect(log.filter((x) => x === "abort:a1")).toHaveLength(1);
+  });
+
+  it("一个适配器的 abort 抛错，其余在跑的 run 仍被中止", async () => {
+    const log: string[] = [];
+    const sched = new Scheduler([
+      stuckAdapter("bad", log, true),
+      stuckAdapter("good", log),
+    ]);
+    const batch = sched.runBatch([task("t1", "src/a"), task("t2", "src/b")], ".");
+    await waitLive(sched, 2);
+
+    const n = await sched.abortInFlight();
+    // bad 抛错 ⇒ 不计入；good 正常 ⇒ 计入
+    expect(n).toBe(1);
+    expect(log).toContain("abort:good");
+    await batch;
+  });
+});
+
 describe("Scheduler.runBatch", () => {
   it("runs zone-disjoint tasks concurrently and collects outcomes", async () => {
     const sched = new Scheduler([adapterWith("a1", true)]);
