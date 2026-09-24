@@ -2,6 +2,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { isPathInZone } from "../../shared/glob";
 
+/** 台账 id 的同毫秒单调序数（见 `begin` 的注释）。 */
+let journalSeq = 0;
+
 /**
  * Directories whose churn is never one task's business.
  *
@@ -102,7 +105,10 @@ export class FileJournal {
     return { ...this.lastStats };
   }
 
-  begin(root: string, zones: string[], id = `j-${Date.now().toString(36)}`): JournalToken {
+  // `id` 缺省由调用方省略时的防碰撞后缀：同毫秒连开两批，裸 `Date.now()`
+  // 会给出同一个台账 id，而回滚与冲突归因都按 id 取台账 —— 撞了就分不清
+  // 哪份基线属于哪一批。与 store.ts 的 idSeq 同一套做法。
+  begin(root: string, zones: string[], id = `j-${Date.now().toString(36)}-${(journalSeq += 1)}`): JournalToken {
     const rootAbs = path.resolve(root);
     return {
       id,

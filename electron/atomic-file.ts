@@ -22,12 +22,29 @@ import path from "node:path";
  * `fs.renameSync` is only atomic within one filesystem — `/tmp` is frequently a
  * different mount, which would degrade the rename to a copy.
  */
+/**
+ * 同一进程内的单调序数。`pid + Date.now()` 两件套的漏洞是**毫秒粒度**：
+ * 同一毫秒里连写两次（并发任务各自落盘、或重入写同一个文件）会得到同一个
+ * tmp 名，后写的覆盖先写的 —— 那次 write 的内容就凭空丢了，且没有任何报错。
+ * 与 `store.ts` 的 `idSeq`、`scheduler.ts` 的 `dispatchSeq` 同一套做法。
+ */
+let tmpSeq = 0;
+
+/**
+ * 临时文件名策略（纯函数，便于断言"同毫秒也不同名"）。
+ * 落点是**同目录**：`fs.renameSync` 只在同一文件系统内是原子的，`/tmp`
+ * 常是另一个挂载点，跨挂载会退化成复制。
+ */
+export function tempNameFor(base: string, pid = process.pid, now = Date.now()): string {
+  return `.${base}.${pid}.${now}.${(tmpSeq += 1)}.tmp`;
+}
+
 export function writeFileAtomic(file: string, content: string): void {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
   // Unique per process+call so two concurrent writers cannot clobber each
   // other's temp file; the rename that follows is what actually publishes.
-  const tmp = path.join(dir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+  const tmp = path.join(dir, tempNameFor(path.basename(file)));
   try {
     fs.writeFileSync(tmp, content, "utf8");
     fs.renameSync(tmp, file);

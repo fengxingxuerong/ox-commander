@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { FileJournal } from "../electron/sandbox/file-journal";
 import {
   SnapshotStore,
@@ -1607,5 +1607,31 @@ describe("FileJournal · 遍历与比对的跳过语义", () => {
 
     const ops = journal.changed(token).map((c) => c.op + ":" + c.path).sort();
     expect(ops).toEqual(["modify:z-after-link.js"]);
+  });
+});
+
+describe("FileJournal · 台账 id 的防碰撞", () => {
+  it("同毫秒连开两批，缺省 id 互不相同（回滚与归因按 id 取台账）", () => {
+    // 必须钉死时钟：两次 begin 之间要 walkStat 整棵树，真实时钟下大概率跨毫秒，
+    // 于是"裸时间戳"也能碰巧给出不同 id —— 断言看起来绿，其实什么都没验。
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-25T00:00:00.000Z"));
+    try {
+      // 裸 `Date.now()` 在这一格就是同一个 id：两批共用一份台账 id，
+      // 于是"哪份基线属于哪一批"不可分辨 —— 冲突归错批、回滚拿错基线。
+      const root = scratch("journal-id-collision");
+      const journal = new FileJournal();
+      const a = journal.begin(root, []);
+      const b = journal.begin(root, []);
+      expect(a.id).not.toBe(b.id);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("显式传入的 id 仍原样使用（调用方可以自己保证唯一）", () => {
+    const root = scratch("journal-id-explicit");
+    const token = new FileJournal().begin(root, [], "j-fixed");
+    expect(token.id).toBe("j-fixed");
   });
 });

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readJsonFile, writeFileAtomic } from "../electron/atomic-file";
+import { readJsonFile, tempNameFor, writeFileAtomic } from "../electron/atomic-file";
 import { ProjectStore, SettingsStore } from "../electron/store";
 import { DEFAULT_SETTINGS } from "../shared/types";
 
@@ -42,6 +42,26 @@ describe("writeFileAtomic", () => {
     expect(() => writeFileAtomic(blocker, "x")).toThrow();
     // The real file was never touched, so a reader still sees a complete value.
     expect(fs.readFileSync(file, "utf8")).toBe("good");
+  });
+});
+
+describe("tempNameFor · 同毫秒也要唯一", () => {
+  it("同一 pid 同一毫秒的两次调用给出不同名字（并发写不再互相覆盖）", () => {
+    // 只有 pid + Date.now() 时这两次会得到同一个 tmp：后写的覆盖先写的，
+    // 那次内容凭空消失且不报错。这正是 CI 上"偶发丢一次写入"的形状。
+    const a = tempNameFor("data.json", 4242, 1_700_000_000_000);
+    const b = tempNameFor("data.json", 4242, 1_700_000_000_000);
+    expect(a).not.toBe(b);
+  });
+
+  it("名字里带 pid、basename 与 .tmp 后缀（落点仍是同目录）", () => {
+    const name = tempNameFor("data.json", 4242, 1_700_000_000_000);
+    expect(name.startsWith(".data.json.4242.")).toBe(true);
+    expect(name.endsWith(".tmp")).toBe(true);
+  });
+
+  it("不同 basename 互不相同（同目录多文件并发写不串台）", () => {
+    expect(tempNameFor("a.json", 7, 1)).not.toBe(tempNameFor("b.json", 7, 1));
   });
 });
 
