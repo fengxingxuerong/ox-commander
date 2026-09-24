@@ -2,6 +2,8 @@
   "name": "ox-commander",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
+  "author": "fengxingxuerong",
   "description": "总指挥智能体：把项目需求拆解后按 zone 并行下发给 SenseNova API 执行器（3 密钥 × 3 模型故障转移），经构建+测试多轮硬性验证后交付",
   "main": "dist-electron/electron/main.js",
   "scripts": {
@@ -10,6 +12,7 @@
     "build": "tsc -b && vite build && tsc -b tsconfig.electron.json",
     "start": "electron .",
     "build:headless": "tsc -b tsconfig.headless.json",
+    "build:dist": "npm run build && npm run build:headless && electron-builder --win --linux --publish never",
     "smoke:artifact": "node scripts/artifact-smoke.mjs",
     "smoke:snapshot-secrets": "node scripts/e2e-snapshot-secrets.cjs",
     "smoke:gateway": "node scripts/admission-gateway-it.mjs",
@@ -19,6 +22,7 @@
     "check:scripts": "node scripts/check-syntax.mjs",
     "check:scripts-wired": "node scripts/check-script-wiring.mjs",
     "check:masker": "node scripts/masker-selftest.mjs",
+    "check:packaged-paths": "node scripts/check-packaged-paths.mjs",
     "mutation": "node scripts/mutation-check.mjs --limit=8",
     "mutation:site": "node scripts/mutation-check.mjs --mode=site --limit=8",
     "mutation:audit": "node scripts/mutation-check.mjs --mode=site --limit=999",
@@ -27,7 +31,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json",
-    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import"
+    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import"
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -45,6 +49,7 @@
     "@vitest/coverage-v8": "^4.1.11",
     "cross-env": "^7.0.3",
     "electron": "^33.2.0",
+    "electron-builder": "^26.15.3",
     "eslint": "^9.30.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "jsdom": "^30.1.0",
