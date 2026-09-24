@@ -6,6 +6,7 @@
  * trustworthy if its happy path is actually exercised.
  */
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { VerificationExhaustedError } from "../electron/engine";
 import type { OrchestratorCallbacks, RunSnapshot } from "../electron/engine";
 import type { AgentLayer } from "../electron/agents";
@@ -36,11 +37,62 @@ export function requiredCredentialVars(spec: ParsedSpec): string[] {
   return [...out];
 }
 
-/** 池内 provider 一个凭证都没有时，给宿主一句能行动的话。 */
-function missingCredentials(spec: ParsedSpec): string[] | undefined {
+/** 池内 provider 一个凭证都没有时，返回那些缺的变量名；否则 undefined。 */
+export function missingCredentials(spec: ParsedSpec): string[] | undefined {
   const wanted = requiredCredentialVars(spec);
   const present = wanted.filter((v) => (process.env[v] ?? "").trim() !== "");
   return wanted.length > 0 && present.length === 0 ? wanted : undefined;
+}
+
+/**
+ * 回收中断/崩溃留下的快照备份目录。
+ *
+ * 为什么不能"退出时删"：Ctrl-C 那一刻，备份恰恰是人工恢复现场的唯一材料，
+ * 而续跑会另起一个批号（= 目录名），旧备份既接不上也没人再来清 —— 它就是
+ * `userData/snapshots` 只会变大的原因。所以回收放在**启动时**，且两条硬约束：
+ *   · 只认 `batch-*` 形状（`Scheduler` 发的批号），别的一律不碰 —— 宿主把
+ *     `snapshotRoot` 指到共享目录时也不该丢别人的东西；
+ *   · 只删超过保留期的（默认 24h），避免 concurrent run 正在用的目录被误删。
+ * 返回删掉的目录数；任何 fs 错误都吞掉（回收是卫生工作，不该让一次 run 因它失败）。
+ */
+export interface PruneResult {
+  removed: number;
+  /** 想删但删不掉的（权限、被占用）—— 不吞掉，否则"回收过了"是假的。 */
+  failed: string[];
+  /** 备份根本不存在（首次运行）时为真：不是错误，但调用方措辞不同。 */
+  missingRoot: boolean;
+}
+
+export function pruneStaleBackups(
+  backupRoot: string,
+  opts: { now?: number; maxAgeMs?: number } = {},
+): PruneResult {
+  const now = opts.now ?? Date.now();
+  const maxAge = opts.maxAgeMs ?? 24 * 60 * 60 * 1000;
+  const out: PruneResult = { removed: 0, failed: [], missingRoot: false };
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(backupRoot, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") out.missingRoot = true;
+    // 备份根读不动（权限等）也不炸：回收是卫生工作。
+    else out.failed.push(`${backupRoot}: ${(e as Error).message}`);
+    return out;
+  }
+  // 显式排序：`readdirSync` 在 Linux 上是 hash 序、Windows 上是字典序，而 `failed`
+  // 是要给宿主比对的结果列表，不能随平台变。
+  for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    if (!entry.isDirectory() || !entry.name.startsWith("batch-")) continue;
+    const abs = path.join(backupRoot, entry.name);
+    try {
+      if (now - fs.statSync(abs).mtimeMs <= maxAge) continue;
+      fs.rmSync(abs, { recursive: true, force: true, maxRetries: 3 });
+      out.removed += 1;
+    } catch (e) {
+      out.failed.push(`${entry.name}: ${(e as Error).message}`);
+    }
+  }
+  return out;
 }
 
 export interface RunSpecIo {
@@ -76,7 +128,6 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     warnings: spec.warnings,
   });
   for (const w of spec.warnings) io.emit({ type: "log", text: `[protocol] ${w}` });
-
   // 没有凭证时，第一声大脑层调用只会吐 "failover client has no groups" —— 那是内部话，
   // 宿主拿到以后不知道该做什么。这里提前一步说清楚要什么。放在 hello 之后，
   // 因为宿主的协议用法是先读 hello；注入了 llm 替身的调用方不受此限。
@@ -94,6 +145,16 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   }
 
   const policy = spec.escalationPolicy;
+  // 上一次被中断的运行留下的备份目录在这里回收（放在 hello 之后：宿主的读法是先拿 hello）。
+  const pruned = pruneStaleBackups(spec.snapshotRoot);
+  if (pruned.removed > 0 || pruned.failed.length > 0) {
+    io.emit({
+      type: "log",
+      text:
+        `[snapshots] 回收 ${pruned.removed} 个中断遗留的备份目录（${spec.snapshotRoot}）` +
+        (pruned.failed.length > 0 ? `，另有 ${pruned.failed.length} 个删不掉：${pruned.failed.join("；")}` : ""),
+    });
+  }
   const redispatched = new Set<string>();
   const callbacks: OrchestratorCallbacks = {
     onStage: (stage) => io.emit({ type: "stage", stage }),

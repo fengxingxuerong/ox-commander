@@ -295,6 +295,11 @@ const TARGETS = [
   // （NaN/负数/缺字段不能污染总量）是它的全部价值所在 —— 这类"算错了也不报错"
   // 的逻辑正该进变异门禁。tier 1：整份测试 9ms。
   { file: "shared/usage-meter.ts", test: "src/usage-meter.test.ts", tier: 1 },
+
+  // ---- 2026-09-24 第八批：headless 的两道纯逻辑闸 ----
+  // 凭证闸（少 Key 就拒跑）与备份回收（`pruneStaleBackups`）都是"判错方向不报错"
+  // 的逻辑：前者放行了会打到没密钥的 provider，后者删错了会吃掉唯一的中断现场。
+  { file: "headless/run-spec.ts", tests: ["src/headless-protocol.test.ts"], tier: 2 },
 ];
 
 /**

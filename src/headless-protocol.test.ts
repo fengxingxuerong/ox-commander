@@ -3,10 +3,10 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
-import { runSpec, requiredCredentialVars } from "../headless/run-spec";
+import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
 import type { LlmClient } from "../shared/llm-client";
-import type { AgentAdapter, Task, VerificationReport } from "../shared/types";
+import type { AgentAdapter, Task, TaskPayload, VerificationReport } from "../shared/types";
 import type { AgentCapabilities } from "../shared/agent-contract";
 import type { PrdDocument } from "../shared/types";
 
@@ -411,10 +411,12 @@ describe("runSpec", () => {
     const stages = events.filter((e) => e.type === "stage").map((e) => (e as { stage: string }).stage);
     expect(stages).toEqual(["PRD", "PLANNING", "DEVELOPMENT", "VERIFICATION", "DELIVERY", "DONE"]);
 
-    const runs = events.filter((e) => e.type === "run") as Array<{ phase: string; agentId?: string; ok?: boolean }>;
+    const runs = events.filter((e) => e.type === "run") as Array<{ phase: string; agentId?: string; ok?: boolean; durationMs?: number }>;
     expect(runs.map((r) => r.phase)).toEqual(["start", "end"]);
     expect(runs[1]!.agentId).toBe("worker");
     expect(runs[1]!.ok).toBe(true);
+    // 耗时是宿主唯一的逐次耗时来源（批次级数字盖不住一次 run），必须原样带出来。
+    expect(typeof runs[1]!.durationMs).toBe("number");
 
     const hello = events[0] as Extract<HeadlessEvent, { type: "hello" }>;
     expect(hello.protocolVersion).toBe(PROTOCOL_VERSION);
@@ -452,6 +454,71 @@ describe("runSpec", () => {
     // 这里会算出 SenseNova 那 4 个变量）。
     const single = parse(JSON.stringify({ ...LEGACY_SPEC, llmProvider: "deepseek", llmPool: [] }));
     expect(requiredCredentialVars(single)).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("凭证闸的三个分支各自判对：全缺拒跑、有一条就放行、不需要 Key 的不误伤", () => {
+    // 这一格曾经把"有 Key 的线路"和"所有线路"混成一格：只要不是全缺就拒跑，
+    // 于是宿主手里有一条可用线路也进不来。反过来，本地 provider 的 wanted 是空集，
+    // 空数组在调用方是真值 —— 当成"缺东西"返回会把零配额的 Ollama 挡在门外。
+    const vars = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "SENSENOVA_API_KEY_3", "AMD_API_KEY"];
+    const pooled = parse(JSON.stringify(LEGACY_SPEC));
+    const keyless = parse(JSON.stringify({ ...LEGACY_SPEC, llmProvider: "ollama", llmPool: ["ollama"] }));
+    const saved: Record<string, string | undefined> = {};
+    for (const v of vars) {
+      saved[v] = process.env[v];
+      delete process.env[v];
+    }
+    try {
+      expect(missingCredentials(pooled)).toEqual(requiredCredentialVars(pooled));
+      process.env.SENSENOVA_API_KEY_2 = " sk-partial ";
+      expect(missingCredentials(pooled)).toBeUndefined();
+      // 纯空白不算持有凭证
+      process.env.SENSENOVA_API_KEY_2 = "   ";
+      expect(missingCredentials(pooled)).toEqual(requiredCredentialVars(pooled));
+      expect(missingCredentials(keyless)).toBeUndefined();
+    } finally {
+      for (const v of vars) {
+        if (saved[v] === undefined) delete process.env[v];
+        else process.env[v] = saved[v];
+      }
+    }
+  });
+
+  it("中断遗留的快照备份：只回收过期的 batch-* 目录", () => {
+    const root = scratch("prune-backups");
+    const old = Date.parse("2020-01-01T00:00:00Z");
+    const fresh = Date.now();
+    const mk = (name: string, when: number) => {
+      const dir = path.join(root, name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, "src__a.js"), "backup", "utf8");
+      fs.utimesSync(dir, new Date(when), new Date(when));
+      return dir;
+    };
+    // 名字是排过序的：回收按字典序遍历，所以两条"跳过"（非 batch- 的杂项、没过保留期）
+    // 都排在待删项之前 —— 否则"跳过这一条"和"整个循环到此为止"看不出区别。
+    const stale1 = mk("batch-old-1", old);
+    const stale2 = mk("batch-old-2", old);
+    const keepFresh = mk("batch-fresh", fresh);
+    const keepForeign = mk("b-foreign-dir", old);
+    const keepFile = path.join(root, "a-loose.txt");
+    fs.writeFileSync(keepFile, "x", "utf8");
+
+    // 保留期是"超过 24h"，所以这里给 48h —— 正好卡在边界上应当保留，
+    // 那不是本用例要测的东西（边界由下面的 fresh/old 两侧共同说明）。
+    const res = pruneStaleBackups(root, { now: Date.parse("2020-01-03T00:00:00Z") });
+    expect(res.failed, `删不掉的原因要说出来：${JSON.stringify(res.failed)}`).toEqual([]);
+    expect(res.removed).toBe(2);
+    expect([fs.existsSync(stale1), fs.existsSync(stale2)]).toEqual([false, false]);
+    expect(fs.existsSync(keepFresh)).toBe(true);
+    // 宿主把 snapshotRoot 指到共享目录时，非本方案命名的目录一个都不能碰。
+    expect(fs.existsSync(keepForeign)).toBe(true);
+    expect(fs.existsSync(keepFile)).toBe(true);
+    // 备份根不存在（首次运行）不是错误，但要说得清"是没得删"而不是"删不动"。
+    const missing = pruneStaleBackups(path.join(root, "missing"));
+    expect(missing.removed).toBe(0);
+    expect(missing.missingRoot).toBe(true);
+    expect(missing.failed).toEqual([]);
   });
 
   it("没有凭证时给一句能行动的话，而不是内部术语", async () => {
@@ -725,6 +792,89 @@ describe("runSpec", () => {
     const code = await runSpec(spec, { emit, isDirectory: () => false });
     expect(code).toBe(1);
     expect(events).toEqual([{ type: "error", message: expect.stringContaining("projectRoot") }]);
+  });
+
+  it("projectRoot 指向一个文件（存在、但不是目录）时同样拒跑", async () => {
+    // 上一条注入的是 isDirectory，所以默认实现那一格从没被走过 —— 只看 existsSync
+    // 的实现会把一个普通文件当成合法根目录，然后一路走到第一次真读写才炸。
+    const file = path.join(scratch("headless-root-file"), "not-a-dir.txt");
+    fs.writeFileSync(file, "x", "utf8");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: file }));
+    const { events, emit } = collect();
+    const code = await runSpec(spec, { emit });
+    expect(code).toBe(1);
+    expect(events).toEqual([{ type: "error", message: expect.stringContaining("不是目录") }]);
+  });
+
+  it("上次被中断留下的备份目录在 hello 之后就被回收，并且说出来", async () => {
+    // 静默回收等于没回收：snapshotRoot 只会变大的那个前提，就是没人告诉宿主它被清过。
+    const root = scratch("headless-prune-run");
+    const snap = path.join(root, ".snap");
+    const stale = path.join(snap, "batch-interrupted");
+    fs.mkdirSync(stale, { recursive: true });
+    const twoDaysAgo = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    fs.utimesSync(stale, twoDaysAgo, twoDaysAgo);
+    const spec = parse(
+      JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, snapshotRoot: snap, verificationCommands: [] }),
+    );
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+    expect(code, JSON.stringify(events.filter((e) => e.type === "error"))).toBe(0);
+    expect(fs.existsSync(stale)).toBe(false);
+    const logs = events.filter((e) => e.type === "log").map((e) => e.text);
+    expect(logs.some((t) => t.includes("[snapshots] 回收 1 个"))).toBe(true);
+    // hello 仍然先发出：宿主的读法是先拿 hello 再判其余事件。
+    expect(events[0]!.type).toBe("hello");
+  });
+
+  it("三种升级策略在“还要不要再派一次”上是三种行为", async () => {
+    // 都只断言"最后报了 escalation"的话，三者就退化成一种 —— 取反位点正是在这里存活。
+    const rows: Array<{ policy: string; code: number; dispatches: number; escalations: number }> = [];
+    for (const policy of ["skip", "redispatch_once", "abort"] as const) {
+      const root = scratch(`headless-esc-${policy}`);
+      const spec = parse(
+        JSON.stringify({
+          ...LEGACY_SPEC,
+          projectRoot: root,
+          maxRepairRounds: 0,
+          escalationPolicy: policy,
+          verificationCommands: [],
+        }),
+      );
+      const { events, emit } = collect();
+      let dispatches = 0;
+      const failing: AgentAdapter = Object.assign(fakeAdapter("worker"), {
+        async dispatch(payload: TaskPayload) {
+          dispatches += 1;
+          return { runId: payload.runId, agentId: "worker", taskId: payload.taskId };
+        },
+        async *collect() {
+          yield { kind: "failed" as const, text: "exit 1", timestamp: Date.now() };
+        },
+      });
+      const code = await runSpec(spec, {
+        emit,
+        llm: tasksResponse([fakeTask("t1", "src")]),
+        layer: createAgentLayer({ adapters: [failing] }),
+        verify: async () => pass,
+      });
+      rows.push({
+        policy,
+        code,
+        dispatches,
+        escalations: events.filter((e) => e.type === "escalation").length,
+      });
+    }
+    expect(rows).toEqual([
+      { policy: "skip", code: 0, dispatches: 1, escalations: 1 },
+      { policy: "redispatch_once", code: 1, dispatches: 2, escalations: 2 },
+      { policy: "abort", code: 1, dispatches: 1, escalations: 1 },
+    ]);
   });
 
   it("surfaces protocol warnings as log lines", async () => {

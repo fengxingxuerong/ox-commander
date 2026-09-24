@@ -18,6 +18,35 @@ function emit(evt: HeadlessEvent): void {
   process.stdout.write(`${JSON.stringify(evt)}\n`);
 }
 
+/**
+ * 中断处理。此前这个进程**没有任何 signal 处理器**：Ctrl-C 之后宿主只拿到被截断的
+ * JSONL（没有终态事件），而中断留下的备份目录永远没人回收。
+ *
+ * 这里刻意不删备份：被中断的那一批可能正处在"越界文件已经写了、还没仲裁"的状态，
+ * 那份备份是人工恢复现场的唯一材料。回收是下一次运行启动时的事
+ * （`run-spec.ts` 的 `pruneStaleBackups`：只认 `batch-*` 且超过保留期的目录）。
+ */
+function installInterruptHandlers(snapshotRoot: string): void {
+  let seen = false;
+  for (const sig of ["SIGINT", "SIGTERM"] as const) {
+    process.on(sig, () => {
+      if (seen) {
+        // 第二下：别再等了，直接走。
+        process.exit(1);
+      }
+      seen = true;
+      emit({
+        type: "error",
+        message:
+          `收到 ${sig}，运行被中断。工作区可能停在未仲裁的一批上；` +
+          `本次的快照备份保留在 ${snapshotRoot} 下（由下一次运行回收）。`,
+      });
+      // 不 process.exit()：让 stdout 刷出去，也给在飞的仲裁一次落盘机会。
+      process.exitCode = 1;
+    });
+  }
+}
+
 function readStdin(): Promise<string> {
   return new Promise((resolve) => {
     let raw = "";
@@ -34,6 +63,7 @@ async function main(): Promise<number> {
     emit({ type: "error", message: parsed.message });
     return 1;
   }
+  installInterruptHandlers(parsed.spec.snapshotRoot);
   return runSpec(parsed.spec, { emit });
 }
 
