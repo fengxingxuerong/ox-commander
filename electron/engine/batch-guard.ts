@@ -101,7 +101,21 @@ export class BatchGuard {
     const scope: BatchScope = { runId, rootAbs, zones: [...zones], changes: [] };
     this.journalTokens.set(scope, this.journal.begin(rootAbs, scope.zones, runId));
     if (this.snapshots) {
-      this.snapshotTokens.set(scope, await this.snapshots.begin({ runId, root: rootAbs, zones: scope.zones }));
+      this.snapshotTokens.set(
+        scope,
+        await this.snapshots.begin({
+          runId,
+          root: rootAbs,
+          zones: scope.zones,
+          /*
+           * 共享文件必须在"看得见"的位置：zone 通常只有 src/、tests/，而模型改
+           * package.json 是最常见的越权形态（也正是下面 sharedPaths 存在的理由）。
+           * 不把它交给快照层，回滚时那里就"没有备份"，而"没有备份"曾被推断成
+           * "本批新增"并把用户的文件删掉 —— 现在快照层对没看过的位置只报告不删。
+           */
+          include: sharedFilePaths(this.sharedPaths),
+        }),
+      );
     }
     return scope;
   }
@@ -146,8 +160,11 @@ export class BatchGuard {
 
     const allPaths = [...new Set(conflicts.flatMap((c) => c.paths))];
     if (this.mode === "revert-batch") {
+      // 删除的许可来自日志的 create 记录，而不是"备份里没有"：zone 外的根级
+      // package.json 被改过时后者会把它判成新建，于是回滚把用户的文件删掉。
+      const created = changes.filter((c) => c.op === "create").map((c) => c.path);
       const revertResult = this.snapshots
-        ? await this.snapshots.revert(this.snapshotTokenOf(scope), { paths: allPaths })
+        ? await this.snapshots.revert(this.snapshotTokenOf(scope), { paths: allPaths, created })
         : null;
       if (revertResult) {
         this.onEvent?.(
@@ -292,6 +309,11 @@ function describe(c: Conflict): string {
   return c.kind === "unauthorized-write"
     ? `越权写入 ${c.paths.length} 个 zone 外文件`
     : `共享文件被改动：${c.paths.join("、")}`;
+}
+
+/** `sharedPaths` 里的字面文件路径（排除 glob）：只有它们谈得上"提前备份下来"。 */
+function sharedFilePaths(patterns: readonly string[]): string[] {
+  return patterns.filter((p) => !p.includes("*"));
 }
 
 function matchesShared(rel: string, pattern: string): boolean {

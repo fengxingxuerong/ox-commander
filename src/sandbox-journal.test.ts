@@ -356,6 +356,53 @@ describe("SnapshotStore", () => {
     expect(read(root, "src/b.js")).toBe("b1"); // untouched on purpose
   });
 
+  /**
+   * 回滚只能删"证明是本批新建"的文件。快照的采集范围只有本批的 zone，
+   * 所以 zone 外路径"备份里没有"根本推不出"它原本不存在"——旧逻辑正是这样
+   * 把被模型改过的根级 package.json 当新增删掉的。
+   */
+  it("no backup and no create-evidence: report it, never delete it", async () => {
+    const root = scratch("snap-evidence");
+    const backupRoot = scratch("snap-evidence-backups");
+    write(root, "src/a.js", "a");
+    write(root, "package.json", '{"name":"the-user-project"}'); // zone 外，begin 没看它
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-ev", root, zones: ["src"] });
+    write(root, "package.json", '{"name":"hijacked"}');
+
+    const result = await store.revert(token, { paths: ["package.json"] });
+    expect(result.removed).toEqual([]);
+    expect(read(root, "package.json")).toBe('{"name":"hijacked"}'); // 保留现场
+    expect(result.skipped[0]?.reason).toContain("无备份");
+  });
+
+  it("create-evidence still deletes a file the batch made outside the zones", async () => {
+    const root = scratch("snap-evidence2");
+    const backupRoot = scratch("snap-evidence2-backups");
+    write(root, "src/a.js", "a");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-ev2", root, zones: ["src"] });
+    write(root, "package.json", '{"name":"generated"}');
+
+    const result = await store.revert(token, { paths: ["package.json"], created: ["package.json"] });
+    expect(result.removed).toEqual(["package.json"]);
+    expect(read(root, "package.json")).toBeNull();
+  });
+
+  it("include 把 zone 外但必须可回滚的文件纳入备份范围", async () => {
+    const root = scratch("snap-include");
+    const backupRoot = scratch("snap-include-backups");
+    write(root, "src/a.js", "a");
+    write(root, "package.json", "original-manifest");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-in", root, zones: ["src"], include: ["package.json"] });
+    write(root, "package.json", "rewritten");
+
+    const result = await store.revert(token, { paths: ["package.json"], created: [] });
+    expect(result.restored).toEqual(["package.json"]);
+    expect(read(root, "package.json")).toBe("original-manifest");
+  });
+
   it("does not delete a pre-existing file it failed to back up", async () => {
     const root = scratch("snap-budget");
     const backupRoot = scratch("snap-budget-backups");
@@ -1088,6 +1135,49 @@ describe("BatchGuard arbitration", () => {
     // Only the violating paths were selected, so the in-zone edit survives.
     expect(read(root, "src/a.js")).toBe("changed");
     expect(events.join("|")).toContain("已回滚");
+  });
+
+  /**
+   * 真事故形状：任务只拥有 src/，模型顺手改根级 package.json（加依赖是最常见的一次越权）。
+   * 旧的默认 revert-batch 会因为"快照范围里没有它 ⇒ 备份里没有 ⇒ 本批新建"把它**删掉** ——
+   * 用户项目的清单文件消失，而且每轮重修再删一次。现在它必须被回滚成原内容。
+   */
+  it("shared file edited outside the zones is restored, not deleted", async () => {
+    const root = scratch("guard-shared");
+    const backupRoot = scratch("guard-shared-backups");
+    const original = '{"name":"user-project","scripts":{"build":"node build.js"}}';
+    write(root, "src/a.js", "a");
+    write(root, "package.json", original);
+    const events: string[] = [];
+    const guard = new BatchGuard({
+      snapshots: new SnapshotStore({ backupRoot }),
+      mode: "revert-batch",
+      onEvent: (t) => events.push(t),
+    });
+    const scope = await guard.begin("r-shared", root, ["src"]);
+    write(root, "package.json", '{"name":"user-project","dependencies":{"left-pad":"1.0.0"}}');
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+    // package.json 既在 zone 外又被 shared 名单点名，检测层去重后归到 unauthorized-write，
+    // 这里认的是"它被列进了冲突清单"，不认 KIND 标签本身。
+    expect(verdict.conflicts.flatMap((c) => c.paths)).toContain("package.json");
+    expect(verdict.outcomes[0]!.ok).toBe(false);
+    // 关键断言：文件还在，而且是被还原的那一份
+    expect(read(root, "package.json")).toBe(original);
+    expect(events.join("|")).toContain("删除 0 个新增文件");
+  });
+
+  /** 反向：项目里本来没有 package.json，是这一批生成出来的 —— 那才该删。 */
+  it("a shared file the batch actually created is still rolled back (deleted)", async () => {
+    const root = scratch("guard-shared-new");
+    const backupRoot = scratch("guard-shared-new-backups");
+    write(root, "src/a.js", "a");
+    const guard = new BatchGuard({ snapshots: new SnapshotStore({ backupRoot }), mode: "revert-batch" });
+    const scope = await guard.begin("r-shared-new", root, ["src"]);
+    write(root, "package.json", '{"name":"generated"}');
+
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+    expect(read(root, "package.json")).toBeNull();
   });
 
   it("批内构建产物既不判越权、也不被回滚删除（默认档）", async () => {

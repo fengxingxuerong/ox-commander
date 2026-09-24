@@ -8,6 +8,18 @@
 
 ### 修复
 
+- **回滚不再删掉用户项目自己的 `package.json`**（`electron/sandbox/snapshot-store.ts` +
+  `electron/engine/batch-guard.ts`）。默认档 `revert-batch` 的删除判据是"备份里没有 ⇒ 它是本批新建"，
+  而快照只备份本批 zone 覆盖到的路径（通常 `src/`、`tests/`）—— 于是模型改根级 `package.json`
+  （加依赖是最常见的一次越权）被仲裁检出之后，回滚把用户本来有的清单文件**当新增删掉**，
+  每轮重修再删一次。现在两件事分开：
+  ① `BatchGuard.begin` 把 `sharedPaths` 里的字面文件交给快照层的 `include`，它们从批开始就在备份里，
+  回滚是**还原原内容**；② `revert` 的删除只认正面证据 —— 调用方传进来的 `created` 集合，
+  来自 `FileJournal` 的 `create` 记录（日志看的是整棵树，不受 zone 限制），
+  "没有备份"从此只记 `skipped`、不动文件。
+  反证：把生产改动退回上一版，新用例 `shared file edited outside the zones is restored, not deleted`
+  当场红；还原后 80/80 绿。同时留了反向用例（项目本来没有 `package.json`、是这一批生成的 → 仍删），
+  避免把"不删"修成无条件
 - **Windows 上每一条走 `.cmd` shim 的验证命令都是红的**（`electron/sandbox/spawn-plan.ts`）。
   cmd 包装过去只给每个 token 加引号：`/c "C:\Program Files\nodejs\npm.cmd" run build`。
   而 `/s` 的语义正是"去掉首尾两个引号字符、中间原样保留"，于是 cmd 把它解析成命令
@@ -16,7 +28,7 @@
   也就是桌面端开箱跑任何项目，第一次验证就必红、判"工作区受损"、全员重跑、重修预算烧光。
   现在整条 line 外层再套一对引号（`""<shim>" run build"`），实测四种形态全通：
   带空格路径、无空格路径、含空格的 arg、空 arg。
-  **为什么 970 条用例没抓到**：`src/spawn-plan.test.ts` 那条包装用例断的是
+  **为什么 974 条用例没抓到**：`src/spawn-plan.test.ts` 那条包装用例断的是
   `args[3]` *包含* `npm.cmd` 子串，旧写法也包含；且它的 shim 建在没有空格的临时目录里。
   现在断整条形状，并加一条**真 spawn** 的用例（临时目录里刻意建 `with space` 子目录）。
   反证：把生产改动退回上一版，这两条当场红；还原后 16/16 绿

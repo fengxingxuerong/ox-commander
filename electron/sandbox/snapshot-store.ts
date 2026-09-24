@@ -74,8 +74,12 @@ export interface SnapshotFsLike {
  * 3. **Only back up what the batch could touch** (its zones), so the cost stays
  *    proportional to the task rather than the repository.
  *
- * Restore semantics: backed-up paths are copied back; paths that did *not* exist
- * in the baseline are deleted (they can only have been created by the batch).
+ * Restore semantics: backed-up paths are copied back; a path with no backup is
+ * deleted **only** when the caller proves the batch created it (`revert`'s
+ * `created`, which comes from `FileJournal` — that one sees the whole tree) or
+ * when the no-selection walk covered its location and found nothing there.
+ * "No backup" on its own means *unknown*, and unknown is never a reason to
+ * delete somebody else's file.
  */
 export class SnapshotStore {
   private readonly backupRoot: string;
@@ -94,6 +98,7 @@ export class SnapshotStore {
     const rootAbs = path.resolve(scope.root);
     const dirAbs = path.join(this.backupRoot, scope.runId.replace(/[^\w.-]/g, "_"));
     this.fsImpl.mkdirSync(dirAbs, { recursive: true });
+    const include = (scope.include ?? []).map(toRel);
     const token: SnapshotToken = {
       id: scope.runId,
       rootAbs,
@@ -103,7 +108,7 @@ export class SnapshotStore {
       skipped: [],
       truncated: false,
     };
-    const candidates = this.collect(rootAbs, scope.zones, scope.include ?? []);
+    const candidates = this.collect(rootAbs, scope.zones, include);
     for (const rel of candidates) {
       if (token.backedUp.size >= this.maxFiles) {
         token.truncated = true;
@@ -129,22 +134,31 @@ export class SnapshotStore {
    * Rolls the workspace back to the state captured by `begin`.
    * `sel.paths` limits the rollback to specific files (used for zone violations);
    * omitting it rolls back everything the batch touched.
+   *
+   * `sel.created` is the caller's positive evidence (from `FileJournal`, which
+   * sees the whole tree) about which of those paths the batch *made*. A path with
+   * no backup and no such evidence is reported, never deleted.
    */
-  async revert(token: SnapshotToken, sel?: { paths?: readonly string[] }): Promise<RevertResult> {
+  async revert(
+    token: SnapshotToken,
+    sel?: { paths?: readonly string[]; created?: readonly string[] },
+  ): Promise<RevertResult> {
     const result: RevertResult = { restored: [], removed: [], skipped: [] };
+    const created = new Set((sel?.created ?? []).map(toRel));
     const targets = sel?.paths ?? null;
 
     if (targets) {
       for (const raw of targets) {
         const rel = toRel(raw);
-        this.revertOne(token, rel, result);
+        this.revertOne(token, rel, result, created);
       }
       return result;
     }
 
     // No selection: restore every backed-up file, and delete anything the batch
-    // created that the snapshot does not know about.
-    for (const rel of token.backedUp.keys()) this.revertOne(token, rel, result);
+    // created that the snapshot does not know about. `newlyCreated` walks exactly
+    // the zones this token covered, so "not there" is evidence in its own right.
+    for (const rel of token.backedUp.keys()) this.revertOne(token, rel, result, created);
     for (const rel of this.newlyCreated(token)) {
       const abs = path.join(token.rootAbs, rel);
       try {
@@ -171,7 +185,12 @@ export class SnapshotStore {
     return token.backedUp.has(toRel(relPath));
   }
 
-  private revertOne(token: SnapshotToken, rel: string, result: RevertResult): void {
+  private revertOne(
+    token: SnapshotToken,
+    rel: string,
+    result: RevertResult,
+    created: ReadonlySet<string>,
+  ): void {
     const abs = path.join(token.rootAbs, rel);
     const backup = path.join(token.dirAbs, rel);
     if (token.backedUp.has(rel)) {
@@ -184,17 +203,29 @@ export class SnapshotStore {
       }
       return;
     }
-    // No backup: the file did not exist when the batch started.
-    if (this.fsImpl.existsSync(abs)) {
-      try {
-        this.fsImpl.rmSync(abs, { force: true });
-        result.removed.push(rel);
-      } catch (err) {
-        result.skipped.push({ path: rel, reason: (err as Error).message });
-      }
+    if (!this.fsImpl.existsSync(abs)) {
+      result.skipped.push({ path: rel, reason: "快照中没有该文件，且当前不存在（无需回滚）" });
       return;
     }
-    result.skipped.push({ path: rel, reason: "快照中没有该文件，且当前不存在（无需回滚）" });
+    /*
+     * 无备份时，"它是本批新建"必须有正面证据，不能靠"我扫过那里没有"推断 ——
+     * 快照只覆盖本批的 zone，而根级 package.json / lockfile 常在 zone 外：
+     * 它们被模型改过之后，旧逻辑认定"备份里没有 ⇒ 新建 ⇒ 删掉"，于是用户项目
+     * 的清单文件被删（默认 revert-batch 档下每轮重修再删一次）。
+     */
+    if (!created.has(rel)) {
+      result.skipped.push({ path: rel, reason: "无备份、也无本批新建的证据：保留现状不删，需人工确认" });
+      return;
+    }
+    // 这里不再另设"备份时被跳过"的分支：一个路径能进 `skipped` 就意味着 begin()
+    // 时它存在，那日志只会记 modify 而不会记 create，上面那一步已经把它拦住了。
+    // 多写一层不会更错，只会多一个谁也验证不了的位点（site 口径下当场存活）。
+    try {
+      this.fsImpl.rmSync(abs, { force: true });
+      result.removed.push(rel);
+    } catch (err) {
+      result.skipped.push({ path: rel, reason: (err as Error).message });
+    }
   }
 
   private newlyCreated(token: SnapshotToken): string[] {
