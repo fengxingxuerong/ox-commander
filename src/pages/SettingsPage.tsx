@@ -192,8 +192,9 @@ export function SettingsPage() {
           </label>
         ))}
         <p className="muted">
-          商汤 = 3 密钥 × 4 模型 = <strong>12 条线路</strong>（deepseek-v4-flash / sensenova-6.8-flash-lite /
-          deepseek-v4-pro / glm-5.2）；AMD 端点兜底（实测提供 DeepSeek-V4-Flash 等多个模型）。
+          商汤 = {SENSENOVA_KEY_VARS.length} 密钥 × {SENSENOVA_MODELS.length} 模型 ={" "}
+          <strong>{SENSENOVA_KEY_VARS.length * SENSENOVA_MODELS.length} 条线路</strong>
+          （{SENSENOVA_MODELS.join(" / ")}）；AMD 端点兜底（实测提供 DeepSeek-V4-Flash 等多个模型）。
           全部取消勾选则退回单一提供商模式。
         </p>
       </section>
@@ -286,7 +287,10 @@ export function SettingsPage() {
               </label>
             ))}
           </div>
-          <p className="muted">SenseNova API 执行器：3 组密钥 × 3 个模型自动故障转移（429/5xx/超时自动切换）。</p>
+          <p className="muted">
+            SenseNova API 执行器：{SENSENOVA_KEY_VARS.length} 组密钥 × {SENSENOVA_MODELS.length} 个模型自动故障转移
+            （429/5xx/超时自动切换）。
+          </p>
         </div>
         <div className="form-row">
           <label htmlFor="agent-router">

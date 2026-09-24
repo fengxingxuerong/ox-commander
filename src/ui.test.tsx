@@ -9,6 +9,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AgentsPanel } from "./components/AgentsPanel";
@@ -481,6 +482,21 @@ describe("SettingsPage", () => {
     render(<SettingsPage />);
     fireEvent.click(await screen.findByRole("button", { name: /测试连接/ }));
     expect(await screen.findByText(/✅ 连接成功（模型：deepseek-v4-flash）/)).toBeTruthy();
+  });
+
+  it("derives the route-pool copy from the provider constants instead of hard-coded counts", async () => {
+    // 同一页面曾两处互不相符（线路池卡片写 4 模型、执行器说明写 3 模型）：
+    // 数字手抄一遍就漂移一次，所以这里把两处都钉回常量。
+    const { container } = render(<SettingsPage />);
+    await screen.findByLabelText("提供商");
+    const text = container.textContent ?? "";
+    const keys = SENSENOVA_KEY_VARS.length;
+    const models = SENSENOVA_MODELS.length;
+    expect(text).toContain(`商汤 = ${keys} 密钥 × ${models} 模型`);
+    expect(text).toContain(`${keys * models} 条线路`);
+    expect(text).toContain(`SenseNova API 执行器：${keys} 组密钥 × ${models} 个模型`);
+    // 模型名同样来自常量：手抄清单在扩池那天就会说谎
+    for (const model of SENSENOVA_MODELS) expect(text).toContain(model);
   });
 
   it("embeds the agents panel: capabilities, circuit stats and manifest errors", async () => {
