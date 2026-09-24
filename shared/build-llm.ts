@@ -25,7 +25,7 @@ function withMeter(client: LlmClient, meter: UsageMeter | undefined): LlmClient 
 /**
  * Brain-layer LLM factory shared by the Electron (ipc.ts) and headless
  * (headless-main.ts) entries so the two can never drift apart: sensenova gets
- * the 3-key × 3-model failover client, every other provider a plain client.
+ * the multi-key × multi-model failover client, every other provider a plain client.
  */
 export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): LlmClient {
   const env = opts.env ?? process.env;

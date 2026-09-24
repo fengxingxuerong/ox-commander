@@ -14,7 +14,7 @@ import type { UsageMeter } from "../../shared/usage-meter";
 
 /**
  * Agent registry: the SenseNova API executor is the default worker. Failover
- * across 3 API keys × 3 models happens inside its LlmClient layer, so the
+ * across every configured API key × model happens inside its LlmClient layer, so the
  * scheduler has exactly one adapter to talk to unless more are registered.
  *
  * `meter` 只影响内置执行器自己构造的那个客户端 —— 外部声明的 CLI / HTTP

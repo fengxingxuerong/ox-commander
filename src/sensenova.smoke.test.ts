@@ -86,7 +86,7 @@ describe.skipIf(!enabled)("SenseNova real API smoke tests", () => {
   });
 
   it(
-    "failover client (3 keys x 3 models) answers a real request",
+    "failover client (all configured keys × models) answers a real request",
     async () => {
       const client = createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS);
       const res = await client.chat({
