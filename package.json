@@ -12,7 +12,7 @@
     "build": "tsc -b && vite build && tsc -b tsconfig.electron.json",
     "start": "electron .",
     "build:headless": "tsc -b tsconfig.headless.json",
-    "build:dist": "npm run build && npm run build:headless && electron-builder --win --linux --publish never",
+    "build:dist": "npm run build && npm run build:headless && node scripts/build-dist.mjs",
     "smoke:artifact": "node scripts/artifact-smoke.mjs",
     "smoke:snapshot-secrets": "node scripts/e2e-snapshot-secrets.cjs",
     "smoke:gateway": "node scripts/admission-gateway-it.mjs",

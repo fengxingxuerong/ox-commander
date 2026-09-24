@@ -89,8 +89,13 @@ SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
 **方式三：自己打包**
 
 ```bash
-npm run build:dist    # → release/（Windows + Linux）
+npm run build:dist    # → release/，只打**当前平台**的原生目标
 ```
+
+`build:dist` 刻意**只打当前平台**：Windows 上的 AppImage/deb 需要 Docker、Linux 上的 NSIS
+需要 wine，写死 `--win --linux` 会让每个平台都有一半目标站不住（首次真跑就是这么红的，
+两个 CI job 各在 30 秒内失败）。全平台产物由 `release` 工作流的 windows + ubuntu 矩阵各自产出。
+确实装了 wine / Docker 的人可以 `node scripts/build-dist.mjs --targets=win,linux` 显式跨平台。
 
 首次打包会下载 Electron 二进制与各平台工具链（几百 MB，本机需代理），
 所以**推荐让 CI 出产物**：推 `v*` tag 会自动建 Release 并挂上安装包，
