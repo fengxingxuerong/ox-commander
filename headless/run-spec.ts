@@ -10,9 +10,38 @@ import { VerificationExhaustedError } from "../electron/engine";
 import type { OrchestratorCallbacks, RunSnapshot } from "../electron/engine";
 import type { AgentLayer } from "../electron/agents";
 import { createFileJournal, createPlatform } from "../electron/platform";
+import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import type { LlmClient } from "../shared/llm-client";
 import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
+
+/**
+ * 大脑层实际会用的那组 provider → 它要求哪些环境变量里有值。
+ *
+ * provider 侧必须与 `electron/platform.ts` 的 `buildLlm` 同口径：「池非空用池，
+ * 池空才退回 `settings.llmProvider`」。跟着默认池走就会出现"池里明明是免密钥的
+ * 本地 provider，却按 SenseNova 要 key"的假拦截。`apiKeyEnvVar` 为空的 provider
+ * （本地 Ollama 之类）贡献为空 —— 空数组就是"这一步不拦"。
+ *
+ * 导出只为让这条口径能被单测直接钉住（不必走一遍真实网络路径）。
+ */
+export function requiredCredentialVars(spec: ParsedSpec): string[] {
+  const ids = spec.llmPool.length > 0 ? spec.llmPool : [spec.settings.llmProvider];
+  const out = new Set<string>();
+  for (const id of ids) {
+    const provider = getProvider(id);
+    for (const v of providerKeyEnvVars(id)) out.add(v);
+    if (provider?.apiKeyEnvVar) out.add(provider.apiKeyEnvVar);
+  }
+  return [...out];
+}
+
+/** 池内 provider 一个凭证都没有时，给宿主一句能行动的话。 */
+function missingCredentials(spec: ParsedSpec): string[] | undefined {
+  const wanted = requiredCredentialVars(spec);
+  const present = wanted.filter((v) => (process.env[v] ?? "").trim() !== "");
+  return wanted.length > 0 && present.length === 0 ? wanted : undefined;
+}
 
 export interface RunSpecIo {
   emit: (evt: HeadlessEvent) => void;
@@ -47,6 +76,22 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     warnings: spec.warnings,
   });
   for (const w of spec.warnings) io.emit({ type: "log", text: `[protocol] ${w}` });
+
+  // 没有凭证时，第一声大脑层调用只会吐 "failover client has no groups" —— 那是内部话，
+  // 宿主拿到以后不知道该做什么。这里提前一步说清楚要什么。放在 hello 之后，
+  // 因为宿主的协议用法是先读 hello；注入了 llm 替身的调用方不受此限。
+  if (!io.llm) {
+    const missing = missingCredentials(spec);
+    if (missing) {
+      io.emit({
+        type: "error",
+        message:
+          `没有可用凭证：大脑层 provider 需要 ${missing.join(" / ")} 中的至少一个。` +
+          "headless 只读进程环境变量（.env 由桌面端主进程加载，这里不读），请由宿主注入。",
+      });
+      return 1;
+    }
+  }
 
   const policy = spec.escalationPolicy;
   const redispatched = new Set<string>();

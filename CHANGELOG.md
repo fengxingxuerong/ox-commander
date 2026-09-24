@@ -11,12 +11,34 @@
 - `.qoder/skills/ox-commander-dev/`：给 agent 的仓库工作手册（`verify` 16 步逐条机制、变异白名单的
   行号锚点、两张豁免表的双向失效规则、分层与放置约定、win32/POSIX 分支差异、红灯速查）
 - `docs/2026-09-24-consistency-review.md`：一致性复核，含 10 条带复现方式的未修缺陷清单
+- **`verify` 增加第 17 步 `smoke:offline-e2e`：零配额的离线全链路 E2E**
+  （`scripts/offline-e2e-it.mjs`）。此前没有任何一步真的穿过进程边界——其余各步要么在函数层
+  注入假件跑引擎，要么只查产物语法与协议退出码。这条用本地假大脑（冒充 `ollama`，占 11434）
+  加假 http-bridge 智能体，经真 `dist-headless` 跑两遍完整 run，21 项断言钉住：六个阶段的顺序、
+  `hello` 首发与终态事件、run 归因条数、越权回滚是**外科手术式**的（zone 内的产出必须留下）、
+  仲裁发出的 remedy 值与看板词表同源、重修轮只重派越权那个任务、退出码 0 与 2 的分野、
+  stdout 每行都是合法 JSON。反证：把越权场景的处置临时改成 `report-only` → 5 项 FAIL、
+  退出码 1（README 留在盘上、批次不改判、正常交付），也就是它真的在看行为而不是在跑流程。
+  端口 11434 被占（本机跑着真 Ollama）时**直接失败并给出排查命令**，不静默跳过
 - `typecheck` 现在覆盖第四套工程 `tsconfig.node.json`（`vite.config.mts` / `vitest.config.mts`）——
-  这两个文件此前不在任何 npm script 里，改坏了要到 `vite build` 才暴露。verify 的步数不变（仍是 16 步），
+  这两个文件此前不在任何 npm script 里，改坏了要到 `vite build` 才暴露。verify 的步数当时不变，
+  本轮因下面这条离线 E2E 才成为 17 步，
   实测 +1.7s；接入前先验过一次：现存配置干净，且故意注入的类型错误确实被抓出来
 
 ### 修正
 
+- **headless 的 `llmProvider` 从此真的生效**。协议字段表写着"大脑层 provider"，但实现只把它
+  echo 进 `hello` 事件，装配时用的仍是 `settings.llmProvider` 的默认值 —— 宿主写
+  `"llmProvider": "ollama"` 而池为空时，打的还是 SenseNova。现在它进 `settings`，与
+  `buildLlm` 的「池优先、池空退单 provider」口径一致（`headless/protocol.ts`）
+- **headless 缺凭证时给一句能行动的话**。原先一路跑到第一次模型调用才炸，宿主看到
+  `failover client has no groups` 无从下手。现在在 `hello` 之后就发 `error` 并以退出码 1 结束，
+  消息里列出需要哪几个环境变量（`headless/run-spec.ts` 的 `requiredCredentialVars`）。
+  口径跟着**实际会用的那组 provider** 走：池里是免密钥的本地 provider 时不拦 —— 我第一版
+  按 `settings.llmPool`（永远等于默认池）判断，被离线 E2E 当场抓成假拦截，已改并补了单测
+- **README 关于 `.env` 的说法纠正**：旧文案说"headless CLI 只认 `.env`"，实际加载 `.env` 的
+  只有桌面端主进程（`electron/main.ts`），headless 从来就读不到它。现在写明：headless 的凭证
+  只能来自宿主注入的进程环境变量，`docs/headless-protocol.md` 也补了这节
 - **仲裁四档现在真的有四种行为**。`report-only` 与 `deny-all` 此前走同一分支（都标记批次失败、
   都不回滚），差别只在日志文案，于是设置页上「仅记录日志」那一档其实会判整批失败。
   现在按界面写下的那句分开：`report-only` 只记日志、不改判（裁决报 `pass`），

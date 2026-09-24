@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
-import { runSpec } from "../headless/run-spec";
+import { runSpec, requiredCredentialVars } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
 import type { LlmClient } from "../shared/llm-client";
 import type { AgentAdapter, Task, VerificationReport } from "../shared/types";
@@ -420,6 +420,72 @@ describe("runSpec", () => {
     expect(hello.protocolVersion).toBe(PROTOCOL_VERSION);
     expect(hello.projectRoot).toBe(root);
     expect(hello.agentRouter).toBe(true);
+  });
+
+  it("llmProvider 真的进 settings（它决定池为空时用哪家，不能只 echo 进 hello）", () => {
+    // 旧行为：`llmProvider` 只出现在 `hello` 事件里，settings 仍是默认值 ——
+    // 于是宿主写 "llmProvider": "ollama" 之后，池为空时大脑层照打 SenseNova。
+    const s = parse(JSON.stringify({ ...LEGACY_SPEC, llmProvider: "ollama", llmPool: [] }));
+    expect(s.settings.llmProvider).toBe("ollama");
+    expect(s.llmProvider).toBe("ollama");
+    // 不传时仍是默认 provider，且默认池非空（12 条线路 + AMD）优先于单 provider。
+    const d = parse(JSON.stringify(LEGACY_SPEC));
+    expect(d.settings.llmProvider).toBe(d.llmProvider);
+    expect(d.llmPool.length).toBeGreaterThan(0);
+  });
+
+  it("凭证要求按大脑层**实际会用的** provider 算，不按默认池", () => {
+    // 默认池是 SenseNova + AMD；只看 `settings.llmPool` 会把本地 Ollama 的宿主
+    // 挡在门外，而池为空时又必须退回单 provider —— 两处口径都钉在这里。
+    const keyless = parse(JSON.stringify({ ...LEGACY_SPEC, llmProvider: "ollama", llmPool: ["ollama"] }));
+    expect(requiredCredentialVars(keyless)).toEqual([]);
+
+    const pooled = parse(JSON.stringify(LEGACY_SPEC));
+    expect(requiredCredentialVars(pooled).sort()).toEqual([
+      "AMD_API_KEY",
+      "SENSENOVA_API_KEY",
+      "SENSENOVA_API_KEY_2",
+      "SENSENOVA_API_KEY_3",
+    ]);
+
+    // 这一条同时钉住 `llmProvider` 进了 settings（旧行为下它只 echo 进 hello，
+    // 这里会算出 SenseNova 那 4 个变量）。
+    const single = parse(JSON.stringify({ ...LEGACY_SPEC, llmProvider: "deepseek", llmPool: [] }));
+    expect(requiredCredentialVars(single)).toEqual(["DEEPSEEK_API_KEY"]);
+  });
+
+  it("没有凭证时给一句能行动的话，而不是内部术语", async () => {
+    // 大脑层拿不到 key 时，原先一路跑到第一次调用才炸，宿主看到的是
+    // "failover client has no groups" —— 不知道该做什么。headless 不读 .env
+    // （只有桌面端主进程加载它），所以要说清"由宿主注入进程环境变量"。
+    const root = scratch("headless-nokey");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+    const saved: Record<string, string | undefined> = {};
+    const vars = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "SENSENOVA_API_KEY_3", "AMD_API_KEY"];
+    for (const v of vars) {
+      saved[v] = process.env[v];
+      delete process.env[v];
+    }
+    try {
+      // 注意不传 io.llm：注入假客户端的调用方本来就不需要凭证，那条路必须照常走。
+      const code = await runSpec(spec, {
+        emit,
+        layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+        verify: async () => pass,
+      });
+      expect(code).toBe(1);
+      const err = events.find((e) => e.type === "error") as Extract<HeadlessEvent, { type: "error" }>;
+      expect(err.message).toContain("没有可用凭证");
+      expect(err.message).toContain("SENSENOVA_API_KEY");
+      expect(err.message).toContain("宿主注入");
+      // hello 仍然先发出去：宿主的用法是先读 hello 再判其余事件。
+      expect(events[0]!.type).toBe("hello");
+    } finally {
+      for (const v of vars) {
+        if (saved[v] !== undefined) process.env[v] = saved[v];
+      }
+    }
   });
 
   it("用量事件：在 done 之前发一次，金额等于大脑两次调用的和", async () => {

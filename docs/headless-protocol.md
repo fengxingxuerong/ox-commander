@@ -12,6 +12,11 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 - **stderr**：保留给 Node 自身的告警，宿主可忽略。
 - **退出码**：`0` 交付成功 / `2` 重修预算耗尽 / `1` 致命错误（输入非法、LLM 不可用等）。
 
+> **凭证只来自进程环境。** headless 不读 `.env`（加载 `.env` 的是桌面端主进程），所以宿主必须把
+> 池内 provider 需要的 key 变量放进它 spawn 的子进程环境里。一个都没有时，runner 在发完 `hello`
+> 之后立刻发一条 `error`（消息里列出需要哪几个变量）并以退出码 1 结束 —— 而不是等到第一次大脑层
+> 调用才吐 `failover client has no groups` 这种内部术语。注入了 `llm` 替身的编程调用不受此限。
+
 > 实现分层：`headless/protocol.ts` 是**契约**（校验 + 默认值，纯函数），
 > `headless/run-spec.ts` 是**执行**（可注入假件、可测），`headless-main.ts` 只是 stdin/stdout 胶水。
 

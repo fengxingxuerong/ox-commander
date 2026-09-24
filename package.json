@@ -18,6 +18,7 @@
     "smoke:gateway": "node scripts/admission-gateway-it.mjs",
     "smoke:coze": "node scripts/coze-bridge-it.mjs",
     "smoke:import": "node scripts/import-headless-run-it.mjs",
+    "smoke:offline-e2e": "node scripts/offline-e2e-it.mjs",
     "check:unwired": "node scripts/check-unwired.mjs",
     "check:scripts": "node scripts/check-syntax.mjs",
     "check:scripts-wired": "node scripts/check-script-wiring.mjs",
@@ -31,7 +32,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json && tsc -p tsconfig.node.json --noEmit",
-    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import"
+    "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import && npm run smoke:offline-e2e"
   },
   "dependencies": {
     "react": "^18.3.1",

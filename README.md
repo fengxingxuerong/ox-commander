@@ -63,8 +63,8 @@ echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-head
 | Linux | `OxCommander-<ver>-x64.AppImage` / `.deb` | AppImage 直接 `chmod +x` 后运行 |
 | macOS | **不产出** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺 |
 
-⚠️ **跑起来之前要有凭证**：桌面端可以在「设置」里填（加密进 OS keychain），也可以放一份 `.env`
-（headless CLI 只认这条）。至少给一把商汤的 key：
+⚠️ **跑起来之前要有凭证**：桌面端在「设置」里填即可（加密进 OS keychain），也可以放一份 `.env`。
+至少给一把商汤的 key：
 
 ```dotenv
 SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
@@ -78,7 +78,9 @@ SENSENOVA_API_KEY=sk-...          # 必填，一条 key 就能跑
 
 > 桌面端**可以不备 `.env`**：「设置」里填的 key 经 OS keychain 加密落盘，构建引擎时按池内 provider
 > 补回进程环境（大脑层与内置执行器同一来源）。优先级是 **进程环境 > `.env` > keychain**，三者都只补缺失项。
-> headless CLI 没有 key store，所以 `.env`（或宿主环境）仍是它的唯一入口。
+> headless CLI **不读 `.env`** —— 加载 `.env` 的是桌面端主进程（`electron/main.ts`）。
+> 由宿主驱动时请把凭证放进它 spawn 子进程的环境里；缺失时 runner 会在 `hello` 之后立刻报
+> 需要哪几个变量并以退出码 1 结束，而不是等到第一次模型调用才吐内部错误。
 
 **方式二：从源码跑**（开发者）
 
@@ -96,7 +98,7 @@ npm run build:dist    # → release/（Windows + Linux）
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-24 本机实测 EXIT 0 / 57s，16 步）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-24 本机实测 EXIT 0，17 步）：
 
 ```
 typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
@@ -104,12 +106,12 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ vitest（951 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（954 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
-→ smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import（四条集成链路）
+→ smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
 ```
 
 覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-24 实测 92.06% stmts / 86.49% branch，
@@ -180,7 +182,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 ## 文档索引
 
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
-  门禁 16 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
+  门禁 17 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
   （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
 - [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
   以及逐条带证据的**未修**缺陷清单

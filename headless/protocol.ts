@@ -335,8 +335,13 @@ export function parseSpec(rawText: string): ParseResult {
 
   if (issues.length > 0) return { ok: false, message: issues.join("；") };
 
+  // `llmProvider` 必须同时进 `settings` —— 平台在池为空时用 `settings.llmProvider`
+  // 建大脑客户端。它以前只被 echo 进 `hello`，于是"指定 provider"这个字段
+  // 对实际调用毫无影响（宿主设了 ollama 仍然打 SenseNova）。
+  const brainProvider = isNonEmptyString(raw.llmProvider) ? (raw.llmProvider as string) : "sensenova";
   const settings: ProjectSettings = {
     ...DEFAULT_SETTINGS,
+    llmProvider: brainProvider,
     ...(maxRepairRounds !== undefined ? { maxRepairRounds } : {}),
     ...(verificationCommands ? { verificationCommands } : {}),
     // 只需一个条件：`agentRouter` 只在上面 `if (raw.agentRouter !== undefined)`
@@ -356,7 +361,7 @@ export function parseSpec(rawText: string): ParseResult {
       requirement: (raw.requirement as string).trim(),
       projectRoot: path.resolve(raw.projectRoot as string),
       ...(prd ? { prd } : {}),
-      llmProvider: isNonEmptyString(raw.llmProvider) ? raw.llmProvider : "sensenova",
+      llmProvider: brainProvider,
       llmPool: llmPool ?? [...DEFAULT_SETTINGS.llmPool],
       escalationPolicy: escalationPolicy ?? "abort",
       settings,

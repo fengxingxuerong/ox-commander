@@ -1,6 +1,6 @@
-# `npm run verify` 的 16 步逐条机制
+# `npm run verify` 的 17 步逐条机制
 
-顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、951 用例、约 2 分钟。
+顺序即 `package.json:35` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、954 用例、约 2 分钟。
 README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进来后没同步）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
@@ -18,8 +18,9 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 | 11 | `build:headless` | `tsc -b tsconfig.headless.json` | |
 | 12 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 10/11 的产物 |
 | 13-16 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
+| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：起本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑完整条 run | 零配额；断言阶段顺序 / 越权回滚 / 退出码 0 与 2 |
 
-**12-16 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
+**12-17 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
 ## 1. typecheck：三套互不相干的工程
 
