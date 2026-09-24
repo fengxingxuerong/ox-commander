@@ -1,7 +1,7 @@
 {
   "name": "ox-commander",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "license": "MIT",
   "author": "fengxingxuerong",
   "description": "总指挥智能体：把项目需求拆解后按 zone 并行下发给 SenseNova API 执行器（多密钥 × 多模型故障转移），经构建+测试多轮硬性验证后交付",
