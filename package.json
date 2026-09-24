@@ -31,7 +31,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "typecheck": "tsc -b && tsc -b tsconfig.electron.json && tsc -b tsconfig.headless.json && tsc -p tsconfig.node.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit --incremental false && tsc -p tsconfig.electron.json --noEmit --incremental false && tsc -p tsconfig.headless.json --noEmit --incremental false && tsc -p tsconfig.node.json --noEmit --incremental false",
     "verify": "npm run typecheck && npm run lint && npm run check:unwired && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm test && npm run mutation:quick && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import && npm run smoke:offline-e2e"
   },
   "dependencies": {

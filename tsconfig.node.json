@@ -1,6 +1,8 @@
 {
   "compilerOptions": {
-    "composite": true,
+    // 没有 composite：这套工程不被任何项目 references（vite/vitest 的配置只在这里做
+    // 类型检查，不产出声明），而 `composite` 与 `--incremental false` 互斥 ——
+    // 门禁要对四套工程用同一个口径。
     "skipLibCheck": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
