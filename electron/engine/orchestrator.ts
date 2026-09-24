@@ -103,6 +103,12 @@ export function isCancelled(err: unknown): boolean {
   return err instanceof CancelledError || (err as { name?: string } | null)?.name === "CancelledError";
 }
 
+/** 失败摘要压成一行放进重修上下文：多行日志会把提示词撑爆，而首行通常就是原因。 */
+function firstLine(digest: string): string {
+  const line = (digest.split("\n").find((l) => l.trim() !== "") ?? "").trim();
+  return line.length > 160 ? `${line.slice(0, 160)}…` : line;
+}
+
 /**
  * Repair rounds ran out while verification still failed.
  *
@@ -305,6 +311,36 @@ export class OrchestratorEngine {
         lastDigest,
       });
     save();
+
+    /**
+     * 基线验证：动手之前把同样的命令跑一遍。
+     *
+     * 为什么要它 —— 重修提示里只有"上一轮的失败日志"，于是**目标项目本来就坏着**
+     * （缺依赖、套件红、命令被沙箱拒绝）时，智能体看到一份与自己无关的失败，会去
+     * 修不属于自己的东西；而引擎的"验证未过但无失败任务 → 全员重跑"分支会把同一份
+     * 失败再烧三轮预算。标注出来之后，谁造成的谁负责。
+     *
+     * 只在全新 run 上跑：断点续跑时工作区已被上一轮改过，"基线"这个概念不成立。
+     * 代价是每次运行多一轮验证命令，所以它换的是归因与预算，不是速度。
+     */
+    let preexistingKinds = "";
+    if (!resume) {
+      const baseline = await this.deps.verify(projectRoot);
+      const bad = baseline.results.filter((r) => !r.ok);
+      if (bad.length === 0) {
+        this.cb.onLog("基线验证：本次运行开始前，验证命令全部通过。");
+      } else {
+        // 给操作者的是原因（含日志首行），给智能体的只到"哪条命令、退出码"这一层：
+        // 把失败摘要原样抄进每份重修上下文，会把"这条线索归谁"这类归属判据冲掉
+        // ——[413] 那条变异测试就是这么被缴械的（实测过），而且智能体本来就会
+        // 在本轮的错误摘要里看到同样的文字。
+        preexistingKinds = bad.map((r) => `${r.kind}(exit=${r.exitCode ?? "null"})`).join("、");
+        this.cb.onLog(
+          `基线验证：${bad.length} 条命令在本次运行开始前就失败（不是智能体造成的）：` +
+            `${preexistingKinds}\n${bad.map((r) => `[${r.kind}] ${firstLine(r.logDigest)}`).join("\n")}`,
+        );
+      }
+    }
     this.cb.onStage("DEVELOPMENT");
     /** Per-task digests routed by zone from the last verification report. */
     let routedByTask = new Map<string, string>();
@@ -361,6 +397,10 @@ export class OrchestratorEngine {
                   errorLogDigest: [
                     routedByTask.get(t.id) ?? lastDigest,
                     lastFailedLogs.get(t.id) ? `[该任务上次失败日志] ${lastFailedLogs.get(t.id)}` : "",
+                    // 每一份重修上下文都要知道：这些失败早于本次运行。
+                    // 只报"哪条命令早于本次运行就是红的"，不复制失败摘要：
+                    // 摘要本身已经在本轮的错误归属里，抄两遍只会淹没归属线索。
+                    preexistingKinds ? `[本次运行前就已失败] ${preexistingKinds}` : "",
                   ]
                     .filter((s) => s !== "")
                     .join("\n\n"),

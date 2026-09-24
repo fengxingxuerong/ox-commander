@@ -63,8 +63,13 @@ function engine(opts: {
     settings: { ...DEFAULT_SETTINGS, maxRepairRounds: opts.maxRounds ?? 3 },
   };
   // verify passes when scheduler's first round succeeded; else fails until repair.
+  // 第 1 次调用是**基线验证**（引擎动手前跑的），它必须返回绿：基线红会往日志与
+  // 重修上下文里注入"本次运行前就已失败"，把这条用例想测的时序整个挪掉。
+  let calls = 0;
   let verified = false;
   deps.verify = async () => {
+    calls += 1;
+    if (calls === 1) return makeReport(true);
     if (!opts.failFirstRound) return makeReport(true);
     if (verified) return makeReport(true);
     verified = true;
@@ -296,6 +301,7 @@ describe("OrchestratorEngine.execute", () => {
 
   it("routes verification errors to the task owning the failing file's zone", async () => {
     const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
+    const greenLogs: string[] = [];
     const tCalc: Task = { ...TASKS[0]!, id: "tc", zone: "src/calc" };
     const tApi: Task = { ...TASKS[0]!, id: "ta", zone: "src/api" };
     let call = 0;
@@ -331,11 +337,113 @@ describe("OrchestratorEngine.execute", () => {
     const deps: OrchestratorDeps = {
       llm: fakeLlm(),
       scheduler,
+      // 第 1 次是**基线验证**（动手之前跑，必须绿，否则这条用例的意图就变了）；
+      // 第 2 次是首轮交付闸（红）；第 3 次是重修后的闸（绿）。
       verify: async () => {
         verifyCalls += 1;
-        return verifyCalls === 1 ? failingReport : makeReport(true);
+        return verifyCalls === 2 ? failingReport : makeReport(true);
       },
       settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (t) => greenLogs.push(t),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const report = await eng.execute([[tCalc, tApi]], ".");
+    // 基线是绿的：日志必须说"全部通过"。把 `bad.length === 0` 翻成 `!==` 时，
+    // 零条失败会被当成红，这一句就不出现了 —— 这个位点靠本断言杀掉。
+    expect(greenLogs.join("\n")).toContain("基线验证：本次运行开始前，验证命令全部通过。");
+    expect(report.passed).toBe(true);
+    // 基线 + 首轮闸 + 重修后闸
+    expect(verifyCalls).toBe(3);
+    // Round 1 repair context: tc gets the routed digest, ta does not.
+    const repairRound = repairPayloads.at(-1)!;
+    expect(repairRound.get("tc")?.errorLogDigest).toContain("src/calc/math.js");
+    expect(repairRound.get("ta")?.errorLogDigest).not.toContain("src/calc/math.js");
+    // 基线是绿的，所以不该出现"本次运行前就已失败"的标注。
+    expect(repairRound.get("ta")?.errorLogDigest).not.toContain("本次运行前就已失败");
+  });
+
+  it("基线红时，每一份重修上下文都带上这份历史失败", async () => {
+    // 契约很简单：只要基线是红的，本轮每个任务的上下文都附上这份历史失败。
+    // 两个任务的 zone 一个覆盖、一个不覆盖验证报出来的文件，是为了同时钉住
+    // "归属路由本身没被基线注掉"（tq 看得到定位到自己 zone 的那份错）。
+    const tz: Task = { ...TASKS[0]!, id: "tz", zone: "src/z" };
+    const tq: Task = { ...TASKS[0]!, id: "tq", zone: "src/q" };
+    const seen: Array<Map<string, { errorLogDigest: string }>> = [];
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { repairOf?: Map<string, { errorLogDigest: string }> },
+      ) {
+        if (opts?.repairOf) seen.push(opts.repairOf);
+        return tasks.map((t) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const baselineBroken: VerificationReport = {
+      passed: false,
+      results: [{ kind: "test", ok: false, exitCode: 1, logDigest: "Cannot find module 'left-pad'", durationMs: 5 }],
+    };
+    const gateRouted: VerificationReport = {
+      passed: false,
+      results: [{ kind: "test", ok: false, exitCode: 1, logDigest: "TypeError: boom\n    at fn (src/q/a.js:3:1)", durationMs: 5 }],
+    };
+    let verifyCalls = 0;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) return baselineBroken; // 基线（动手之前）
+        if (verifyCalls === 2) return gateRouted; // 首轮交付闸
+        return makeReport(true); // 重修之后
+      },
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const logs: string[] = [];
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (t) => logs.push(t),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const report = await eng.execute([[tz, tq]], ".");
+    expect(report.passed).toBe(true);
+    expect(logs.join("\n")).toContain("在本次运行开始前就失败");
+    const repair = seen.at(-1)!;
+    for (const id of ["tz", "tq"]) {
+      expect(repair.get(id)?.errorLogDigest).toContain("[本次运行前就已失败] test(exit=1)");
+    }
+    // 注记不复制失败摘要 —— 否则"这条线索归谁"的归属判据会被冲掉（见 [413]）。
+    for (const id of ["tz", "tq"]) {
+      expect(repair.get(id)?.errorLogDigest).not.toContain("left-pad");
+    }
+    expect(logs.join("\n")).toContain("Cannot find module 'left-pad'");
+    // 与既有归属路由用例（"routes verification errors…"）不冲突：那份错该归谁仍由
+    // routing.ts 决定，这里只保证基线注记一定附上。
+  });
+
+  it("断点续跑不重跑基线（工作区已被上一轮改过，基线不成立）", async () => {
+    const t = { id: "tr", title: "tr", description: "", zone: "src/r", dependencies: [], suggestedRole: "fullstack-dev" } as Task;
+    let verifyCalls = 0;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          return tasks.map((x) => ({ taskId: x.id, ok: true, logDigest: "ok", events: [] }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => {
+        verifyCalls += 1;
+        return makeReport(true);
+      },
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+      journal: { save: () => undefined },
     };
     const eng = new OrchestratorEngine(deps, {
       onStage: () => undefined,
@@ -344,12 +452,10 @@ describe("OrchestratorEngine.execute", () => {
       onVerification: () => undefined,
       onEscalation: () => undefined,
     });
-    const report = await eng.execute([[tCalc, tApi]], ".");
-    expect(report.passed).toBe(true);
-    // Round 1 repair context: tc gets the routed digest, ta does not.
-    const repairRound = repairPayloads.at(-1)!;
-    expect(repairRound.get("tc")?.errorLogDigest).toContain("src/calc/math.js");
-    expect(repairRound.get("ta")?.errorLogDigest).not.toContain("src/calc/math.js");
+    await eng.execute([[t]], ".", {
+      resume: { allDone: [], skipped: [], attempts: { tr: 1 }, round: 1, extraRounds: 0, lastDigest: "" },
+    });
+    expect(verifyCalls).toBe(1); // 只有交付闸那一次
   });
 
   it("lets the user skip an exhausted task and still deliver", async () => {
@@ -1268,6 +1374,7 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
   it("does not mark a task cancelled once it already reached a terminal state", async () => {
     const statuses: string[] = [];
     let eng!: OrchestratorEngine;
+    let calls = 0;
     const scheduler = {
       async runBatch(tasks: Task[]) {
         return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "log", events: [] }));
@@ -1277,8 +1384,10 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
       llm: fakeLlm(),
       scheduler,
       // The cancel lands after the batch succeeded — the task is already `done`
-      // and must stay that way.
+      // and must stay that way. 第 1 次调用是基线验证，那时派单还没开始，
+      // 在它上面 cancel 会让整条用例失去意义（没有任何终态可保留）。
       verify: async () => {
+        if (++calls === 1) return makeReport(true);
         eng.cancel();
         throw new CancelledError();
       },

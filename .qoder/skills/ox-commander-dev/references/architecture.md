@@ -15,6 +15,9 @@
 **阶段**：6 个 Stage 定义在 `shared/types.ts:1-16`；PRD→PLANNING 由 `generatePrd` / `decompose` 各自 `onStage`
 （`electron/engine/orchestrator.ts:169,192`），DEVELOPMENT→VERIFICATION→DELIVERY→DONE 在 `runPipeline`（`:308,400,419-422`）。
 repair 循环 `while (round <= maxRounds + extraRounds)`（`:313`），默认 3 轮（`shared/types.ts:182`）。
+循环**之前**先跑一次基线验证（只在全新 run 上，断点续跑不跑）：目标项目本来就红的命令会随
+每一份重修上下文附上 `[本次运行前就已失败]`，避免智能体去修与自己无关的历史失败。代价是每次
+运行多一轮验证命令（`verifier` 是首败即停，所以基线只报出第一条红）。
 
 **任务态**：`pending→running→done|failed`，cancel 经 `inFlight` 补发 `cancelled`。
 ⚠️ `TaskStatus` 里的 `queued` / `verifying` / `repairing` **引擎从不发**（全仓找不到生产者）——别按它们写 UI 逻辑。

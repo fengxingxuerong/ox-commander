@@ -13,8 +13,10 @@
  *   · 重修轮是否只重派越权的那个任务，而不是整批；
  *   · 退出码 0 / 2 的分野。
  *
- * 两个场景：clean（都在 zone 内 → 交付，exit 0）/ rogue（实现任务顺手写 zone 外的
- * README.md → 判越权、回滚、重修一轮仍越权 → exit 2）。
+ * 三个场景：
+ *   clean     —— 两个任务都在自己 zone 内写 → 交付，exit 0；
+ *   rogue      —— 实现任务顺手写 zone 外的 README.md → 判越权、回滚、重修一轮仍越权 → exit 2；
+ *   prebroken —— 动手前就有一条验证命令是红的 → 基线归因必须出现在日志与每一份重修上下文里。
  *
  * 大脑层冒充方式：`ollama` 是 providers 表里唯一 `apiKeyEnvVar: ""` 的条目，
  * baseUrl 写死 `http://localhost:11434/v1`，所以本脚本必须占住 11434。
@@ -89,6 +91,11 @@ async function runOnce({ mode }) {
   fs.mkdirSync(path.join(proj, "src"), { recursive: true });
   fs.writeFileSync(path.join(proj, "package.json"), JSON.stringify({ name: "e2e", version: "1.0.0" }), "utf8");
   fs.writeFileSync(path.join(proj, "src", "add.js"), "module.exports.add = (a, b) => a + b;\n", "utf8");
+  if (mode === "prebroken") {
+    // 失败必须落在某个 zone 之内 —— 否则计划期的 zone 覆盖预检（orchestrator 那条
+    // "验证命令引用的路径无人认领"防线）会直接拒绝整份计划，根本到不了运行期。
+    fs.writeFileSync(path.join(proj, "src", "broken.js"), "throw new Error('pre-existing host-project failure');\n", "utf8");
+  }
 
   const brain = http.createServer((req, res) => {
     req.resume();
@@ -104,6 +111,7 @@ async function runOnce({ mode }) {
   });
 
   const dispatched = [];
+  const payloads = [];
   let count = 0;
   const bridge = http.createServer((req, res) => {
     let body = "";
@@ -124,6 +132,7 @@ async function runOnce({ mode }) {
         count += 1;
         const task = JSON.parse(body || "{}");
         dispatched.push({ taskId: String(task.taskId), zone: String(task.zone) });
+        payloads.push(String(task.repairContext?.errorLogDigest ?? task.description ?? ""));
         if (/impl/.test(String(task.taskId))) {
           write("src/add.js", IMPL);
           // 越权场景：声明的 zone 只有 src 与 tests，README.md 在两者之外。
@@ -163,7 +172,15 @@ async function runOnce({ mode }) {
       },
       maxRepairRounds: 1,
       escalationPolicy: "exhaust",
-      verificationCommands: [{ kind: "test", command: "node", args: ["--test", "tests/add.test.js"] }],
+      verificationCommands:
+        mode === "prebroken"
+          ? [
+              // 顺序有讲究：验证器**首败即停**（verifier.ts:151），所以把智能体能修好的
+              // 那条放前面，才能让两条结果都出现在报告里。
+              { kind: "test", command: "node", args: ["--test", "tests/add.test.js"] },
+              { kind: "build", command: "node", args: ["src/broken.js"] },
+            ]
+          : [{ kind: "test", command: "node", args: ["--test", "tests/add.test.js"] }],
       arbitration: "revert-batch",
       agents: [
         {
@@ -215,7 +232,7 @@ async function runOnce({ mode }) {
         return null;
       }
     };
-    return { code, events, err, dispatched, impl: read("src/add.js"), readme: read("README.md") };
+    return { code, events, err, dispatched, payloads, impl: read("src/add.js"), readme: read("README.md") };
   } finally {
     brain.close();
     bridge.close();
@@ -290,6 +307,41 @@ async function main() {
     rogue.events.at(-1)?.type === "error" && rogue.events.at(-1)?.exhausted === true,
     JSON.stringify(rogue.events.at(-1)),
   );
+
+  console.log("\n=== 场景 C：动手前就有一条验证命令是红的（在 zone 内，但没人被派去修它）===");
+  const pre = await runOnce({ mode: "prebroken" });
+  const preLogs = pre.events.filter((e) => e.type === "log").map((e) => e.text);
+  check(
+    "基线红被当场说出来（并写清不是智能体造成的）",
+    preLogs.some((t) => t.includes("基线验证") && t.includes("在本次运行开始前就失败")),
+    JSON.stringify(preLogs.filter((t) => t.includes("基线")).map((t) => t.slice(0, 60))),
+  );
+  // 重修轮派给桥端的载荷里必须带这句归因 —— 这是基线验证存在的唯一理由。
+  check(
+    "重修轮把「动手前就已失败」随上下文发给智能体",
+    pre.payloads.filter((p) => p.includes("本次运行前就已失败")).length >= 1,
+    JSON.stringify(pre.payloads.map((p) => p.slice(0, 50))),
+  );
+  check(
+    "首轮派单里没有这句（还没有历史可标注）",
+    !pre.payloads[0]?.includes("本次运行前就已失败"),
+    JSON.stringify(pre.payloads[0]?.slice(0, 60)),
+  );
+  const lastVer = pre.events.filter((e) => e.type === "verification").at(-1);
+  check(
+    "智能体那部分确实交付了：test 转绿，红的只有那条动手前就红的历史失败",
+    JSON.stringify((lastVer?.results ?? []).map((r) => `${r.kind}:${r.ok ? "ok" : "fail"}`)) === '["test:ok","build:fail"]',
+    JSON.stringify((lastVer?.results ?? []).map((r) => [r.kind, r.ok])),
+  );
+  check(
+    "不因为基线红就放行交付 → 退出码 2",
+    pre.code === 2,
+    `实际 ${pre.code} / 事件 ${JSON.stringify(pre.events.map((e) => e.type))} / ${JSON.stringify(
+      pre.events.filter((e) => e.type === "error"),
+    )}`,
+  );
+  check("仍然照常走完重修轮（基线红不短路引擎）", pre.dispatched.filter((d) => d.taskId === "t-impl").length === 2);
+
 
   console.log(failures === 0 ? "\n=== 判定：IT PASS ✓（离线全链路，零配额）===" : `\n=== 判定：IT FAIL ✗（${failures} 项）===`);
   process.exit(failures === 0 ? 0 : 1);

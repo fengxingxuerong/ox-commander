@@ -18,7 +18,7 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
 | 11 | `build:headless` | `tsc -b tsconfig.headless.json` | |
 | 12 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 10/11 的产物 |
 | 13-16 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：起本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑完整条 run | 零配额；断言阶段顺序 / 越权回滚 / 退出码 0 与 2 |
+| 17 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**三个场景**（27 项断言） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因；退出码 0 与 2 |
 
 **12-17 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -111,6 +111,14 @@ README 写「15 步 / 930 用例」是过时的（`check:packaged-paths` 加进�
   `spawn-plan.ts:96`、`http-bridge.ts:309`、`sensenova-api.ts:337` / `:343`、`ipc/context.ts:177`
 
 > `mutation-check` 会**临时改写源文件**再还原；中途被打断或崩溃可能留脏 → 跑完 `git status` 必查。
+>
+> ⚠️ **改动引擎控制流（多跑一次 `deps.verify` 之类）之后，必须复跑 site 口径**：
+> `mutation-check` 的 `verify` 桩是按**调用次序**脚本化的，多一次调用会让某些用例
+> 悄悄不再触达它要钉的属性 —— 用例照样全绿，位点却从此存活。2026-09-24 加基线验证时
+> 实测到：`[413]`（待修任务只算"没完成且没跳过"的）被缴械，症状是
+> `&& → || @463` 稳定存活，而 `npm test` 一句都不红。
+> 另一个同类陷阱：往重修上下文里**复制失败摘要**会冲掉"这条线索归谁"的断言依据，
+> 所以基线注记只报命令名与退出码，原因留在给操作者的日志里。
 
 ## 12-16. 产物与集成 IT
 

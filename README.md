@@ -17,7 +17,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | --- | --- |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
-> | 验证 | build + typecheck + test 硬门禁 + repair loop 归因重修 + 产物冒烟 |
+> | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 |
 > | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门 |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）|
