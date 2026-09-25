@@ -70,6 +70,14 @@
   其中 `ox-snap-*` 里还写着**长得像真 Key 的**哨兵字符串。现在都挂在 `process.on("exit")` 上，
   判定通过/失败/`process.exit` 三条路都会经过。复现核对：
   `npm run smoke:gateway` 前后各数一次 `ls -d $TEMP/ox-agents-it-* | wc -l`
+- **未到期批备份从此要说出来**（`headless/run-spec.ts`）。批在中途死掉时 `BatchGuard.settle()` 从未执行，
+  那一批的越权写入既没被仲裁也没被回滚，只留下一个 `batch-*` 备份目录 —— 而回收器对它
+  "未到期所以保留"这一支**一声不吭**，于是"保留"读起来像"没事"。现在 `PruneResult` 带 `kept`，
+  启动时点名这些目录并写明"本次运行不会自动回滚，请人工核对"。措辞刻意避开"回收"二字：
+  离线 IT 有一条断言就是"没谎报回收"（两处都是 `includes` 子串判定，读码核过）。
+  跨进程证明落在 `smoke:offline-e2e` 场景 D 的同一条检查里。**要不要在启动期自动补一次仲裁**
+  仍是未定的策略，没做。
+
 - **回滚不再删掉用户项目自己的 `package.json`**（`electron/sandbox/snapshot-store.ts` +
   `electron/engine/batch-guard.ts`）。默认档 `revert-batch` 的删除判据是"备份里没有 ⇒ 它是本批新建"，
   而快照只备份本批 zone 覆盖到的路径（通常 `src/`、`tests/`）—— 于是模型改根级 `package.json`

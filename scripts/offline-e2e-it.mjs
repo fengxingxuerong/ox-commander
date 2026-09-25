@@ -466,7 +466,9 @@ async function main() {
     );
     check(
       "没到保留期的遗留备份一个都没删，也没谎报回收",
-      second.backups.length > 0 && !secondLogs.some((t) => t.includes("[snapshots] 回收")),
+      second.backups.length > 0 &&
+        !secondLogs.some((t) => t.includes("[snapshots] 回收")) &&
+        secondLogs.some((t) => t.includes("未到期批备份")),
       JSON.stringify(second.backups),
     );
 
