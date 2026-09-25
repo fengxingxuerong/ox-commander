@@ -112,6 +112,44 @@
 
 ### 修复
 
+- **`Tests N` 这个头条数字此前虚报 28 条**（`src/router.test.ts`、`src/agent-registry.test.ts`、
+  新文件 `src/__fakes__/agents.ts`、`scripts/check-tests-collected.mjs`）。起因是我补用例后核对差值：
+  我只加了 8 条（registry 5 + prompts 3），总数却从 1020 跳到 1033。查出来是
+  `router.test.ts` 写着 `import { fakeAgent } from "./agent-registry.test"` —— **测试文件把另一个
+  测试文件当模块导入**，收集 router 时连带执行 agent-registry 的 `describe/it`，那 28 条被注册两次。
+  同一份 `router.test.ts` 在不同 run 里报 40 和 45 行（取决于 worker 有没有复用到那份模块缓存），
+  所以这不是"数字大一点"的小节：门禁的承判映射与头条都不可信，而变异审计跑某个 judge 文件时
+  还能借到别人的断言（这次核过：`router.ts` 与 `registry.ts` 逐位点仍各 20/20 全杀，
+  之前的绿**没有**被借来的断言撑着 —— 这条要说清，否则听起来像以前的门禁是假的）。
+  修法：夹具进 `src/__fakes__/agents.ts`（仓库既有约定，`check-unwired` 的 `SKIP_DIR` 已含该目录），
+  两边都从那里 import；并把它变成机器判据 —— 第 8 步现在扫"能解析到盘上测试文件的相对说明符"，
+  命中即 FAIL 并指出夹具该住哪。差分跑过：临时造一个跨测试文件 import ⇒ RC=1 且点名文件与说明符，
+  删掉探针 ⇒ RC=0 并多打一行「跨测试文件 import：0 处」。
+  真值现在是 **1005 = 996 passed + 9 skipped**；今天各条 CHANGELOG/手册里写过的 996/999/1004/1006/
+  1014/1020/1033 都被这 28 条虚报污染过（虚报幅度随那两个文件的规模而变），我不逐条改写历史条目，
+  在这里统一更正一次口径：**以第 8 步修好之后的 `npm test` 输出为准**。
+
+- **两处"没人断言的默认方向"补了用例**（`src/agent-registry.test.ts` +5、`src/prompts.test.ts` +3）。
+  起点是覆盖率报告：`shared/agent-contract.ts` 的分支只有 75%，而它**不在变异门禁的承判文件里**，
+  全量 site 审计也不会去看它 —— 这类文件的"翻转默认方向"没人守。
+  ① `normalizeCapabilities` 的空数组回退（`roles:[] → ["*"]`、`zoneGlobs:[] → ["**"]`、
+  `artifactKinds:[] → files+logs`）此前一行没断过。方向是刻意的（与 v1 适配器无限制的老语义一致，
+  且 manifest schema 在解析层就拒空数组，走不到"声明为空还静默放宽"），但一次"顺手收紧"
+  就会让一个声明不全的智能体**永远选不中或永远写不进**，而且不报错。用例除了看字段还看行为
+  （`candidates()` 真的还能命中它）。差分验过：把 `length > 0` 翻成 `>= 0` ⇒ 2 failed / 26 passed
+  —— 这正是 site 审计结构性看不见的数值边界（`>` 不在算子集里）。
+  ② `maxConcurrency` 的取整与下界（0.7→1、2.7→2），以及"返回的是拷贝"——
+  改它会污染调用方声明的数组、或让模块级 `LEGACY_CAPABILITIES` 被 push 脏，两条都断了。
+  ③ `buildEscalationSummary` 是**人做处置决定时唯一的输入**（跳过 / 重派 / 终止），此前
+  orchestrator 只数回调次数、从不读文案；现在断它点名三个真实可接受的动作、带上两个数字
+  （已试轮数与上限）、带上错误原文，且空摘要写成「(空)」而不是留一行悬空标题。
+  **两次我自己造出来的假缺陷要报备**（都被工具顶回来，没进代码）：
+  一是为测"数组缺失"传了个没有 `roles` 的对象 ⇒ :207 抛 TypeError；二是为测"`selfIsolated` 缺省
+  为 false"省略了该字段 ⇒ tsc 两条 2345 直接红。事实是 `selfIsolated` 在类型里必填、
+  manifest 解析器（`manifest-schema.ts:105,116`）也总会写出布尔值，两条入口都到不了"缺失"形状，
+  那个 `?? false` 只是给非 TS 调用方的兜底 —— 不该为不可能的形状写断言，更不该没读类型定义
+  就断"缺省行为"。跑完整门禁时 typecheck 抓到它们，说明第 1 段就是该抓这个的位置。
+
 - **把三处"睡固定时长再断言"的用例改成断言条件**（`src/sensenova-api.test.ts`、
   `src/audit-log.test.ts`）。这类写法把结果压在墙钟上，共享 runner 卡一下就红在一次抖动上：
   ① 两条 run 时限用例原来给 120ms / 40ms 的真预算 —— 判据是"**在途请求**被掐掉"，

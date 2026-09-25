@@ -1,7 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { AgentRegistry, createRegistry, wrapLegacyDescriptor } from "../electron/agents/registry";
-import { AGENT_PROTOCOL_VERSION, type AgentCapabilities } from "../shared/agent-contract";
+import { AGENT_PROTOCOL_VERSION, LEGACY_CAPABILITIES, type AgentCapabilities } from "../shared/agent-contract";
 import type { AgentAdapter, Task } from "../shared/types";
+/*
+ * `fakeAgent` 此前定义在本文件里并被 `router.test.ts` 跨测试文件 import —— 那会让
+ * vitest 连带执行本文件的 describe/it，把同一批用例注册两次（给 router 报的用例数
+ * 因此在 40/45 之间漂）。夹具挪进 `src/__fakes__/agents.ts`（`check:unwired` 跳过该目录）。
+ */
+import { fakeAgent } from "./__fakes__/agents";
 
 function caps(partial: Partial<AgentCapabilities>): AgentCapabilities {
   return {
@@ -13,24 +19,6 @@ function caps(partial: Partial<AgentCapabilities>): AgentCapabilities {
     selfIsolated: false,
     ...partial,
   };
-}
-
-/** Minimal adapter; when `declared` is given it also speaks the v2 capability contract. */
-export function fakeAgent(id: string, declared?: AgentCapabilities): AgentAdapter {
-  const base: AgentAdapter = {
-    meta: { id, name: id, kind: "api" },
-    async probe() {
-      return true;
-    },
-    async dispatch(payload) {
-      return { runId: payload.runId, agentId: id, taskId: payload.taskId };
-    },
-    async *collect() {
-      yield { kind: "completed" as const, text: "done", timestamp: Date.now() };
-    },
-    async abort() {},
-  };
-  return declared ? (Object.assign(base, { capabilities: () => declared }) as AgentAdapter) : base;
 }
 
 function task(zone: string, role: string): Task {
@@ -250,5 +238,63 @@ describe("AgentRegistry · adapter 字段的推断与校验", () => {
     // 只断言"ui → http-bridge"的话，`===` 与 `!==` 里总有一侧无人验证。
     const reg = new AgentRegistry([{ adapter: fakeAgent("api-agent", caps({})) }]);
     expect(reg.get("api-agent")!.manifest.adapter).toBe("local-llm");
+  });
+});
+
+/**
+ * `normalizeCapabilities` 的**回退方向**此前没有任何用例：
+ * 空数组会被填成"宽松默认"（`roles → ["*"]`、`zoneGlobs → ["**"]`、`supports → 全能力`）。
+ * 方向是刻意的（与 v1 适配器无限制的老语义一致），但没人钉的话，一次"顺手收紧"
+ * 就会让一个声明不全的智能体变成**永远选不中 / 永远写不进**，而且不报错。
+ *
+ * 顺带钉两件事：返回值必须是**拷贝**（改它不能污染模块级 LEGACY_CAPABILITIES），
+ * 以及输入数组不被就地改。
+ */
+describe("AgentRegistry normalization · 空声明的回退方向", () => {
+  it("roles 为空 ⇒ 回退成 *，并且真的还能被选中（不是只改了字段）", () => {
+    const reg = new AgentRegistry([{ adapter: fakeAgent("a1", caps({ roles: [] })) }]);
+    expect(reg.get("a1")!.capabilities.roles).toEqual(["*"]);
+    expect(reg.candidates({ task: task("src/x", "docs-writer") })).toHaveLength(1);
+    expect(reg.candidates({ task: task("src/x", "backend-dev") })).toHaveLength(1);
+  });
+
+  it("zoneGlobs 为空 ⇒ 回退成 **，任务区域照过", () => {
+    const reg = new AgentRegistry([{ adapter: fakeAgent("a1", caps({ zoneGlobs: [] })) }]);
+    expect(reg.get("a1")!.capabilities.zoneGlobs).toEqual(["**"]);
+    expect(reg.candidates({ task: task("whatever/deep/path", "backend-dev") })).toHaveLength(1);
+  });
+
+  it("artifactKinds 为空 ⇒ 回退成 legacy 的 files+logs", () => {
+    const reg = new AgentRegistry([{ adapter: fakeAgent("a1", caps({ artifactKinds: [] })) }]);
+    expect(reg.get("a1")!.capabilities.artifactKinds).toEqual(["files", "logs"]);
+  });
+
+  it("maxConcurrency 取下界与取整，且不就地改调用方声明的数组", () => {
+    const declared = caps({ maxConcurrency: 0.7, roles: ["backend-dev"] });
+    const frozen = [...declared.roles];
+    const reg = new AgentRegistry([{ adapter: fakeAgent("a1", declared) }]);
+    const got = reg.get("a1")!.capabilities;
+    expect(got.maxConcurrency).toBe(1); // floor(0.7)=0 ⇒ 再夹到 1
+    expect(got.roles).toEqual(["backend-dev"]);
+    got.roles.push("test-writer"); // 改返回的数组
+    expect(declared.roles).toEqual(frozen); // ⇒ 不能污染调用方的声明
+
+    const frac = new AgentRegistry([{ adapter: fakeAgent("a2", caps({ maxConcurrency: 2.7 })) }]);
+    expect(frac.get("a2")!.capabilities.maxConcurrency).toBe(2);
+    /*
+     * `selfIsolated ?? false` 这一兜底**不在这里断**：`AgentCapabilities.selfIsolated` 是必填，
+     * 而 manifest 解析器（`manifest-schema.ts:105,116`）也总会写出一个布尔 —— 两条入口都
+     * 到不了"字段缺失"的形状。我先前试图省略它来"测默认值"，tsc 直接把两条错误顶回来（2345），
+     * 那才是事实；为一个不可能的形状写断言只会把契约写反。
+     */
+  });
+
+  it("回退到 LEGACY 时给的是拷贝：改它不污染模块级默认", () => {
+    const reg = new AgentRegistry([{ adapter: fakeAgent("a1", caps({ roles: [] })) }]);
+    reg.get("a1")!.capabilities.roles.push("test-writer");
+    expect(LEGACY_CAPABILITIES.roles).toEqual(["*"]);
+    // 再建一个走空声明回退的，确认它拿到的不是被上面 push 脏过的那一份
+    const again = new AgentRegistry([{ adapter: fakeAgent("a2", caps({ roles: [] })) }]);
+    expect(again.get("a2")!.capabilities.roles).toEqual(["*"]);
   });
 });

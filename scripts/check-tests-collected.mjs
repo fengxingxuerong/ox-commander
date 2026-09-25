@@ -167,3 +167,42 @@ if (unaccepted.length > 0) {
 }
 
 console.log("\nPASS: 每个测试文件要么被 vitest 收集，要么已显式登记由另一套 runner 执行");
+
+/**
+ * ③ 反向缺陷：测试文件**互相 import**。
+ *
+ * 为什么和"没被收集"放在同一个门禁里：那是一枚硬币的两面 —— 一边是"以为在跑其实没跑"，
+ * 另一边是"跑了一遍，却被算成两遍"。本仓库踩过的是后者：`router.test.ts` 写过
+ * `import { fakeAgent } from "./agent-registry.test"`，于是收集 router 时连带**执行**
+ * agent-registry 的 describe/it，同一批用例注册两次，vitest 报给 router.test.ts 的行数
+ * 在 40/45 之间漂（取决于 worker 是否复用到那份模块缓存），而 `Tests N passed` 这个
+ * 门禁头条数字被虚报。夹具该住 `src/__fakes__/`（`check-unwired` 已跳过那个目录）。
+ *
+ * 判定：只认能解析到**盘上某个测试文件**的相对说明符（`./x.test` 会补 .ts/.tsx 再试），
+ * 不做字符串包含匹配 —— 否则注释里提一句"见 a.test"就会把门禁弄红。
+ */
+const EXTENSIONS = [".ts", ".tsx", ".js", ".mjs", ".cjs"];
+const onDiskSet = new Set(onDisk);
+const importsTestFile = [];
+for (const f of onDisk) {
+  const src = fs.readFileSync(path.join(ROOT, f), "utf8");
+  for (const m of src.matchAll(/(?:from|import)\s*\(?\s*["'](\.[^"']+)["']/g)) {
+    const spec = m[1];
+    const base = path.posix.normalize(path.posix.join(path.posix.dirname(f), spec)).replace(/\\/g, "/");
+    const hit = onDiskSet.has(base)
+      ? base
+      : EXTENSIONS.map((e) => `${base}${e}`).find((cand) => onDiskSet.has(cand));
+    if (hit) {
+      importsTestFile.push([f, spec, hit]);
+      break; // 一个文件报一次就够，多份只是噪音
+    }
+  }
+}
+if (importsTestFile.length > 0) {
+  console.error(`\nFAIL: ${importsTestFile.length} 个测试文件 import 了另一个测试文件 —— 被 import 的那份会连带执行，`);
+  console.error("      同一批用例被注册两次，`Tests N` 与每个文件的行数都不再可信：");
+  for (const [f, spec, hit] of importsTestFile) console.error(`  ${f}  ←  "${spec}"  ⇒  ${hit}`);
+  console.error("\n处置：把共享夹具挪进 `src/__fakes__/`（check-unwired 已跳过该目录），两边都从那里 import。\n");
+  process.exit(1);
+}
+console.log("  跨测试文件 import：0 处（夹具没让用例重复注册）");

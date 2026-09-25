@@ -1,6 +1,7 @@
 # `npm run verify` 的 19 步逐条机制
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、19 段、1020 用例（1011 passed + 9 skipped）。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、19 段、1005 用例（996 passed + 9 skipped）。
+注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见第 8 步）：同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
 README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
@@ -17,7 +18,7 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 5 | `check:scripts-wired` | `scripts/check-script-wiring.mjs` | 不可达脚本 → 红；失效 `ACCEPTED` → 红 |
 | 6 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
 | 7 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
-| 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红** |
+| 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
 | 9 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
 | 10 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
 | 11 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
@@ -105,6 +106,13 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 - **`vitest list` 失败或产出空集合 → FAIL**（不是"没有未收集项"）：收集过程坏了却报绿，
   是"基线失败被静默容忍"的同一类空转
 - 与第 5 步同族：那边抓"写好的脚本没接进入口"，这边抓"写好的测试没进收集范围"
+- **同族反向缺陷（2026-09-25 补）**：测试文件**互相 import**。被 import 的那份会连带执行它的
+  `describe/it`，于是同一批用例注册两次 —— 报出来的 `Tests N` 与"每个文件几行"都不再可信。
+  本仓库实测踩过：`router.test.ts` 从 `agent-registry.test` 借 `fakeAgent`，虚报 28 条
+  （头条 1033 / 真值 1005，同一份 router.test.ts 在不同 run 里报 40 与 45，取决于 worker
+  是否复用那份模块缓存）。判据只认能解析到盘上测试文件的相对说明符（补 `.ts/.tsx` 再试），
+  不做字符串包含匹配，免得注释里提一句就把门禁弄红。共享夹具的去处是 `src/__fakes__/`
+  （`check-unwired` 的 `SKIP_DIR` 已包含它，所以"只有测试在用"的导出不会被它拦）
 
 ## 9. vitest
 

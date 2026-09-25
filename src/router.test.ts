@@ -3,7 +3,7 @@ import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter, DEFAULT_ROUTER_WEIGHTS, type RouteContext } from "../electron/engine/router";
 import { DEFAULT_AGENT_LIMITS, type AgentCapabilities, type AgentDescriptor } from "../shared/agent-contract";
 import type { Task } from "../shared/types";
-import { fakeAgent } from "./agent-registry.test";
+import { fakeAgent } from "./__fakes__/agents";
 
 function caps(partial: Partial<AgentCapabilities>): AgentCapabilities {
   return {
