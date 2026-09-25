@@ -177,13 +177,75 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: installers-${{ matrix.os }}
-          path: release/*
+          # 排掉一层子目录：release/ 下除了安装包还有 win-unpacked/ linux-unpacked/
+          # __appImage-x64/ 这类中间目录，不加排除会把整个 unpacked 树塞进 artifact
+          # （2026-09-26 实测 windows artifact 200 MB，里面大半是 win-unpacked）。
+          path: |
+            release/*
+            !release/*/**
           if-no-files-found: error
 
       # 只在打 tag 时建 Release。用 runner 预装的 gh，不引第三方 action。
       - name: Create release and attach installers
+        id: release
         if: startsWith(github.ref, 'refs/tags/v') && steps.package.outcome == 'success'
+        # 这一步自己也要走诊断通道：2026-09-26 的 v0.1.2-rc1 上，打包**成功了**、
+        # 安装包也传上了，唯独这一步红 —— 而当时的诊断只在 package 失败时才发，
+        # 于是"为什么建不出 Release"又变成只能猜。所以先 continue-on-error 把输出落盘，
+        # 判失败挪到末尾单独一步。
+        continue-on-error: true
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" --generate-notes release/*
+        run: |
+          set -o pipefail
+          # 只取 release/ 根下的**普通文件**：`release/*` 会把 win-unpacked/ 这类目录
+          # 一起展开进 argv，gh 收到目录参数会直接拒绝（推断是 v0.1.2-rc1 上这一步红的直接原因）。
+          assets=()
+          while IFS= read -r f; do assets+=("$f"); done < <(find release -maxdepth 1 -type f | sort)
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "::error::release/ 下没有可挂载的文件，先确认 electron-builder 产出了安装包"
+            ls -la release
+            exit 1
+          fi
+          echo "attaching ${#assets[@]} file(s):"
+          printf '  %s\n' "${assets[@]}"
+          gh release create "$GITHUB_REF_NAME" --generate-notes "${assets[@]}" 2>&1 | tee release-create.log
+          exit "${PIPESTATUS[0]}"
+
+      # 与打包诊断同一个通道（checks API，公开仓库无需 admin），但用不同的 check 名，
+      # 免得把"打包失败"与"建 Release 失败"两份诊断混在一个 output 里分不清。
+      - name: Publish release diagnostics to check run
+        if: steps.release.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/github-script@v7
+        env:
+          MATRIX_OS: ${{ matrix.os }}
+        with:
+          script: |
+            const fs = require('fs');
+            const os = process.env.MATRIX_OS;
+            let text = '';
+            try { text = fs.readFileSync('release-create.log', 'utf8'); } catch (e) { text = '(release-create.log 读取失败: ' + e.message + ')'; }
+            const LIMIT = 60000;
+            const tail = text.length > LIMIT ? text.slice(text.length - LIMIT) : text;
+            await github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: `release-create-diagnostics (${os})`,
+              head_sha: context.sha,
+              status: 'completed',
+              conclusion: 'neutral',
+              output: {
+                title: `gh release create 失败诊断 (${os})`,
+                summary: '打包已成功、安装包已上传，但建 GitHub Release 失败时的完整输出。',
+                text: tail,
+              },
+            });
+
+      - name: Fail the job if release creation failed
+        if: steps.release.outcome == 'failure'
+        shell: bash
+        run: |
+          echo "::error::gh release create 失败，诊断已写入 check run 'release-create-diagnostics (${{ matrix.os }})'"
+          exit 1

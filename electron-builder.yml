@@ -44,3 +44,16 @@ linux:
     - deb
   category: Utility
   artifactName: "${productName}-${version}-${arch}.${ext}"
+  # deb 用 fpm 打包，fpm 强制要求 Maintainer 字段带 email。
+  # package.json 的 author 是裸字符串（只有名字、没有邮箱），于是 deb 目标直接抛
+  #   "Please specify author 'email' in the application package.json"
+  # ——更坏的是它发生在 AppImage **已经打成功之后**，一个目标的失败会把整个 build 带成非零退出，
+  # 表现为"Linux 打包全红、其实 AppImage 早就出来了"。
+  # 这里用 linux.maintainer 显式给出，就不必为了打包去改 package.json 的 author 语义。
+  # 邮箱用 GitHub 的 noreply 地址：公开可查、不承载真实联系方式。
+  maintainer: "fengxingxuerong <fengxingxuerong@users.noreply.github.com>"
+  # ⚠️ 仍未处理的另一条警告：未设 desktopName 时，桌面环境无法把运行中的窗口关联到
+  # .desktop 条目（任务栏图标显示为通用图标、窗口分组错乱）。
+  # 它不是 build config 的字段（scheme.json 里只有 linux.syncDesktopName，且那个读的是
+  # **package.json 的 desktopName**），要修得往 package.json 加 `desktopName` 再配
+  # `syncDesktopName: true`。非阻塞，留到下轮。

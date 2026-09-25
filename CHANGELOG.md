@@ -281,6 +281,32 @@
   2026-09-25 那次两个 package job 停在 checkout / setup-node 阶段 in_progress 三十多小时，
   既不失败也不结束、把后面的 run 全堵住 —— 宁可让它显式超时，留一条「卡在哪一步」的事实。
 
+- **诊断通道第一次用到就抓到了根因**（`v0.1.2-rc1` / `078cbdb` 那次 run）。结果分两条，
+  两条都不是"打包没配好"，而是**差在最后一步**：
+  1. **Linux = deb 缺 maintainer**：`⨯ Please specify author 'email' in the application package.json`
+     （`FpmTarget.computeFpmMetaInfoOptions`）。`package.json` 的 `author` 是裸字符串、没有邮箱，
+     而 deb 用 fpm 打包、fpm 强制要 `Maintainer` 带 email。**AppImage 其实已经打成功了**
+     （`OxCommander-0.1.1-x86_64.AppImage` 109 MB），是 deb 目标抛错把整个 build 带成非零退出 ——
+     这就解释了为什么之前"看着像 Linux 打包全红"。修法放在 `electron-builder.yml` 的
+     `linux.maintainer`（填 GitHub noreply 邮箱），不去动 `package.json` 的 `author` 语义。
+  2. **Windows 打包成功、挂在建 Release**：`Package` 绿、`installers-windows-latest` artifact
+     200 MB 也传上了，唯独 `gh release create` 红。`release/*` 会把 `win-unpacked/` 这类
+     **目录**一起展开进 argv（ubuntu 侧诊断里 release/ 下就有 `__appImage-x64` 与 `linux-unpacked`
+     两个目录），gh 收到目录参数会拒绝。改成先用 `find release -maxdepth 1 -type f` 收成数组再传，
+     并且**文件数为零时显式报错退出**（免得建出一个没有任何安装包的 Release）。
+     同一个 glob 问题也修在 `Upload installers (artifact)` 上 —— 加 `!release/*/**` 排除子目录树，
+     否则 artifact 的 200 MB 里大半是 `win-unpacked`。
+- **建 Release 这一步自己也接上了诊断通道**（`.github/workflows/release.yml`）。
+  `v0.1.2-rc1` 上暴露了一个缺口：`Publish diagnostics to check run` 的条件是
+  `steps.package.outcome == 'failure'`，**Package 之后的步骤挂掉就没有任何可读输出** ——
+  恰恰是这次红的那一步。现在 `Create release` 也 `continue-on-error` + `tee` 到 `release-create.log`，
+  失败时写进一个**独立命名**的 check run（`release-create-diagnostics (<os>)`，与
+  `packaging-diagnostics` 分开，免得两份诊断混在同一个 output 里分不清），判失败同样挪到末尾单独一步。
+- ⚠️ **仍未处理**：`desktopName` 未设（Linux 桌面环境无法把运行中的窗口关联到 .desktop 条目）、
+  icon 未设（分发版用默认 Electron 图标）。前者不是 build config 的字段 ——
+  `scheme.json` 里只有 `linux.syncDesktopName`，而它读的是 **package.json 的 `desktopName`**，
+  要修得两边一起加。非阻塞。
+
 ### 新增
 
 - `src/sandbox-llm-call.smoke.test.ts`：**沙箱内的 LLM 可达性探针**（真实网络，刻意不进 `verify`，
