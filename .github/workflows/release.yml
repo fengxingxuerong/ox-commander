@@ -37,7 +37,11 @@ jobs:
       # 这个 job 同样不启动 Electron，只要类型定义。
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
     steps:
+      # fetch-depth: 0 —— 这个 job 跑 `npm run verify`，其中第 19 步要用 HEAD~1 定基线
+      # （默认浅克隆没有父提交，那一步会崩）。详见 .github/workflows/verify.yml 同处注释。
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: "22"

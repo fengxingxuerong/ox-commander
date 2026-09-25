@@ -112,6 +112,24 @@
 
 ### 修复
 
+- **CI 的两个 `verify` job 从 `2afd002` 起一直红，根因是 `mutation:touched` 在浅克隆里崩**
+  （`scripts/mutation-touched.mjs`、`.github/workflows/{verify,release}.yml`）。
+  它按 `package.json` 的顺序是第 11 段（共 19 段；那笔提交写的"第 19 步"说的是"新加的那一段"）。
+  `actions/checkout@v4` 默认 `fetch-depth: 1`，那种仓库里**没有 `HEAD~1`**，而干净工作区下
+  这一步正是拿 `HEAD~1..HEAD` 当基线 ⇒ `git diff` 直接 fatal，抛给 job 日志一坨裸 node 堆栈。
+  本机永远是全历史，所以这一步在本机从没红过 —— 是我推完四笔去查远端结论才发现的。
+  **归因**：`cde8075`（我开工前的一笔）两个 verify job 都是绿的，`2afd002`（引入第 19 步）起转红，
+  我这四笔（`aa35f20`/`49e36d2`/`0c37f43`/`c5c995e`）不是成因；`mutation (site, every site)` 全程绿
+  也对得上——它不跑这一步。
+  两处一起改：① 跑 `npm run verify` 的两个 job 的 checkout 加 `fetch-depth: 0`；
+  ② 脚本不再让 git 的堆栈裸奔 —— 基线解析不出来就 FAIL 并说明"浅克隆 ⇒ CI 加 fetch-depth: 0 /
+  本机用 `--base=<ref>`"，`--base` 写错也走同一句。**不退化成审 `git diff HEAD`**：干净工作区下那是
+  空集，会让这一步宣称 PASS 而一个位点都没审。
+  验证：在 depth-1 克隆里用 `skip-worktree` 造出"干净树 + 无父提交"的 CI 原形，改前 RC=1 且是裸堆栈，
+  改后 RC=1 且是那句人话；写错的 `--base=nope-not-a-ref` 同样一句。
+  遗留一条（**不是 bug，是这一步的语义**）：CI 上一次推多笔时，`HEAD~1..HEAD` 只覆盖最后那一笔，
+  其余靠 `mutation (site, every site)` 那个全量 job 兜。
+
 - **零验证不再被念成"验证通过"**（`electron/engine/orchestrator.ts`）。`verificationCommands: []`
   是合法配置（headless 协议允许空集），而空集在 `verifyProject` 里恒为 `passed`，于是交付那一句日志
   写的是"全部验证通过，进入交付。"——实际什么都没验。**判定刻意不改**（纯文档类任务确实不需要构建，

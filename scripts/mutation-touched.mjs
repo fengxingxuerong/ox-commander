@@ -42,15 +42,46 @@ function targetsTable() {
   return byFile;
 }
 
+function hasRev(rev) {
+  try {
+    git(["rev-parse", "--verify", "--quiet", rev]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function baseFromArgs() {
   for (const a of process.argv.slice(2)) {
     const m = /^--base=(.*)$/.exec(a);
     if (m) return m[1];
   }
-  return git(["status", "--porcelain"]).trim() === "" ? "HEAD~1" : "HEAD";
+  if (git(["status", "--porcelain"]).trim() !== "") return "HEAD";
+  /*
+   * CI 的 `actions/checkout` 默认是 depth=1 的浅克隆，那里**没有父提交**，
+   * `HEAD~1` 直接解析失败。以前这一步会把一坨裸 node 堆栈抛给 job 日志
+   * （2026-09-25 的 ubuntu/windows 两个 verify job 就是这么红的，而本机永远复现不了）。
+   *
+   * 也**不能**退化成"审 `git diff HEAD`" —— 干净工作区下那是个空集，
+   * 于是这一步会宣称 PASS 而一个位点都没审。宁可红着说清楚。
+   */
+  if (!hasRev("HEAD~1")) {
+    console.error(
+      "FAIL: 仓库是浅克隆（没有 HEAD~1），这一步无法确定「本次改了哪些文件」的基线。\n" +
+        "      CI 请把 checkout 改成 `fetch-depth: 0`（见 .github/workflows/verify.yml）；\n" +
+        "      本机可用 `--base=<ref>` 显式指定基线。",
+    );
+    process.exit(1);
+  }
+  return "HEAD~1";
 }
 
 const base = baseFromArgs();
+if (base !== "HEAD" && !hasRev(base)) {
+  // `--base=<ref>` 写错时也给一句人话，而不是让 `git diff` 抛一坨裸堆栈。
+  console.error(`FAIL: 基线 "${base}" 在这个仓库里解析不出来（浅克隆？写错的 ref？）。`);
+  process.exit(1);
+}
 const touched =
   base === "HEAD"
     ? [...lines(git(["diff", "--name-only", "-M", "HEAD"])), ...lines(git(["diff", "--name-only", "-M", "--cached", "HEAD"]))]

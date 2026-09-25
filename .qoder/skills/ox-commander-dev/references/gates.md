@@ -20,11 +20,12 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红** |
 | 9 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
 | 10 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
-| 11 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
-| 12 | `build:headless` | `tsc -b tsconfig.headless.json` | |
-| 13 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 11/12 的产物 |
-| 14-17 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 18 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
+| 11 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
+| 12 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
+| 13 | `build:headless` | `tsc -b tsconfig.headless.json` | |
+| 14 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 12/13 的产物 |
+| 15-18 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
+| 19 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
 
 **13-18 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -150,7 +151,7 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 > 另一个同类陷阱：往重修上下文里**复制失败摘要**会冲掉"这条线索归谁"的断言依据，
 > 所以基线注记只报命令名与退出码，原因留在给操作者的日志里。
 
-## 13-18. 产物与集成 IT
+## 14-19. 产物与集成 IT
 
 - `artifact-smoke.mjs`：累计 `failed` 不早退；查 `dist/index.html` 存在、`dist-electron/**/*.js` 全量 `node --check`、
   headless 两次 stdin 协议退出码
@@ -170,16 +171,33 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
   `npm ci` + `npm run verify`，**无 `timeout-minutes`**
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
+- 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 **第 11 段，共 19 段**；
+  CHANGELOG 里"第 19 步"说的是"新加的那一段"，不是位置）定不出基线 —— 2026-09-25 就是这样让
+  两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
+  当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 
-`.github/workflows/release.yml`：打 tag 直接 `build:dist`，**不先跑 verify**。
+  ```bash
+  rm -rf /tmp/sh && git clone --depth 1 file:///d/ox/ox-commander /tmp/sh
+  git -C /tmp/sh update-index --skip-worktree scripts/mutation-touched.mjs
+  cp scripts/mutation-touched.mjs /tmp/sh/scripts/   # skip-worktree 让改动静音 ⇒ 状态仍"干净"
+  node /tmp/sh/scripts/mutation-touched.mjs; echo RC=$?   # 期望 RC=1 + 那句人话
+  ```
+
+`.github/workflows/release.yml`：`verify` job 先跑 `npm run verify`，`build` job 才 `build:dist`
+（以前这里写的是"打 tag 直接 build:dist、不先跑 verify"—— 按 2026-09-25 的文件核过，那句是错的）。
 
 > 本机没装 `gh`：读 workflow 只能推断，别把"文件里写了"当成"CI 跑过"。要结论就去 Actions 页看，或先装 `gh`。
+> 查结论有个不用 token 的办法：`GET /repos/.../commits/<sha>/check-runs` 的 `name`/`conclusion` 可读，
+> 但 **job 日志正文匿名读不到**（`output.title`/`summary` 实测为空），定位红点仍要人贴日志。
 
 ## 边界：site 审计的算子集不含数值比较
 
-`--list` 实测（2026-09-25）：`electron/engine/orchestrator.ts` 的 29 个位点只来自
+`--list` 实测（2026-09-25，同日第二次核）：`electron/engine/orchestrator.ts` 的 33 个位点只来自
 `&& → ||`、`|| → &&`、`=== → !==`、`!== → ===` 四种算子。**`<=` / `>=` / `<` / `>` 不在算子集内**
 （脚本文件头「已知局限 2」自己写了"抓不到数值边界写错"）。
+注意"只有四种"是**按文件**成立，不是算子集本身：同一份 `--list` 里 `scoped-env.ts` 有
+`继续(continue) → 中断(break)`、`llm-client.ts` 也有，`path-policy.ts`/`registry.ts` 有 `return true → false`。
 
 所以 `PASS: 无存活变异 —— 全部 N 处位点已逐点验证` 这句话**不能给数值边界类断言作证**。
 引用它之前先问：我新写的那几处是不是那四种算子之一？不是的话，该位点根本不在审计范围内，

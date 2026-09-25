@@ -29,6 +29,11 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
+        # 第 19 步 `mutation:touched` 靠 `HEAD~1..HEAD` 圈"本次改到了哪些文件"，
+        # 而 checkout 默认 depth=1 的浅克隆里**没有父提交**，那一步会直接崩
+        # （2026-09-25 两个 verify job 常红的成因；本机是全历史，复现不了）。
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-node@v4
         with:
