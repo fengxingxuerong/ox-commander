@@ -204,19 +204,41 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -o pipefail
           # 只取 release/ 根下的**普通文件**：`release/*` 会把 win-unpacked/ 这类目录
-          # 一起展开进 argv，gh 收到目录参数会直接拒绝（推断是 v0.1.2-rc1 上这一步红的直接原因）。
+          # 一起展开进 argv，gh 收到目录参数会直接拒绝（v0.1.2-rc1 上这一步红的直接原因）。
+          # 顺带排掉 electron-builder 自己写的 builder-debug.yml —— 那是 effective config 的
+          # 快照、给排查打包用的，不该挂到用户下载列表里（v0.1.2-rc3 上它就混进去了）。
           assets=()
-          while IFS= read -r f; do assets+=("$f"); done < <(find release -maxdepth 1 -type f | sort)
+          while IFS= read -r f; do assets+=("$f"); done < <(
+            find release -maxdepth 1 -type f | sort | grep -v -e '/builder-debug\.yml$'
+          )
           if [ "${#assets[@]}" -eq 0 ]; then
             echo "::error::release/ 下没有可挂载的文件，先确认 electron-builder 产出了安装包"
             ls -la release
             exit 1
           fi
-          echo "attaching ${#assets[@]} file(s):"
+
+          # 两个 OS 的 job **都会**跑到这一步，而同一个 tag 只能有一个 Release：
+          # v0.1.2-rc3 上 windows 先建好，ubuntu 接着撞上
+          # "a release with the same tag name already exists" —— 打包全绿却整个 job 红掉。
+          # 所以先探一次，已存在就改用 upload 追加（--clobber 覆盖同名资产）。
+          # create 失败时再回退一次 upload，是为了覆盖两个 job **同时**判成"不存在"的竞态。
+          mode=create
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then mode=upload; fi
+
+          if [ "$mode" = create ]; then
+            echo "attaching ${#assets[@]} file(s) to a new release:"
+            printf '  %s\n' "${assets[@]}"
+            gh release create "$GITHUB_REF_NAME" --generate-notes "${assets[@]}" 2>&1 | tee release-create.log
+            code=${PIPESTATUS[0]}
+            if [ "$code" -eq 0 ]; then exit 0; fi
+            if ! grep -qi "already exists" release-create.log; then exit "$code"; fi
+            echo "另一个 OS 的 job 抢先建好了同一个 release，改为追加资产"
+          fi
+
+          echo "uploading ${#assets[@]} file(s) to the existing release:"
           printf '  %s\n' "${assets[@]}"
-          gh release create "$GITHUB_REF_NAME" --generate-notes "${assets[@]}" 2>&1 | tee release-create.log
+          gh release upload "$GITHUB_REF_NAME" "${assets[@]}" --clobber 2>&1 | tee -a release-create.log
           exit "${PIPESTATUS[0]}"
 
       # 与打包诊断同一个通道（checks API，公开仓库无需 admin），但用不同的 check 名，

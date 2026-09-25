@@ -302,6 +302,22 @@
   恰恰是这次红的那一步。现在 `Create release` 也 `continue-on-error` + `tee` 到 `release-create.log`，
   失败时写进一个**独立命名**的 check run（`release-create-diagnostics (<os>)`，与
   `packaging-diagnostics` 分开，免得两份诊断混在同一个 output 里分不清），判失败同样挪到末尾单独一步。
+- **第一个 Release 真的出来了**（`v0.1.2-rc3`）。三个目标全部打包成功：
+  Windows `OxCommander-0.1.1-x64.exe` 80.7 MB、Linux `OxCommander-0.1.1-amd64.deb` 85.9 MB 与
+  `OxCommander-0.1.1-x86_64.AppImage` 109.8 MB；日志里能看到
+  `Setting from flags: maintainer=fengxingxuerong <...>` —— deb 那条修正确实生效了。
+  中途还撞了两个坑，都不是打包本身的问题：
+  ① 想给 artifact 排掉 `win-unpacked/` 而加的 `!release/*/**`，把 `release/` 下的文件
+  **一起否掉了**，两个 OS 的 `Upload installers` 同时 failure（已回退到 `path: release/*`）；
+  ② 诊断原本只在 `steps.package.outcome == 'failure'` 时才发，于是"打包成功但后续步骤红"
+  又变成只能猜 —— 条件改成 `always()`，成功时也发一份 neutral check（不影响门禁）。
+- **建 Release 的步骤改成幂等**（`.github/workflows/release.yml`）。两个 OS 的 job 都会跑到
+  `gh release create`，而同一个 tag 只能有一个 Release：windows 先建好之后，ubuntu 撞上
+  `a release with the same tag name already exists` → 打包全绿、整个 job 却红掉。
+  现在先 `gh release view` 探一次，已存在就改用 `gh release upload --clobber` 追加；
+  `create` 失败且报 already exists 时再回退 upload 一次（覆盖两个 job 同时判成"不存在"的竞态）。
+  顺带排掉 `builder-debug.yml` —— 它是 electron-builder 写的 effective config 快照、给排查打包
+  用的，rc3 上被当成安装包挂进了下载列表。
 - ⚠️ **仍未处理**：`desktopName` 未设（Linux 桌面环境无法把运行中的窗口关联到 .desktop 条目）、
   icon 未设（分发版用默认 Electron 图标）。前者不是 build config 的字段 ——
   `scheme.json` 里只有 `linux.syncDesktopName`，而它读的是 **package.json 的 `desktopName`**，
