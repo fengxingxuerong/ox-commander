@@ -1555,6 +1555,41 @@ describe("OrchestratorEngine.decompose · 【规划校验】zone 覆盖", () => 
  * 否则看板与审计日志会显示"全部验证通过"，而那一次什么都没验过。
  */
 describe("OrchestratorEngine · 零验证交付的口径", () => {
+/**
+ * run 级墙钟上界。三个分支都要能被判红：没配（省略字段）、配 0（=不限）、配 1ms（到点）。
+ * 变异口径下这三处（`=== undefined` / `<= 0` / `elapsed <= limit`）各自都有断言对着。
+ */
+describe("OrchestratorEngine · run 墙钟上界", () => {
+  const eagerScheduler = {
+    async runBatch(tasks: Task[]) {
+      return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "log", events: [] }));
+    },
+  } as unknown as Scheduler;
+  function clockEngine(settings: Record<string, number>, scheduler: Scheduler): OrchestratorEngine {
+    return new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler, verify: async () => makeReport(true), settings: { ...DEFAULT_SETTINGS, ...settings } },
+      { onStage: () => undefined, onLog: () => undefined, onTaskStatus: () => undefined, onVerification: () => undefined, onEscalation: () => undefined },
+    );
+  }
+
+  it("到点就停在批/轮边界，并说清现场还在", async () => {
+    const eng = clockEngine({ runWallClockMs: 1 }, eagerScheduler);
+    await new Promise((r) => setTimeout(r, 20));
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/墙钟上限/);
+  });
+
+  it("配 0 是不限，不是「立刻超时」", async () => {
+    const rep = await clockEngine({ runWallClockMs: 0 }, eagerScheduler).execute([TASKS], ".");
+    expect(rep.passed).toBe(true);
+  });
+
+  it("没配这个字段时行为与从前完全一致", async () => {
+    const rep = await clockEngine({}, eagerScheduler).execute([TASKS], ".");
+    expect(rep.passed).toBe(true);
+  });
+});
+
+
   function verifyEngine(report: VerificationReport, logs: string[]): OrchestratorEngine {
     const scheduler = {
       async runBatch(tasks: Task[]) {

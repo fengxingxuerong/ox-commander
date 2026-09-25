@@ -159,6 +159,7 @@ const KNOWN_FIELDS = new Set<string>([
   "arbitration",
   "maxParallelRuns",
   "maxTokensPerRun",
+  "runWallClockMs",
 ]);
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
@@ -352,6 +353,7 @@ export function parseSpec(rawText: string): ParseResult {
     ...(agentRouter !== undefined ? { agentRouter } : {}),
     ...(arbitration ? { arbitration } : {}),
     ...(maxTokensPerRun !== undefined ? { maxTokensPerRun } : {}),
+    ...(typeof raw.runWallClockMs === "number" ? { runWallClockMs: raw.runWallClockMs } : {}),
   };
 
   return {

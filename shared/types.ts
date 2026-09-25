@@ -176,6 +176,12 @@ export interface ProjectSettings {
    * 想禁用调用应走能力路由，而不是把预算设为 0。
    */
   maxTokensPerRun?: number;
+  /**
+   * 本次 run 的墙钟上限（毫秒）。只在批/轮边界生效，不掐断在途请求 ——
+   * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。
+   * `undefined` 或 `<= 0` 都是不限（要"不限"就省略这个字段，与 maxTokensPerRun 同风格）。
+   */
+  runWallClockMs?: number;
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

@@ -127,8 +127,21 @@ export class VerificationExhaustedError extends Error {
  * Fixed six-stage skeleton; inside PLANNING and repair rounds the LLM may
  * freely shape content, but stage transitions are code-controlled.
  */
+/** run 墙钟到点。抛在批/轮边界，现场（journal 与快照备份）保留，可续跑或调大上限。 */
+export class RunWallClockError extends Error {
+  constructor(public readonly elapsedMs: number, public readonly limitMs: number) {
+    super(
+      `本次 run 已达墙钟上限 ${Math.round(limitMs / 1000)}s（实际用时 ${Math.round(elapsedMs / 1000)}s）：` +
+        "停在批/轮边界，现场已保留，可断点续跑或调大 runWallClockMs。",
+    );
+    this.name = "RunWallClockError";
+  }
+}
+
 export class OrchestratorEngine {
   private cancelled = false;
+  /** 计时起点＝引擎构造那一刻（两个宿主都是每次 run 现构造引擎）。 */
+  private readonly runStartedAt = Date.now();
   private paused = false;
   /** Tasks currently dispatched (status `running`); drives the cancel sweep. */
   private readonly inFlight = new Set<string>();
@@ -177,6 +190,16 @@ export class OrchestratorEngine {
           `${what}：全部 LLM 路由冷却中，第 ${n} 次等待约 ${Math.ceil(ms / 1000)}s 后重试`,
         ),
     });
+  }
+
+  /** 见 `runWallClockMs`：只在批/轮边界检查，不掐在途请求。 */
+  private assertWallClock(): void {
+    const limit = this.deps.settings.runWallClockMs;
+    if (limit === undefined) return;
+    if (limit <= 0) return;
+    const elapsed = Date.now() - this.runStartedAt;
+    if (elapsed <= limit) return;
+    throw new RunWallClockError(elapsed, limit);
   }
 
   async generatePrd(userRequirement: string): Promise<PrdDocument> {
@@ -355,6 +378,7 @@ export class OrchestratorEngine {
     let outcomes: DispatchOutcome[] = [];
     let lastFailedLogs = new Map<string, string>();
     while (round <= maxRounds + extraRounds) {
+      this.assertWallClock();
       await this.gate();
       const isRepair = round > 0;
       if (isRepair) {
