@@ -8,6 +8,23 @@
 ## [未发布]
 
 ### 新增
+- **取消与超时现在真的掐得掉在途 LLM 请求**（`shared/providers.ts`、`shared/http-clients.ts`、
+  `shared/llm-client.ts`、`electron/agents/{run-session,sensenova-api}.ts`）。
+  此前 `postJson` 只把 `AbortSignal.timeout(300s)` 交给 fetch，**没有任何调用方取消的入口**：
+  用户点"中止"或 run 撞到时限，事件流会立刻收口，但那一次请求继续跑完、继续花 token、
+  回来后还要走一遍沙箱写入判定（上一轮靠"丢弃生成物"兜住副作用，钱是兜不住的）。
+  现在 `ChatRequest` 带可选 `signal`，与内部超时合并后下传（谁先响谁算）；
+  内置执行器按 run 挂一个 `AbortController`，`abort()` 与看门狗到点都会真的掐掉那一回合。
+  连带修掉三个"接上取消之后才会出现"的坑：
+  ① `isTransient` 对一切非 HTTP 错误返回 true ⇒ 取消会被当成线路故障，**换个 Key 把同一份 prompt
+  再发 11 次**，所以 `FailoverLlmClient` 现在见到 `req.signal.aborted` 原样抛出、**不轮询也不冷却**
+  （一次取消不该惩罚后面所有 run）；② `chatJson` 的自纠偏重试会重发已叫停的请求 ⇒ 加了同样的短路；
+  ③ 并发槽位仍跟着真实请求释放，不因超时提前放行。
+  用例：取消后只调用过第一条线路 / 零条"冷却 N 秒"处置 / 下一次正常调用仍先试同一条线路、
+  signal 真的下传（不合并就是 5s 挂住）、不传 signal 时内部 `TimeoutError` 照旧、
+  `abort()` 与超时时 `req.signal.aborted` 为真、自纠偏只发 1 次。
+  反证四处各跑过：摘掉故障转移的取消分支 1 failed / 24 passed、摘掉 signal 合并 1 failed / 10 passed、
+  摘掉执行器接线 2 failed / 27 passed、摘掉 `chatJson` 短路 1 failed / 19 passed。
 - **内置执行器（`sensenova-api`）现在也有 run 级时限**（`electron/agents/sensenova-api.ts`）。
   在此之前三个适配器里只有它不带 `limits`、不接 `TimeoutGate`，唯一的上界是**单次 HTTP 请求** 300s
   （`EXECUTOR_TIMEOUT_MS`）—— 而它恰是 `DEFAULT_SETTINGS.enabledAgents` 里开箱默认的那一个。
@@ -16,7 +33,8 @@
   现在按 `cli-agent` / `http-bridge` 的同一形态接 `TimeoutGate`，`limits.runDeadlineMs` 默认 600s（同 `DEFAULT_AGENT_LIMITS`），
   覆盖排队、重试与冷却等待；到点判 `failed: 超出总时限`、**迟到的那一回合不落盘**（与"run 已中止即丢弃生成物"同一条守卫），
   并发槽位仍跟着真实请求释放，不因超时提前放行。
-  已知边界：**在途的那一次请求仍会跑完**（token 已花），要真掐掉得把 `AbortSignal` 接进 HTTP 客户端；
+  已知边界：**在途的那一次请求仍会跑完**（token 已花），要真掐掉得把 `AbortSignal` 接进 HTTP 客户端
+  （~~同日已闭合~~，见下面"取消/超时真的掐掉在途请求"那条）；
   本适配器的 **idle 看门狗刻意关掉**（`idleTimeoutMs: Infinity`）—— 一次请求在途最长 300s 期间本来就不产生事件，
   开 idle 会把每一次健康的慢生成判死。用例两侧都钉：预算内照常落盘、超时限判 deadline 那一支且不写文件；
   反证是摘掉 `guard()` 后两条超时用例必须红（实测 2 failed / 27 passed）。

@@ -28,6 +28,12 @@ export class RunSession {
   events: AgentEvent[] = [];
   waiting: Array<(e: IteratorResult<AgentEvent>) => void> = [];
   finished = false;
+  /**
+   * Caller-side cancellation for this run. API adapters hand `signal` to the
+   * in-flight transport (HTTP request) so `abort()` actually stops it; process
+   * adapters may ignore it — they already tear the run down themselves.
+   */
+  readonly cancel = new AbortController();
 
   /**
    * 入队一个事件并唤醒等待者。

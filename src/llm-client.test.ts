@@ -140,6 +140,27 @@ describe("chatJson", () => {
     expect(calls).toHaveLength(2);
   });
 
+  it("调用方取消后不再自纠偏重试（不重发一份已被叫停的请求）", async () => {
+    // 与上一条正好相反：transport error 没有 signal 参与 ⇒ 照旧重试。
+    const ctrl = new AbortController();
+    const calls: ChatRequest[] = [];
+    const client: LlmClient = {
+      async chat(req) {
+        calls.push(req);
+        ctrl.abort();
+        throw new Error("aborted by caller");
+      },
+    };
+    await expect(
+      chatJson(
+        client,
+        { messages: [], signal: ctrl.signal },
+        { schemaName: "t", validate: (raw) => raw as unknown, maxRetries: 2 },
+      ),
+    ).rejects.toThrow("aborted by caller");
+    expect(calls).toHaveLength(1);
+  });
+
   it("rethrows after transport errors exhaust retries", async () => {
     const client: LlmClient = {
       async chat() {

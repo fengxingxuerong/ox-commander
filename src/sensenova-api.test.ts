@@ -481,19 +481,25 @@ describe("SensenovaApiAdapter", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("abort terminates an in-flight run", async () => {
+  it("abort terminates an in-flight run and cancels the HTTP request", async () => {
     const root = tmpRoot();
     let release!: () => void;
     const gate = new Promise<void>((r) => (release = r));
+    let sawSignal: AbortSignal | undefined;
     const slowClient: LlmClient = {
-      async chat() {
+      async chat(req: ChatRequest) {
+        sawSignal = req.signal;
         await gate;
         throw new Error("should not matter");
       },
     };
     const adapter = new SensenovaApiAdapter(slowClient);
     const handle = await run(adapter, root);
+    for (let i = 0; i < 200 && !sawSignal; i++) await new Promise((r) => setTimeout(r, 1));
+    expect(sawSignal).toBeDefined(); // 请求确实发出去了，不是"还没来得及 abort 就结束"
+    expect(sawSignal?.aborted).toBe(false);
     await adapter.abort(handle);
+    expect(sawSignal?.aborted).toBe(true); // 取消要下传到在途请求，不只是关掉事件流
     release();
     const kinds: string[] = [];
     for await (const ev of adapter.collect(handle)) kinds.push(ev.kind);
@@ -534,13 +540,15 @@ describe("SensenovaApiAdapter", () => {
     const pending = new Promise<ChatResponse>((res) => {
       release = res;
     });
+    let sawSignal: AbortSignal | undefined;
     const adapter = new SensenovaApiAdapter(
       {
-        async chat(): Promise<ChatResponse> {
+        async chat(r: ChatRequest): Promise<ChatResponse> {
+          sawSignal = r.signal;
           return pending;
         },
       },
-      { limits: { runDeadlineMs: 30 } },
+      { limits: { runDeadlineMs: 120 } },
     );
     const handle = await run(adapter, root);
     const events: string[] = [];
@@ -548,6 +556,8 @@ describe("SensenovaApiAdapter", () => {
     // 必须是 deadline 那一支：本适配器把 idle 窗口关掉了（单请求在途时本来就没事件）。
     expect(events[events.length - 1]).toMatch(/^failed: \[sensenova-api\] run .+ 超出总时限$/);
     expect(events.some((e) => e.includes("不再等待本回合结果"))).toBe(true);
+    // 到点不只是"不再等"：在途那一次请求也被真的掐掉（不占线路池、不再继续花 token）
+    expect(sawSignal?.aborted).toBe(true);
     release({
       content: '{"files":[{"path":"src/add.js","content":"// late"}]}',
       provider: "test",

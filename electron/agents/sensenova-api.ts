@@ -203,10 +203,11 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private async run(payload: TaskPayload, session: RunSession): Promise<void> {
     this.gate.attach({ id: payload.runId }, () => {
       // 看门狗只说明"为什么"，真正把 run 收口的是下面 `guard()` 抛出的 TimeoutError。
+      session.cancel.abort(); // 在途那一次请求一并掐掉，不再占线路池、也不再花 token
       session.push(
         "log",
         `[sensenova-api] 已超出 run 时限 ${this.limits.runDeadlineMs}ms，不再等待本回合结果` +
-          `（在途请求仍会跑完，那一笔 token 已经花了）`,
+          `（在途请求已中止，那一笔 token 可能已经花掉）`,
       );
     });
     try {
@@ -246,9 +247,9 @@ export class SensenovaApiAdapter implements AgentAdapter {
       const generated = await this.gate.guard(payload.runId, work);
       if (session.finished) {
         /*
-         * run 已被中止。模型这一回合是**算完了**的（token 已花），但写盘是不可逆
-         * 副作用 —— 取消之后再落文件，用户看到的是一份他叫停过的改动。
-         * 真正掐掉在途请求要把 AbortSignal 接进 HTTP 客户端，那是另一件事。
+         * run 已被中止。这一回合的 token 多半已经花了（`abort()` 掐的是 socket，
+         * 请求可能刚好已经答完），但写盘是不可逆副作用 —— 取消之后再落文件，
+         * 用户看到的是一份他叫停过的改动。
          */
         session.push(
           "log",
@@ -311,6 +312,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
           ],
           temperature: 0.2,
           jsonMode: true,
+          signal: session.cancel.signal,
         },
         { schemaName: "files-protocol", validate: parseFilePayload, maxRetries: 2 },
       );
@@ -472,6 +474,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
   async abort(handle: RunHandle): Promise<void> {
     const session = this.sessions.get(handle.runId);
     if (!session || session.finished) return;
+    session.cancel.abort(); // 先掐在途请求，再收事件流：晚一步就是取消之后还在烧钱
     session.push("aborted", "run aborted");
     session.finished = true;
     session.wake();

@@ -55,7 +55,7 @@ repair 循环 `while (round <= maxRounds + extraRounds)`（`:357`），默认 3 
 | 文件 | `electron/agents/sensenova-api.ts` | `electron/agents/cli-agent.ts` | `electron/agents/http-bridge.ts` |
 | 能力 | 只有 `read/edit/create`（注释言明**不跑命令**，`:95-115`） | 声明什么就跑什么 | 由宿主实现决定 |
 | 并发 | `maxConcurrency` = 已配 key 数（`:113,146`） | | 4 端点轮询，`pollMs` 默认 500 |
-| 超时 | `limits` + TimeoutGate，**只认 deadline**（`:175` 另有 per-request `EXECUTOR_TIMEOUT_MS`）<br>idle 在这里必假阳：一次请求在途最长 300s 期间本来不产生事件 | TimeoutGate + `killTree`（`:209-223,293`） | |
+| 超时 | `limits` + TimeoutGate，**只认 deadline**（`:175` 另有 per-request `EXECUTOR_TIMEOUT_MS`）<br>idle 在这里必假阳：一次请求在途最长 300s 期间本来不产生事件<br>abort()/看门狗到点 → `session.cancel.abort()` → `ChatRequest.signal` 掐掉在途 fetch | TimeoutGate + `killTree`（`:209-223,293`） | |
 | 入参 | files-protocol JSON 输出（`:484-497`） | 走 prompt 文件不用 argv（`:359-399`），`shell:false` + `buildSpawnSpec`，env 经 `scopedEnv` 最小化，stdout 有字节预算 | `credential` 在这里才真被消费（`authHeaders` `:343-369`） |
 
 **manifest 校验只有三个入口**：`agents.d` 目录（`manifest-loader.ts:42`，单文件解析失败只跳过并计入 `manifestErrors`）、
@@ -172,4 +172,4 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README 旧版「15 步 / 930 用例」 | 19 段 / 999 用例（990 passed + 9 skipped，2026-09-25 本机 win32 实测） | `package.json:36` |
+| README 旧版「15 步 / 930 用例」 | 19 段 / 1004 用例（995 passed + 9 skipped，2026-09-25 本机 win32 实测） | `package.json:36` |

@@ -148,6 +148,9 @@ export async function chatJson<T>(
       // Every failover combo is already cooling down: this outer retry loop
       // would only re-hit the same cooldown, so propagate immediately.
       if (e instanceof AllRoutesCoolingError) throw e;
+      // Caller cancelled (run aborted / deadline tripped): the self-correction
+      // retry would re-send a request the user already called off.
+      if (request.signal?.aborted) throw e;
       // Transport-level failures (network errors, timeouts) are retryable too.
       if (attempt === maxRetries) throw e;
       lastRaw = `(transport error: ${(e as Error).message})`;
