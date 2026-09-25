@@ -11,7 +11,7 @@
  *
  * 环境变量：SENSENOVA_API_KEY(+_2/_3) 提供执行器密钥；切换 llmProvider 时读取对应 *_API_KEY。
  */
-import { PROTOCOL_VERSION, parseSpec, type HeadlessEvent } from "./protocol";
+import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent } from "./protocol";
 import { runSpec } from "./run-spec";
 
 function emit(evt: HeadlessEvent): void {
@@ -67,6 +67,15 @@ function readStdin(): Promise<string> {
 }
 
 async function main(): Promise<number> {
+  // 先验运行时，再读 stdin：宿主可能压根不关管道，那时"跑到一半才崩"会变成"永远挂着"。
+  const gap = runtimeGap({
+    nodeVersion: process.versions.node,
+    hasAbortSignalAny: typeof AbortSignal.any === "function",
+  });
+  if (gap) {
+    emit({ type: "error", message: gap });
+    return 1;
+  }
   const parsed = parseSpec(await readStdin());
   if (!parsed.ok) {
     emit({ type: "error", message: parsed.message });

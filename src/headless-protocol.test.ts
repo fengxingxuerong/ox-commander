@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { PROTOCOL_VERSION, parseSpec, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
+import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
 import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
 import type { LlmClient } from "../shared/llm-client";
@@ -1070,5 +1070,20 @@ describe("parseSpec · agentRouter 透传到 settings", () => {
 
   it("非布尔值被拒绝", () => {
     expect(parseSpec(JSON.stringify({ ...LEGACY_SPEC, agentRouter: "yes" })).ok).toBe(false);
+  });
+});
+
+describe("runtimeGap · headless 的运行时前置条件", () => {
+  it("有 AbortSignal.any ⇒ 一条提示也不给（旧版本误判成缺失会拦掉所有正常 run）", () => {
+    expect(runtimeGap({ nodeVersion: "24.18.0", hasAbortSignalAny: true })).toBeNull();
+  });
+
+  it("缺 AbortSignal.any ⇒ 说清缺什么、当前是什么、怎么办", () => {
+    const gap = runtimeGap({ nodeVersion: "18.20.4", hasAbortSignalAny: false });
+    expect(gap).toContain("18.20.4");
+    expect(gap).toContain("AbortSignal.any");
+    expect(gap).toContain("20.19");
+    // 提示里不能只剩一个 TypeError 的措辞：宿主需要知道换什么
+    expect(gap).toMatch(/node/i);
   });
 });

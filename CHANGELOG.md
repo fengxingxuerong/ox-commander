@@ -8,6 +8,15 @@
 ## [未发布]
 
 ### 新增
+- **声明并检查 headless CLI 的 Node 下限**（`package.json` 的 `engines`、`headless/protocol.ts` 的
+  `runtimeGap`、`headless/headless-main.ts` 入口）。上一笔接取消时用了 `AbortSignal.any` 合并
+  "单请求超时 ∪ 调用方取消" —— 那是运行时路径上**第一个**把下限抬到 Node 20.3+ 的 API
+  （此前只有 `structuredClone` 与 `AbortSignal.timeout`，17.x 就够），而仓库既没有 `engines`
+  也没有任何版本要求文档。症状会很难看：宿主用旧 node 驱动 CLI，planning 的 token 花完之后
+  第一次执行器调用才从 `postJson` 抛 `TypeError: AbortSignal.any is not a function`。
+  现在判据是**特性而不是版本号**（发行版会回移特性），缺了什么直接说"当前 X，需要 >= 20.19，
+  因为缺 AbortSignal.any"，并且**先于读 stdin** —— 宿主不关管道时，"跑到一半才崩"会变成"永远挂着"。
+  桌面端不受影响（Electron 33 自带 Node 20.18+，且它总走自己的运行时）。
 - **取消与超时现在真的掐得掉在途 LLM 请求**（`shared/providers.ts`、`shared/http-clients.ts`、
   `shared/llm-client.ts`、`electron/agents/{run-session,sensenova-api}.ts`）。
   此前 `postJson` 只把 `AbortSignal.timeout(300s)` 交给 fetch，**没有任何调用方取消的入口**：

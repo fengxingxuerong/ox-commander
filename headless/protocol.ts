@@ -29,6 +29,26 @@ import {
 
 export const PROTOCOL_VERSION = "ox-headless/1";
 
+/** 本 CLI 要求的 Node 版本下限：`AbortSignal.any`（取消/超时下传给在途请求）与工具链同档。 */
+export const MIN_NODE_VERSION = "20.19";
+
+/**
+ * 运行时前置条件。满足返回 `null`，否则返回一条**可行动的**说明。
+ *
+ * 判据刻意用特性而不是版本号：真正被依赖的是 `AbortSignal.any`（Node 20.3+），
+ * 版本字符串只是它的代理，而发行版会回移特性。没有这条检查时，症状是跑到第一次
+ * LLM 调用才从 `postJson` 里抛出 `TypeError: AbortSignal.any is not a function`
+ * —— 那已经是花了 planning 的 token 之后，而且提示里没有一句说的是"换 node 版本"。
+ */
+export function runtimeGap(env: { nodeVersion: string; hasAbortSignalAny: boolean }): string | null {
+  if (env.hasAbortSignalAny) return null;
+  return (
+    `OxCommander headless 需要 Node >= ${MIN_NODE_VERSION}（当前 ${env.nodeVersion}）：` +
+    "这个版本没有 AbortSignal.any，LLM 请求的取消与超时无法下传。" +
+    "请用更高版本的 node 启动本 CLI（或改用桌面端，它自带运行时）。"
+  );
+}
+
 /**
  * What the runner does when repair rounds are exhausted.
  *
