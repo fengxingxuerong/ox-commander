@@ -337,6 +337,26 @@ export function SettingsPage() {
           已发生的那一次照常记录 —— 总量始终能和服务商账单对上。
         </p>
         <div className="form-row">
+          <label htmlFor="run-wall-clock">单次运行墙钟上限（分钟）</label>
+          <input
+            id="run-wall-clock"
+            type="number"
+            min={0}
+            value={Math.round((draft.runWallClockMs ?? 0) / 60000)}
+            onChange={(e) => {
+              const min = Math.max(0, Math.floor(Number(e.target.value) || 0));
+              // 界面按分钟给（毫秒没人填得对），存的是毫秒；0 存成 undefined = 不限，
+              // 与引擎那边的契约一致（省略字段表示不限，不是"立刻超时"）。
+              patch({ runWallClockMs: min > 0 ? min * 60000 : undefined });
+            }}
+          />
+        </div>
+        <p className="muted">
+          一次运行允许的最长墙钟时间（0 表示不限）。只在批次/重修轮的边界上生效，
+          不会掐断已经在途的请求 —— 到点停下并保留现场，可以断点续跑。
+          它管的是"这一单跑飞了多久"，与各智能体自己的空闲/总时限是两回事。
+        </p>
+        <div className="form-row">
           <label htmlFor="arbitration">zone 越权处置</label>
           <select
             id="arbitration"

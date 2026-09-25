@@ -572,6 +572,22 @@ describe("SettingsPage", () => {
     expect(saved.arbitration).toBe("quarantine");
   });
 
+  it("墙钟上限按分钟给、按毫秒存，归零是不限而不是立刻超时", async () => {
+    render(<SettingsPage />);
+    const label = "单次运行墙钟上限（分钟）";
+    await screen.findByLabelText(label);
+    fireEvent.change(screen.getByLabelText(label), { target: { value: "3" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0].runWallClockMs).toBe(180000);
+
+    fireEvent.change(screen.getByLabelText(label), { target: { value: "0" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.length).toBeGreaterThanOrEqual(2));
+    const back = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0];
+    expect("runWallClockMs" in back ? back.runWallClockMs : undefined).toBeUndefined();
+  });
+
   it("persists the token budget control into the saved payload", async () => {
     render(<SettingsPage />);
     const save = await screen.findByRole("button", { name: "保存设置" });
