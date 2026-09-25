@@ -524,6 +524,14 @@ describe("runSpec", () => {
     expect(missing.failed).toEqual([]);
   });
 
+  it("runWallClockMs 只有给的是数字才落成设置字段", () => {
+    const ok = parse(JSON.stringify({ ...LEGACY_SPEC, runWallClockMs: 90000 }));
+    expect(ok.settings.runWallClockMs).toBe(90000);
+    // 字符串"90000"不是墙钟时间：宁可当作没配，也不能把类型错传成 NaN 让闸门永不触发
+    const bad = parse(JSON.stringify({ ...LEGACY_SPEC, runWallClockMs: "90000" }));
+    expect("runWallClockMs" in bad.settings).toBe(false);
+  });
+
   it("没有凭证时给一句能行动的话，而不是内部术语", async () => {
     // 大脑层拿不到 key 时，原先一路跑到第一次调用才炸，宿主看到的是
     // "failover client has no groups" —— 不知道该做什么。headless 不读 .env
