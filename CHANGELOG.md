@@ -5,7 +5,6 @@
 纯内部重构若改变了行为仍会记入。
 
 ## [未发布]
-## [未发布]
 
 ### 新增
 - **预算闸现在会自己承认看不见多少**（`shared/usage-meter.ts` 的 `onBudgetBlind` / `budgetBlindNote`、
@@ -264,6 +263,23 @@
   这也更接近智能体真实的修法
 - **`CliAgentAdapter.probe()` 同样最小化环境**（`electron/agents/cli-agent.ts`）：探测就是拿
   `--version` 真跑一次那个二进制，它此前也继承全部 Key —— `dispatch` 做了收缩、`probe` 没做
+
+### 新增（CI / 分发）
+
+- **打包失败现在不再是无头案**（`.github/workflows/release.yml`）。此前 `package (windows)` 与
+  `package (ubuntu)` 三次停在 `Package` 这一步，而本仓库读不到 job 日志
+  （`GET .../actions/jobs/{id}/logs` → 403 Must have admin rights），失败原因只能靠猜 ——
+  猜过「`files` 引用不存在的 `LICENSE`」「linux deb 需要 runner 上没有的 fpm」「产物目录为空触发
+  `if-no-files-found`」三轮，一个都没落实（`LICENSE` 后来补上了，打包照样红）。
+  现在失败时先把 `npm run build:dist` 的完整输出（`DEBUG=electron-builder` 开着，默认只打人话摘要）
+  落成 `build-dist.log` 与 `diagnostics.txt`（含 node/npm 版本、`release/` 与三个 dist 目录的实际内容），
+  再走两条**无需 admin** 的通道出去：① `packaging-diagnostics-<os>` artifact；
+  ② check run 的 `output.text`（checks API 对公开仓库可读，截断在 60 KB 内）。
+  判失败单独挪到最后一步 —— `continue-on-error` 不能把红灯吃掉，而 `| tee` 之后那条 `echo`
+  会把退出码盖成 0（步骤 outcome 取最后一条命令），所以必须显式 `exit $code`。
+  同一轮加了 `concurrency`（取消同 ref 上的旧 run）与每 job `timeout-minutes: 30`：
+  2026-09-25 那次两个 package job 停在 checkout / setup-node 阶段 in_progress 三十多小时，
+  既不失败也不结束、把后面的 run 全堵住 —— 宁可让它显式超时，留一条「卡在哪一步」的事实。
 
 ### 新增
 
