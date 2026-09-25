@@ -222,9 +222,11 @@ export class SensenovaApiAdapter implements AgentAdapter {
           );
           return;
         }
-        const written = this.writeFiles(payload.projectRoot, generated, session);
+        const res = this.writeFiles(payload.projectRoot, generated, session);
         if (!session.finished) {
-          session.push("completed", `写入 ${written} 个文件（run ${payload.runId}）`);
+          // 终态里带上被拒数量与路径：重修 prompt 传的是这份摘要，只说"写入 N 个"
+          // 的话，模型下一轮会原样再写一遍被沙箱拒掉的那条路径，预算空烧。
+          session.push("completed", SensenovaApiAdapter.completedNote(res, payload.runId));
         }
       } finally {
         this.releaseSlot();
@@ -371,27 +373,44 @@ export class SensenovaApiAdapter implements AgentAdapter {
     projectRoot: string,
     files: Array<{ path: string; content: string }>,
     session: RunSession,
-  ): number {
+  ): { written: number; refused: string[] } {
     // Sandbox gate (P3): the path rules that used to be hard-coded here
     // (project root + protected paths) now live in PathPolicy, so every adapter
     // shares one implementation. Zone is deliberately left out: this gate uses a
     // strict prefix, so honouring it here would reject `src/duration.js` for zone
     // `src/duration` — a write the arbitration gate owns and must not roll back.
     const policy = new PathPolicy({ projectRoot });
-    let count = 0;
+    const refused: string[] = [];
+    let written = 0;
     for (const f of files) {
       const decision = policy.assertWritable(f.path);
       if (!decision.ok) {
         session.push("log", `[${this.meta.id}] 跳过：${decision.reason}`);
+        refused.push(f.path);
         continue;
       }
       fs.mkdirSync(path.dirname(decision.abs), { recursive: true });
       fs.writeFileSync(decision.abs, f.content, "utf8");
       session.push("log", `[${this.meta.id}] 写入 ${f.path}（${f.content.length} 字符）`);
-      count++;
+      written++;
     }
-    if (count === 0) throw new Error("模型未返回可写入的文件");
-    return count;
+    if (written === 0) {
+      // 点名被拒的路径：只说"没有可写入的文件"，重修那一轮就会让模型原样再写一遍
+      // 同一条被沙箱拒的路径 —— 预算空烧，而日志里那句「跳过」没人带进 prompt。
+      throw new Error(
+        refused.length > 0
+          ? `模型返回的 ${files.length} 个文件全部被沙箱拒绝：${refused.join("、")}`
+          : "模型未返回可写入的文件",
+      );
+    }
+    return { written, refused };
+  }
+
+  /** 终态文案：写了多少、被沙箱拒了多少（被拒路径逐条点名，它会随重修上下文回到模型手里）。 */
+  private static completedNote(res: { written: number; refused: string[] }, runId: string): string {
+    const head = `写入 ${res.written} 个文件（run ${runId}）`;
+    if (res.refused.length === 0) return head;
+    return `${head}；沙箱拒绝 ${res.refused.length} 个：${res.refused.join("、")}`;
   }
 
   async *collect(handle: RunHandle): AsyncGenerator<AgentEvent> {

@@ -162,6 +162,43 @@ describe("SensenovaApiAdapter", () => {
     expect(fs.existsSync(path.join(root, "src", "add.js"))).toBe(false);
   });
 
+  /**
+   * 被沙箱拒掉的路径必须出现在**终态**里。只在中间日志流说一句「跳过」是不够的：
+   * 重修循环带进 prompt 的是这份摘要，模型看到"写入 1 个文件"就以为都落了，
+   * 下一轮原样再写一遍同一条被拒路径 —— 预算空烧，而且没人告诉它为什么红。
+   */
+  it("names sandbox-refused paths in the terminal event, not just in the log stream", async () => {
+    const root = tmpRoot();
+    const payload = JSON.stringify({
+      files: [
+        { path: "src/ok.js", content: "module.exports = 1;" },
+        { path: ".git/config", content: "[core] nope" },
+      ],
+    });
+    const adapter = new SensenovaApiAdapter(scriptedClient([payload]).client);
+    const texts: string[] = [];
+    const handle = await run(adapter, root);
+    for await (const e of adapter.collect(handle)) texts.push(`${e.kind}:${e.text}`);
+    const joined = texts.join(" | ");
+    expect(joined).toContain("completed:写入 1 个文件");
+    expect(joined).toContain("沙箱拒绝 1 个：.git/config");
+    expect(fs.existsSync(path.join(root, "src", "ok.js"))).toBe(true);
+  });
+
+  it("全部被拒时，失败摘要点名被拒路径而不是含糊说「没返回文件」", async () => {
+    const root = tmpRoot();
+    const payload = JSON.stringify({ files: [{ path: ".git/config", content: "nope" }] });
+    const adapter = new SensenovaApiAdapter(scriptedClient([payload]).client);
+    const texts: string[] = [];
+    const handle = await run(adapter, root);
+    for await (const e of adapter.collect(handle)) texts.push(`${e.kind}:${e.text}`);
+    const joined = texts.join(" | ");
+    expect(joined).toContain("全部被沙箱拒绝");
+    expect(joined).toContain(".git/config");
+    // 模型确实返回了文件，说"未返回可写入的文件"会把归因带偏到模型输出格式上
+    expect(joined).not.toContain("模型未返回可写入的文件");
+  });
+
   it("writes model-returned files and completes", async () => {
     const root = tmpRoot();
     const adapter = new SensenovaApiAdapter(
