@@ -35,6 +35,32 @@ export function topologicalSort(tasks: Task[]): Task[] {
 }
 
 /**
+ * 被「用户跳过的上游」传染到的任务集合（沿依赖边取传递闭包，跳过的任务本身不算）。
+ *
+ * 为什么需要它：engine 把跳过的依赖**视同已满足**，下游照派 —— 这是刻意的
+ * "人自担"语义（下游也许确实不需要那份产物）。但"自担"不等于"任人烧钱"：
+ * 这类任务一旦失败，继续吃重修轮、继续弹升级决策，用户每答一次"重派"就多花
+ * 一整轮 run 的预算，而它缺的那份产物**永远不会出现**。
+ *
+ * 这里只回答"谁有这种结构性风险"，处置与措辞留在调用方。
+ */
+export function skippedDescendants(tasks: Task[], skipped: ReadonlySet<string>): Set<string> {
+  const out = new Set<string>();
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    for (const t of tasks) {
+      if (out.has(t.id) || skipped.has(t.id)) continue;
+      if (t.dependencies.some((d) => skipped.has(d) || out.has(d))) {
+        out.add(t.id);
+        progressed = true;
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Greedy batching over the topological order: repeatedly start a new batch and
  * fill it with every task whose deps are already done and whose zone is not
  * yet claimed by this batch; zone conflicts defer the task to a later batch.

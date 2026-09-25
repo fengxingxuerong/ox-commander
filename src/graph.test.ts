@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planBatches } from "../shared/graph";
+import { planBatches, skippedDescendants } from "../shared/graph";
 import type { Task } from "../shared/types";
 
 function t(id: string, deps: string[], zone = `z-${id}`): Task {
@@ -44,5 +44,34 @@ describe("planBatches", () => {
     const flatOrder = batches.flat().map((x) => x.id);
     expect(flatOrder.indexOf("a")).toBeLessThan(flatOrder.indexOf("d"));
     expect(flatOrder).toHaveLength(4);
+  });
+});
+
+describe("skippedDescendants · 被跳过的上游会传染到谁", () => {
+  it("空集合没有任何后果", () => {
+    const tasks = [t("a", []), t("b", ["a"])];
+    expect(skippedDescendants(tasks, new Set())).toEqual(new Set());
+  });
+
+  it("跳过的任务本身不算下游，闭包沿依赖边传递", () => {
+    const tasks = [t("a", []), t("b", ["a"]), t("c", ["b"])];
+    const out = skippedDescendants(tasks, new Set(["a"]));
+    expect([...out].sort()).toEqual(["b", "c"]);
+    expect(out.has("a")).toBe(false);
+  });
+
+  it("多上游里只要有一份被跳过就算传染", () => {
+    const tasks = [t("a", []), t("ok", []), t("x", ["a", "ok"])];
+    expect([...skippedDescendants(tasks, new Set(["a"]))]).toEqual(["x"]);
+  });
+
+  it("菱形：一份产物缺了，两条支路与汇合点都缺", () => {
+    const tasks = [t("a", []), t("b", ["a"]), t("c", ["a"]), t("d", ["b", "c"])];
+    expect([...skippedDescendants(tasks, new Set(["a"]))].sort()).toEqual(["b", "c", "d"]);
+  });
+
+  it("上游都在（只是失败没跳过）时不传染", () => {
+    const tasks = [t("a", []), t("b", ["a"])];
+    expect(skippedDescendants(tasks, new Set(["nope"]))).toEqual(new Set());
   });
 });

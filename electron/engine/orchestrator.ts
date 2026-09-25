@@ -6,7 +6,7 @@ import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../
 import type { UsageSnapshot } from "../../shared/usage-meter";
 import { runSmokeChecks } from "./verifier";
 import type { SmokeCheck } from "../../shared/types";
-import { planBatches } from "../../shared/graph";
+import { planBatches, skippedDescendants } from "../../shared/graph";
 import { routeVerificationErrors } from "../../shared/routing";
 import type { DispatchOutcome } from "./scheduler";
 import type {
@@ -329,6 +329,10 @@ export class OrchestratorEngine {
     let extraRounds = resume?.extraRounds ?? 0;
     let round = resume?.round ?? 0;
     let lastDigest = "";
+    /** 「上游被跳过 ⇒ 不再花修预算」已经说过的任务，避免每轮重复播报。 */
+    const givenUpAnnounced = new Set<string>();
+    /** 同一批任务的两条话各记一次：共用一个集合会让先说的那条把后一条吞掉。 */
+    const noEscalationAnnounced = new Set<string>();
     // 断点续跑：关键点保存快照（计划完成 / 每批次 / 每轮收尾）。
     const save = () =>
       this.deps.journal?.save({
@@ -403,7 +407,24 @@ export class OrchestratorEngine {
         // 成功后下游自动解锁）——避免在注定失败的下游上白烧 API 配额。
         // 用户跳过的依赖视为已满足（下游可继续）。
         const depsReady = (t: Task) => t.dependencies.every((d) => allDone.has(d) || skipped.has(d));
-        const pending = notDone.filter(depsReady);
+        const ready = notDone.filter(depsReady);
+        /*
+         * 上游被用户跳过的任务只给**第一次**机会：它缺的那份产物永远不会出现，
+         * 每追加重修轮都是纯烧钱。试过一次的从这里开始不再派发（"人自担"不等于
+         * "任人烧预算"），并且只说一次。
+         */
+        const infected = skippedDescendants(batches.flat(), skipped);
+        const pending = ready.filter((t) => !infected.has(t.id) || !attempts.has(t.id));
+        const givenUp = ready.filter((t) => infected.has(t.id) && attempts.has(t.id));
+        const newlyGivenUp = givenUp.filter((t) => !givenUpAnnounced.has(t.id));
+        for (const t of newlyGivenUp) givenUpAnnounced.add(t.id);
+        if (newlyGivenUp.length > 0) {
+          this.cb.onLog(
+            `上游被用户跳过 ⇒ 缺的产物不会再出现，已停止为这些任务花修预算` +
+              `（各自已试过一轮，后续重修轮不再派发）：${newlyGivenUp.map((t) => `「${t.title}」`).join("、")}。` +
+              `要它们就把上游补上重跑。`,
+          );
+        }
         const blocked = notDone.filter((t) => !depsReady(t));
         if (blocked.length > 0) {
           this.cb.onLog(
@@ -522,7 +543,22 @@ export class OrchestratorEngine {
       const exhausted = round === maxRounds + extraRounds;
       if (exhausted) {
         const failedTasks = batches.flat().filter((t) => !allDone.has(t.id) && !skipped.has(t.id));
+        // 每处理一个任务都重算：用户在循环里"跳过"的上游，必须立刻让它下游
+        // 不再拿到"要不要重派"这个问题（重派补不上缺的产物）。
+        const infectedNow = (): Set<string> => skippedDescendants(batches.flat(), skipped);
         for (const t of failedTasks) {
+          if (infectedNow().has(t.id)) {
+            // 不弹升级决策：那里只有"终止/跳过/重派"三个答案，而**重派不会补上被跳过的
+            // 上游产物**，问一次就是诱用户再花一整轮。改成直接说明并放弃（每任务只说一次）。
+            if (!noEscalationAnnounced.has(t.id)) {
+              noEscalationAnnounced.add(t.id);
+              this.cb.onLog(
+                `「${t.title}」仍未通过，但它缺的上游被用户跳过 ⇒ 不进入升级决策（重派也补不上）。` +
+                  `要它就把上游补上重跑。`,
+              );
+            }
+            continue;
+          }
           const summary = buildEscalationSummary({
             taskTitle: t.title,
             attemptsSoFar: attempts.get(t.id) ?? round + 1,
@@ -543,8 +579,9 @@ export class OrchestratorEngine {
               this.cb.onLog(
                 `用户跳过任务「${t.title}」，不再重试。` +
                   (downstream.length > 0
-                    ? ` 它的下游 ${downstream.map((d) => `「${d.title}」`).join("、")} 仍会被派出，` +
-                      `很可能因缺少它的产物而失败 —— 那种失败不是下游自己的问题。`
+                    ? ` 它的下游 ${downstream.map((d) => `「${d.title}」`).join("、")} 至多还会被派出一次，` +
+                      `缺它的产物很可能失败 —— 那种失败不是下游自己的问题，` +
+                      `也不会为它们追加重修轮。`
                     : ""),
               );
               continue;
@@ -557,9 +594,11 @@ export class OrchestratorEngine {
         }
 
         if (this.cb.requestEscalationDecision) {
+          // 被跳过上游传染的任务不算"还在失败"：为它们继续追加轮次只是重复烧钱。
+          const givenUp = skippedDescendants(batches.flat(), skipped);
           const stillFailing = batches
             .flat()
-            .some((t) => !allDone.has(t.id) && !skipped.has(t.id));
+            .some((t) => !allDone.has(t.id) && !skipped.has(t.id) && !givenUp.has(t.id));
           if (!stillFailing) {
             // Everything was skipped; deliver only if verification now passes.
             const finalReport = await this.deps.verify(projectRoot);
@@ -569,7 +608,11 @@ export class OrchestratorEngine {
               this.cb.onStage("DONE");
               return finalReport;
             }
-            throw new Error("所有失败任务已被跳过，但验证仍未通过");
+            throw new Error(
+              givenUp.size > 0
+                ? `上游被跳过带累 ${givenUp.size} 个下游任务（已停止为它们花修预算），且验证仍未通过`
+                : "所有失败任务已被跳过，但验证仍未通过",
+            );
           }
           round += 1;
           save();

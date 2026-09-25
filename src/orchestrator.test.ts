@@ -486,7 +486,7 @@ describe("OrchestratorEngine.execute", () => {
     expect(events.some((e) => e.includes("跳过任务"))).toBe(true);
   });
 
-  it("跳过任务时点名仍会被派出的下游", async () => {
+  it("跳过任务时点名它的下游，并说明不会为它们花修预算", async () => {
     const events: string[] = [];
     const scheduler = {
       async runBatch(tasks: Task[]) {
@@ -511,11 +511,142 @@ describe("OrchestratorEngine.execute", () => {
         requestEscalationDecision: async (taskId: string) => (taskId === "t1" ? "skip" : "abort"),
       },
     );
-    await expect(eng.execute([[upstream, downstream]], ".")).rejects.toThrow(/用户终止/);
+    // 这条终局从"用户终止（对下游答 abort）"变成"带累 N 个下游"：下游现在根本拿不到
+    // 那一问 —— 问它就是诱人多花一轮。见下一个用例。
+    await expect(eng.execute([[upstream, downstream]], ".")).rejects.toThrow(/带累 1 个下游任务/);
     const line = events.find((l) => l.includes("用户跳过任务"));
     expect(line).toBeDefined();
     expect(line!).toContain("它的下游");
     expect(line!).toContain("「下游模块」");
+  });
+
+  it("上游被跳过后，下游不再拿升级决策（重派也补不上缺的产物）", async () => {
+    const events: string[] = [];
+    const asked: string[] = [];
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const upstream: Task = { id: "t1", title: "上游模块", description: "d", zone: "src/a", dependencies: [], suggestedRole: "fullstack-dev" };
+    const downstream: Task = { id: "t2", title: "下游模块", description: "d", zone: "src/b", dependencies: ["t1"], suggestedRole: "fullstack-dev" };
+    const eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(false),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      },
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        requestEscalationDecision: async (taskId: string) => {
+          asked.push(taskId);
+          return "skip";
+        },
+      },
+    );
+    await expect(eng.execute([[upstream, downstream]], ".")).rejects.toThrow(/带累 1 个下游任务/);
+    expect(asked).toEqual(["t1"]); // t2 从没被问"要不要重派"——那一问只会诱导再花钱
+    expect(events.some((e) => e.includes("不进入升级决策") && e.includes("「下游模块」"))).toBe(true);
+  });
+
+  it("被跳过上游传染的任务只给一次机会，后续重修轮不再派发", async () => {
+    const events: string[] = [];
+    const dispatched: string[][] = [];
+    let t3Asks = 0;
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        const ids = tasks.map((t) => t.id);
+        dispatched.push(ids);
+        events.push(`dispatch:${ids.join(",")}`);
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const upstream: Task = { id: "t1", title: "上游模块", description: "d", zone: "src/a", dependencies: [], suggestedRole: "fullstack-dev" };
+    const other: Task = { id: "t3", title: "旁支模块", description: "d", zone: "src/c", dependencies: [], suggestedRole: "fullstack-dev" };
+    const downstream: Task = { id: "t2", title: "下游模块", description: "d", zone: "src/b", dependencies: ["t1"], suggestedRole: "fullstack-dev" };
+    const eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(false),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      },
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        // t1 一开始就被跳过；t3 前两次要求重派（换来两个追加轮：第一轮给 t2 第一次
+        // 机会，第二轮才轮到"已试过的 t2 不再派发"这条判定），第三次跳过
+        // —— 否则这个循环没有尽头。
+        requestEscalationDecision: async (taskId: string) => {
+          if (taskId === "t3") {
+            t3Asks += 1;
+            return t3Asks <= 2 ? "redispatch" : "skip";
+          }
+          return "skip";
+        },
+      },
+    );
+    await eng.execute([[upstream, other], [downstream]], ".").catch(() => undefined);
+    expect(dispatched.filter((ids) => ids.includes("t2"))).toHaveLength(1); // 只给一次机会
+    const givenUpLines = events.filter((e) => e.includes("已停止为这些任务花修预算"));
+    expect(givenUpLines).toHaveLength(1);
+    expect(givenUpLines[0]).toContain("「下游模块」");
+    // 那句话必须在它**真的被派过之后**才说：提前说等于宣称"已试过"而其实正要派发它。
+    expect(events.indexOf(givenUpLines[0])).toBeGreaterThan(
+      events.findIndex((e) => e === "dispatch:t2"),
+    );
+  });
+
+  it("被跳过的上游挡在中间时，它后面的正常任务照样拿到升级决策", async () => {
+    // `continue → break` 的位点：传染的任务排在未传染的任务前面时，一旦循环被打断，
+    // 后面的任务就永远等不到那句"要不要重派/终止/跳过"——用户失去处置权。
+    const asked: string[] = [];
+    const events: string[] = [];
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({
+          taskId: t.id,
+          ok: t.id === "v", // 只有 v 成功：x 的依赖成立，所以 x 不属于被传染的那一类
+          logDigest: "boom",
+          events: [],
+        }));
+      },
+    } as unknown as Scheduler;
+    const u: Task = { id: "u", title: "上游模块", description: "d", zone: "src/a", dependencies: [], suggestedRole: "fullstack-dev" };
+    const v: Task = { id: "v", title: "旁支上游", description: "d", zone: "src/b", dependencies: [], suggestedRole: "fullstack-dev" };
+    const d: Task = { id: "d", title: "下游模块", description: "d", zone: "src/c", dependencies: ["u"], suggestedRole: "fullstack-dev" };
+    const x: Task = { id: "x", title: "独立模块", description: "d", zone: "src/d", dependencies: ["v"], suggestedRole: "fullstack-dev" };
+    const eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(false),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      },
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        requestEscalationDecision: async (taskId: string) => {
+          asked.push(taskId);
+          if (taskId === "u") return "skip";
+          return "abort";
+        },
+      },
+    );
+    await expect(eng.execute([[u, v], [d, x]], ".")).rejects.toThrow(/用户终止/);
+    expect(asked).toEqual(["u", "x"]); // d 被跳过上游传染 ⇒ 不问它；x 必须照问
+    expect(events.some((e) => e.includes("不进入升级决策") && e.includes("「下游模块」"))).toBe(true);
   });
 
   it("没有下游依赖时不多嘴", async () => {
