@@ -16,7 +16,7 @@
   **只在批/轮边界生效**，不掐断在途请求（那归 agent 的时限与 HTTP 超时管）；到点抛
   `RunWallClockError` 且不动 journal 与快照备份，现场留着可断点续跑。
   headless 侧同步进了 `KNOWN_FIELDS` 与 settings 组装（不加会被判"未知字段已忽略"，设置传不进来）。
-  仍缺的一项：桌面设置页没有这个输入口，当前只能由 headless 或直接改 settings JSON 设定。
+  设置页有对应输入口（`单次运行墙钟上限（分钟）`）：界面按分钟给、存的是毫秒，填 0 = 省略字段 = 不限。
 
 - **勘误（针对上面 `runWallClockMs` 那条）**：实现时我说过"site 口径 29/29 全杀，含三个新位点的两侧"，
   这话只对一处 —— `limit === undefined` 属于 `=== → !==`，而 `limit <= 0`、`elapsed <= limit`
