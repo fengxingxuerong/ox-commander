@@ -8,6 +8,18 @@
 ## [未发布]
 
 ### 新增
+- **内置执行器（`sensenova-api`）现在也有 run 级时限**（`electron/agents/sensenova-api.ts`）。
+  在此之前三个适配器里只有它不带 `limits`、不接 `TimeoutGate`，唯一的上界是**单次 HTTP 请求** 300s
+  （`EXECUTOR_TIMEOUT_MS`）—— 而它恰是 `DEFAULT_SETTINGS.enabledAgents` 里开箱默认的那一个。
+  单任务最坏耗时 = chatJson 自纠偏重试 × 线路池排队 × (300s + 冷却等待)，冷却单次上限 120s、最多等 2 次，
+  所以一个卡住的生成任务合法地可以占用十几分钟而没有任何东西拦它。
+  现在按 `cli-agent` / `http-bridge` 的同一形态接 `TimeoutGate`，`limits.runDeadlineMs` 默认 600s（同 `DEFAULT_AGENT_LIMITS`），
+  覆盖排队、重试与冷却等待；到点判 `failed: 超出总时限`、**迟到的那一回合不落盘**（与"run 已中止即丢弃生成物"同一条守卫），
+  并发槽位仍跟着真实请求释放，不因超时提前放行。
+  已知边界：**在途的那一次请求仍会跑完**（token 已花），要真掐掉得把 `AbortSignal` 接进 HTTP 客户端；
+  本适配器的 **idle 看门狗刻意关掉**（`idleTimeoutMs: Infinity`）—— 一次请求在途最长 300s 期间本来就不产生事件，
+  开 idle 会把每一次健康的慢生成判死。用例两侧都钉：预算内照常落盘、超时限判 deadline 那一支且不写文件；
+  反证是摘掉 `guard()` 后两条超时用例必须红（实测 2 failed / 27 passed）。
 - **`verify` 增加第 19 步 `mutation:touched`：只审「本次真的改到的变异目标文件」**
   （`scripts/mutation-touched.mjs`）。缺口是我自己踩出来的：`mutation:quick` 是 aggregate 口径、每目标 1 个
   变异，抓不到"某个承判文件里新加的判断没人逐点验过"；能抓的全量 `mutation:audit` 约 15 分钟、只在

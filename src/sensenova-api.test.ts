@@ -515,6 +515,60 @@ describe("SensenovaApiAdapter", () => {
       else process.env.SENSENOVA_API_KEY = saved;
     }
   });
+
+  it("run 时限内的健康生成照常落盘，默认时限与其他适配器一致", async () => {
+    expect(new SensenovaApiAdapter().limits.runDeadlineMs).toBe(600_000);
+    const root = tmpRoot();
+    const adapter = new SensenovaApiAdapter(
+      fakeClient('{"files":[{"path":"src/add.js","content":"// ok"}]}'),
+      { limits: { runDeadlineMs: 5_000 } },
+    );
+    const terminal = await terminalText(adapter, await run(adapter, root));
+    expect(terminal.startsWith("completed")).toBe(true);
+    expect(fs.readFileSync(path.join(root, "src/add.js"), "utf8")).toBe("// ok");
+  });
+
+  it("超出 run 时限：判失败而不是继续等，迟到的那一回合不落盘", async () => {
+    const root = tmpRoot();
+    let release!: (r: ChatResponse) => void;
+    const pending = new Promise<ChatResponse>((res) => {
+      release = res;
+    });
+    const adapter = new SensenovaApiAdapter(
+      {
+        async chat(): Promise<ChatResponse> {
+          return pending;
+        },
+      },
+      { limits: { runDeadlineMs: 30 } },
+    );
+    const handle = await run(adapter, root);
+    const events: string[] = [];
+    for await (const ev of adapter.collect(handle)) events.push(`${ev.kind}: ${ev.text}`);
+    // 必须是 deadline 那一支：本适配器把 idle 窗口关掉了（单请求在途时本来就没事件）。
+    expect(events[events.length - 1]).toMatch(/^failed: \[sensenova-api\] run .+ 超出总时限$/);
+    expect(events.some((e) => e.includes("不再等待本回合结果"))).toBe(true);
+    release({
+      content: '{"files":[{"path":"src/add.js","content":"// late"}]}',
+      provider: "test",
+      model: "test",
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+  });
+
+  it("冷却等待也算进 run 时限：到点收口，不睡完整个 Retry-After", async () => {
+    const root = tmpRoot();
+    const { client } = scriptedClient([
+      new AllRoutesCoolingError(300),
+      '{"files":[{"path":"src/add.js","content":"// ok"}]}',
+    ]);
+    const adapter = new SensenovaApiAdapter(client, { limits: { runDeadlineMs: 40 } });
+    const terminal = await terminalText(adapter, await run(adapter, root));
+    // 没有看门狗时这里会是 `completed`：300ms 的冷却睡完就重试成功了。
+    expect(terminal).toMatch(/^failed: .+ 超出总时限$/);
+    expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+  });
 });
 
 /**

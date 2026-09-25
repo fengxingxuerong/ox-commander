@@ -14,7 +14,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 三条最容易踩的硬事实：
 
 1. **唯一验收入口是 `npm run verify`，只认退出码**（17 个 `npm run` 段 `&&` 串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 19 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-09-25 末次实测 996 = 987 passed + 9 skipped）。
+   本机实测基线：EXIT 0 / 19 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-09-25 末次实测 999 = 990 passed + 9 skipped）。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
 3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 19 步 / 996）。任何数字现跑现查。

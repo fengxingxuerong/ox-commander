@@ -13,8 +13,9 @@ import { createFailoverClient, EXECUTOR_TIMEOUT_MS } from "../../shared/http-cli
 import { withCooldownRetry } from "../../shared/llm-client";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
 import { meteredLlm, type UsageMeter } from "../../shared/usage-meter";
-import { AGENT_PROTOCOL_VERSION, type AgentCapabilities } from "../../shared/agent-contract";
+import { AGENT_PROTOCOL_VERSION, DEFAULT_AGENT_LIMITS, type AgentCapabilities, type AgentLimits } from "../../shared/agent-contract";
 import { PathPolicy } from "../sandbox/path-policy";
+import { TimeoutGate } from "../sandbox/timeout-gate";
 import { RunSession } from "./run-session";
 import { fencedBlock, inlineField } from "../../shared/prompt-text";
 
@@ -81,6 +82,15 @@ export interface SensenovaAdapterOptions {
    * 当注入的恰好是宿主自己的 metered 客户端时会重复计数。
    */
   meter?: UsageMeter;
+  /**
+   * Per-run ceilings, same shape the external adapters take.
+   *
+   * Only `runDeadlineMs` is honoured here: `idleTimeoutMs` means "no event for
+   * N ms", and this adapter emits nothing while a single request is in flight
+   * (up to `EXECUTOR_TIMEOUT_MS`), so an idle watchdog would fire on every
+   * slow-but-healthy generation.
+   */
+  limits?: Partial<AgentLimits>;
 }
 
 export class SensenovaApiAdapter implements AgentAdapter {
@@ -109,6 +119,9 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private llm: LlmClient | undefined;
   private readonly maxConcurrentOverride: number | undefined;
   private readonly meter: UsageMeter | undefined;
+  readonly limits: AgentLimits;
+  /** Per-run watchdog: hard ceiling on how long one task may stay alive. */
+  private readonly gate: TimeoutGate;
   /** Shared failover client with decision logging wired to live sessions. */
   private sharedFailover: LlmClient | undefined;
   /** Semaphore state: in-flight LLM calls + FIFO waiters. */
@@ -121,6 +134,13 @@ export class SensenovaApiAdapter implements AgentAdapter {
     this.llm = llm;
     this.maxConcurrentOverride = opts?.maxConcurrent;
     this.meter = opts?.meter;
+    this.limits = { ...DEFAULT_AGENT_LIMITS, ...(opts?.limits ?? {}) };
+    this.gate = new TimeoutGate({
+      deadlineMs: this.limits.runDeadlineMs,
+      // See `SensenovaAdapterOptions.limits`: idling is normal mid-request, so
+      // the gate only enforces the deadline and never the idle window.
+      idleTimeoutMs: Number.POSITIVE_INFINITY,
+    });
   }
 
   private concurrencyLimit(): number {
@@ -181,6 +201,14 @@ export class SensenovaApiAdapter implements AgentAdapter {
   }
 
   private async run(payload: TaskPayload, session: RunSession): Promise<void> {
+    this.gate.attach({ id: payload.runId }, () => {
+      // 看门狗只说明"为什么"，真正把 run 收口的是下面 `guard()` 抛出的 TimeoutError。
+      session.push(
+        "log",
+        `[sensenova-api] 已超出 run 时限 ${this.limits.runDeadlineMs}ms，不再等待本回合结果` +
+          `（在途请求仍会跑完，那一笔 token 已经花了）`,
+      );
+    });
     try {
       const client = this.client();
       session.push("log", `[sensenova-api] 正在调用模型生成「${payload.title}」的代码…`);
@@ -205,36 +233,43 @@ export class SensenovaApiAdapter implements AgentAdapter {
         );
       }
       const queued = await this.acquireSlot();
-      try {
-        if (queued && !session.finished) {
-          session.push("log", `[sensenova-api] LLM 并发槽位已满，本任务排队等待`);
-        }
-        const generated = await this.generateWithCooldownRetry(client, userParts, session);
-        if (session.finished) {
-          /*
-           * run 已被中止。模型这一回合是**算完了**的（token 已花），但写盘是不可逆
-           * 副作用 —— 取消之后再落文件，用户看到的是一份他叫停过的改动。
-           * 真正掐掉在途请求要把 AbortSignal 接进 HTTP 客户端，那是另一件事。
-           */
-          session.push(
-            "log",
-            `[sensenova-api] run 已中止，丢弃本回合生成的 ${generated.length} 个文件`,
-          );
-          return;
-        }
-        const res = this.writeFiles(payload.projectRoot, generated, session);
-        if (!session.finished) {
-          // 终态里带上被拒数量与路径：重修 prompt 传的是这份摘要，只说"写入 N 个"
-          // 的话，模型下一轮会原样再写一遍被沙箱拒掉的那条路径，预算空烧。
-          session.push("completed", SensenovaApiAdapter.completedNote(res, payload.runId));
-        }
-      } finally {
-        this.releaseSlot();
+      if (queued && !session.finished) {
+        session.push("log", `[sensenova-api] LLM 并发槽位已满，本任务排队等待`);
+      }
+      /*
+       * 槽位跟着**真实请求**的结束释放，不跟着 `guard()` 的结束释放：超时只是
+       * 不再等它，那一回合仍在途并占着一条线路，提前释放会让信号量放进更多并发。
+       */
+      const work = this.generateWithCooldownRetry(client, userParts, session).finally(() =>
+        this.releaseSlot(),
+      );
+      const generated = await this.gate.guard(payload.runId, work);
+      if (session.finished) {
+        /*
+         * run 已被中止。模型这一回合是**算完了**的（token 已花），但写盘是不可逆
+         * 副作用 —— 取消之后再落文件，用户看到的是一份他叫停过的改动。
+         * 真正掐掉在途请求要把 AbortSignal 接进 HTTP 客户端，那是另一件事。
+         */
+        session.push(
+          "log",
+          `[sensenova-api] run 已中止，丢弃本回合生成的 ${generated.length} 个文件`,
+        );
+        return;
+      }
+      const res = this.writeFiles(payload.projectRoot, generated, session);
+      if (!session.finished) {
+        // 终态里带上被拒数量与路径：重修 prompt 传的是这份摘要，只说"写入 N 个"
+        // 的话，模型下一轮会原样再写一遍被沙箱拒掉的那条路径，预算空烧。
+        session.push("completed", SensenovaApiAdapter.completedNote(res, payload.runId));
       }
     } catch (err) {
       if (!session.finished) {
         session.push("failed", `[sensenova-api] ${(err as Error).message}`);
       }
+    } finally {
+      // 幂等：`guard()` 收口时已经解过。放这里是为了让"进 guard 之前就返回/抛出"
+      // 的路径也不留在臂上的定时器 —— 它会让进程退不出去。
+      this.gate.detach(payload.runId);
     }
     session.finished = true;
     session.wake();

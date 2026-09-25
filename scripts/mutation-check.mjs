@@ -475,8 +475,9 @@ const EQUIVALENT_SITES = [
    *   （这一轮起把描述改成**按构造点名**而不是"307 行/304 行"：锚点行号是机器判的，
    *    而散文里的行号没人判，上一轮就是这么漂掉两处还留着旧坐标。）
    * 两层防御仍在：walkStat 用**同一个** `isSecretLikeFile` 在同一个 rel 上先过滤过一次。
+   * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 348 → 383。
    */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 348 },
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 383 },
   /**
    * `readSnapshotContents` 中读文件失败的 `catch { continue; }` —— 二级。
    *
@@ -494,8 +495,9 @@ const EQUIVALENT_SITES = [
    * 2026-09-24：快照跳过清单轮再下移 6 行 → 343；TOCTOU 在测试里仍构造不出。
    * 2026-09-25：中止守卫轮在其上方插入 9 行 → 343 → 352；
    * 同日「被沙箱拒绝要进终态」轮再加 2 行 → 352 → 354。
+   * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 354 → 389。
    */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 354 },
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 389 },
   /**
    * `electron/ipc/context.ts:177` 的 `settingsValue.agentRouter !== false` → `=== false`
    * —— **可证明等价**（一级）。
