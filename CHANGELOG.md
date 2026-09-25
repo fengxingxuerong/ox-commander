@@ -6,6 +6,18 @@
 
 ## [未发布]
 
+### 新增
+
+- **`ProjectSettings.runWallClockMs`：一次 run 的墙钟上限**（`electron/engine/orchestrator.ts`）。
+  在此之前只有两个局部上界（单次 HTTP 请求 300s、单条验证命令 300s）和各 agent 自己的
+  `runDeadline`——总时长完全没有概念，重修轮可以一直追加，一次运行可以合法地跑几小时以上
+  （本机实测单模型 PLANNING 就能 >170s 不返回）。`undefined` 或 `<= 0` 都是不限，
+  与 `maxTokensPerRun` 同风格：要"不限"就省略字段。检查点在重修循环顶部，
+  **只在批/轮边界生效**，不掐断在途请求（那归 agent 的时限与 HTTP 超时管）；到点抛
+  `RunWallClockError` 且不动 journal 与快照备份，现场留着可断点续跑。
+  headless 侧同步进了 `KNOWN_FIELDS` 与 settings 组装（不加会被判"未知字段已忽略"，设置传不进来）。
+  仍缺的一项：桌面设置页没有这个输入口，当前只能由 headless 或直接改 settings JSON 设定。
+
 ### 修复
 
 - **零验证不再被念成"验证通过"**（`electron/engine/orchestrator.ts`）。`verificationCommands: []`
