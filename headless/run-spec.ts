@@ -61,6 +61,11 @@ export interface PruneResult {
   failed: string[];
   /** 备份根本不存在（首次运行）时为真：不是错误，但调用方措辞不同。 */
   missingRoot: boolean;
+  /**
+   * 未到期因而「保留」下来的 batch-* 目录名。它们来自没有结算完的批，
+   * 里面可能有从未被仲裁过的越权写入 —— 以前这里既不删也不报，保留看起来像没事。
+   */
+  kept: string[];
 }
 
 export function pruneStaleBackups(
@@ -69,7 +74,7 @@ export function pruneStaleBackups(
 ): PruneResult {
   const now = opts.now ?? Date.now();
   const maxAge = opts.maxAgeMs ?? 24 * 60 * 60 * 1000;
-  const out: PruneResult = { removed: 0, failed: [], missingRoot: false };
+  const out: PruneResult = { removed: 0, failed: [], missingRoot: false, kept: [] };
   let entries: fs.Dirent[];
   try {
     entries = fs.readdirSync(backupRoot, { withFileTypes: true });
@@ -85,7 +90,11 @@ export function pruneStaleBackups(
     if (!entry.isDirectory() || !entry.name.startsWith("batch-")) continue;
     const abs = path.join(backupRoot, entry.name);
     try {
-      if (now - fs.statSync(abs).mtimeMs <= maxAge) continue;
+      const ageMs = now - fs.statSync(abs).mtimeMs;
+      if (ageMs <= maxAge) {
+        out.kept.push(entry.name);
+        continue;
+      }
       fs.rmSync(abs, { recursive: true, force: true, maxRetries: 3 });
       out.removed += 1;
     } catch (e) {
@@ -147,6 +156,16 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   const policy = spec.escalationPolicy;
   // 上一次被中断的运行留下的备份目录在这里回收（放在 hello 之后：宿主的读法是先拿 hello）。
   const pruned = pruneStaleBackups(spec.snapshotRoot);
+  // 措辞刻意不含"回收"二字：离线 IT 有一条断言就是"没谎报回收"，
+  // 保留下来的东西不能被写成回收过。
+  if (pruned.kept.length > 0) {
+    io.emit({
+      type: "log",
+      text:
+        `[snapshots] 保留 ${pruned.kept.length} 个未到期批备份：${pruned.kept.join("、")} —— ` +
+        "它们来自没有结算完的批，其中可能有未被仲裁的越权写入；本次运行不会自动回滚，请人工核对。",
+    });
+  }
   if (pruned.removed > 0 || pruned.failed.length > 0) {
     io.emit({
       type: "log",

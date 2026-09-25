@@ -518,6 +518,9 @@ describe("runSpec", () => {
     const missing = pruneStaleBackups(path.join(root, "missing"));
     expect(missing.removed).toBe(0);
     expect(missing.missingRoot).toBe(true);
+    expect(missing.kept).toEqual([]);
+    // 未到期不等于"没事"：留下来的目录必须被列出来，调用方才有可能报出"未结算的批"。
+    expect(pruneStaleBackups(root, { now: Date.parse("2020-01-01T00:00:00Z") }).kept.length).toBeGreaterThan(0);
     expect(missing.failed).toEqual([]);
   });
 
