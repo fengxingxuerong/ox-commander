@@ -7,6 +7,15 @@ export interface ChatRequest {
   messages: ChatMessage[];
   temperature?: number;
   jsonMode?: boolean;
+  /**
+   * Caller-side cancellation (run aborted / run deadline tripped).
+   *
+   * It lives on the *request*, not the client: one client instance is shared by
+   * every run of a provider pool, while the thing being cancelled is a single
+   * run. Aborting it must also stop the failover pool from rotating — see
+   * `FailoverLlmClient.chat`.
+   */
+  signal?: AbortSignal;
 }
 
 export interface ChatResponse {

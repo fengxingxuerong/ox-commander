@@ -335,3 +335,57 @@ describe("createFailoverClient · sensenova flavor", () => {
     await expect(client.chat(REQ)).rejects.toThrow("no groups");
   });
 });
+
+describe("FailoverLlmClient · 调用方取消", () => {
+  it("取消后不轮询下一条线路，也不把该线路拉进冷却", async () => {
+    const seen: string[] = [];
+    const events: string[] = [];
+    const ctrl = new AbortController();
+    const first: LlmClient = {
+      async chat(): Promise<ChatResponse> {
+        seen.push("first");
+        ctrl.abort(); // 模拟"请求在途时用户叫停 / 撞到 run 时限"
+        throw new Error("aborted by caller");
+      },
+    };
+    const second: LlmClient = {
+      async chat(): Promise<ChatResponse> {
+        seen.push("second");
+        return OK("m2")();
+      },
+    };
+    const pool = new FailoverLlmClient([group("g1", [first]), group("g2", [second])], async () => {}, {
+      onEvent: (t) => events.push(t),
+    });
+    await expect(pool.chat({ ...REQ, signal: ctrl.signal })).rejects.toThrow("aborted by caller");
+    expect(seen).toEqual(["first"]);
+    expect(events.some((e) => e.includes("已被调用方取消"))).toBe(true);
+    // 取消不是线路的错：一条"冷却 N 秒"的处置都不该产生
+    expect(events.filter((e) => /冷却 \d+s/.test(e))).toEqual([]);
+
+    // 冷却池没被动过 ⇒ 下一次调用仍然先试 first（若被拉进冷却会被直接跳过）
+    const next = await pool.chat(REQ);
+    expect(seen).toEqual(["first", "first", "second"]);
+    expect(next.model).toBe("m2");
+  });
+
+  it("真故障仍然照旧轮询并冷却（取消分支没顺手改掉默认语义）", async () => {
+    const seen: string[] = [];
+    const a: LlmClient = {
+      async chat(): Promise<ChatResponse> {
+        seen.push("a");
+        throw new HttpLlmError(429, "rate limited");
+      },
+    };
+    const b: LlmClient = {
+      async chat(): Promise<ChatResponse> {
+        seen.push("b");
+        return OK("m-b")();
+      },
+    };
+    const pool = new FailoverLlmClient([group("g1", [a]), group("g2", [b])], async () => {});
+    const res = await pool.chat(REQ);
+    expect(res.model).toBe("m-b");
+    expect(seen).toEqual(["a", "b"]);
+  });
+});

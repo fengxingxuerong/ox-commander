@@ -150,3 +150,47 @@ describe("createLlmClient 的协议分发", () => {
     expect(openai).toBeInstanceOf(OpenAiCompatibleClient);
   });
 });
+
+describe("caller signal · 取消要真的下传到 fetch", () => {
+  it("调用方 signal 与内部超时合并：abort 后请求立刻失败，不占满 timeoutMs", async () => {
+    const ctrl = new AbortController();
+    let sawSignal: AbortSignal | undefined;
+    const client = new OpenAiCompatibleClient(
+      getProvider("deepseek"),
+      "k",
+      ((
+        _url: string,
+        init: RequestInit,
+      ) =>
+        new Promise((_res, rej) => {
+          // 服务端永不返回：只有 signal 能结束这次调用
+          sawSignal = init.signal ?? undefined;
+          init.signal?.addEventListener("abort", () => rej(init.signal!.reason), { once: true });
+        })) as never,
+    );
+    const p = client.chat({ ...req, signal: ctrl.signal });
+    ctrl.abort();
+    const err = await p.then(() => null, (e) => e as Error);
+    expect(err?.name).toBe("AbortError");
+    expect(sawSignal?.aborted).toBe(true);
+    // 传进来的是"超时 ∪ 调用方"的合并信号，不是调用方那个原件
+    expect(sawSignal).not.toBe(ctrl.signal);
+  });
+
+  it("不传 signal 时内部超时仍然生效（合并分支没把原行为弄丢）", async () => {
+    const client = new OpenAiCompatibleClient(
+      getProvider("deepseek"),
+      "k",
+      ((
+        _url: string,
+        init: RequestInit,
+      ) =>
+        new Promise((_res, rej) => {
+          init.signal?.addEventListener("abort", () => rej(init.signal!.reason), { once: true });
+        })) as never,
+      5,
+    );
+    const err = await client.chat(req).then(() => null, (e) => e as Error);
+    expect(err?.name).toBe("TimeoutError");
+  });
+});

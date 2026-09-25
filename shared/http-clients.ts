@@ -147,12 +147,23 @@ abstract class BaseHttpLlmClient implements LlmClient {
 
   abstract chat(req: ChatRequest): Promise<ChatResponse>;
 
-  protected async postJson(url: string, headers: Record<string, string>, body: unknown): Promise<Record<string, unknown>> {
+  protected async postJson(
+    url: string,
+    headers: Record<string, string>,
+    body: unknown,
+    signal?: AbortSignal,
+  ): Promise<Record<string, unknown>> {
+    // The per-request timeout and the caller's cancellation are independent:
+    // whichever fires first wins. `AbortSignal.any` needs Node >= 20.3 (CI pins
+    // 22, Electron 33 ships 20.18 — the headless CLI runs on the user's node,
+    // so an older runtime fails loudly here rather than silently ignoring aborts).
+    const signals = [AbortSignal.timeout(this.timeoutMs)];
+    if (signal) signals.push(signal);
     const res = await this.fetchImpl(url, {
       method: "POST",
       headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(this.timeoutMs),
+      signal: AbortSignal.any(signals),
     });
     if (!res.ok) {
       const text = await readCappedErrorBody(res);
@@ -193,6 +204,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       `${this.config.baseUrl}/chat/completions`,
       this.authHeaders(),
       body,
+      req.signal,
     );
     const choices = data.choices as
       | Array<{ message?: { content?: string; reasoning_content?: string }; finish_reason?: string }>
@@ -234,7 +246,12 @@ export class AnthropicClient extends BaseHttpLlmClient {
       messages: this.toAnthropicMessages(req.messages),
     };
     if (system) body.system = system;
-    const data = await this.postJson(`${this.config.baseUrl}/messages`, this.authHeaders(), body);
+    const data = await this.postJson(
+      `${this.config.baseUrl}/messages`,
+      this.authHeaders(),
+      body,
+      req.signal,
+    );
     const blocks = data.content as Array<{ type: string; text?: string }> | undefined;
     const content = (blocks ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
     const usage = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
@@ -367,6 +384,15 @@ export class FailoverLlmClient implements LlmClient {
         this.cooldowns.delete(comboKey);
         return res;
       } catch (e) {
+        if (req.signal?.aborted) {
+          /*
+           * 调用方取消（run 被中止 / 撞到时限）**不是线路的错**：轮询到下一条
+           * 等于"用户已叫停，我们换个 Key 把同一份 prompt 再发一次"，而把该线路
+           * 拉进冷却池会因为一次取消惩罚后面所有 run。所以原样抛出、不冷却。
+           */
+          this.onEvent?.(`${comboKey} 已被调用方取消，停止轮询（不计入冷却）`);
+          throw e;
+        }
         const status = e instanceof HttpLlmError ? e.status : undefined;
         const nonRetryable = status === 401 || status === 403;
         if (nonRetryable && this.failFastOnAuth) {
