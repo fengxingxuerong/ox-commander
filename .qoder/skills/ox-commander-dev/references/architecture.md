@@ -172,4 +172,4 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README 旧版「15 步 / 930 用例」 | 19 段 / 1014 用例（1005 passed + 9 skipped，2026-09-25 本机 win32 实测） | `package.json:36` |
+| README 旧版「15 步 / 930 用例」 | 19 段 / 1020 用例（1011 passed + 9 skipped，2026-09-25 本机 win32 实测） | `package.json:36` |

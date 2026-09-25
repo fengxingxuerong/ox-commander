@@ -57,6 +57,22 @@ function validLimit(max: number | undefined): number | undefined {
 }
 
 /**
+ * 预算闸"看不见"某些调用时的那句提示（不带前缀，方便并进另一行）。
+ *
+ * 为什么需要：闸门只能拿**端点上报的** `usage.total_tokens` 做判断，而有些端点
+ * 根本不回报用量 —— 那部分调用的 token 永远进不了 `totalTokens`，于是
+ * `maxTokensPerRun` 对它们不起作用。这里刻意**不估算**：没有本机校准过的
+ * "字符→token"分布，估出来的数会被当成账单口径读，比不估更坏。说要说什么没被
+ * 看见，让人自己决定信不信这个数。
+ */
+export function budgetBlindNote(info: { limit: number; unmeasuredCalls: number }): string {
+  return (
+    `已有 ${info.unmeasuredCalls} 次调用端点未上报用量 ⇒ maxTokensPerRun=${info.limit} ` +
+    `这道闸看不见它们，实际支出可能已超过上限（未上报的部分刻意不估算）`
+  );
+}
+
+/**
  * 进程内累加器。刻意**不**做持久化 —— 它的职责只有"数得对"和"拦得住"。
  *
  * 对脏数据的处理是刻意收紧的：`undefined` / `NaN` / `Infinity` / 负数
@@ -76,9 +92,16 @@ export class UsageMeter {
   private measured = 0;
   private readonly byModel = new Map<string, number>();
   private readonly limit: number | undefined;
+  private readonly onBudgetBlind: ((info: { limit: number; unmeasuredCalls: number }) => void) | undefined;
+  /** 半盲提示只说一次：每跳都喊一遍会淹掉日志，而事实不会变。 */
+  private blindAnnounced = false;
 
-  constructor(opts?: { maxTokensPerRun?: number }) {
+  constructor(opts?: {
+    maxTokensPerRun?: number;
+    onBudgetBlind?: (info: { limit: number; unmeasuredCalls: number }) => void;
+  }) {
     this.limit = validLimit(opts?.maxTokensPerRun);
+    this.onBudgetBlind = opts?.onBudgetBlind;
   }
 
   /** 已用 token 是否达到预算上限；达到则抛 `BudgetExceededError`。 */
@@ -91,7 +114,15 @@ export class UsageMeter {
   record(sample: UsageSample): void {
     this.calls += 1;
     const tokens = sample.usageTokens;
-    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) return;
+    if (typeof tokens !== "number" || !Number.isFinite(tokens) || tokens < 0) {
+      // 这一跳没上报用量 ⇒ 配了预算也拦不到它：第一次遇到就说，而不是等 run 结束
+      // 才对着一行"总量 = 0"困惑。
+      if (this.limit !== undefined && !this.blindAnnounced) {
+        this.blindAnnounced = true;
+        this.onBudgetBlind?.({ limit: this.limit, unmeasuredCalls: this.calls - this.measured });
+      }
+      return;
+    }
     this.measured += 1;
     this.total += tokens;
     const key = `${sample.provider ?? "unknown"}/${sample.model ?? "unknown"}`;
@@ -140,5 +171,10 @@ export function formatUsageLine(s: UsageSnapshot): string {
     .sort((a, b) => b[1] - a[1])
     .map(([key, tokens]) => `${key}=${tokens}`);
   if (models.length > 0) parts.push(models.join(" / "));
-  return `[usage] ${parts.join(" · ")}`;
+  const line = `[usage] ${parts.join(" · ")}`;
+  // 配了预算、又有一半调用看不见 ⇒ 这行必须自己说破：否则"3k / 上限 100k"
+  // 读起来像"还很安全"，而真实支出可能早就过了上限。
+  return s.limit !== undefined && unmetered > 0
+    ? `${line}；注意：${budgetBlindNote({ limit: s.limit, unmeasuredCalls: unmetered })}`
+    : line;
 }

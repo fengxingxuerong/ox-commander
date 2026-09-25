@@ -22,7 +22,7 @@ import type { BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import type { LlmClient } from "../shared/llm-client";
-import { formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
+import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -133,7 +133,15 @@ export function createPlatform(config: PlatformConfig): Platform {
   // `config.meter` 显式传入时（测试 / 宿主自建）尊重传入值，不再二次包配置。
   const meter =
     config.meter ??
-    new UsageMeter(settings.maxTokensPerRun !== undefined ? { maxTokensPerRun: settings.maxTokensPerRun } : undefined);
+    new UsageMeter(
+      settings.maxTokensPerRun !== undefined
+        ? {
+            maxTokensPerRun: settings.maxTokensPerRun,
+            // 第一跳没上报用量就说，而不是等 run 结束才对着一行"总量 0"困惑。
+            onBudgetBlind: (info) => log(`[budget] ${budgetBlindNote(info)}`),
+          }
+        : undefined,
+    );
 
   const layer =
     config.layer ??

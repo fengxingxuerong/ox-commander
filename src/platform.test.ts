@@ -239,6 +239,26 @@ describe("createPlatform · brain client grade", () => {
     expect(platform.usage().calls).toBe(2);
   });
 
+  it("配了预算而端点不回报用量 ⇒ 日志当场说出这道闸看不见它", async () => {
+    const lines: string[] = [];
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "injected", model: "m" }; // 没有 usageTokens
+      },
+    };
+    const platform = createPlatform({
+      settings: { ...settings(), maxTokensPerRun: 500 },
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: (l: string) => lines.push(l) },
+    });
+    await platform.buildLlm().chat({ messages: [] });
+    expect(lines.some((l) => l.startsWith("[budget]") && l.includes("maxTokensPerRun=500"))).toBe(true);
+    // 总量仍然是 0：没上报就是没上报，这里不拿估算冒充账单口径。
+    expect(platform.usage().totalTokens).toBe(0);
+    expect(platform.usage().calls).toBe(1);
+  });
+
   it("可以自带 meter：宿主想复用同一个计数器时，platform.usage() 就是它的快照", async () => {
     // `config.meter` 这个缝的用途：宿主（或测试）自建计数器并观察同一份数据，
     // 而不是让 platform 自己藏一个。断言两者指向同一份计数，而不是各自一份。

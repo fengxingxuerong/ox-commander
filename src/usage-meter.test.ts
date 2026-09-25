@@ -249,3 +249,59 @@ describe("formatUsageLine", () => {
     expect(line({})).toBe("[usage] 0 tokens · 0 次调用");
   });
 });
+
+describe("UsageMeter · 预算闸对「未上报用量」的调用是半盲的", () => {
+  it("配了预算 + 第一跳没上报用量 ⇒ 当场说一次（不每跳都喊）", () => {
+    const notes: Array<{ limit: number; unmeasuredCalls: number }> = [];
+    const meter = new UsageMeter({
+      maxTokensPerRun: 1000,
+      onBudgetBlind: (i) => notes.push(i),
+    });
+    meter.record(sample({ usageTokens: undefined }));
+    meter.record(sample({ usageTokens: undefined }));
+    meter.record(sample({ usageTokens: 5 }));
+    meter.record(sample({ usageTokens: undefined }));
+    expect(notes).toHaveLength(1);
+    expect(notes[0]).toEqual({ limit: 1000, unmeasuredCalls: 1 });
+    expect(meter.snapshot().totalTokens).toBe(5);
+  });
+
+  it("没配预算 ⇒ 半盲无所谓，不喊", () => {
+    let fired = 0;
+    const meter = new UsageMeter({ onBudgetBlind: () => (fired += 1) });
+    meter.record(sample({ usageTokens: undefined }));
+    expect(fired).toBe(0);
+  });
+
+  it("配了预算且每跳都上报 ⇒ 不喊，总量照累", () => {
+    let fired = 0;
+    const meter = new UsageMeter({ maxTokensPerRun: 1000, onBudgetBlind: () => (fired += 1) });
+    meter.record(sample({ usageTokens: 10 }));
+    meter.record(sample({ usageTokens: 20 }));
+    expect(fired).toBe(0);
+    expect(meter.snapshot().totalTokens).toBe(30);
+  });
+
+  it("坏预算值（0/NaN）= 不限 ⇒ 同样不该喊「看不见」", () => {
+    let fired = 0;
+    const meter = new UsageMeter({ maxTokensPerRun: 0, onBudgetBlind: () => (fired += 1) });
+    meter.record(sample({ usageTokens: undefined }));
+    expect(fired).toBe(0);
+  });
+
+  it("终态那行自己说破：有预算 + 有未上报才带上限与原因", () => {
+    const withLimit = formatUsageLine({
+      totalTokens: 3,
+      calls: 4,
+      measuredCalls: 1,
+      byModel: {},
+      limit: 1000,
+    });
+    expect(withLimit).toContain("3 次未上报用量");
+    expect(withLimit).toContain("maxTokensPerRun=1000");
+    expect(withLimit).toContain("看不见");
+    const noLimit = formatUsageLine({ totalTokens: 3, calls: 4, measuredCalls: 1, byModel: {} });
+    expect(noLimit).toContain("3 次未上报用量");
+    expect(noLimit).not.toContain("看不见");
+  });
+});

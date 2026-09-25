@@ -8,6 +8,15 @@
 ## [未发布]
 
 ### 新增
+- **预算闸现在会自己承认看不见多少**（`shared/usage-meter.ts` 的 `onBudgetBlind` / `budgetBlindNote`、
+  `electron/platform.ts` 接线）。缺口：闸门判断用的是端点上报的 `usage.total_tokens`，
+  而有些端点根本不回报这个字段 —— 那些调用的 token 永远进不了 `totalTokens`，
+  `maxTokensPerRun` 对它们等于不存在（此前的表现是"总量 = 0、闸从不拦"，看板上读起来像还很安全）。
+  这次**只做宣告、不做估算**：第一跳没上报用量就 `[budget]` 说一句（含上限与"看不见几次"），
+  终态那行 `[usage]` 在有预算且有未上报时同样带上这句；没配预算、或每跳都上报时不说，
+  坏预算值（0/NaN/负）按"不限"处理也不说。估算那半为什么不做：没有本机校准过的
+  "字符→token"分布，估出来的数会被当成账单口径读，比不估更坏 —— 要估算得先做校准实测。
+  用例 6 条（含"摘掉 platform 接线 ⇒ 该用例红"的反证，实测 1 failed / 29 passed）。
 - **跳过上游之后，它的下游不再被继续烧钱**（`shared/graph.ts` 的 `skippedDescendants` +
   `electron/engine/orchestrator.ts` 三处判定）。这是"点名下游"那条留下的后半段：
   提示说清楚了，钱照烧 —— 被跳过的上游在派发上视同已满足，下游失败后每一重修轮都再派一次，
