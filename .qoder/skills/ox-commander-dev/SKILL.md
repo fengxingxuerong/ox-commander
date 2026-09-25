@@ -1,6 +1,6 @@
 ---
 name: ox-commander-dev
-description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的 18 步机制、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
+description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的 19 步机制、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
 ---
 
 # OxCommander 开发
@@ -14,10 +14,10 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 三条最容易踩的硬事实：
 
 1. **唯一验收入口是 `npm run verify`，只认退出码**（17 个 `npm run` 段 `&&` 串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 18 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-09-25 末次实测 986 = 977 passed + 9 skipped）。
+   本机实测基线：EXIT 0 / 19 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-09-25 末次实测 996 = 987 passed + 9 skipped）。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
-3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 18 步 / 984）。任何数字现跑现查。
+3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，本轮实测是 19 步 / 996）。任何数字现跑现查。
 
 ## 铁律
 
@@ -96,5 +96,5 @@ README/docs 与代码有几处口径不一致，动相关文件前先读
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 18 步逐条机制（每个检查脚本扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 19 步逐条机制（每个检查脚本扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致

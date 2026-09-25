@@ -1,6 +1,6 @@
-# `npm run verify` 的 18 步逐条机制
+# `npm run verify` 的 19 步逐条机制
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、18 段、984 用例（975 passed + 9 skipped）。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、19 段、996 用例（987 passed + 9 skipped）。
 README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
 
 | # | 步骤 | 实际执行 | 失败语义 |

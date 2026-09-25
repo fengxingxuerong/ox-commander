@@ -5,8 +5,20 @@
 纯内部重构若改变了行为仍会记入。
 
 ## [未发布]
+## [未发布]
 
 ### 新增
+- **`verify` 增加第 19 步 `mutation:touched`：只审「本次真的改到的变异目标文件」**
+  （`scripts/mutation-touched.mjs`）。缺口是我自己踩出来的：`mutation:quick` 是 aggregate 口径、每目标 1 个
+  变异，抓不到"某个承判文件里新加的判断没人逐点验过"；能抓的全量 `mutation:audit` 约 15 分钟、只在
+  CI 的 ubuntu job 上跑，本机没人肯跑 —— 于是出现过"只重跑了改动涉及的其中一个目标文件就交付"，
+  远端红了几笔才定位到 `headless/protocol.ts` 里我新增的一个 === 位点没人验过。现在这一步按 diff
+  自动圈范围，成本随改动大小走（没碰到目标文件秒过；实测"改到 1 个目标"= 15 个位点 / 约 65s）。
+  基线默认取工作区改动，干净时取 HEAD~1..HEAD，--base=<ref> 可覆盖。反证：在目标文件里植入一个
+  === 翻转后这一步 exit 1；拦下的原因是基线测试红，不是"存活"（我没另外造出"只存活不红基线"的
+  等价变异，所以不那样写）。README 与门禁手册的步数/用例数一并校回 19 段 / 996。
+
+
 
 - **`ProjectSettings.runWallClockMs`：一次 run 的墙钟上限**（`electron/engine/orchestrator.ts`）。
   在此之前只有两个局部上界（单次 HTTP 请求 300s、单条验证命令 300s）和各 agent 自己的
