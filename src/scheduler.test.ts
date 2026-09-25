@@ -110,11 +110,17 @@ describe("Scheduler.abortInFlight", () => {
   });
 
   /**
-   * 登记表里可能留着**已不在池里的适配器**的句柄（跑到一半被注销，或适配器报回来
-   * 一个不属于池的 agentId）。这里钉的是"跳过它继续"而不是"到此为止"：把那句
-   * `continue` 改成 `break`，取消会在第一处残留句柄上静默收工，后面的 run 全都
-   * 跑满自己的时限 —— 而看板上已经写着"已取消"。
-   * site 口径实测：没有这条用例时该位点**存活**。
+   * 登记表里留着**已注销适配器**的句柄（run 跑到一半被摘掉）时，必须跳过它、继续中止其余在跑的
+   * run。把 `continue` 改成 `break`，取消会在第一处残留句柄上静默收工，后面的 run 照样跑满
+   * 自己的时限 —— 而看板上已经写着"已取消"。
+   *
+   * 两点来之不易（上一版在这两处都是空的，本机 site 审计当时还报 15/15）：
+   *   1. ghost 的句柄必须带**真的在池里**的 agentId，否则 `collectToTerminal` 里同一个
+   *      findAdapter 找不到它就当场返回失败、释放槽位、把句柄摘掉 ⇒ 那一支根本不可达；
+   *      "已从池里注销"改由 registry.activeAdapters() 在 abort 前一刻制造。
+   *   2. 前置条件要"没满足就红"：waitLive 是轮询到点就放过的辅助函数，单靠它，
+   *      构造没成立的用例照样会通过。
+   * 判定方式：差分 —— 把生产那句改成 break，这条用例必须红。
    */
   it("残留句柄的适配器不在池里时，跳过它并继续中止其余在跑的 run", async () => {
     const log: string[] = [];
@@ -133,7 +139,10 @@ describe("Scheduler.abortInFlight", () => {
       },
       async dispatch(payload) {
         log.push("dispatch:ghost");
-        return { runId: payload.runId, agentId: "already-deregistered", taskId: payload.taskId };
+        // agentId 必须是真的在池里的那个 id —— 否则 collectToTerminal 里的 findAdapter
+        // 也找不到它，会当场返回失败并释放槽位，run 根本不会留在 liveRuns 里。
+        // "已从池里注销"改由下面的 registry.activeAdapters() 在 abort 前一刻制造。
+        return { runId: payload.runId, agentId: "ghost", taskId: payload.taskId };
       },
       async *collect() {
         await ghostCollect;
@@ -165,13 +174,25 @@ describe("Scheduler.abortInFlight", () => {
       },
     };
 
-    const sched = new Scheduler([ghost, good]);
+    // pool() 在给了 registry 时读 activeAdapters() ⇒ 可以让 ghost 在派发那一刻在场、
+    // 到 abort 前一刻才从池里消失，这才是"登记表里留着已注销适配器的句柄"的真实形状。
+    let ghostInPool = true;
+    const sched = new Scheduler([ghost, good], [], {
+      registry: {
+        activeAdapters: () => (ghostInPool ? [ghost, good] : [good]),
+      },
+    } as never);
     const batch = sched.runBatch([task("t1", "src/a"), task("t2", "src/b")], ".");
     for (let i = 0; i < 100 && !log.includes("dispatch:ghost"); i++) {
       await new Promise((r) => setTimeout(r, 5));
     }
     releaseGoodDispatch();
     await waitLive(sched, 2);
+    // 前置条件必须"没满足就红"：waitLive 是轮询到点就放过的辅助函数，单靠它
+    // 会让"构造根本没成立"的用例照样通过（这条用例上一版就是这样空的）。
+    expect(log).toContain("dispatch:ghost");
+    expect(sched.activeRuns()).toBe(2);
+    ghostInPool = false; // ghost 的 run 还在飞，但它已经不在池里了
 
     expect(await sched.abortInFlight()).toBe(1);
     expect(log).toContain("abort:good");
