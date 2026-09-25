@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog, classifyFailure } from "../electron/audit-log";
 import { Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
@@ -158,10 +158,14 @@ describe("Scheduler concurrency cap", () => {
       [task("t1", "z1"), task("t2", "z2"), task("t3", "z3"), task("t4", "z4")],
       ".",
     );
-    // Let the scheduler fill its two slots.
-    await new Promise((r) => setTimeout(r, 30));
+    /*
+     * 先等"两个槽确实被占住"再判上限：只睡固定时长然后断 `peak <= 2`，
+     * 在调度器根本还没起跑时也是空的（vacuous pass）—— 上限必须由
+     * "已经满了 + 后面还有任务在排队"这两件事一起证明。
+     */
+    await vi.waitFor(() => expect(state.peak).toBe(2));
+    expect(sched.activeRuns()).toBe(2);
     expect(state.peak).toBeLessThanOrEqual(2);
-    expect(sched.activeRuns()).toBeLessThanOrEqual(2);
 
     // Release everything; waiters are admitted as slots free up.
     const settled = pending.then((o) => o);
@@ -181,8 +185,11 @@ describe("Scheduler concurrency cap", () => {
     const registry = new AgentRegistry([{ adapter }]);
     const sched = new Scheduler([adapter], [], { registry, maxParallelRuns: 0 });
     const pending = sched.runBatch([task("t1", "z1"), task("t2", "z2"), task("t3", "z3")], ".");
-    await new Promise((r) => setTimeout(r, 30));
-    expect(state.peak).toBe(3);
+    /*
+     * 等"三个都进来了"这个**条件**，而不是睡固定 30ms 再判 `peak === 3`：
+     * 后者把断言压在墙钟上，共享 runner 卡一下就红在一次抖动上，跟并发上限无关。
+     */
+    await vi.waitFor(() => expect(state.peak).toBe(3));
     for (let i = 0; i < 3; i++) state.releases.shift()?.();
     await expect(pending).resolves.toHaveLength(3);
   });

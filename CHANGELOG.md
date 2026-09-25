@@ -112,6 +112,19 @@
 
 ### 修复
 
+- **把三处"睡固定时长再断言"的用例改成断言条件**（`src/sensenova-api.test.ts`、
+  `src/audit-log.test.ts`）。这类写法把结果压在墙钟上，共享 runner 卡一下就红在一次抖动上：
+  ① 两条 run 时限用例原来给 120ms / 40ms 的真预算 —— 判据是"**在途请求**被掐掉"，
+  而机器慢时看门狗可能在请求**发出之前**就响，`sawSignal` 还是 `undefined`，
+  于是红在抖动而不是行为上。现在用 `vi.useFakeTimers()`：先把微任务跑干（断言请求确已发出、
+  signal 尚未 abort），再推进 `runDeadlineMs`，顺序被钉死；冷却那条同时多断一句
+  "喊过'第 1 次等待约 5s 后重试'"，证明截断发生在**等待途中**而不是开始前。
+  ② 并发上限那条原来睡 30ms 然后断 `peak <= 2` —— 调度器还没起跑时这个断言是**空的**。
+  现在先 `vi.waitFor(() => peak === 2)`，再断 `activeRuns() === 2` 与上限，
+  "上限"必须由"槽已占满 + 后面还在排队"共同证明；"0 = 不限"那条同样改成等条件。
+  验证：摘掉看门狗 `guard()` 仍是 2 failed / 27 passed（假时钟没让断言变哑）；
+  `scheduler.ts` 逐位点 **15/15** 全杀（改断言没有削弱并发门禁的覆盖面）。
+
 - **CI 的两个 `verify` job 从 `2afd002` 起一直红，根因是 `mutation:touched` 在浅克隆里崩**
   （`scripts/mutation-touched.mjs`、`.github/workflows/{verify,release}.yml`）。
   它按 `package.json` 的顺序是第 11 段（共 19 段；那笔提交写的"第 19 步"说的是"新加的那一段"）。

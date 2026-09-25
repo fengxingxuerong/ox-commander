@@ -535,49 +535,79 @@ describe("SensenovaApiAdapter", () => {
   });
 
   it("超出 run 时限：判失败而不是继续等，迟到的那一回合不落盘", async () => {
-    const root = tmpRoot();
-    let release!: (r: ChatResponse) => void;
-    const pending = new Promise<ChatResponse>((res) => {
-      release = res;
-    });
-    let sawSignal: AbortSignal | undefined;
-    const adapter = new SensenovaApiAdapter(
-      {
-        async chat(r: ChatRequest): Promise<ChatResponse> {
-          sawSignal = r.signal;
-          return pending;
+    /*
+     * 用假时钟而不是"120ms 真预算"：判据是**在途请求被时限掐掉**，而墙钟给 120ms
+     * 时，高负载 runner 可能在请求发出**之前**就看门狗就响了 ⇒ `sawSignal` 还是
+     * undefined，用例红在一次抖动上、不是红在行为上。假时钟把顺序钉死：
+     * 先把微任务跑干（请求必定已发出），再推进时限。
+     */
+    vi.useFakeTimers();
+    try {
+      const root = tmpRoot();
+      let release!: (r: ChatResponse) => void;
+      const pending = new Promise<ChatResponse>((res) => {
+        release = res;
+      });
+      let sawSignal: AbortSignal | undefined;
+      const adapter = new SensenovaApiAdapter(
+        {
+          async chat(r: ChatRequest): Promise<ChatResponse> {
+            sawSignal = r.signal;
+            return pending;
+          },
         },
-      },
-      { limits: { runDeadlineMs: 120 } },
-    );
-    const handle = await run(adapter, root);
-    const events: string[] = [];
-    for await (const ev of adapter.collect(handle)) events.push(`${ev.kind}: ${ev.text}`);
-    // 必须是 deadline 那一支：本适配器把 idle 窗口关掉了（单请求在途时本来就没事件）。
-    expect(events[events.length - 1]).toMatch(/^failed: \[sensenova-api\] run .+ 超出总时限$/);
-    expect(events.some((e) => e.includes("不再等待本回合结果"))).toBe(true);
-    // 到点不只是"不再等"：在途那一次请求也被真的掐掉（不占线路池、不再继续花 token）
-    expect(sawSignal?.aborted).toBe(true);
-    release({
-      content: '{"files":[{"path":"src/add.js","content":"// late"}]}',
-      provider: "test",
-      model: "test",
-    });
-    await new Promise((r) => setTimeout(r, 20));
-    expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+        { limits: { runDeadlineMs: 1000 } },
+      );
+      const handle = await run(adapter, root);
+      const events: string[] = [];
+      const drained = (async () => {
+        for await (const ev of adapter.collect(handle)) events.push(`${ev.kind}: ${ev.text}`);
+      })();
+      await vi.advanceTimersByTimeAsync(0); // 跑干微任务：请求确实已经发出
+      expect(sawSignal).toBeDefined();
+      expect(sawSignal?.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(1000); // 到点
+      await drained;
+      // 必须是 deadline 那一支：本适配器把 idle 窗口关掉了（单请求在途时本来就没事件）。
+      expect(events[events.length - 1]).toMatch(/^failed: \[sensenova-api\] run .+ 超出总时限$/);
+      expect(events.some((e) => e.includes("不再等待本回合结果"))).toBe(true);
+      // 到点不只是"不再等"：在途那一次请求也被真的掐掉（不占线路池、不再继续花 token）
+      expect(sawSignal?.aborted).toBe(true);
+      release({
+        content: '{"files":[{"path":"src/add.js","content":"// late"}]}',
+        provider: "test",
+        model: "test",
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("冷却等待也算进 run 时限：到点收口，不睡完整个 Retry-After", async () => {
-    const root = tmpRoot();
-    const { client } = scriptedClient([
-      new AllRoutesCoolingError(300),
-      '{"files":[{"path":"src/add.js","content":"// ok"}]}',
-    ]);
-    const adapter = new SensenovaApiAdapter(client, { limits: { runDeadlineMs: 40 } });
-    const terminal = await terminalText(adapter, await run(adapter, root));
-    // 没有看门狗时这里会是 `completed`：300ms 的冷却睡完就重试成功了。
-    expect(terminal).toMatch(/^failed: .+ 超出总时限$/);
-    expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+    vi.useFakeTimers();
+    try {
+      const root = tmpRoot();
+      const { client } = scriptedClient([
+        new AllRoutesCoolingError(5000), // 比时限长：不截断就要睡满 5s 再重试
+        '{"files":[{"path":"src/add.js","content":"// ok"}]}',
+      ]);
+      const adapter = new SensenovaApiAdapter(client, { limits: { runDeadlineMs: 1000 } });
+      const handle = await run(adapter, root);
+      const events: string[] = [];
+      const drained = (async () => {
+        for await (const ev of adapter.collect(handle)) events.push(`${ev.kind}: ${ev.text}`);
+      })();
+      await vi.advanceTimersByTimeAsync(1000);
+      await drained;
+      // 截断发生在**等待途中**：那句"第 1 次等待约 5s 后重试"已经喊出去了
+      expect(events.some((e) => e.includes("冷却中，第 1 次等待约 5s"))).toBe(true);
+      expect(events[events.length - 1]).toMatch(/^failed: .+ 超出总时限$/);
+      expect(fs.existsSync(path.join(root, "src/add.js"))).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
