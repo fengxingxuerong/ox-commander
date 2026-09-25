@@ -539,7 +539,14 @@ export class OrchestratorEngine {
             if (decision === "skip") {
               skipped.add(t.id);
               allDone.add(t.id);
-              this.cb.onLog(`用户跳过任务「${t.title}」，不再重试。`);
+              const downstream = pendingNow.filter((d) => d.dependencies.includes(t.id));
+              this.cb.onLog(
+                `用户跳过任务「${t.title}」，不再重试。` +
+                  (downstream.length > 0
+                    ? ` 它的下游 ${downstream.map((d) => `「${d.title}」`).join("、")} 仍会被派出，` +
+                      `很可能因缺少它的产物而失败 —— 那种失败不是下游自己的问题。`
+                    : ""),
+              );
               continue;
             }
             // redispatch: grant one more round and reset this task's failure log.

@@ -486,6 +486,64 @@ describe("OrchestratorEngine.execute", () => {
     expect(events.some((e) => e.includes("跳过任务"))).toBe(true);
   });
 
+  it("跳过任务时点名仍会被派出的下游", async () => {
+    const events: string[] = [];
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const upstream: Task = { id: "t1", title: "上游模块", description: "d", zone: "src/a", dependencies: [], suggestedRole: "fullstack-dev" };
+    const downstream: Task = { id: "t2", title: "下游模块", description: "d", zone: "src/b", dependencies: ["t1"], suggestedRole: "fullstack-dev" };
+    const eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(false),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      },
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        requestEscalationDecision: async (taskId: string) => (taskId === "t1" ? "skip" : "abort"),
+      },
+    );
+    await expect(eng.execute([[upstream, downstream]], ".")).rejects.toThrow(/用户终止/);
+    const line = events.find((l) => l.includes("用户跳过任务"));
+    expect(line).toBeDefined();
+    expect(line!).toContain("它的下游");
+    expect(line!).toContain("「下游模块」");
+  });
+
+  it("没有下游依赖时不多嘴", async () => {
+    const events: string[] = [];
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const only: Task = { id: "t1", title: "孤立模块", description: "d", zone: "src/a", dependencies: [], suggestedRole: "fullstack-dev" };
+    const eng = new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler, verify: async () => makeReport(false), settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 } },
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        requestEscalationDecision: async () => "skip",
+      },
+    );
+    // 唯一任务被跳过后没有可交付产物，验证仍是红的：这里只关心那句提示，不关心终局
+    await eng.execute([[only]], ".").catch(() => undefined);
+    const line = events.find((l) => l.includes("用户跳过任务"));
+    expect(line).toBeDefined();
+    expect(line!).not.toContain("它的下游");
+  });
+
   it("throws when the user chooses abort on an escalated task", async () => {
     const scheduler = {
       async runBatch(tasks: Task[]) {
