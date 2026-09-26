@@ -804,3 +804,129 @@ describe("Scheduler · 探针缓存失效的粒度", () => {
     })();
   });
 });
+
+describe("Scheduler · 批内并发准入（maxConcurrency 是硬上限）", () => {
+  function cap1(id: string, maxConcurrency: number, dispatched: string[]): AgentAdapter {
+    const base = adapterWith(id, true, { dispatched });
+    return Object.assign(base, {
+      capabilities: () => ({
+        roles: ["*"],
+        zoneGlobs: ["**"],
+        supports: ["read", "edit", "create", "run-test"],
+        artifactKinds: ["files"],
+        maxConcurrency,
+        selfIsolated: false,
+      }),
+    }) as AgentAdapter;
+  }
+
+  function zTask(id: string, role = "backend-dev"): Task {
+    return { id, title: id, description: "d", zone: `${id}-zone`, dependencies: [], suggestedRole: role };
+  }
+
+  it("同批第二个任务不再派给已满载的 agent，改派空闲者", async () => {
+    // 2026-09-26 实弹演习实测的行为：maxConcurrency=1 的 loomy 同批接下
+    // t1/t2 两单 —— t2 决策时 inflight 已是 1/1，却只被扣 10 分照样胜出。
+    //
+    // 构造要点：a1 带 priority=50（weight 1 → +50 分），保证 load 软惩罚（-10）
+    // 不足以让 a2 反超 —— 否则用例在旧实现下就绿，钉不住硬拦语义
+    //（这正是演习里 loomy 压过内置执行器的形态）。
+    const dispatched: string[] = [];
+    const a1 = cap1("a1", 1, dispatched);
+    const a2 = cap1("a2", 1, dispatched);
+    const registry = new AgentRegistry([
+      { adapter: a1, manifest: { id: "a1", priority: 50 } },
+      { adapter: a2 },
+    ]);
+    const sched = new Scheduler([a1, a2], [], { registry, router: createCapabilityRouter() });
+    const outcomes = await sched.runBatch([zTask("t1"), zTask("t2")], ".");
+    // 旧实现 t2 也会派给 a1（load 软惩罚拦不住）：["a1", "a1"]
+    expect(dispatched).toEqual(["a1", "a2"]);
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
+  });
+
+  it("唯一 agent 满载时第二个任务如实 no-agent，不硬派", async () => {
+    // router 报"无人可派"后，planPool 的 round-robin 兜底（?? available[i % n]）
+    // 会把任务硬塞回满载者 —— 并发准入闸必须连兜底路径一起把关。
+    const dispatched: string[] = [];
+    const a1 = cap1("a1", 1, dispatched);
+    const registry = new AgentRegistry([{ adapter: a1 }]);
+    const sched = new Scheduler([a1], [], { registry, router: createCapabilityRouter() });
+    const outcomes = await sched.runBatch([zTask("t1"), zTask("t2")], ".");
+    // 旧实现：["a1", "a1"]
+    expect(dispatched).toEqual(["a1"]);
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[1]!.ok).toBe(false);
+    expect(outcomes[1]!.errorClass).toBe("no-agent");
+  });
+
+  it("preferredAgentId 点名超过并发上限 → 超出部分 no-agent（点名不静默改派）", async () => {
+    // 点名是显式意图：满了就是满了，静默改派别人违背点名语义；
+    // 超出的任务走 no-agent，由修复轮在 agent 空闲后自然重试。
+    const dispatched: string[] = [];
+    const a1 = cap1("a1", 1, dispatched);
+    const a2 = cap1("a2", 1, dispatched);
+    const registry = new AgentRegistry([{ adapter: a1 }, { adapter: a2 }]);
+    const sched = new Scheduler([a1, a2], [], { registry, router: createCapabilityRouter() });
+    const outcomes = await sched.runBatch([zTask("t1"), zTask("t2")], ".", { preferredAgentId: "a1" });
+    // 旧实现：["a1", "a1"]
+    expect(dispatched).toEqual(["a1"]);
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[1]!.errorClass).toBe("no-agent");
+  });
+
+  it("legacy 池不受并发准入影响（v1 round-robin 原样）", async () => {
+    const dispatched: string[] = [];
+    const layer = createAgentLayer({
+      adapters: [adapterWith("a1", true, { dispatched }), adapterWith("a2", true, { dispatched })],
+    });
+    const sched = new Scheduler(layer.adapters, [], layer.schedulerOptions);
+    const outcomes = await sched.runBatch([zTask("t1"), zTask("t2"), zTask("t3")], ".");
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true, true]);
+    expect(dispatched).toEqual(["a1", "a2", "a1"]);
+  });
+
+  it("满载兜底路径能命中 spare —— 改派给还有余量的声明 agent", async () => {
+    // 这条钉住 admitConcurrency 的 spare 查找本体（@343 的「跳过 wanted 自己」）。
+    // 改派场景平时在 router 评分层就被消化了（满载者不进 decision），spare 查找
+    // 唯一的真实入口是 round-robin 兜底：candidates 为空（本用例用无人匹配的
+    // role 构造）→ 兜底按 index 选中 a1 → a1 已满 → spare 查找把任务交给
+    // 还有余量的 a2。
+    const dispatched: string[] = [];
+    const mk = (id: string, mc: number) =>
+      Object.assign(adapterWith(id, true, { dispatched }), {
+        capabilities: () => ({
+          roles: ["backend-dev"],
+          zoneGlobs: ["**"],
+          supports: ["read", "edit", "create", "run-test"],
+          artifactKinds: ["files"],
+          maxConcurrency: mc,
+          selfIsolated: false,
+        }),
+      }) as AgentAdapter;
+    const a1 = mk("a1", 1);
+    const a2 = mk("a2", 5);
+    const registry = new AgentRegistry([{ adapter: a1 }, { adapter: a2 }]);
+    const sched = new Scheduler([a1, a2], [], { registry, router: createCapabilityRouter() });
+    // suggestedRole = "nobody"：两个声明 agent 都不匹配 → candidates 恒空 → 走兜底
+    const nobody = (id: string): Task => ({
+      id, title: id, description: "d", zone: `${id}-zone`, dependencies: [], suggestedRole: "nobody",
+    });
+    const outcomes = await sched.runBatch([nobody("t1"), nobody("t2"), nobody("t3")], ".");
+    // t1 兜底 a1（放行）；t2 兜底 a2（放行）；t3 兜底 a1 已满 → spare 命中 a2
+    expect(dispatched).toEqual(["a1", "a2", "a2"]);
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true, true]);
+  });
+
+  it("点名 legacy agent 不受并发闸限制（bypass，v1 语义）", async () => {
+    // 直派路径的 registry 检查是 `d && !d.inferredLegacy` —— legacy 点名必须
+    // 原样放行（v1 池没有并发概念），连续点名几次都照派。
+    const dispatched: string[] = [];
+    const v1 = adapterWith("v1", true, { dispatched });
+    const registry = new AgentRegistry([{ adapter: v1 }]);
+    const sched = new Scheduler([v1], [], { registry, router: createCapabilityRouter() });
+    const outcomes = await sched.runBatch([zTask("t1"), zTask("t2")], ".", { preferredAgentId: "v1" });
+    expect(dispatched).toEqual(["v1", "v1"]);
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
+  });
+});

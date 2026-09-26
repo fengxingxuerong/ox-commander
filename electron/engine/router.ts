@@ -130,6 +130,9 @@ export function createCapabilityRouter(opts: RouterOptions = {}): CapabilityRout
       const required = ctx.requiredTags ?? (["edit"] as AgentAction[]);
       const preferredRank = new Map((ctx.preferredAgents ?? []).map((id, i) => [id, i]));
       const scored: Scored[] = [];
+      // 声明候选里有多少个是因“满载”被拦下的 —— 与“能力不匹配”分开计数，
+      // 因为两者在 scored 为空时的语义不同（见下方回落决策）。
+      let loadBlocked = 0;
 
       for (const descriptor of ctx.candidates) {
         const caps = descriptor.capabilities;
@@ -142,6 +145,17 @@ export function createCapabilityRouter(opts: RouterOptions = {}): CapabilityRout
 
         const stats = opts.stats?.(descriptor.manifest.id);
         if (stats?.circuit === "open") continue;
+
+        const inflight = stats?.inflight ?? ctx.inflight?.get(descriptor.manifest.id) ?? 0;
+        // 并发准入（与 circuit=open 同类的动态硬拦）：声明了 maxConcurrency 的
+        // agent 满载后不再接收新任务。load 软惩罚（下方 -10/单位）只能排序，
+        // 拦不住“唯一高分者已满”的场景 —— 2026-09-26 实弹演习实测：
+        // maxConcurrency=1 的 loomy 在 t1 在飞时仍以 180+ 分接下 t2。
+        // legacy 候选不受此拦（bypass 一切 capability 检查，registry 同口径）。
+        if (!descriptor.inferredLegacy && inflight >= caps.maxConcurrency) {
+          loadBlocked += 1;
+          continue;
+        }
 
         const parts: string[] = [];
         let score = 0;
@@ -171,7 +185,6 @@ export function createCapabilityRouter(opts: RouterOptions = {}): CapabilityRout
           score -= w.circuitHalfOpen;
           parts.push(`circuit=half-open(-${w.circuitHalfOpen})`);
         }
-        const inflight = stats?.inflight ?? ctx.inflight?.get(descriptor.manifest.id) ?? 0;
         const loadPenalty = Math.round(w.load * (inflight / caps.maxConcurrency));
         score -= loadPenalty;
         parts.push(`load=${inflight}/${caps.maxConcurrency}(-${loadPenalty})`);
@@ -183,6 +196,21 @@ export function createCapabilityRouter(opts: RouterOptions = {}): CapabilityRout
       }
 
       if (scored.length === 0) {
+        // 两种“全军覆没”语义不同：
+        // • 能力不匹配（role/zone/tag）→ 回落 round-robin（never route worse
+        //   than legacy，这单它永远做不了，v1 池怎么接就怎么接）；
+        // • 合格候选全部满载 → 不能回落 —— 回落就是把任务硬派回满载者，
+        //   maxConcurrency 声明等于白写。如实报无人可派，交给平台既有的
+        //   修复轮在 agent 空闲后重派。
+        if (loadBlocked > 0) {
+          const decision: RoutingDecision = {
+            agentId: undefined,
+            score: 0,
+            reason: `合格候选全部满载（${loadBlocked} 个），本轮不派，等修复轮重派`,
+          };
+          opts.onDecision?.(decision, ctx);
+          return decision;
+        }
         const decision = legacyDecision(ctx, "能力匹配为空，回落 round-robin");
         opts.onDecision?.(decision, ctx);
         return decision;

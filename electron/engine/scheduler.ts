@@ -258,7 +258,19 @@ export class Scheduler {
       const exact = this.findAdapter(preferredAgentId);
       if (!exact) return tasks.map(() => undefined);
       const ok = await this.probeCached(exact);
-      return tasks.map(() => (ok ? exact : undefined));
+      if (!ok) return tasks.map(() => undefined);
+      // 点名路径也要过并发闸：点名是显式意图，但 maxConcurrency 是能力声明，
+      // 连续点名的第 N 个任务不能把它打穿。满载时不静默改派别人（那违背点名
+      // 语义），如实报 no-agent，交给修复轮在 agent 空闲后重试。
+      const planned = new Map<string, number>();
+      return tasks.map(() => {
+        const d = this.opts.registry?.get(exact.meta.id);
+        if (d && !d.inferredLegacy) {
+          if ((planned.get(exact.meta.id) ?? 0) >= d.capabilities.maxConcurrency) return undefined;
+        }
+        planned.set(exact.meta.id, (planned.get(exact.meta.id) ?? 0) + 1);
+        return exact;
+      });
     }
     const available = await this.availableAgents();
     if (available.length === 0) return tasks.map(() => undefined);
@@ -283,7 +295,7 @@ export class Scheduler {
       const wanted =
         (decision.agentId ? available.find((a) => a.meta.id === decision.agentId) : undefined) ??
         available[i % available.length];
-      const picked = this.admitBreaker(wanted, available);
+      const picked = this.admitConcurrency(this.admitBreaker(wanted, available), inflight, available);
       if (picked) inflight.set(picked.meta.id, (inflight.get(picked.meta.id) ?? 0) + 1);
       return picked;
     });
@@ -303,6 +315,36 @@ export class Scheduler {
     if (!breaker) return wanted;
     if (breaker.allow(wanted.meta.id)) return wanted;
     return available.find((a) => a.meta.id !== wanted.meta.id && breaker.allow(a.meta.id));
+  }
+
+  /**
+   * Concurrency admission: a declared agent at capacity takes no more tasks in
+   * this batch. The router already filters saturated candidates, but this gate
+   * carries real weight on two paths that bypass scoring entirely — the
+   * round-robin fallback (`?? available[i % n]`, which would otherwise hand a
+   * "no one available" decision straight back to the saturated agent) and any
+   * future caller that picks without routing. It is the scheduler-side twin of
+   * the registry's hard filter, not a redundant re-check.
+   *
+   * 2026-09-26 实弹演习实测：maxConcurrency=1 的 loomy 同批接下 t1/t2 两单 ——
+   * load 评分是软惩罚（-10/单位），压不过优先级/专属区的分差。
+   */
+  private admitConcurrency(
+    wanted: AgentAdapter | undefined,
+    inflight: ReadonlyMap<string, number>,
+    available: AgentAdapter[],
+  ): AgentAdapter | undefined {
+    if (!wanted) return undefined;
+    const wantedDesc = this.opts.registry?.get(wanted.meta.id);
+    if (!wantedDesc || wantedDesc.inferredLegacy) return wanted;
+    if ((inflight.get(wanted.meta.id) ?? 0) < wantedDesc.capabilities.maxConcurrency) return wanted;
+    // 满载：改派第一个还能接的（legacy 恒可接；声明的看余量）。全满 → 无人。
+    return available.find((a) => {
+      if (a.meta.id === wanted.meta.id) return false;
+      const d = this.opts.registry?.get(a.meta.id);
+      if (!d || d.inferredLegacy) return true;
+      return (inflight.get(a.meta.id) ?? 0) < d.capabilities.maxConcurrency;
+    });
   }
 
   async runBatch(

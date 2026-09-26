@@ -282,3 +282,76 @@ describe("CapabilityRouter · 等分时的声明优先 tie-break", () => {
     expect(d.agentId).toBe("declared");
   });
 });
+
+describe("CapabilityRouter · 并发准入（maxConcurrency 是硬上限，不是软偏好）", () => {
+  it("[硬拦] 已满载的 agent 不再接单，任务改派空闲者", () => {
+    // 2026-09-26 实弹演习实测：load 软惩罚（-10/单位）拦不住"唯一高分者已满"——
+    // maxConcurrency=1 的 loomy 在 t1 在飞时仍以 180+ 分接下 t2（t2 评分时
+    // 已打出 load=1/1 却只扣 10 分照样胜出）。满载者必须像 circuit=open 一样
+    // 直接出局，而不是扣完分继续赢。
+    //
+    // 构造要点：busy 带 priority=50（weight 1 → +50 分，复刻演习里 loomy 的
+    // 优先级形态），保证**软惩罚（-10）不足以翻转**——否则两个同权候选里
+    // -10 恰好让 idle 反超，用例在旧实现下就绿，钉不住"硬拦"语义。
+    const t = task("src/app", "backend-dev");
+    const declared = caps({ roles: ["backend-dev"], zoneGlobs: ["src/**"], maxConcurrency: 1 });
+    const candidates = [
+      { ...descriptor("busy", declared), priority: 50 },
+      descriptor("idle", declared),
+    ];
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 1,
+      candidates,
+      inflight: new Map([["busy", 1]]),
+    });
+    expect(d.agentId).toBe("idle");
+    // 满载者的评分明细不应再出现在理由里 —— 它根本没参与评分。
+    expect(d.reason).not.toContain("load=1/1");
+  });
+
+  it("全部合格候选满载时如实报无人可派，不回落 round-robin", () => {
+    // "能力不匹配"回落是务实兜底（这单它永远做不了，v1 池怎么接就怎么接）；
+    // 但"满载"回落是把任务硬派回满载者 —— maxConcurrency 声明等于白写。
+    // 此时只能报无人可派，交给平台既有的修复轮重派机制。
+    const t = task("src/app", "backend-dev");
+    const declared = caps({ roles: ["backend-dev"], zoneGlobs: ["src/**"], maxConcurrency: 1 });
+    const candidates = [descriptor("busy", declared)];
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 1,
+      candidates,
+      inflight: new Map([["busy", 1]]),
+    });
+    expect(d.agentId).toBeUndefined();
+    expect(d.reason).toContain("满载");
+  });
+
+  it("legacy 候选不受并发硬拦（bypass 一切 capability 检查，与 registry 同口径）", () => {
+    // v1 池没有并发概念，round-robin 保真是路由器的明文承诺 —— 满载拦截
+    // 只对声明了能力的候选生效。
+    const t = task("src/app", "backend-dev");
+    const candidates = [descriptor("v1", {}, true)];
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 2,
+      candidates,
+      inflight: new Map([["v1", 3]]),
+    });
+    expect(d.agentId).toBe("v1");
+  });
+
+  it("未满载（inflight < maxConcurrency）照常参评，load 明细保留", () => {
+    const t = task("src/app", "backend-dev");
+    const declared = caps({ roles: ["backend-dev"], zoneGlobs: ["src/**"], maxConcurrency: 2 });
+    const candidates = [descriptor("half", declared)];
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 0,
+      candidates,
+      inflight: new Map([["half", 1]]),
+    });
+    expect(d.agentId).toBe("half");
+    expect(d.reason).toContain("load=1/2");
+  });
+});

@@ -410,16 +410,24 @@ const EQUIVALENT_SITES = [
    * 的设计互为印证。行号 92 在两端一致，无漂移风险。
    */
   { file: "electron/sandbox/path-policy.ts", op: "=== → !==", line: 92 },
-  { file: "electron/engine/router.ts", op: "&& → ||", line: 193 },
-  // `if (!title || !command) return;` —— 改成 `&&` 后，"只缺一个字段"的 smoke 条目
-  // 不再被提前 return，会带着 `undefined` 被 push 进 smoke 数组。
-  //
-  // 但**观察不到**：`requireString` 在缺字段时已经把问题写进 `issues`，
-  // 函数末尾 `if (issues.length) throw new SchemaValidationError(issues)` 必然抛错，
-  // 那个数组随之被丢弃。抛错的类型与消息在两种版本下完全一致。
-  //
-  // 换句话说这是"副作用发生了但被后续抛错抹掉"的等价 —— 要让它可观测，
-  // 得改生产代码（例如让校验失败也回传已解析的部分），代价不对。
+  /**
+   * `electron/engine/router.ts` tie-break 排序里的
+   * `if (anyDeclared && a.descriptor.inferredLegacy !== b.descriptor.inferredLegacy)`
+   * 的 `&& → ||` —— **可证明等价**（一级）。
+   *
+   * 记条件为 `A && X`，其中 `X = (两候选的 inferredLegacy 不同)`。X 为真要求
+   * 一真一假 → 池中**必然存在声明候选** → `anyDeclared`（`scored.some(非 legacy)`）
+   * 恒为真。由 `X ⇒ A` 得 `A && X ≡ X ≡ A || X` —— 放宽成 `||` 后多出的
+   * 情况（A 真 X 假）里 tie-break 块内部的两个 if 都不成立，整块空转。
+   * 行为逐输入恒等。
+   *
+   * ⚠️ 行号是锚点：router.ts 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认上面的蕴含关系仍成立。
+   *
+   * 2026-09-27：并发准入轮在评分循环里插入 28 行（满载 continue + 全满载
+   * 不回落分支）→ 193 → 221。
+   */
+  { file: "electron/engine/router.ts", op: "&& → ||", line: 221 },
   { file: "shared/schema.ts", op: "|| → &&", line: 184 },
   /**
    * `electron/sandbox/spawn-plan.ts:96` `return false → true`（`isFile` 的 catch）。
@@ -524,6 +532,28 @@ const EQUIVALENT_SITES = [
    *   追加的 `;executorTimeoutMs=${…}` 分量与被取反的布尔分量各自独立，取反仍双射。
    */
   { file: "electron/ipc/context.ts", op: "!== → ===", line: 182 },
+  /**
+   * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
+   * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，
+   * 生产装配不可达**。
+   *
+   * 该分支只在「spare 查找遍历到 legacy 或 registry 缺项的 adapter」时承重，
+   * 而 spare 查找被触发的两条路径都到不了那里：
+   * • decision 路径：router 已把满载声明者过滤出局（loadBlocked），decision
+   *   不会指向满载者；指向 legacy 时 `admitConcurrency` 在 wantedDesc 检查处
+   *   直接放行，根本不进 spare 查找；
+   * • 兜底路径（decision 为 undefined）：candidates 为空或全部满载 ——
+   *   `registry.candidates()` 对 legacy 恒放行，所以这两种情况都意味着
+   *   **池里没有 legacy**，spare 查找遍历到的全是声明 agent。
+   * 生产装配（agents/index.ts / headless）中 registry 与 available 同源构造，
+   * `registry.get` 恒命中 → `!d` 同样不可达。
+   *
+   * 分支刻意保留：Scheduler 的 adapters 与 registry 在 API 上是两个独立入参，
+   * 不强制同源；这行是装配方式未来变化时的 fail-safe —— 位点重回分母即提示
+   * 重新核对同源假设（与 sensenova-api 快照"二次防线"同一处置逻辑）。
+   */
+  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 345 },
+  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 345 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
