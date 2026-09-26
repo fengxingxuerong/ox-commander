@@ -20,8 +20,19 @@ import type { UsageMeter } from "../../shared/usage-meter";
  * `meter` 只影响内置执行器自己构造的那个客户端 —— 外部声明的 CLI / HTTP
  * 桥接智能体跑在别的进程里，它们的用量不由本进程记账（桥接侧自己知道）。
  */
-export function createDefaultAdapters(meter?: UsageMeter): AgentAdapter[] {
-  return [new SensenovaApiAdapter(undefined, meter ? { meter } : undefined)];
+/**
+ * 内置执行器（当前只有 SenseNova API 一个）。
+ *
+ * `executorTimeoutMs` 是它**单次 HTTP 请求**的超时，不是整轮 run 的时限
+ * （后者是 `limits.runDeadlineMs`）。不传时适配器用自己的内置默认。
+ */
+export function createDefaultAdapters(meter?: UsageMeter, executorTimeoutMs?: number): AgentAdapter[] {
+  return [
+    new SensenovaApiAdapter(undefined, {
+      ...(meter ? { meter } : {}),
+      ...(executorTimeoutMs !== undefined ? { timeoutMs: executorTimeoutMs } : {}),
+    }),
+  ];
 }
 
 export function findAdapter(adapters: AgentAdapter[], agentId: string): AgentAdapter | undefined {
@@ -65,6 +76,11 @@ export interface AgentLayerOptions {
    * 注入 `adapters` / `layer` 时不经此处 —— 那种情况下用量由注入方负责。
    */
   meter?: UsageMeter;
+  /**
+   * 内置执行器单次调用的超时（毫秒）。只影响 `createDefaultAdapters` 造出来的那个
+   * 适配器 —— 外部声明的 CLI / HTTP 桥接智能体跑在别的进程里，超时由它们自己管。
+   */
+  executorTimeoutMs?: number;
 }
 
 export interface AgentLayer {
@@ -86,7 +102,7 @@ export interface AgentLayer {
  * original single-adapter, round-robin setup.
  */
 export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
-  const builtin = opts.adapters ?? createDefaultAdapters(opts.meter);
+  const builtin = opts.adapters ?? createDefaultAdapters(opts.meter, opts.executorTimeoutMs);
   const loaded = opts.manifestDir ? loadManifestDir(opts.manifestDir) : { manifests: [], errors: [] };
   const declared: AgentManifest[] = [
     ...(opts.manifests ?? []).map((m) => (m.source ? m : { ...m, source: "declared" as const })),

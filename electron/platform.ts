@@ -21,6 +21,7 @@ import type { DispatchOutcome } from "./engine/scheduler";
 import type { BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
+import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import type { AgentManifest } from "../shared/agent-contract";
@@ -48,6 +49,17 @@ export const BRAIN_POOL_TIMEOUT_MS = 300_000;
 export function brainTimeoutMsFor(settings: Pick<ProjectSettings, "brainTimeoutMs">): number {
   const v = settings.brainTimeoutMs;
   return v !== undefined && v > 0 ? v : BRAIN_POOL_TIMEOUT_MS;
+}
+
+/**
+ * 内置执行器单次调用的超时取哪个值（语义与 `brainTimeoutMsFor` 完全同构：
+ * 省略 / 0 / 负数都归"用内置默认"，只有正数算用户设置）。
+ *
+ * 默认值写成常量引用而不是再抄一个 300_000，避免两处默认值各自漂移。
+ */
+export function executorTimeoutMsFor(settings: Pick<ProjectSettings, "executorTimeoutMs">): number {
+  const v = settings.executorTimeoutMs;
+  return v !== undefined && v > 0 ? v : EXECUTOR_TIMEOUT_MS;
 }
 
 /** What the platform needs to know about its host. */
@@ -164,6 +176,8 @@ export function createPlatform(config: PlatformConfig): Platform {
       promptDir: config.promptDir,
       ...(config.snapshotRoot ? { snapshotRoot: config.snapshotRoot } : {}),
       arbitration: config.arbitration ?? settings.arbitration,
+      // 内置执行器那一路的超时；注入 `layer` 的调用方不受影响（那种情况由注入方负责）。
+      executorTimeoutMs: executorTimeoutMsFor(settings),
       meter,
       onRouting: (decision, task) => log(agentRoutingLogLine(decision, task)),
       onEvent: (text) => log(`[sandbox] ${text}`),

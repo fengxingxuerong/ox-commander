@@ -12,7 +12,7 @@ import path from "node:path";
 import { OrchestratorEngine, type OrchestratorCallbacks, type RunSnapshot } from "../engine";
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../agents";
 import { AuditLog } from "../audit-log";
-import { createPlatform, type Platform } from "../platform";
+import { createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
 import { writeFileAtomic } from "../atomic-file";
 import { ProjectStore, SettingsStore } from "../store";
 import { KeysStore, createSafeStorageCrypto } from "../keys-store";
@@ -174,7 +174,13 @@ export function seedKeysFromStore(settingsValue: ProjectSettings, envVars: Set<s
 }
 
 export function ensureAgentLayer(settingsValue: ProjectSettings): AgentLayer {
-  const signature = `router=${settingsValue.agentRouter !== false};arbitration=${settingsValue.arbitration}`;
+  // ⚠️ 执行器超时必须进 signature：这个 layer 是**缓存的单例**，而适配器在构造时
+  // 就把 `timeoutMs` 存成了字段（`client()` 之后不再读 settings）。大脑层不需要进
+  // —— 它在 `buildLlm` 里每次都现读。改了设置却不重建 layer，改的就是个摆设。
+  const executorTimeoutMs = executorTimeoutMsFor(settingsValue);
+  const signature =
+    `router=${settingsValue.agentRouter !== false};arbitration=${settingsValue.arbitration}` +
+    `;executorTimeoutMs=${executorTimeoutMs}`;
   if (agentLayer && layerSignature === signature) return agentLayer;
   const layer = createAgentLayer({
     enableRouter: settingsValue.agentRouter !== false,
@@ -182,6 +188,7 @@ export function ensureAgentLayer(settingsValue: ProjectSettings): AgentLayer {
     promptDir: promptDir(),
     snapshotRoot: snapshotRoot(),
     arbitration: settingsValue.arbitration,
+    executorTimeoutMs,
     onRouting: (decision, task) => logLine(agentRoutingLogLine(decision, task)),
     onEvent: (text) => logLine(`[sandbox] ${text}`),
     breakerOptions: { onEvent: (text) => logLine(`[breaker] ${text}`) },

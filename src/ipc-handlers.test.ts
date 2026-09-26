@@ -159,6 +159,12 @@ vi.mock("../electron/platform", () => ({
       buildLlm: vi.fn(() => ({ chat: h.llmChat })),
     };
   }),
+  // 原样实现：context.ts 用它算 agent layer 的缓存 signature，这里不该被 mock 掉
+  // （漏了它，ensureAgentLayer 会直接抛"No export is defined on the mock"）。
+  executorTimeoutMsFor: (s: { executorTimeoutMs?: number }) =>
+    s.executorTimeoutMs !== undefined && s.executorTimeoutMs > 0 ? s.executorTimeoutMs : 300_000,
+  brainTimeoutMsFor: (s: { brainTimeoutMs?: number }) =>
+    s.brainTimeoutMs !== undefined && s.brainTimeoutMs > 0 ? s.brainTimeoutMs : 300_000,
 }));
 
 h.llmChat = vi.fn();
@@ -184,6 +190,7 @@ import {
   buildPlatformLayer,
   dynamicAgentMap,
   enginesOf,
+  ensureAgentLayer,
   getRunningProjectId,
   seedKeysFromStore,
   setRunningProjectId,
@@ -953,6 +960,26 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
     // what lets runtime-registered agents survive engine rebuilds.
     expect(h.createAgentLayerFn.mock.calls.length - before).toBe(1);
     expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(expect.objectContaining({ enableRouter: false }));
+  });
+
+  it("执行器超时进了 layer 的缓存 signature —— 改了会重建，不改则复用", () => {
+    // 这条防的是一个很隐蔽的失效：agent layer 是**缓存的单例**，而适配器在构造时
+    // 就把 timeoutMs 存成了字段。signature 里漏掉这个字段的话，设置页改了超时、
+    // layer 却是旧的 —— 界面上有输入框，实际改不动。
+    const base: ProjectSettings = { ...DEFAULT_SETTINGS };
+    const before = h.createAgentLayerFn.mock.calls.length;
+
+    ensureAgentLayer({ ...base, executorTimeoutMs: 45_000 });
+    const mid = h.createAgentLayerFn.mock.calls.length;
+    expect(mid - before).toBe(1);
+    expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(expect.objectContaining({ executorTimeoutMs: 45_000 }));
+
+    ensureAgentLayer({ ...base, executorTimeoutMs: 45_000 });
+    expect(h.createAgentLayerFn.mock.calls.length).toBe(mid); // 同 signature → 复用
+
+    ensureAgentLayer({ ...base, executorTimeoutMs: 60_000 });
+    expect(h.createAgentLayerFn.mock.calls.length - mid).toBe(1); // 值变了 → 重建
+    expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(expect.objectContaining({ executorTimeoutMs: 60_000 }));
   });
 
   it("audits run start/end with redacted digests", () => {

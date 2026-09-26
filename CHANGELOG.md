@@ -4,6 +4,29 @@
 版本号遵循语义化版本。**未发布前的版本只记"对用户/对维护者可见的变化"**，
 纯内部重构若改变了行为仍会记入。
 
+## [未发布]
+
+### 新增
+
+- **内置执行器（SenseNova API）单次调用的超时现在可以配**（`shared/types.ts` 的
+  `ProjectSettings.executorTimeoutMs`、`electron/platform.ts` 的 `executorTimeoutMsFor`、
+  `electron/agents/sensenova-api.ts`、设置页「执行器单次调用超时（秒）」）。
+  这是 `brainTimeoutMs` 那条的同族项：同一段代码里另一个 300s 常量
+  （`EXECUTOR_TIMEOUT_MS`），此前同样连环境变量都不读。它管的是**生成代码那一路**的
+  单次 HTTP 请求 —— 与大脑层的拥塞表现同源，痛点也同源（被掐断只能改代码重新打包）。
+  沿用同一套取值语义：`undefined` / `0` / 负数都归"用内置默认"，只有正数算用户设置。
+
+  **这次特意把两条路一起打通**，不再留"只有桌面端能调"的半截：
+  ① headless 协议（`headless/protocol.ts`）同步认 `executorTimeoutMs`，规矩与
+  `brainTimeoutMs` 一致（只认正数，想用默认就省略）；
+  ② 桌面端的 `ensureAgentLayer` 是**缓存的单例**，而适配器在构造时就把 `timeoutMs`
+  存成了字段 —— 所以这个值必须进缓存 signature，否则"设置页改了、layer 还是旧的"，
+  界面上有输入框却改不动。大脑层不需要进（它在 `buildLlm` 里每次现读）。
+
+  用例：`executorTimeoutMsFor` 取值归属 4 条、真的传进 `createAgentLayer` 2 条、
+  协议侧 4 条（含"协议与平台两头对得上"那条 `executorTimeoutMsFor(spec.settings)`）、
+  设置页按秒填存毫秒 1 条、缓存 signature 1 条（改值重建 / 同值复用 / 再改再建）。
+
 ## [0.1.5] — 2026-09-27
 
 ### 新增

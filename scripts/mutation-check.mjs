@@ -475,10 +475,12 @@ const EQUIVALENT_SITES = [
    *   （这一轮起把描述改成**按构造点名**而不是"307 行/304 行"：锚点行号是机器判的，
    *    而散文里的行号没人判，上一轮就是这么漂掉两处还留着旧坐标。）
    * 两层防御仍在：walkStat 用**同一个** `isSecretLikeFile` 在同一个 rel 上先过滤过一次。
-   * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 348 → 383。
-   * 同日第三轮：取消下传在途请求，`run()` 的看门狗回调与 `chatFiles` 各加 1 行 → 383 → 385。
-   */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 385 },
+ * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 348 → 383。
+ * 同日第三轮：取消下传在途请求，`run()` 的看门狗回调与 `chatFiles` 各加 1 行 → 383 → 385。
+ * 2026-09-27：executorTimeoutMs 轮在上方插入 12 行（适配器 timeoutMs 选项/字段/构造归一）
+ *   → 385 → 397。
+ */
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 397 },
   /**
    * `readSnapshotContents` 中读文件失败的 `catch { continue; }` —— 二级。
    *
@@ -494,12 +496,13 @@ const EQUIVALENT_SITES = [
    *
    * 2026-09-23：同上，usage 轮行号漂移 323 → 337，audit 抓到后校回。
    * 2026-09-24：快照跳过清单轮再下移 6 行 → 343；TOCTOU 在测试里仍构造不出。
-   * 2026-09-25：中止守卫轮在其上方插入 9 行 → 343 → 352；
-   * 同日「被沙箱拒绝要进终态」轮再加 2 行 → 352 → 354。
-   * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 354 → 389。
-   * 同日第三轮：取消下传在途请求，上方又各加 1 行 → 389 → 391。
-   */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 391 },
+ * 2026-09-25：中止守卫轮在其上方插入 9 行 → 343 → 352；
+ * 同日「被沙箱拒绝要进终态」轮再加 2 行 → 352 → 354。
+ * 2026-09-25（同日第二轮）：内置执行器 run 时限轮在上方插入 35 行 → 354 → 389。
+ * 同日第三轮：取消下传在途请求，上方又各加 1 行 → 389 → 391。
+ * 2026-09-27：executorTimeoutMs 轮同上（上方插入 12 行）→ 391 → 403。
+ */
+  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 403 },
   /**
    * `electron/ipc/context.ts:177` 的 `settingsValue.agentRouter !== false` → `=== false`
    * —— **可证明等价**（一级）。
@@ -515,8 +518,12 @@ const EQUIVALENT_SITES = [
    * ⚠️ 注意区别：**同一表达式在 216 行是承重的**（那里它直接决定 enableRouter），
    * 所以 216 行必须是真断言、不能一起白名单。这正是"同一写法在不同位置
    * 语义不同"的例子 —— 判等价要按**使用点**判，不能按表达式形状判。
+   *
+   * 2026-09-27：executorTimeoutMs 轮在函数体开头插入 5 行（缓存 signature 说明注释
+   *   4 行 + `executorTimeoutMsFor` 取值 1 行）→ 177 → 182。等价性论证不变：
+   *   追加的 `;executorTimeoutMs=${…}` 分量与被取反的布尔分量各自独立，取反仍双射。
    */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 177 },
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 182 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

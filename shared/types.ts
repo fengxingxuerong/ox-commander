@@ -196,6 +196,20 @@ export interface ProjectSettings {
    * `maxTokensPerRun`（预算）是三件不同的事。
    */
   brainTimeoutMs?: number;
+
+  /**
+   * 内置执行器（SenseNova API）**单次 HTTP 调用**的超时（毫秒）。
+   *
+   * 省略则用内置默认（`EXECUTOR_TIMEOUT_MS`，300s）。与 `brainTimeoutMs` 是同一类
+   * 出口子，针对的是同一段代码里的另一个常量：大脑层管 PRD/分解，这里管**执行器生成代码**
+   * 那一路 —— 两边供应商相同、拥塞表现相同，所以痛点也相同（被掐断只能改代码重打包）。
+   *
+   * `undefined` 或 `<= 0` 都表示**用内置默认**（同 `brainTimeoutMs` 的语义）。
+   *
+   * ⚠️ 不要和 `limits.runDeadlineMs`（整轮 run 的上界）混淆：这个字段掐的是
+   * **一次请求**，超时后线路轮换接着试下一条；run 时限到点则是收口并保留现场。
+   */
+  executorTimeoutMs?: number;
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

@@ -2,10 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { AllRoutesCoolingError } from "../shared/http-clients";
+import { AllRoutesCoolingError, EXECUTOR_TIMEOUT_MS, createFailoverClient } from "../shared/http-clients";
 import { SensenovaApiAdapter, parseFilePayload } from "../electron/agents/sensenova-api";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/llm-client";
+
+/** 透传式 spy：保留真实实现，只为记录"建客户端时用了哪个超时"。 */
+vi.mock("../shared/http-clients", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../shared/http-clients")>();
+  return { ...mod, createFailoverClient: vi.fn(mod.createFailoverClient) };
+});
 
 function fakeClient(reply: string | Error): LlmClient {
   return {
@@ -117,6 +123,35 @@ describe("parseFilePayload", () => {
     expect(() => parseFilePayload("a string")).toThrowError(RE);
     expect(() => parseFilePayload({})).toThrowError(RE);
     expect(() => parseFilePayload({ files: "not-an-array" })).toThrowError(RE);
+  });
+});
+
+describe("SensenovaApiAdapter · 单次请求超时", () => {
+  /** 触发"真的去建 failover 客户端"的那条路径：不注入 llm 才会走到 client()。 */
+  function builtTimeout(opts?: { timeoutMs?: number }): number | undefined {
+    vi.mocked(createFailoverClient).mockClear();
+    const adapter = new SensenovaApiAdapter(undefined, opts);
+    // dispatch 会真的发一次请求（无 key 时失败但客户端已经建好），这里只关心建参。
+    void adapter.dispatch({
+      runId: "r-to",
+      taskId: "t-to",
+      title: "t",
+      description: "d",
+      zone: "src/**",
+      projectRoot: tmpRoot(),
+    });
+    const calls = vi.mocked(createFailoverClient).mock.calls;
+    return calls.length > 0 ? (calls[0]![3] as { timeoutMs?: number })?.timeoutMs : undefined;
+  }
+
+  it("opts.timeoutMs 真的进到了 failover 客户端（不是只被存起来）", () => {
+    expect(builtTimeout({ timeoutMs: 45_000 })).toBe(45_000);
+  });
+
+  it("不给时用内置默认；0 与负数按默认处理（0 毫秒的超时没有意义）", () => {
+    expect(builtTimeout()).toBe(EXECUTOR_TIMEOUT_MS);
+    expect(builtTimeout({ timeoutMs: 0 })).toBe(EXECUTOR_TIMEOUT_MS);
+    expect(builtTimeout({ timeoutMs: -1 })).toBe(EXECUTOR_TIMEOUT_MS);
   });
 });
 

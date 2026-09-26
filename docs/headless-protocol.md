@@ -44,7 +44,8 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `maxParallelRuns` | number ≥ 0 | | `4` | 平台级并发上限；`0` 表示不限 |
 | `maxTokensPerRun` | number > 0 | | 不限 | 单轮 token 预算闸；**省略表示不限**，`0`/负数是宿主 bug，直接报错 |
 | `runWallClockMs` | number | | 不限 | run 级墙钟上界；`0` 表示不限 |
-| `brainTimeoutMs` | number > 0 | | `300000` | 大脑层**单次** LLM 调用的超时（毫秒）；省略用内置默认。与整轮墙钟、token 预算是三件不同的事 |
+| `brainTimeoutMs` | number > 0 | | `300000` | 大脑层（PRD / 分解）**单次** LLM 调用的超时（毫秒）；省略用内置默认 |
+| `executorTimeoutMs` | number > 0 | | `300000` | 内置执行器（生成代码那一路）**单次** LLM 调用的超时（毫秒）；省略用内置默认 |
 
 参数错误会**一次性列出所有问题**（不半途退出），例如：
 

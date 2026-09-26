@@ -627,6 +627,23 @@ describe("SettingsPage", () => {
     expect(saved2.brainTimeoutMs).toBeUndefined();
   });
 
+  it("执行器超时同样按秒填、按毫秒存；填 0 是『用默认』", async () => {
+    render(<SettingsPage />);
+    const input = await screen.findByLabelText("执行器单次调用超时（秒）");
+
+    fireEvent.change(input, { target: { value: "45" } });
+    fireEvent.click(screen.getByText("保存设置"));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.executorTimeoutMs).toBe(45_000);
+
+    fireEvent.change(input, { target: { value: "0" } });
+    fireEvent.click(screen.getByText("保存设置"));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalledTimes(2));
+    const saved2 = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved2.executorTimeoutMs).toBeUndefined();
+  });
+
   it("keeps the save failure visible instead of resetting the button silently", async () => {
     vi.mocked(window.oxCommander.saveSettings).mockRejectedValue(new Error("settings.json 只读"));
     render(<SettingsPage />);

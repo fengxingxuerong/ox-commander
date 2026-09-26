@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
 import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
-import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor } from "../electron/platform";
+import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, executorTimeoutMsFor } from "../electron/platform";
+import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import type { AgentAdapter, Task, TaskPayload, VerificationReport } from "../shared/types";
 import type { AgentCapabilities } from "../shared/agent-contract";
@@ -373,6 +374,50 @@ describe("parseSpec · brainTimeoutMs", () => {
 
     const bare = parse(JSON.stringify(LEGACY_SPEC));
     expect(brainTimeoutMsFor(bare.settings)).toBe(BRAIN_POOL_TIMEOUT_MS);
+  });
+});
+
+describe("parseSpec · executorTimeoutMs", () => {
+  it("合法正数流进 settings；省略时不出现该字段，也不产生警告", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, executorTimeoutMs: 45_000 }));
+    expect(spec.settings.executorTimeoutMs).toBe(45_000);
+    expect(spec.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.executorTimeoutMs).toBeUndefined();
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("0 / 负数 / 非数字都被拒绝（与 brainTimeoutMs 同一套规矩）", () => {
+    for (const bad of [0, -1, Number.NaN, "fast"]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, executorTimeoutMs: bad }));
+      expect(r.ok, `executorTimeoutMs=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("executorTimeoutMs");
+    }
+  });
+
+  it("小数向下取整", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, executorTimeoutMs: 1500.7 }));
+    expect(spec.settings.executorTimeoutMs).toBe(1500);
+  });
+
+  // JSON.stringify 会把 NaN 序列化成 null（typeof 检查就能拦住），所以上一条
+  // 循环里的 NaN 其实测不到 Infinity 这类"合法 JSON 数字溢出"的输入 —— 必须像
+  // brainTimeoutMs 那条一样用裸字符串写 1e999。Infinity 漏过校验的话，
+  // Math.floor(Infinity) 仍是 Infinity，executorTimeoutMsFor 里 `Infinity > 0`
+  // 为真，会被当作用户设置采用 —— 等于"单次调用永不超时"。
+  it("1e999 溢出成 Infinity 也被拒（漏过会被当用户设置采用）", () => {
+    const r = parseSpec('{"requirement":"x","projectRoot":".","executorTimeoutMs":1e999}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("executorTimeoutMs");
+  });
+
+  it("省略时平台侧拿到的仍是内置默认 —— 协议与平台两头对得上", () => {
+    const given = parse(JSON.stringify({ ...LEGACY_SPEC, executorTimeoutMs: 45_000 }));
+    expect(executorTimeoutMsFor(given.settings)).toBe(45_000);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(executorTimeoutMsFor(bare.settings)).toBe(EXECUTOR_TIMEOUT_MS);
   });
 });
 

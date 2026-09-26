@@ -181,6 +181,7 @@ const KNOWN_FIELDS = new Set<string>([
   "maxTokensPerRun",
   "runWallClockMs",
   "brainTimeoutMs",
+  "executorTimeoutMs",
 ]);
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
@@ -294,6 +295,18 @@ export function parseSpec(rawText: string): ParseResult {
     }
   }
 
+  // 与 `brainTimeoutMs` 同一套规矩（只认正数、省略即用内置默认），管的是另一路调用：
+  // 大脑层做 PRD/分解，内置执行器生成代码 —— 两路供应商相同、拥塞表现相同，
+  // 所以出口子的方式也一致，免得修完一半又留下"只有桌面端能调"的坑。
+  let executorTimeoutMs: number | undefined;
+  if (raw.executorTimeoutMs !== undefined) {
+    if (typeof raw.executorTimeoutMs !== "number" || !Number.isFinite(raw.executorTimeoutMs) || raw.executorTimeoutMs <= 0) {
+      issues.push("executorTimeoutMs 必须是正数（毫秒；省略表示用内置默认 300000）");
+    } else {
+      executorTimeoutMs = Math.floor(raw.executorTimeoutMs);
+    }
+  }
+
   let escalationPolicy: EscalationPolicy | undefined;
   if (raw.escalationPolicy !== undefined) {
     if (typeof raw.escalationPolicy !== "string" || !ESCALATION_POLICIES.includes(raw.escalationPolicy as EscalationPolicy)) {
@@ -391,6 +404,7 @@ export function parseSpec(rawText: string): ParseResult {
     ...(maxTokensPerRun !== undefined ? { maxTokensPerRun } : {}),
     ...(typeof raw.runWallClockMs === "number" ? { runWallClockMs: raw.runWallClockMs } : {}),
     ...(brainTimeoutMs !== undefined ? { brainTimeoutMs } : {}),
+    ...(executorTimeoutMs !== undefined ? { executorTimeoutMs } : {}),
   };
 
   return {

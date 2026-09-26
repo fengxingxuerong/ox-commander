@@ -91,6 +91,14 @@ export interface SensenovaAdapterOptions {
    * slow-but-healthy generation.
    */
   limits?: Partial<AgentLimits>;
+  /**
+   * **单次 HTTP 请求**的超时（毫秒）；省略用 `EXECUTOR_TIMEOUT_MS`。
+   *
+   * 它掐的是一次请求，不是整轮 run —— 超时后 failover 换下一条线路继续试，
+   * 整轮的上界另有 `limits.runDeadlineMs`。两者被混为一谈会出现"一次慢请求
+   * 吃光整轮预算、failover 拿不到第二次机会"（这正是桥那边 300s→600s 分层要治的）。
+   */
+  timeoutMs?: number;
 }
 
 export class SensenovaApiAdapter implements AgentAdapter {
@@ -119,6 +127,8 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private llm: LlmClient | undefined;
   private readonly maxConcurrentOverride: number | undefined;
   private readonly meter: UsageMeter | undefined;
+  /** 单次请求的超时；省略时走 `EXECUTOR_TIMEOUT_MS`（见 `SensenovaAdapterOptions.timeoutMs`）。 */
+  private readonly requestTimeoutMs: number;
   readonly limits: AgentLimits;
   /** Per-run watchdog: hard ceiling on how long one task may stay alive. */
   private readonly gate: TimeoutGate;
@@ -134,6 +144,8 @@ export class SensenovaApiAdapter implements AgentAdapter {
     this.llm = llm;
     this.maxConcurrentOverride = opts?.maxConcurrent;
     this.meter = opts?.meter;
+    // 与大脑层同口径：0/负数没有意义，一律按"用内置默认"处理，不设哨兵值。
+    this.requestTimeoutMs = opts?.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : EXECUTOR_TIMEOUT_MS;
     this.limits = { ...DEFAULT_AGENT_LIMITS, ...(opts?.limits ?? {}) };
     this.gate = new TimeoutGate({
       deadlineMs: this.limits.runDeadlineMs,
@@ -172,7 +184,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
     if (this.llm) return this.llm;
     if (!this.sharedFailover) {
       const failover = createFailoverClient("sensenova", SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
-        timeoutMs: EXECUTOR_TIMEOUT_MS,
+        timeoutMs: this.requestTimeoutMs,
         onEvent: (text) => this.broadcastFailoverEvent(text),
       });
       // 包在**最外层**：routes 由 FailoverLlmClient 内部自建，包在里面会按线路重复计数。

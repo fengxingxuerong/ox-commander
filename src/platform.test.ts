@@ -2,8 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, createFileJournal, createPlatform } from "../electron/platform";
+import {
+  BRAIN_POOL_TIMEOUT_MS,
+  brainTimeoutMsFor,
+  createFileJournal,
+  createPlatform,
+  executorTimeoutMsFor,
+} from "../electron/platform";
+import { createAgentLayer } from "../electron/agents";
 import { buildLlmPool } from "../shared/build-llm";
+import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 
@@ -14,6 +22,12 @@ import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 vi.mock("../shared/build-llm", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../shared/build-llm")>();
   return { ...mod, buildLlmPool: vi.fn(mod.buildLlmPool), buildLlmClient: vi.fn(mod.buildLlmClient) };
+});
+
+/** 同为透传式 spy：只为断言"执行器超时真的交给了装配层"，真实装配照旧。 */
+vi.mock("../electron/agents", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../electron/agents")>();
+  return { ...mod, createAgentLayer: vi.fn(mod.createAgentLayer) };
 });
 
 const dirs: string[] = [];
@@ -525,6 +539,44 @@ describe("brainTimeoutMsFor · 大脑层超时的取值归属", () => {
 
   it("正数原样采用", () => {
     expect(brainTimeoutMsFor({ brainTimeoutMs: 45_000 })).toBe(45_000);
+  });
+});
+
+describe("executorTimeoutMsFor · 执行器超时的取值归属", () => {
+  it("省略字段 = 用内置默认", () => {
+    expect(executorTimeoutMsFor({})).toBe(EXECUTOR_TIMEOUT_MS);
+  });
+
+  it("0 不是『不限』而是『用默认』", () => {
+    expect(executorTimeoutMsFor({ executorTimeoutMs: 0 })).toBe(EXECUTOR_TIMEOUT_MS);
+  });
+
+  it("负数同样按默认处理", () => {
+    expect(executorTimeoutMsFor({ executorTimeoutMs: -1 })).toBe(EXECUTOR_TIMEOUT_MS);
+  });
+
+  it("正数原样采用", () => {
+    expect(executorTimeoutMsFor({ executorTimeoutMs: 45_000 })).toBe(45_000);
+  });
+});
+
+describe("设置里的 executorTimeoutMs 真的传进了装配层", () => {
+  it("createAgentLayer 收到设置里的毫秒值", () => {
+    vi.mocked(createAgentLayer).mockClear();
+    createPlatform({
+      settings: settings({ executorTimeoutMs: 45_000 }),
+      promptDir: tempDir(),
+      host: { log: () => undefined },
+    });
+    expect(vi.mocked(createAgentLayer).mock.calls[0]![0]).toMatchObject({ executorTimeoutMs: 45_000 });
+  });
+
+  it("没给设置时回落到内置默认，而不是 undefined 或 0", () => {
+    vi.mocked(createAgentLayer).mockClear();
+    createPlatform({ settings: settings(), promptDir: tempDir(), host: { log: () => undefined } });
+    expect(vi.mocked(createAgentLayer).mock.calls[0]![0]).toMatchObject({
+      executorTimeoutMs: EXECUTOR_TIMEOUT_MS,
+    });
   });
 });
 

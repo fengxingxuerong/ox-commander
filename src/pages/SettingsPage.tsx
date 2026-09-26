@@ -377,6 +377,26 @@ export function SettingsPage() {
           墙钟到点会停下并保留现场，而这个超时只掐掉卡住的那一次请求，线路轮换会接着试下一条。
         </p>
         <div className="form-row">
+          <label htmlFor="executor-timeout">执行器单次调用超时（秒）</label>
+          <input
+            id="executor-timeout"
+            type="number"
+            min={0}
+            value={Math.round((draft.executorTimeoutMs ?? 0) / 1000)}
+            onChange={(e) => {
+              const sec = Math.max(0, Math.floor(Number(e.target.value) || 0));
+              // 与大脑层那个框同风格：界面按秒、存毫秒，0 存成 undefined = 用内置默认。
+              patch({ executorTimeoutMs: sec > 0 ? sec * 1000 : undefined });
+            }}
+          />
+        </div>
+        <p className="muted">
+          内置执行器（SenseNova API，生成代码的那一
+          路）一次 LLM 调用最多等多久。0 表示用内置默认（300 秒）。
+          它与上面那个框是同一类出口子，只是管的是另一路调用 —— 掐掉的是一次请求，
+          超时后线路轮换接着试；真正收口一整轮的是各自的 run 时限。
+        </p>
+        <div className="form-row">
           <label htmlFor="arbitration">zone 越权处置</label>
           <select
             id="arbitration"
