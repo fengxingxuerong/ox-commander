@@ -180,6 +180,7 @@ const KNOWN_FIELDS = new Set<string>([
   "maxParallelRuns",
   "maxTokensPerRun",
   "runWallClockMs",
+  "brainTimeoutMs",
 ]);
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
@@ -275,6 +276,21 @@ export function parseSpec(rawText: string): ParseResult {
       issues.push("maxTokensPerRun 必须是正数（token 数；不传表示不限）");
     } else {
       maxTokensPerRun = Math.floor(raw.maxTokensPerRun);
+    }
+  }
+
+  let brainTimeoutMs: number | undefined;
+  if (raw.brainTimeoutMs !== undefined) {
+    // 与桌面端设置页的口径**刻意不同**：那里 0 与负数都按"用内置默认"处理
+    // （`brainTimeoutMsFor`），因为填框的人留空是常态。协议层相反 —— 宿主算出 0
+    // 通常是自己把秒换算漏了，静默当默认会让它以为设上了。所以这里只认正数，
+    // 想用内置默认就**省略该字段**（与 `maxTokensPerRun` 同一条规矩）。
+    // 为什么不用 `Number.isFinite` 之外的更多校验：毫秒级的上下界没有客观值，
+    // 定死一个上限只会挡住"我就是想等 10 分钟"的合法宿主。
+    if (typeof raw.brainTimeoutMs !== "number" || !Number.isFinite(raw.brainTimeoutMs) || raw.brainTimeoutMs <= 0) {
+      issues.push("brainTimeoutMs 必须是正数（毫秒；省略表示用内置默认 300000）");
+    } else {
+      brainTimeoutMs = Math.floor(raw.brainTimeoutMs);
     }
   }
 
@@ -374,6 +390,7 @@ export function parseSpec(rawText: string): ParseResult {
     ...(arbitration ? { arbitration } : {}),
     ...(maxTokensPerRun !== undefined ? { maxTokensPerRun } : {}),
     ...(typeof raw.runWallClockMs === "number" ? { runWallClockMs: raw.runWallClockMs } : {}),
+    ...(brainTimeoutMs !== undefined ? { brainTimeoutMs } : {}),
   };
 
   return {

@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
 import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
+import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor } from "../electron/platform";
 import type { LlmClient } from "../shared/llm-client";
 import type { AgentAdapter, Task, TaskPayload, VerificationReport } from "../shared/types";
 import type { AgentCapabilities } from "../shared/agent-contract";
@@ -326,6 +327,52 @@ describe("parseSpec · maxTokensPerRun", () => {
     const r = parseSpec('{"requirement":"x","projectRoot":".","maxTokensPerRun":1e999}');
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.message).toContain("maxTokensPerRun");
+  });
+});
+
+describe("parseSpec · brainTimeoutMs", () => {
+  it("合法正数流进 settings；省略时不出现该字段，也不产生警告（KNOWN_FIELDS 已注册）", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, brainTimeoutMs: 45_000 }));
+    expect(spec.settings.brainTimeoutMs).toBe(45_000);
+    expect(spec.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.brainTimeoutMs).toBeUndefined();
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("0 / 负数 / 非数字都被拒绝 —— 与桌面端设置页口径相反，协议层不把 0 解释成「用默认」", () => {
+    // 桌面端 `brainTimeoutMsFor` 把 0 与负数都当"用内置默认"，因为填框的人留空是常态；
+    // 协议层面向宿主程序，算出 0 通常是秒→毫秒换算漏了，静默当默认会让它以为设上了。
+    // NaN 在 JSON 里序列化成 null，同样落在"非数字"分支。
+    for (const bad of [0, -1, Number.NaN, "fast"]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, brainTimeoutMs: bad }));
+      expect(r.ok, `brainTimeoutMs=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("brainTimeoutMs");
+    }
+  });
+
+  it("小数向下取整（毫秒是整数）", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, brainTimeoutMs: 1500.7 }));
+    expect(spec.settings.brainTimeoutMs).toBe(1500);
+  });
+
+  it("1e999 这类 JSON 合法但溢出成 Infinity 的值也被拒绝", () => {
+    // 为 site 口径的 `|| → &&` 变异准备：三段条件里只有 `!Number.isFinite`
+    // 拦得住 Infinity，缺了它则全部普通输入都与原文等价，门禁杀不掉。
+    const r = parseSpec('{"requirement":"x","projectRoot":".","brainTimeoutMs":1e999}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("brainTimeoutMs");
+  });
+
+  it("省略时平台侧拿到的仍是内置默认 —— 协议与平台两头对得上", () => {
+    // 只断言字段存在与否还不够：真正的契约是"宿主编的 spec 最终决定大脑层用多久"。
+    // 这里把两端接起来，避免"协议认了字段、平台没读"这类断链重演。
+    const given = parse(JSON.stringify({ ...LEGACY_SPEC, brainTimeoutMs: 45_000 }));
+    expect(brainTimeoutMsFor(given.settings)).toBe(45_000);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(brainTimeoutMsFor(bare.settings)).toBe(BRAIN_POOL_TIMEOUT_MS);
   });
 });
 

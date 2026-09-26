@@ -42,6 +42,9 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `snapshotRoot` | string | | `<tmp>/ox-commander-snapshots` | 回滚用的内容备份目录。**建议放在项目之外**（放项目内会被判定为 zone 外改动） |
 | `arbitration` | enum | | `revert-batch` | zone 越权处置：`report-only` / `deny-all` / `revert-batch` / `quarantine` |
 | `maxParallelRuns` | number ≥ 0 | | `4` | 平台级并发上限；`0` 表示不限 |
+| `maxTokensPerRun` | number > 0 | | 不限 | 单轮 token 预算闸；**省略表示不限**，`0`/负数是宿主 bug，直接报错 |
+| `runWallClockMs` | number | | 不限 | run 级墙钟上界；`0` 表示不限 |
+| `brainTimeoutMs` | number > 0 | | `300000` | 大脑层**单次** LLM 调用的超时（毫秒）；省略用内置默认。与整轮墙钟、token 预算是三件不同的事 |
 
 参数错误会**一次性列出所有问题**（不半途退出），例如：
 
