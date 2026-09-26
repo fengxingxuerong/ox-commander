@@ -15,7 +15,7 @@
   "capabilities": {
     "protocolVersion": "ox-agent/2",
     "roles": ["*"],
-    "zoneGlobs": ["**"],
+    "zoneGlobs": ["src", "src/**"],
     "supports": ["read", "edit", "create", "run-test", "review"],
     "artifactKinds": ["files", "logs", "diff"],
     "maxConcurrency": 1,
