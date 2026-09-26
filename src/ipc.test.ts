@@ -55,6 +55,7 @@ vi.mock("../electron/audit-log", () => ({
     append = vi.fn();
     read = vi.fn(() => []);
     files = vi.fn(() => []);
+    exportTo = vi.fn((p: string) => p);
   },
 }));
 
@@ -139,6 +140,7 @@ describe("registerIpc · channel contract", () => {
       "agents:stats",
       "agents:toggle",
       "agents:unregister",
+      "audit:export",
       "audit:files",
       "audit:recent",
       "keys:save",

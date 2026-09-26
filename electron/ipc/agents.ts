@@ -4,7 +4,7 @@
  *
  * Registration only — all state lives in `./context`.
  */
-import { ipcMain } from "electron";
+import { dialog, ipcMain } from "electron";
 import path from "node:path";
 import { buildAdaptersFromManifests } from "../agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "../agents/manifest-schema";
@@ -118,4 +118,30 @@ export function registerObservabilityHandlers(): void {
   });
 
   ipcMain.handle("audit:files", () => ensureAudit().files().map((f) => path.basename(f)));
+
+  /**
+   * Export the whole audit history to a file the user picks in a save dialog.
+   *
+   * The renderer never names a path: the dialog *is* the authorization, so no
+   * path whitelist is needed here. Outcomes are reported as data (ok/reason)
+   * instead of throwing, because "canceled" is not an error and the operator
+   * must be able to tell it apart from "nothing exported".
+   */
+  ipcMain.handle("audit:export", async () => {
+    const files = ensureAudit().files();
+    if (files.length === 0) return { ok: false as const, reason: "empty" };
+    const picked = await dialog.showSaveDialog({
+      title: "导出审计日志（JSONL）",
+      defaultPath: `ox-audit-export-${new Date().toISOString().slice(0, 10)}.jsonl`,
+      filters: [{ name: "JSONL", extensions: ["jsonl"] }],
+    });
+    if (picked.canceled || !picked.filePath) return { ok: false as const, reason: "canceled" };
+    try {
+      const saved = ensureAudit().exportTo(picked.filePath);
+      ensureAudit().append({ phase: "settings", detail: `审计日志已导出到 ${saved}` });
+      return { ok: true as const, path: saved };
+    } catch (err) {
+      return { ok: false as const, reason: (err as Error).message };
+    }
+  });
 }

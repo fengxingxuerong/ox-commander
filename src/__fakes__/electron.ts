@@ -184,6 +184,14 @@ export const shell = {
   openExternal: vi.fn(async () => undefined),
 };
 
+/**
+ * Save dialog double: defaults to "canceled" so a test that forgets to stub it
+ * exercises the user-bailed-out branch, never writes a file by accident.
+ */
+export const dialog = {
+  showSaveDialog: vi.fn(async (_options: unknown) => ({ canceled: true, filePath: undefined })),
+};
+
 /** Only used by preload.ts, which this project never exercises in tests. */
 export const contextBridge = { exposeInMainWorld: vi.fn() };
 export const ipcRenderer = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() };

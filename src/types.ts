@@ -70,6 +70,15 @@ export interface AuditRecordView {
   detail?: string;
 }
 
+/**
+ * Outcome of the audit export dialog, reported as data instead of throwing:
+ * "canceled" is a normal outcome and must be distinguishable from "empty"
+ * (nothing to export) and from a real write failure.
+ */
+export type AuditExportResult =
+  | { ok: true; path: string }
+  | { ok: false; reason: string };
+
 export interface EscalationView {
   taskId: string;
   summary: string;
@@ -162,6 +171,7 @@ declare global {
       getAgentStats(): Promise<{ circuits: Record<string, AgentCircuitStats> }>;
       recentAudit(limit?: number): Promise<AuditRecordView[]>;
       auditFiles(): Promise<string[]>;
+      exportAudit(): Promise<AuditExportResult>;
       onEvent(handler: (payload: unknown) => void): () => void;
     };
   }

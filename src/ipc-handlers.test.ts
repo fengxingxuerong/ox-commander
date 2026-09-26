@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
+import { dialog } from "electron";
 
 /**
  * Behavioural tests for the per-domain IPC handlers under `electron/ipc/*`.
@@ -91,6 +92,7 @@ vi.mock("../electron/audit-log", () => ({
     append = vi.fn();
     read = vi.fn(() => [{ phase: "run-start" }]);
     files = vi.fn(() => ["/x/audit-2026-09-22-001.jsonl"]);
+    exportTo = vi.fn((p: string) => p);
     constructor() {
       h.auditInstances.push(this);
     }
@@ -259,7 +261,11 @@ beforeEach(() => {
     (audit.append as Mock).mockClear();
     (audit.read as Mock).mockReset().mockReturnValue([]);
     (audit.files as Mock).mockReset().mockReturnValue([]);
+    (audit.exportTo as Mock).mockReset();
   }
+  // 每个 handler 测试都自己 stub 对话框结果；默认回到「取消」，
+  // 防止上一个测试的 stub 漏进下一个测试把文件写到盘上。
+  (dialog.showSaveDialog as Mock).mockReset().mockResolvedValue({ canceled: true, filePath: undefined });
   for (const keys of h.keysInstances) {
     (keys.set as Mock).mockReset().mockReturnValue(true);
     (keys.status as Mock).mockReset().mockReturnValue([]);
@@ -530,6 +536,54 @@ describe("agent handlers", () => {
     const audit = inst(h.auditInstances);
     (audit.files as Mock).mockReturnValue(["/deep/dir/audit-1.jsonl"]);
     expect((h.ipcMain as FakeIpcMain).invoke("audit:files")).toEqual(["audit-1.jsonl"]);
+  });
+
+  it("audit:export 把全部历史写进用户选定的文件，返回保存路径", async () => {
+    const audit = inst(h.auditInstances);
+    (audit.files as Mock).mockReturnValue(["/x/audit-1.jsonl"]);
+    (dialog.showSaveDialog as Mock).mockResolvedValue({ canceled: false, filePath: "/x/out.jsonl" });
+    const res = await (h.ipcMain as FakeIpcMain).invoke("audit:export");
+    expect(res).toEqual({ ok: true, path: "/x/out.jsonl" });
+    expect(audit.exportTo).toHaveBeenCalledWith("/x/out.jsonl");
+  });
+
+  it("audit:export 用户取消时不碰日志，如实报 canceled", async () => {
+    const audit = inst(h.auditInstances);
+    (audit.files as Mock).mockReturnValue(["/x/audit-1.jsonl"]);
+    (dialog.showSaveDialog as Mock).mockResolvedValue({ canceled: true, filePath: undefined });
+    const res = await (h.ipcMain as FakeIpcMain).invoke("audit:export");
+    expect(res).toEqual({ ok: false, reason: "canceled" });
+    expect(audit.exportTo).not.toHaveBeenCalled();
+  });
+
+  it("audit:export 对话框异常返回（未取消却没给路径）时也不能拿 undefined 写盘", async () => {
+    // Electron 正常不会返回这种组合，但 canceled || !filePath 的防御分支
+    // 必须有断言钉住：一旦有人把 || 改成 &&，这个用例就是第一个死的。
+    const audit = inst(h.auditInstances);
+    (audit.files as Mock).mockReturnValue(["/x/audit-1.jsonl"]);
+    (dialog.showSaveDialog as Mock).mockResolvedValue({ canceled: false, filePath: undefined });
+    const res = await (h.ipcMain as FakeIpcMain).invoke("audit:export");
+    expect(res).toEqual({ ok: false, reason: "canceled" });
+    expect(audit.exportTo).not.toHaveBeenCalled();
+  });
+
+  it("audit:export 没有审计文件时先说 empty，对话框都不弹", async () => {
+    const audit = inst(h.auditInstances);
+    (audit.files as Mock).mockReturnValue([]);
+    const res = await (h.ipcMain as FakeIpcMain).invoke("audit:export");
+    expect(res).toEqual({ ok: false, reason: "empty" });
+    expect(dialog.showSaveDialog).not.toHaveBeenCalled();
+  });
+
+  it("audit:export 写盘失败时上抛原因，不假装导出落了地", async () => {
+    (dialog.showSaveDialog as Mock).mockResolvedValue({ canceled: false, filePath: "/x/out.jsonl" });
+    const audit = inst(h.auditInstances);
+    (audit.files as Mock).mockReturnValue(["/x/audit-1.jsonl"]);
+    (audit.exportTo as Mock).mockImplementation(() => {
+      throw new Error("EACCES: 写不了");
+    });
+    const res = await (h.ipcMain as FakeIpcMain).invoke("audit:export");
+    expect(res).toEqual({ ok: false, reason: "EACCES: 写不了" });
   });
 });
 

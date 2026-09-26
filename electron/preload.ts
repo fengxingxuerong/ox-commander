@@ -35,6 +35,7 @@ const api = {
   getAgentStats: () => ipcRenderer.invoke("agents:stats"),
   recentAudit: (limit?: number) => ipcRenderer.invoke("audit:recent", limit),
   auditFiles: () => ipcRenderer.invoke("audit:files"),
+  exportAudit: () => ipcRenderer.invoke("audit:export"),
   onEvent: (handler: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown) => handler(payload);
     ipcRenderer.on("ox:event", listener);

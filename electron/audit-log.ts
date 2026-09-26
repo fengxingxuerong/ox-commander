@@ -134,6 +134,30 @@ export class AuditLog {
     return opts.limit !== undefined ? out.slice(-opts.limit) : out;
   }
 
+  /**
+   * Copies the whole history (oldest first) verbatim into `filePath` — the file
+   * the user picked in a save dialog — and returns that path.
+   *
+   * Verbatim on purpose: the export is evidence. Re-serializing through JSON
+   * would normalise away exactly the oddities someone greps the raw JSONL for,
+   * so lines are concatenated as they sit on disk. A file that cannot be read
+   * is skipped (same tolerance as `read()`); a target that cannot be written
+   * throws — a silently empty "export" is worse than a loud failure.
+   */
+  exportTo(filePath: string): string {
+    let out = "";
+    for (const file of this.files()) {
+      try {
+        out += fs.readFileSync(file, "utf8");
+      } catch {
+        continue;
+      }
+    }
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, out, "utf8");
+    return filePath;
+  }
+
   private pickFile(): string {
     const existing = this.files();
     if (existing.length === 0) return this.newFile(0);

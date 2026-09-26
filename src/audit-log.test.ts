@@ -94,6 +94,43 @@ describe("AuditLog", () => {
     expect(log.read()).toHaveLength(1);
     expect(fs.existsSync(log.currentFile())).toBe(true);
   });
+
+  it("exportTo 把全部历史原样拼进一个文件（oldest first，逐行不改写）", () => {
+    const dir = scratch("audit-export");
+    // 第一条正常写；再灌满一个小额度触发滚动，制造"跨两个文件的历史"
+    const log = new AuditLog({ dir, maxFileBytes: 400 });
+    log.append({ phase: "run-start", runId: "run-1" });
+    for (let i = 0; i < 5; i += 1) {
+      log.append({ phase: "batch-guard", agentId: "a", ok: false, errorClass: "conflict", detail: `pad-${i}` });
+    }
+    expect(log.files().length).toBeGreaterThanOrEqual(2);
+
+    const target = path.join(scratch("audit-export-target"), "out.jsonl");
+    const returned = log.exportTo(target);
+    expect(returned).toBe(target);
+
+    const lines = fs.readFileSync(target, "utf8").split("\n").filter((l) => l.trim() !== "");
+    expect(lines.length).toBe(6);
+    // 每行仍是合法 JSON，且顺序就是落盘顺序（oldest first）：第一行是 run-start
+    const first = JSON.parse(lines[0]!) as { phase: string };
+    expect(first.phase).toBe("run-start");
+  });
+
+  it("exportTo 目标目录不存在时创建它，写盘失败时如实上抛", () => {
+    const dir = scratch("audit-export-mkdir");
+    const log = new AuditLog({ dir });
+    log.append({ phase: "run-start", runId: "run-1" });
+
+    const target = path.join(scratch("audit-export-target2"), "deep", "out.jsonl");
+    expect(log.exportTo(target)).toBe(target);
+    expect(fs.existsSync(target)).toBe(true);
+
+    // 指向一个目录路径 → writeFileSync 必然失败，错误要浮出来而不是被吞掉：
+    // 导出是拿去做证据的，静默产出空文件比失败更糟。
+    const badTarget = path.join(scratch("audit-export-bad"), "occupied");
+    fs.mkdirSync(badTarget);
+    expect(() => log.exportTo(badTarget)).toThrow();
+  });
 });
 
 describe("classifyFailure", () => {

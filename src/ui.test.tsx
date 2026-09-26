@@ -115,6 +115,7 @@ function makeBridge(): Bridge {
     getAgentStats: vi.fn(async () => ({ circuits: {} })),
     recentAudit: vi.fn(async () => []),
     auditFiles: vi.fn(async () => []),
+    exportAudit: vi.fn(async () => ({ ok: true, path: "/x/out.jsonl" })),
     onEvent: vi.fn(() => () => undefined),
   } as unknown as Bridge;
 }
@@ -623,6 +624,44 @@ describe("AuditPanel", () => {
   // 组件级行为测试：钉的是"记录真的被念出来"，而不是"组件渲染了没崩"——
   // 后者空数组也能过。渲染 AuditPanel 本体而不是宿主页面，行为断言与
   // 页面布局解耦：面板挂在设置页还是看板页，这些测试都不用动。
+  it("智能体统计：同一只手的多条记录折成一行成功/失败，失败多的排前面", async () => {
+    vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
+      { ts: "2026-09-26T03:09:00.000Z", phase: "run-start" },
+      { ts: "2026-09-26T03:15:00.000Z", phase: "run-end", ok: true, durationMs: 42000 },
+      { ts: "2026-09-26T03:10:00.000Z", phase: "agent-change", agentId: "sensenova-api", ok: true },
+      {
+        ts: "2026-09-26T03:11:00.000Z",
+        phase: "batch-guard",
+        agentId: "sensenova-api",
+        ok: false,
+        errorClass: "conflict",
+      },
+      {
+        ts: "2026-09-26T03:12:00.000Z",
+        phase: "batch-guard",
+        agentId: "codex-cli",
+        ok: false,
+        errorClass: "rate-limit",
+      },
+      {
+        ts: "2026-09-26T03:13:00.000Z",
+        phase: "batch-guard",
+        agentId: "codex-cli",
+        ok: false,
+        errorClass: "timeout",
+      },
+    ] as AuditRecordView[]);
+
+    render(<AuditPanel />);
+    expect(await screen.findByText(/codex-cli：成功 0 · 失败 2/)).toBeTruthy();
+    expect(screen.getByText(/sensenova-api：成功 1 · 失败 1/)).toBeTruthy();
+    // run 起止没有 agentId：它们是 run 级事实，不是某只手的，不进聚合
+    expect(screen.queryByText(/成功 0 · 失败 0/)).toBeNull();
+    // 失败多的智能体排在前面 —— 操作者先看到最不稳的那只手
+    const rows = screen.getAllByText(/：成功 /);
+    expect(rows[0]!.textContent).toContain("codex-cli");
+  });
+
   it("把落盘的记录念出来：最新在上、失败分类与路径总数都在", async () => {
     vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
       {
@@ -694,5 +733,33 @@ describe("AuditPanel", () => {
     expect(await screen.findByText(/读取审计日志失败：EACCES/)).toBeTruthy();
     // 关键：失败不能退化成"没有记录" —— 那等于把故障说成空闲
     expect(screen.queryByText("还没有审计记录。")).toBeNull();
+  });
+
+  it("导出成功：把保存路径说出来，让人知道证据落在哪", async () => {
+    vi.mocked(window.oxCommander.exportAudit).mockResolvedValue({ ok: true, path: "D:\\audit\\out.jsonl" });
+
+    render(<AuditPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "导出 JSONL" }));
+    expect(await screen.findByText(/已导出到 D:\\audit\\out\.jsonl/)).toBeTruthy();
+  });
+
+  it("导出被取消：轻声说一句，不算成功也不算故障", async () => {
+    vi.mocked(window.oxCommander.exportAudit).mockResolvedValue({ ok: false, reason: "canceled" });
+
+    render(<AuditPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "导出 JSONL" }));
+    expect(await screen.findByText("已取消导出。")).toBeTruthy();
+    // 取消不是失败：不进 alert，免得每次改主意都像出了事故
+    expect(screen.queryByRole("alert")).toBeNull();
+  });
+
+  it("导出写盘失败：当作故障说出来，不假装导出落了地", async () => {
+    vi.mocked(window.oxCommander.exportAudit).mockResolvedValue({ ok: false, reason: "EACCES: 写不了" });
+
+    render(<AuditPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "导出 JSONL" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("导出失败");
+    expect(alert.textContent).toContain("EACCES: 写不了");
   });
 });
