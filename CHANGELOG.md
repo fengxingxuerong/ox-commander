@@ -337,6 +337,21 @@ Linux `OxCommander-0.1.2-amd64.deb` 与 `OxCommander-0.1.2-x86_64.AppImage`，
   ② 默认最小化环境下凭证变量名为零，而端点仍回 401 —— 也就是**沙箱不掐网络**，
   它管的是路径与命令，不是防火墙；③ `verifyProject` 起的子进程必须与 ② 同源（修复前是红的）
 
+- **运行时注册的智能体现在会落盘**（`electron/agents/manifest-loader.ts` 的 `saveManifestFile` /
+  `removeManifestFile`、`electron/ipc/agents.ts` 的 register / unregister、
+  `src/components/AgentsPanel.tsx`）。此前 `agents:register` 只把 manifest 塞进内存 Map，
+  重启或崩溃就没了 —— UI 只能提示"自己把 JSON 抄到 agents.d"，而一次注销就把配置丢了。
+  现在注册**同时**把 manifest 原子写进 `agents.d/<id>.json`，重启走 `loadManifestDir` 照样加载。
+  三个刻意的取舍：
+  ① **落盘失败不回滚注册** —— 这一轮的 agent 确实能用，但返回值带 `persisted.ok:false`，
+     UI 必须说清"重启后会丢"，审计里也留一句"落盘失败：…"。只报"已注册"会让人以为记住了。
+  ② **注销只在文件内容与注册时一致时才删** —— 用户手工改过的 JSON 是他的东西，
+     注销一个智能体不该连带毁掉他改过的配置；那种情况不删，并把原因报出来。
+     否则"注销"只在本轮生效，重启一看它又回来了，而用户完全不知道为什么。
+  ③ 文件名由 id 决定（这样**重启之后还能定位**，注销时内存映射已经没了）；
+     id 含非法字符时替换成 `_` 并追加一段短哈希，免得 `a/b` 与 `a b` 撞成同一个文件。
+  用例 7 条，含缺陷注入反证（把 `sameManifest` 改成恒真 ⇒ "文件被改过就不删"那条变红）。
+
 ## [0.1.1] — 2026-09-25（首个打 tag 的版本，**没有产出安装包**）
 
 `0.1.0` 只在 CHANGELOG 里声明过、**从未打 tag 也从未产出安装包**，所以它描述的是

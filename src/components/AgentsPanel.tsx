@@ -58,12 +58,19 @@ export function AgentsPanel() {
     setBusy(true);
     try {
       const res = await window.oxCommander.unregisterAgent(agent.id, 5000);
-      setMessage(
-        res.ok
-          ? { kind: "ok", text: `已注销 ${agent.id}（drain: ${"drained" in res ? res.drained : "-"}）` }
-          : { kind: "bad", text: res.error },
-      );
-      await refresh();
+      if (res.ok) {
+        const p = res.persisted;
+        // 文件被改过而没删时要把原因带上，否则用户以为"注销"已经干净了，
+        // 结果重启一看它又回来了。
+        const tail = p?.removed ? " · 已删除 agents.d 中的文件" : p?.reason ? ` · ${p.reason}` : "";
+        setMessage({
+          kind: "ok",
+          text: `已注销 ${agent.id}（drain: ${"drained" in res ? res.drained : "-"}）${tail}`,
+        });
+        await refresh();
+      } else {
+        setMessage({ kind: "bad", text: res.error });
+      }
     } finally {
       setBusy(false);
     }
@@ -81,7 +88,22 @@ export function AgentsPanel() {
       const parsed = JSON.parse(manifestText) as unknown;
       const res = await window.oxCommander.registerAgent(parsed);
       if (res.ok && "id" in res) {
-        setMessage({ kind: "ok", text: `已注册 ${res.id}${res.replaced ? "（覆盖原注册）" : ""}` });
+        const base = `已注册 ${res.id}${res.replaced ? "（覆盖原注册）" : ""}`;
+        // 落盘失败必须说出来：注册这一轮是真的成了，但"记住了"是假的。
+        // 只报"已注册"会让人以为重启后还在，下次开机才发现没了。
+        setMessage(
+          res.persisted?.ok === false
+            ? {
+                kind: "bad",
+                text: `${base} —— 但没写进 agents.d（${res.persisted.reason ?? "原因未知"}），重启后会丢`,
+              }
+            : {
+                kind: "ok",
+                text: `${base}${
+                  res.persisted?.path ? ` · 已写入 ${res.persisted.path}，重启后仍在` : ""
+                }`,
+              },
+        );
       } else if (res.ok) {
         setMessage({ kind: "ok", text: "已注册" });
       } else {
@@ -182,7 +204,9 @@ export function AgentsPanel() {
         <h4>接入外部智能体</h4>
         <p className="muted">
           CLI 类（Codex / Trae / Claude Code）与 HTTP 桥接类（WorkBuddy）都通过 manifest 声明。
-          也可以把 JSON 放到 <code>{data?.manifestDir ?? "agents.d"}</code> 下，重启后自动加载。
+          在这里注册会<strong>同时</strong>把 JSON 写进 <code>{data?.manifestDir ?? "agents.d"}</code>
+          （一个 manifest 一个文件），重启后照样加载 —— 不用自己抄。
+          也可以手放文件进去；手放的文件被改动过的话，注销时不会删它。
         </p>
         <textarea
           className="manifest-input"

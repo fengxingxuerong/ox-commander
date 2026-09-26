@@ -6,7 +6,11 @@
  */
 import { dialog, ipcMain } from "electron";
 import path from "node:path";
-import { buildAdaptersFromManifests } from "../agents/manifest-loader";
+import {
+  buildAdaptersFromManifests,
+  removeManifestFile,
+  saveManifestFile,
+} from "../agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "../agents/manifest-schema";
 import type { AgentDescriptor } from "../../shared/agent-contract";
 import {
@@ -66,20 +70,44 @@ export function registerAgentHandlers(): void {
     const res = layer.registry.register({ adapter, manifest });
     if (!res.ok) return res;
     dynamic.set(manifest.id, { adapter, manifest });
+    // 写回 agents.d：注册只进内存的话，重启（或崩溃）就没了。
+    // 落盘失败**不**回滚注册 —— 这一轮的 agent 确实能用，但必须如实报上去，
+    // 否则用户以为"记住了"，下次开机才发现没了。
+    const saved = saveManifestFile(agentDir(), manifest);
     ensureAudit().append({
       phase: "agent-change",
       agentId: manifest.id,
-      detail: `register（${manifest.adapter}）${res.replaced ? "覆盖原注册" : ""}`,
+      detail: `register（${manifest.adapter}）${res.replaced ? "覆盖原注册" : ""}${
+        saved.ok ? "已落盘" : `落盘失败：${saved.reason ?? "未知原因"}`
+      }`,
     });
-    return { ok: true, id: manifest.id, replaced: res.replaced };
+    return {
+      ok: true,
+      id: manifest.id,
+      replaced: res.replaced,
+      persisted: saved.ok ? { ok: true, path: saved.path! } : { ok: false, reason: saved.reason },
+    };
   });
 
   ipcMain.handle("agents:unregister", async (_e, id: string, graceMs?: number) => {
     const layer = ensureAgentLayer(settingsStore().load());
     const res = await layer.registry.unregister(id, graceMs !== undefined ? { graceMs } : {});
     if (res.ok) {
+      const registered = dynamicAgentMap().get(id);
       dynamicAgentMap().delete(id);
-      ensureAudit().append({ phase: "agent-change", agentId: id, detail: `unregister（drain: ${res.drained}）` });
+      // 顺手删掉当初写下的那份文件，否则"注销"只在本轮生效、重启它又回来了。
+      // 找不到当初的 manifest（比如是内置/agents.d 加载的）就只改内存。
+      const removed = registered
+        ? removeManifestFile(agentDir(), registered.manifest)
+        : { ok: true as const, removed: false };
+      ensureAudit().append({
+        phase: "agent-change",
+        agentId: id,
+        detail: `unregister（drain: ${res.drained}）${
+          removed.removed ? "已删除 agents.d 中的文件" : removed.reason ? `（${removed.reason}）` : ""
+        }`,
+      });
+      return { ...res, persisted: removed };
     }
     return res;
   });

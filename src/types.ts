@@ -23,9 +23,23 @@ export interface AgentListResult {
   skippedManifests: Array<{ id: string; reason: string }>;
 }
 
+/**
+ * 运行时注册的 manifest 是否成功写回 `agents.d`。
+ *
+ * 注册成功但 `ok:false` 是有意义的中间态：这一轮 agent 能用，重启就没了 ——
+ * UI 必须把它说出来，不能只报"注册成功"。
+ * `removed` 只在注销分支出现（false = 文件被改过、没删）。
+ */
+export interface ManifestPersistResult {
+  ok: boolean;
+  path?: string;
+  removed?: boolean;
+  reason?: string;
+}
+
 export type AgentMutationResult =
-  | { ok: true; id: string; replaced?: boolean }
-  | { ok: true; drained: "drained" | "timeout" | "unsupported" }
+  | { ok: true; id: string; replaced?: boolean; persisted?: ManifestPersistResult }
+  | { ok: true; drained: "drained" | "timeout" | "unsupported"; persisted?: ManifestPersistResult }
   | { ok: false; error: string };
 
 export interface TaskView {

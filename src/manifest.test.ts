@@ -8,7 +8,14 @@ import {
   parseAgentManifest,
   parseAgentManifestList,
 } from "../electron/agents/manifest-schema";
-import { buildAdaptersFromManifests, loadManifestDir, tokenResolver } from "../electron/agents/manifest-loader";
+import {
+  buildAdaptersFromManifests,
+  loadManifestDir,
+  manifestFileName,
+  removeManifestFile,
+  saveManifestFile,
+  tokenResolver,
+} from "../electron/agents/manifest-loader";
 import { CliAgentAdapter } from "../electron/agents/cli-agent";
 import { HttpBridgeAdapter } from "../electron/agents/http-bridge";
 
@@ -410,5 +417,56 @@ describe("parseAgentManifest · envTemplate 与未知 adapter", () => {
     }
     expect(message).toContain("未知");
     expect(message).not.toContain("entry.kind 必须是");
+  });
+});
+
+describe("动态注册的落盘", () => {
+  function tmpDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "ox-persist-"));
+  }
+
+  it("写回的文件能被 loadManifestDir 读回来 —— 这就是『重启后仍在』", () => {
+    const dir = tmpDir();
+    const m = parseAgentManifest(validCodex());
+    const saved = saveManifestFile(dir, m);
+    expect(saved.ok).toBe(true);
+    expect(saved.path).toBe(path.join(dir, "codex-cli.json"));
+
+    // 真正的判据不是"文件存在"，而是重启时走的那个 loader 能把它读出来
+    const reloaded = loadManifestDir(dir);
+    expect(reloaded.errors).toEqual([]);
+    expect(reloaded.manifests.map((x) => x.id)).toEqual(["codex-cli"]);
+    expect(reloaded.manifests[0]).toMatchObject({ id: "codex-cli", adapter: "cli" });
+  });
+
+  it("注销会删掉当初写下的那个文件", () => {
+    const dir = tmpDir();
+    const m = parseAgentManifest(validCodex());
+    saveManifestFile(dir, m);
+    const removed = removeManifestFile(dir, m);
+    expect(removed).toEqual({ ok: true, removed: true });
+    expect(loadManifestDir(dir).manifests).toEqual([]);
+  });
+
+  it("文件被手工改过就不删，并给出原因 —— 注销不该连带毁掉用户的配置", () => {
+    const dir = tmpDir();
+    const m = parseAgentManifest(validCodex());
+    const file = saveManifestFile(dir, m).path!;
+    const edited = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
+    edited.displayName = "我改过的名字";
+    fs.writeFileSync(file, JSON.stringify(edited));
+
+    const removed = removeManifestFile(dir, m);
+    expect(removed.removed).toBe(false);
+    expect(removed.reason).toContain("已被改动");
+    expect(fs.existsSync(file)).toBe(true);
+  });
+
+  it("id 含非法字符时仍能定位，且两个不同 id 不撞同一个文件名", () => {
+    expect(manifestFileName("codex-cli")).toBe("codex-cli.json");
+    // 都含非法字符 -> 都会被替换，靠哈希消歧
+    expect(manifestFileName("a/b")).not.toBe(manifestFileName("a b"));
+    expect(manifestFileName("a/b")).toMatch(/\.json$/);
+    expect(path.basename(manifestFileName("a/b"))).not.toContain("/");
   });
 });

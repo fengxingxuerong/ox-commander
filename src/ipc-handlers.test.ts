@@ -32,6 +32,8 @@ const h = vi.hoisted(() => ({
   buildAdapters: null as any,
   createAgentLayerFn: null as any,
   writeFileAtomic: null as any,
+  saveManifest: null as any,
+  removeManifest: null as any,
   generatePrd: null as any,
   decompose: null as any,
   execute: null as any,
@@ -133,6 +135,13 @@ vi.mock("../electron/agents/manifest-loader", () => ({
     adapters: [h.builtAdapter],
     skipped: [],
   }))),
+  // 默认成功（返回的路径带 id，方便断言"写到了哪"）；测试可用
+  // `h.saveManifest.mockReturnValue({ ok: false, reason: "EACCES" })` 模拟落盘失败。
+  saveManifestFile: (h.saveManifest = vi.fn((_dir: string, m: any) => ({
+    ok: true,
+    path: `/agents.d/${m.id}.json`,
+  }))),
+  removeManifestFile: (h.removeManifest = vi.fn(() => ({ ok: true, removed: true }))),
 }));
 
 vi.mock("../electron/platform", () => ({
@@ -249,6 +258,15 @@ beforeEach(() => {
   setRunningProjectId(null);
   h.createPlatformCalls.length = 0;
   h.writeFileAtomic.mockClear();
+  // 落盘相关的两个 mock 带"可编程返回值"：`mockClear` 只清调用记录、**不清
+  // mockReturnValue**，上一条用例的 EACCES 会漏进下一条。必须连默认实现一起重设。
+  h.saveManifest?.mockReset();
+  h.saveManifest?.mockImplementation((_dir: string, m: any) => ({
+    ok: true,
+    path: `/agents.d/${m.id}.json`,
+  }));
+  h.removeManifest?.mockReset();
+  h.removeManifest?.mockImplementation(() => ({ ok: true, removed: true }));
   resetRegistryMocks();
   for (const store of h.projectInstances) {
     (store.get as Mock).mockReset().mockReturnValue(undefined);
@@ -446,11 +464,61 @@ describe("agent handlers", () => {
   it("registers a valid manifest as a dynamic agent and audits the change", () => {
     const raw = exampleManifest();
     const res = (h.ipcMain as FakeIpcMain).invoke("agents:register", raw) as { ok: boolean; id: string };
-    expect(res).toEqual({ ok: true, id: "codex-cli", replaced: false });
+    expect(res).toEqual({
+      ok: true,
+      id: "codex-cli",
+      replaced: false,
+      persisted: { ok: true, path: "/agents.d/codex-cli.json" },
+    });
     expect(dynamicAgentMap().has("codex-cli")).toBe(true);
     const audit = inst(h.auditInstances);
     expect(audit.append).toHaveBeenCalledWith(
       expect.objectContaining({ phase: "agent-change", agentId: "codex-cli" }),
+    );
+  });
+
+  it("注册成功但落不了盘时照样报成功，且把『重启后会丢』说进审计", () => {
+    h.saveManifest.mockReturnValue({ ok: false, reason: "EACCES" });
+    const res = (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest()) as {
+      ok: boolean;
+      persisted?: { ok: boolean; reason?: string };
+    };
+    // 不回滚：这一轮 agent 确实能用。但 persisted 必须如实为 false，
+    // 否则 UI 会把"记住了"当成真的。
+    expect(res.ok).toBe(true);
+    expect(res.persisted).toEqual({ ok: false, reason: "EACCES" });
+    expect(dynamicAgentMap().has("codex-cli")).toBe(true);
+    const audit = inst(h.auditInstances);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ detail: expect.stringContaining("落盘失败：EACCES") }),
+    );
+  });
+
+  it("注销会把 agents.d 里那份文件一起删掉，否则重启它又回来", async () => {
+    (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest());
+    h.removeManifest.mockReturnValue({ ok: true, removed: true });
+    const res = (await (h.ipcMain as FakeIpcMain).invoke("agents:unregister", "codex-cli")) as {
+      persisted?: { removed?: boolean };
+    };
+    expect(res.persisted).toEqual({ ok: true, removed: true });
+    expect(h.removeManifest).toHaveBeenCalled();
+  });
+
+  it("文件被改过就只注销内存，不删用户的文件，并把原因带出去", async () => {
+    (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest());
+    h.removeManifest.mockReturnValue({
+      ok: true,
+      removed: false,
+      reason: "agents.d 里的文件已被改动，未删除",
+    });
+    const res = (await (h.ipcMain as FakeIpcMain).invoke("agents:unregister", "codex-cli")) as {
+      persisted?: { removed?: boolean; reason?: string };
+    };
+    expect(res.persisted?.removed).toBe(false);
+    expect(res.persisted?.reason).toContain("已被改动");
+    const audit = inst(h.auditInstances);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ detail: expect.stringContaining("已被改动") }),
     );
   });
 
@@ -467,7 +535,7 @@ describe("agent handlers", () => {
     expect(dynamicAgentMap().has("codex-cli")).toBe(true);
     const layer = h.layer;
     const res = await (h.ipcMain as FakeIpcMain).invoke("agents:unregister", "codex-cli", 100);
-    expect(res).toEqual({ ok: true, drained: 2 });
+    expect(res).toEqual({ ok: true, drained: 2, persisted: { ok: true, removed: true } });
     // The drain window must reach the registry: unregister(id) vs
     // unregister(id, {graceMs}) are different contracts.
     expect(layer.registry.unregister).toHaveBeenCalledWith("codex-cli", { graceMs: 100 });
