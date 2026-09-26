@@ -41,15 +41,27 @@ const FORBIDDEN_FILES = ["package.json", "package-lock.json", ".env"];
 
 const runs = new Map();
 let counter = 0;
-// Executor-grade timeout: the pool default (120s brain timeout) is too tight
-// for long contract prompts under 429 backoff pressure — live-run lesson.
-// 2026-09-26 second live-run lesson: under a saturated SenseNova TPM/RPM window
-// the builtin executor landed the same-provider call in 307s while every bridge
-// run died at the old 300s ceiling (4/4 at ~300.2s). Raised to 600s, and
-// overridable via LOOMY_BRIDGE_MAX_RUN_MS so future windows can be tuned
-// without touching code.
+// Two-layer timeout, 2026-09-26 live-run lessons:
+// 1. Run budget (MAX_RUN_MS): the first 300s ceiling was below the real
+//    completion time of same-provider calls (the builtin executor landed in
+//    307s while 4/4 bridge runs died at ~300.2s) — raised to 600s.
+// 2. Per-attempt timeout (PER_ATTEMPT_MS) must stay BELOW the run budget:
+//    with the budget conflated into the per-attempt timeout, one hung HTTP
+//    attempt consumed the whole 600s and the failover table never got a
+//    second chance (t1 timed out 4/4 at the ceiling; the builtin executor
+//    cuts attempts at EXECUTOR_TIMEOUT_MS=300s and rotates to the next
+//    route). 300s ≈ the slowest legitimate single generation observed
+//    (t2 landed in 259s).
+// LOOMY_BRIDGE_MAX_RUN_MS / LOOMY_BRIDGE_ATTEMPT_MS override without edits.
 const MAX_RUN_MS = Number(process.env.LOOMY_BRIDGE_MAX_RUN_MS ?? 600_000);
-const pool = buildLlmPool({ timeoutMs: MAX_RUN_MS });
+const PER_ATTEMPT_MS = Number(process.env.LOOMY_BRIDGE_ATTEMPT_MS ?? 300_000);
+const pool = buildLlmPool({
+  timeoutMs: PER_ATTEMPT_MS,
+  // Route rotation / cooldown decisions from the shared pool carry no run
+  // attribution — they go to the bridge console (evidence trail), not into
+  // any single run's event stream.
+  onEvent: (t) => console.log(`[pool] ${new Date().toISOString()} ${t}`),
+});
 
 function emit(run, kind, text) {
   run.events.push({ kind, text });
