@@ -166,7 +166,7 @@ const LOOMY_MANIFEST = {
     selfIsolated: false,
   },
   credential: { kind: "none" },
-  limits: { runDeadlineMs: 420_000, idleTimeoutMs: 180_000, maxStdoutBytes: 2_097_152 },
+  limits: { runDeadlineMs: 600_000, idleTimeoutMs: 180_000, maxStdoutBytes: 2_097_152 },
   priority: 50,
   enabled: true,
 };

@@ -43,7 +43,13 @@ const runs = new Map();
 let counter = 0;
 // Executor-grade timeout: the pool default (120s brain timeout) is too tight
 // for long contract prompts under 429 backoff pressure — live-run lesson.
-const pool = buildLlmPool({ timeoutMs: 300_000 });
+// 2026-09-26 second live-run lesson: under a saturated SenseNova TPM/RPM window
+// the builtin executor landed the same-provider call in 307s while every bridge
+// run died at the old 300s ceiling (4/4 at ~300.2s). Raised to 600s, and
+// overridable via LOOMY_BRIDGE_MAX_RUN_MS so future windows can be tuned
+// without touching code.
+const MAX_RUN_MS = Number(process.env.LOOMY_BRIDGE_MAX_RUN_MS ?? 600_000);
+const pool = buildLlmPool({ timeoutMs: MAX_RUN_MS });
 
 function emit(run, kind, text) {
   run.events.push({ kind, text });
@@ -105,7 +111,7 @@ async function doRun(run) {
       temperature: 0,
       maxTokens: 8192,
     });
-    const effectiveDeadline = Math.min(deadline, 300_000);
+    const effectiveDeadline = Math.min(deadline, MAX_RUN_MS);
     const timer = new Promise((_, rej) =>
       setTimeout(() => rej(new Error(`Loomy 超过 ${Math.round(effectiveDeadline / 1000)}s 未完成`)), effectiveDeadline),
     );
