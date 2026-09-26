@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
+import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER } from "../../shared/types";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -113,12 +114,15 @@ export function BoardPage() {
           </section>
         </aside>
 
-        {/* 中栏：实时日志流 */}
+        {/* 中栏：实时日志流 + 落盘审计。执行日志只活在内存里、重载即消失，
+            审计日志回答的是"上一次到底发生过什么"（run 起止、批次守卫裁决）且重启不丢。
+            两份事实放同一栏：操作者盯着的正是这里，不用换页去设置里翻 JSONL。 */}
         <main className="col col-center">
           <section className="card log-card">
             <h3>执行日志</h3>
             <pre ref={logRef} onScroll={handleLogScroll} className="log-view">{logs.join("\n") || "等待开始…"}</pre>
           </section>
+          <AuditPanel />
         </main>
 
         {/* 右栏：验证结果 / 升级提示 / 控制 */}

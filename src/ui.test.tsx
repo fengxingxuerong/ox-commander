@@ -13,6 +13,7 @@ import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AgentsPanel } from "./components/AgentsPanel";
+import { AuditPanel } from "./components/AuditPanel";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -321,6 +322,14 @@ describe("BoardPage", () => {
       expect(screen.getByText("已处理")).toBeTruthy();
     });
   });
+
+  it("看板页挂审计日志：落盘的历史跟着实时流同栏可见（改前应挂的基线用例）", () => {
+    seedBoard();
+    render(<BoardPage />);
+    // 实时日志只活在内存里，重载即消失；落盘审计管的是"上一次到底发生过什么"。
+    // 两者语义相邻，看板页必须同时给出这两份事实。
+    expect(screen.getByText("审计日志")).toBeTruthy();
+  });
 });
 
 describe("PrdReviewPage", () => {
@@ -521,82 +530,6 @@ describe("SettingsPage", () => {
     expect(screen.getByText("bad.json")).toBeTruthy();
   });
 
-  // 审计面板：`audit:recent` / `audit:files` 两个通道此前**只有测试在调**
-  // （preload 暴露了、没有任何页面用），所以这里钉的是"记录真的被念出来"，
-  // 而不只是"组件渲染了没崩" —— 后者空数组也能过。
-  it("审计面板把落盘的记录念出来：最新在上、失败分类与路径总数都在", async () => {
-    vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
-      {
-        ts: "2026-09-26T03:10:00.000Z",
-        phase: "run-end",
-        runId: "run-0000000000000001",
-        ok: true,
-        durationMs: 42000,
-      },
-      {
-        ts: "2026-09-26T03:12:04.123Z",
-        phase: "batch-guard",
-        runId: "run-0000000000000001",
-        agentId: "sensenova-api",
-        zone: "src/todo",
-        ok: false,
-        errorClass: "conflict",
-        changed: 3,
-        paths: ["src/todo/a.ts", "src/todo/b.ts", "src/todo/c.ts", "src/todo/d.ts"],
-        pathsTotal: 9,
-      },
-    ] as AuditRecordView[]);
-    vi.mocked(window.oxCommander.auditFiles).mockResolvedValue(["audit-2026-09-26-000.jsonl"]);
-
-    render(<SettingsPage />);
-    expect(await screen.findByText("审计日志")).toBeTruthy();
-
-    // 留了几份文件要说出来，否则用户不知道历史到底有多长
-    expect(screen.getByText(/当前共 1 个文件/)).toBeTruthy();
-    expect(screen.getByText(/audit-2026-09-26-000\.jsonl/)).toBeTruthy();
-
-    // 最新在上 —— read() 返回的是 newest last
-    const stamps = screen.getAllByText(/03:1[02]/);
-    expect(stamps.length).toBe(2);
-    expect(stamps[0]!.textContent).toContain("03:12:04");
-    expect(stamps[1]!.textContent).toContain("03:10:00");
-
-    // 限定 li：阶段名在筛选下拉的 <option> 里也有一份，不加 selector 会匹配到两个元素
-    expect(screen.getByText(/批次守卫/, { selector: "li" })).toBeTruthy();
-    expect(screen.getByText(/失败 · conflict/)).toBeTruthy();
-    expect(screen.getByText(/变更 3 个文件/)).toBeTruthy();
-    // 只预览 3 个路径，但总数要说全 —— 否则看着像"只动了 3 个文件"
-    expect(screen.getByText(/等 9 个/)).toBeTruthy();
-    // 截尾部：runId 的公共前缀是 `run-`，截头部会让两次 run 显示成同一个串。
-    // 两条记录同属一个 run，每条都要带出短 id，所以这里必须用 getAllByText
-    // 钉住"两条都在"，getByText 的唯一匹配在这里反而是错的。
-    expect(screen.getAllByText(/run …00000001/).length).toBe(2);
-  });
-
-  it("只看失败：把成功的记录滤掉，而不是只给失败的高亮", async () => {
-    vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
-      { ts: "2026-09-26T03:10:00.000Z", phase: "run-end", ok: true },
-      { ts: "2026-09-26T03:12:04.123Z", phase: "batch-guard", ok: false, errorClass: "conflict" },
-    ] as AuditRecordView[]);
-
-    render(<SettingsPage />);
-    expect(await screen.findByText(/03:10:00/)).toBeTruthy();
-
-    fireEvent.click(screen.getByLabelText("只看失败"));
-
-    await waitFor(() => expect(screen.queryByText(/03:10:00/)).toBeNull());
-    expect(screen.getByText(/03:12:04/)).toBeTruthy();
-  });
-
-  it("读取审计失败时说出来，不与『还没有记录』长得一样", async () => {
-    vi.mocked(window.oxCommander.recentAudit).mockRejectedValue(new Error("EACCES: 读不了"));
-
-    render(<SettingsPage />);
-    expect(await screen.findByText(/读取审计日志失败：EACCES/)).toBeTruthy();
-    // 关键：失败不能退化成"没有记录" —— 那等于把故障说成空闲
-    expect(screen.queryByText("还没有审计记录。")).toBeNull();
-  });
-
   it("saves keys typed into the password inputs", async () => {
     render(<SettingsPage />);
     const input = await screen.findByPlaceholderText("粘贴 API Key");
@@ -683,5 +616,83 @@ describe("SettingsPage", () => {
     fireEvent.click(save);
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("settings.json 只读");
+  });
+});
+
+describe("AuditPanel", () => {
+  // 组件级行为测试：钉的是"记录真的被念出来"，而不是"组件渲染了没崩"——
+  // 后者空数组也能过。渲染 AuditPanel 本体而不是宿主页面，行为断言与
+  // 页面布局解耦：面板挂在设置页还是看板页，这些测试都不用动。
+  it("把落盘的记录念出来：最新在上、失败分类与路径总数都在", async () => {
+    vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
+      {
+        ts: "2026-09-26T03:10:00.000Z",
+        phase: "run-end",
+        runId: "run-0000000000000001",
+        ok: true,
+        durationMs: 42000,
+      },
+      {
+        ts: "2026-09-26T03:12:04.123Z",
+        phase: "batch-guard",
+        runId: "run-0000000000000001",
+        agentId: "sensenova-api",
+        zone: "src/todo",
+        ok: false,
+        errorClass: "conflict",
+        changed: 3,
+        paths: ["src/todo/a.ts", "src/todo/b.ts", "src/todo/c.ts", "src/todo/d.ts"],
+        pathsTotal: 9,
+      },
+    ] as AuditRecordView[]);
+    vi.mocked(window.oxCommander.auditFiles).mockResolvedValue(["audit-2026-09-26-000.jsonl"]);
+
+    render(<AuditPanel />);
+    expect(await screen.findByText("审计日志")).toBeTruthy();
+
+    // 留了几份文件要说出来，否则用户不知道历史到底有多长
+    expect(screen.getByText(/当前共 1 个文件/)).toBeTruthy();
+    expect(screen.getByText(/audit-2026-09-26-000\.jsonl/)).toBeTruthy();
+
+    // 最新在上 —— read() 返回的是 newest last
+    const stamps = screen.getAllByText(/03:1[02]/);
+    expect(stamps.length).toBe(2);
+    expect(stamps[0]!.textContent).toContain("03:12:04");
+    expect(stamps[1]!.textContent).toContain("03:10:00");
+
+    // 限定 li：阶段名在筛选下拉的 <option> 里也有一份，不加 selector 会匹配到两个元素
+    expect(screen.getByText(/批次守卫/, { selector: "li" })).toBeTruthy();
+    expect(screen.getByText(/失败 · conflict/)).toBeTruthy();
+    expect(screen.getByText(/变更 3 个文件/)).toBeTruthy();
+    // 只预览 3 个路径，但总数要说全 —— 否则看着像"只动了 3 个文件"
+    expect(screen.getByText(/等 9 个/)).toBeTruthy();
+    // 截尾部：runId 的公共前缀是 `run-`，截头部会让两次 run 显示成同一个串。
+    // 两条记录同属一个 run，每条都要带出短 id，所以这里必须用 getAllByText
+    // 钉住"两条都在"，getByText 的唯一匹配在这里反而是错的。
+    expect(screen.getAllByText(/run …00000001/).length).toBe(2);
+  });
+
+  it("只看失败：把成功的记录滤掉，而不是只给失败的高亮", async () => {
+    vi.mocked(window.oxCommander.recentAudit).mockResolvedValue([
+      { ts: "2026-09-26T03:10:00.000Z", phase: "run-end", ok: true },
+      { ts: "2026-09-26T03:12:04.123Z", phase: "batch-guard", ok: false, errorClass: "conflict" },
+    ] as AuditRecordView[]);
+
+    render(<AuditPanel />);
+    expect(await screen.findByText(/03:10:00/)).toBeTruthy();
+
+    fireEvent.click(screen.getByLabelText("只看失败"));
+
+    await waitFor(() => expect(screen.queryByText(/03:10:00/)).toBeNull());
+    expect(screen.getByText(/03:12:04/)).toBeTruthy();
+  });
+
+  it("读取审计失败时说出来，不与『还没有记录』长得一样", async () => {
+    vi.mocked(window.oxCommander.recentAudit).mockRejectedValue(new Error("EACCES: 读不了"));
+
+    render(<AuditPanel />);
+    expect(await screen.findByText(/读取审计日志失败：EACCES/)).toBeTruthy();
+    // 关键：失败不能退化成"没有记录" —— 那等于把故障说成空闲
+    expect(screen.queryByText("还没有审计记录。")).toBeNull();
   });
 });

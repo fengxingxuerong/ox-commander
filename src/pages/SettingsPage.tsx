@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import { AgentsPanel } from "../components/AgentsPanel";
-import { AuditPanel } from "../components/AuditPanel";
 import { getProvider, PROVIDER_CATALOG, SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
 import { DEFAULT_SETTINGS, type ArbitrationMode, type ProjectSettings, type VerificationKind } from "../../shared/types";
 
@@ -376,10 +375,6 @@ export function SettingsPage() {
       </section>
 
       <AgentsPanel />
-      {/* 审计日志与智能体面板同一层：它回答的是"刚才到底发生过什么"，
-          而设置项回答的是"接下来怎么跑"。放一起是为了让人在调完设置后
-          能立刻回看上一次的裁决与失败分类，不用换页。 */}
-      <AuditPanel />
 
       <section className="card">
         {settingsError && (
