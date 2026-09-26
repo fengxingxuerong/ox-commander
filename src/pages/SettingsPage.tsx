@@ -357,6 +357,26 @@ export function SettingsPage() {
           它管的是"这一单跑飞了多久"，与各智能体自己的空闲/总时限是两回事。
         </p>
         <div className="form-row">
+          <label htmlFor="brain-timeout">大脑层单次调用超时（秒）</label>
+          <input
+            id="brain-timeout"
+            type="number"
+            min={0}
+            value={Math.round((draft.brainTimeoutMs ?? 0) / 1000)}
+            onChange={(e) => {
+              const sec = Math.max(0, Math.floor(Number(e.target.value) || 0));
+              // 界面按秒给（毫秒没人填得对），存的是毫秒；0 存成 undefined = 用内置默认，
+              // 与 runWallClockMs 同风格（省略字段表示默认）。
+              patch({ brainTimeoutMs: sec > 0 ? sec * 1000 : undefined });
+            }}
+          />
+        </div>
+        <p className="muted">
+          大脑层（PRD / 任务分解）一次 LLM 调用最多等多久。0 表示用内置默认（300 秒）。
+          它管的是<strong>单次 HTTP 调用</strong>，与上面的墙钟上限、token 预算是三件不同的事：
+          墙钟到点会停下并保留现场，而这个超时只掐掉卡住的那一次请求，线路轮换会接着试下一条。
+        </p>
+        <div className="form-row">
           <label htmlFor="arbitration">zone 越权处置</label>
           <select
             id="arbitration"

@@ -2,9 +2,19 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { BRAIN_POOL_TIMEOUT_MS, createFileJournal, createPlatform } from "../electron/platform";
+import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, createFileJournal, createPlatform } from "../electron/platform";
+import { buildLlmPool } from "../shared/build-llm";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
+
+/**
+ * 透传式 spy：保留真实实现（现有用例依赖它），只多一层调用记录，
+ * 这样能断言"设置里的超时真的传进了 buildLlmPool"。
+ */
+vi.mock("../shared/build-llm", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../shared/build-llm")>();
+  return { ...mod, buildLlmPool: vi.fn(mod.buildLlmPool), buildLlmClient: vi.fn(mod.buildLlmClient) };
+});
 
 const dirs: string[] = [];
 afterEach(() => {
@@ -496,5 +506,46 @@ describe("createFileJournal", () => {
     // best-effort fuse and must never take a run down with it.
     const j = createFileJournal(path.join(tempDir(), "no", "such", "dir"), "req-A");
     expect(() => j.save(snapshot as never)).not.toThrow();
+  });
+});
+
+describe("brainTimeoutMsFor · 大脑层超时的取值归属", () => {
+  it("省略字段 = 用内置默认", () => {
+    expect(brainTimeoutMsFor({})).toBe(BRAIN_POOL_TIMEOUT_MS);
+  });
+
+  it("0 不是『不限』而是『用默认』—— 0 毫秒的超时没有意义", () => {
+    // 与 runWallClockMs（0 = 不限）刻意不是同一套语义，别照抄成 v ?? 0。
+    expect(brainTimeoutMsFor({ brainTimeoutMs: 0 })).toBe(BRAIN_POOL_TIMEOUT_MS);
+  });
+
+  it("负数同样按默认处理", () => {
+    expect(brainTimeoutMsFor({ brainTimeoutMs: -1 })).toBe(BRAIN_POOL_TIMEOUT_MS);
+  });
+
+  it("正数原样采用", () => {
+    expect(brainTimeoutMsFor({ brainTimeoutMs: 45_000 })).toBe(45_000);
+  });
+});
+
+describe("设置里的 brainTimeoutMs 真的传进了大脑客户端", () => {
+  it("buildLlmPool 收到设置里的毫秒值", () => {
+    vi.mocked(buildLlmPool).mockClear();
+    createPlatform({
+      settings: settings({ brainTimeoutMs: 45_000 }),
+      promptDir: tempDir(),
+      host: { log: () => undefined },
+    });
+    const calls = vi.mocked(buildLlmPool).mock.calls;
+    expect(calls.length).toBeGreaterThan(0);
+    expect(calls[0]![0]).toMatchObject({ timeoutMs: 45_000 });
+  });
+
+  it("没给设置时回落到内置默认，而不是 undefined 或 0", () => {
+    vi.mocked(buildLlmPool).mockClear();
+    createPlatform({ settings: settings(), promptDir: tempDir(), host: { log: () => undefined } });
+    expect(vi.mocked(buildLlmPool).mock.calls[0]![0]).toMatchObject({
+      timeoutMs: BRAIN_POOL_TIMEOUT_MS,
+    });
   });
 });

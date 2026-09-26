@@ -38,6 +38,18 @@ import type {
  */
 export const BRAIN_POOL_TIMEOUT_MS = 300_000;
 
+/**
+ * 大脑层单次调用的超时取哪个值。
+ *
+ * 抽成函数而不是内联，是因为"省略 / 0 / 负数 / 正常值"四种输入的归属容易写错：
+ * 0 毫秒的超时没有任何意义，把它当成"不限"或当成 0 都是错的 —— 它只能表示
+ * "用内置默认"，与 `runWallClockMs`（0 = 不限）**不是**同一套语义。
+ */
+export function brainTimeoutMsFor(settings: Pick<ProjectSettings, "brainTimeoutMs">): number {
+  const v = settings.brainTimeoutMs;
+  return v !== undefined && v > 0 ? v : BRAIN_POOL_TIMEOUT_MS;
+}
+
 /** What the platform needs to know about its host. */
 export interface PlatformHost {
   /** Board log / protocol event sink. */
@@ -187,8 +199,12 @@ export function createPlatform(config: PlatformConfig): Platform {
     if (seed) seed(new Set<string>());
     const pool = config.llmPool ?? settings.llmPool ?? [];
     return pool.length > 0
-      ? buildLlmPool({ providers: pool, timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log, meter })
-      : buildLlmClient(settings.llmProvider, { timeoutMs: BRAIN_POOL_TIMEOUT_MS, onEvent: log, meter });
+      ? buildLlmPool({ providers: pool, timeoutMs: brainTimeoutMsFor(settings), onEvent: log, meter })
+      : buildLlmClient(settings.llmProvider, {
+          timeoutMs: brainTimeoutMsFor(settings),
+          onEvent: log,
+          meter,
+        });
   };
 
   const callbacks: OrchestratorCallbacks = {

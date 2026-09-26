@@ -182,6 +182,20 @@ export interface ProjectSettings {
    * `undefined` 或 `<= 0` 都是不限（要"不限"就省略这个字段，与 maxTokensPerRun 同风格）。
    */
   runWallClockMs?: number;
+  /**
+   * 大脑层（PRD / 任务分解）单次 LLM 调用的超时（毫秒）。
+   *
+   * 省略则用内置默认（`BRAIN_POOL_TIMEOUT_MS`，300s）。那个默认值是从"拥塞窗口下
+   * 够用"总结出来的经验值，而不同供应商/模型的首字延迟差得远 —— 真被掐断时，
+   * 此前只能改代码重新打包，所以这里开出口子。
+   *
+   * `undefined` 或 `<= 0` 都表示**用内置默认**（与 `runWallClockMs` 同风格：
+   * 要默认值就省略字段，不要填 0 之类的哨兵值 —— 0 毫秒的超时没有任何意义）。
+   *
+   * 注意它管的是**单次 HTTP 调用**，与 `runWallClockMs`（整轮墙钟）、
+   * `maxTokensPerRun`（预算）是三件不同的事。
+   */
+  brainTimeoutMs?: number;
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

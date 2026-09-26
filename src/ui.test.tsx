@@ -19,7 +19,7 @@ import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useApp } from "./store";
-import { DEFAULT_SETTINGS, type PrdDocument, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type PrdDocument, type ProjectSettings, type Task, type VerificationReport } from "../shared/types";
 import type { AgentListResult, AgentSummary, AuditRecordView } from "./types";
 
 type Bridge = Window["oxCommander"];
@@ -607,6 +607,24 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
     const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0];
     expect(saved.maxTokensPerRun).toBe(250000);
+  });
+
+  it("大脑层超时按秒填、按毫秒存；填 0 是『用默认』而不是 0 毫秒", async () => {
+    render(<SettingsPage />);
+    const input = await screen.findByLabelText("大脑层单次调用超时（秒）");
+
+    fireEvent.change(input, { target: { value: "45" } });
+    fireEvent.click(screen.getByText("保存设置"));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.brainTimeoutMs).toBe(45_000);
+
+    // 0 毫秒的超时没有意义：存成 undefined（= 用内置默认），不能存 0。
+    fireEvent.change(input, { target: { value: "0" } });
+    fireEvent.click(screen.getByText("保存设置"));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalledTimes(2));
+    const saved2 = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved2.brainTimeoutMs).toBeUndefined();
   });
 
   it("keeps the save failure visible instead of resetting the button silently", async () => {
