@@ -24,6 +24,11 @@ import { createRequire } from "node:module";
 const require = createRequire(import.meta.url);
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { buildLlmPool } = require(path.join(root, "dist-electron", "shared", "build-llm.js"));
+// 交付格式（OXFILE 分隔符原文块 + JSON 回退）的单一事实来源在 shared/，
+// 这里只 require 编译产物 —— 改格式改 shared/deliverable-format.ts 一处。
+const { buildOutputRules, parseDeliverable } = require(
+  path.join(root, "dist-electron", "shared", "deliverable-format.js"),
+);
 
 function loadDotEnv() {
   const p = path.join(root, ".env");
@@ -68,14 +73,6 @@ function emit(run, kind, text) {
   console.log(`[run ${run.id}] ${kind}: ${text.slice(0, 160)}`);
 }
 
-function extractJson(text) {
-  const cleaned = text.replace(/^\uFEFF/, "").replace(/```(?:json)?/gi, "").trim();
-  const start = cleaned.indexOf("{");
-  const end = cleaned.lastIndexOf("}");
-  if (start < 0 || end <= start) throw new Error("响应中没有 JSON 对象");
-  return JSON.parse(cleaned.slice(start, end + 1));
-}
-
 function assertWritable(projectRoot, zone, rel) {
   // Compare in pure forward-slash space: path.normalize() emits backslashes on
   // Windows while the zone string uses posix separators — comparing them
@@ -113,15 +110,20 @@ async function doRun(run) {
       "硬性规则：",
       `1. 只允许创建/修改 ${task.zone}/ 目录内的文件；禁止触碰 node_modules、.git、.env、package.json、ox-scripts。`,
       "2. 代码用 CommonJS（module.exports），禁止任何第三方依赖。",
-      "3. 输出必须是且仅是一个 JSON 对象（不要 markdown 围栏、不要解释文字）：",
-      `{"files":[{"path":"${task.zone}/xxx.js","content":"文件完整内容"}],"summary":"一句话总结"}`,
+      // 2026-09-27 t1 超时根因治理：旧格式要求模型把代码塞进 JSON 字符串，
+      // 引号密集型任务（CSV 解析）转义层叠转义，生成本身被拖到尝试时限外。
+      // 新格式原样输出、零转义；模型偶尔无视指令输出 JSON 时 parseDeliverable
+      // 仍会回退接住（shared/deliverable-format.ts，测试锁定两格式行为）。
+      buildOutputRules(task.zone ?? ""),
     ].filter(Boolean).join("\n");
 
     const deadline = task.deadlineMs ?? 420_000;
+    // 不传 maxTokens：池层（shared/http-clients.ts）固定用端点声明的输出上限
+    // 65536 并显式检测 finish_reason=length，调用方传小值会被忽略 —— 与其留
+    // 一个不生效的参数误导后来者，不如不传。
     const chat = pool.chat({
       messages: [{ role: "user", content: prompt }],
       temperature: 0,
-      maxTokens: 8192,
     });
     const effectiveDeadline = Math.min(deadline, MAX_RUN_MS);
     const timer = new Promise((_, rej) =>
@@ -143,7 +145,7 @@ async function doRun(run) {
     if (run.abortFlag) throw new Error("已中止");
     emit(run, "log", `思考完成（${((Date.now() - started) / 1000).toFixed(1)}s，model=${res.model ?? "?"}），落盘中…`);
 
-    const parsed = extractJson(res.content ?? "");
+    const parsed = parseDeliverable(res.content ?? "");
     const files = Array.isArray(parsed.files) ? parsed.files : [];
     if (files.length === 0) throw new Error("模型未返回任何文件");
     for (const f of files) {
