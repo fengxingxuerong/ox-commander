@@ -250,17 +250,7 @@ describe("FailoverLlmClient cooldown & backoff", () => {
    * 失败从不记速度（失败走冷却惩罚）。本组用例用注入的 clock 模拟耗时。
    */
   describe("speed profile (fast-route-first ordering)", () => {
-    function slowStub(name: string, ms: number, clockRef: { clock: number }): LlmClient {
-      return {
-        async chat() {
-          clockRef.clock += ms; // 模拟线路耗时（成功耗时 = now 增量）
-          return OK(`m-${name}`)();
-        },
-      };
-    }
-
     it("known-fast route is tried first on the next call", async () => {
-      let clock = 0;
       const ref = { clock: 0 };
       const calls: string[] = [];
       // slow 首次 503（冷却 30s）——给 fast 一个入画像的机会
