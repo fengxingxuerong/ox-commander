@@ -50,10 +50,26 @@ export function extractDeclaredPaths(text: string): string[] {
     // a protected path in prose ("do not modify package.json"), and treating it
     // as an artifact would reject plans that are perfectly fine.
     if (segments.length < 2) continue;
+    // 代码概念黑名单（2026-09-27 --real 演习实测）：PRD 大脑描述 CommonJS
+    // 接口时写出 "require/module.exports" 这类斜杠连接的模块系统概念，两段
+    // 形态恰好骗过上面的启发式。任何一段（小写化）命中即判为代码引用：
+    // 分解层无法让 zone 覆盖一个不存在的文件，这种假路径会让规划校验
+    // 重试全部白烧、演习在 PLANNING 就 exit 1。
+    if (segments.some((s) => CODE_CONCEPT_SEGMENTS.has(s.toLowerCase()))) continue;
     found.add(cleaned);
   }
   return [...found].sort();
 }
+
+/** 模块系统 / 代码概念关键词：出现在"路径"段中几乎必然是代码引用而非文件。 */
+const CODE_CONCEPT_SEGMENTS = new Set([
+  "require",
+  "import",
+  "export",
+  "exports",
+  "module.exports",
+  "default",
+]);
 
 /** Every path the PRD names anywhere a file could be introduced. */
 export function declaredArtifactPaths(prd: PrdDocument): string[] {

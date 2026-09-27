@@ -75,6 +75,37 @@ describe("extractDeclaredPaths", () => {
       "src/cli.js",
     ]);
   });
+
+  /**
+   * 2026-09-27 第三轮 --real 演习实测：PRD 大脑描述 CommonJS 接口时写出
+   * "require/module.exports"（斜杠连接的代码概念），两段形态恰好骗过
+   * "至少两段目录"启发式，被当成真实嵌套路径提取 → zone 覆盖校验永远失败
+   * → 规划带错重试 2/2 也纠不回来（分解层无法覆盖一个不存在的文件），
+   * 演习在 PLANNING 就 exit 1。代码概念关键词进黑名单：任何一段命中即
+   * 判为代码引用而非路径。取舍：真实业务目录叫 exports/ 的场景在本项目
+   * 几乎不存在，且这类误杀远比"规划必败"便宜。
+   */
+  describe("code-concept blacklist (2026-09-27 --real 演习实测)", () => {
+    it("require/module.exports（演习实测形态）不提取", () => {
+      expect(extractDeclaredPaths("模块通过 require/module.exports 提供 CommonJS 接口")).toEqual([]);
+    });
+
+    it("其他模块系统概念的斜杠连接形态不提取", () => {
+      expect(extractDeclaredPaths("use module/exports and import/default semantics")).toEqual([]);
+      expect(extractDeclaredPaths("the require path exports/init.js is not a file")).toEqual([]);
+    });
+
+    it("真实路径不受黑名单影响（回归）", () => {
+      expect(extractDeclaredPaths("write src/core/csv.js and tests/csv.test.js")).toEqual([
+        "src/core/csv.js",
+        "tests/csv.test.js",
+      ]);
+    });
+
+    it("黑名单只杀命中段——后续真实路径照常提取（continue 语义）", () => {
+      expect(extractDeclaredPaths("require/module.exports first, then src/cli.js")).toEqual(["src/cli.js"]);
+    });
+  });
 });
 
 describe("declaredArtifactPaths", () => {
