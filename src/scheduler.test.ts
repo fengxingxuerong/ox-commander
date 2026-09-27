@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 import { digest, Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
-import { createAgentLayer } from "../electron/agents";
+import { createAgentLayer, createDefaultAdapters } from "../electron/agents";
+import { SensenovaApiAdapter } from "../electron/agents/sensenova-api";
+import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { AgentCapabilities } from "../shared/agent-contract";
 import type { AgentAdapter, RunHandle, Task } from "../shared/types";
 
@@ -928,5 +930,26 @@ describe("Scheduler · 批内并发准入（maxConcurrency 是硬上限）", () 
     const outcomes = await sched.runBatch([zTask("t1"), zTask("t2")], ".", { preferredAgentId: "v1" });
     expect(dispatched).toEqual(["v1", "v1"]);
     expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
+  });
+});
+
+// executorTimeoutMs 的四跳链路：协议 → settings → createAgentLayer → 适配器。
+// 前三跳早有断言，**最后一跳没有出口可观测** —— 于是「宿主设了超时、适配器
+// 仍在用内置默认 300s」这种断链，改坏了也不会有任何测试变红（2026-09-27
+// 变异门禁实测：`!== undefined` 改成 `=== undefined` 全绿）。这两条断言把
+// 最后一跳钉住：值要真的落到适配器的单次请求超时上，而不是停在装配层。
+describe('executorTimeoutMs 的最后一跳', () => {
+  it('createAgentLayer 传入时，内置执行器真的用它做单次请求超时', () => {
+    const layer = createAgentLayer({ executorTimeoutMs: 4321 });
+    const builtin = layer.adapters[0] as SensenovaApiAdapter;
+    expect(builtin).toBeInstanceOf(SensenovaApiAdapter);
+    expect(builtin.requestTimeoutMs).toBe(4321);
+  });
+
+  it('省略时回落到内置默认（不是 0 / undefined）', () => {
+    const [a] = createDefaultAdapters();
+    expect((a as SensenovaApiAdapter).requestTimeoutMs).toBe(EXECUTOR_TIMEOUT_MS);
+    const [b] = createDefaultAdapters(undefined, 1234);
+    expect((b as SensenovaApiAdapter).requestTimeoutMs).toBe(1234);
   });
 });

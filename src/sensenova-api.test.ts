@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AllRoutesCoolingError, EXECUTOR_TIMEOUT_MS, createFailoverClient } from "../shared/http-clients";
-import { SensenovaApiAdapter, parseFilePayload } from "../electron/agents/sensenova-api";
+import { SensenovaApiAdapter, parseFilePayload, readSnapshotContents } from "../electron/agents/sensenova-api";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/llm-client";
 
@@ -722,5 +722,27 @@ describe("SensenovaApiAdapter · 快照遍历的跳过不能中断后续", () =>
     const p = await promptFor(root);
     expect(p).not.toContain("a-bin.dat");
     expect(p).toContain("z-after-bin.js");
+  });
+});
+
+describe('readSnapshotContents 的二次防线', () => {
+  // Phase 1 的 walk 现在用同一个 isSecretLikeFile 先过滤一遍，所以下面两个场景
+  // 在真实调用链上到不了 —— 这两处 continue 也就一直拿不到「守住了」的证据。
+  // 直接喂 statEntries 就是在模拟「上游失效」，正是这条防线存在的理由。
+  it('上游漏过来的凭据文件被跳过，且不因此截断后面的文件', () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, '.env'), 'SECRET_TOKEN=leak-me', 'utf8');
+    fs.writeFileSync(path.join(root, 'z-after-secret.js'), '// after', 'utf8');
+    const out = readSnapshotContents(root, [{ rel: '.env' }, { rel: 'z-after-secret.js' }]);
+    expect(out).not.toContain('leak-me');
+    expect(out).toContain('z-after-secret.js');
+  });
+
+  it('条目读不出来时跳过，不因此截断后面的文件', () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, 'z-after-ghost.js'), '// after', 'utf8');
+    // ghost.js 不存在（stat 到 read 之间被删掉就是这种形态）
+    const out = readSnapshotContents(root, [{ rel: 'ghost.js' }, { rel: 'z-after-ghost.js' }]);
+    expect(out).toContain('z-after-ghost.js');
   });
 });

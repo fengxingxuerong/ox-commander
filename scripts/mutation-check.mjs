@@ -23,10 +23,12 @@
  *
  * ## 安全
  *
- * 脚本会**临时改写源文件**。三重保护：
+ * 脚本会**临时改写源文件**。四重保护：
  *   1. 改写前后都读原文，结束时报文比对，不一致直接 exit 2
  *   2. 每个变异用 try/finally 恢复
  *   3. 进程退出钩子兜底恢复（防 SIGINT / 异常退出留脏文件）
+ *   4. **落盘备份 + 启动自愈**：进程被外部强杀时 1~3 全部失效（Windows 上
+ *      信号处理器不执行），变异体会永久留在工作区。见 `armPendingRecord`。
  *
  * ## 用法
  *
@@ -305,6 +307,57 @@ const TARGETS = [
   // 凭证闸（少 Key 就拒跑）与备份回收（`pruneStaleBackups`）都是"判错方向不报错"
   // 的逻辑：前者放行了会打到没密钥的 provider，后者删错了会吃掉唯一的中断现场。
   { file: "headless/run-spec.ts", tests: ["src/headless-protocol.test.ts"], tier: 2 },
+
+  // ---- 2026-09-27 第九批：全量 site 基线（2026-09-23）之后新增/重写、
+  //      却从未进过变异门禁的模块 ----
+  // 挑选口径同第五批：先与 TARGETS 做差集，再按「错了也不报错」排序 ——
+  // 这类判定坏了不会有异常，只会让调用方多绕一轮或白跑一轮。
+  //
+  // deliverable-format.ts 是 09-26/27 实弹演习逼出来的新模块：交付从「JSON
+  // 字符串转义」换成「OXFILE 原文块」，并负责把模型给的路径归一到 zone 内
+  // （`resolveDeliverablePath`）。**输入是模型输出 = 不可信输入**，且三条判定
+  // （绝对路径 / 文件级 zone / 目录前缀）全是上述形状：归一错一格，写入要么被
+  // assertWritable 拒掉白跑一轮，要么指向 zone 之外。tier 1：整份测试 11ms。
+  {
+    file: "shared/deliverable-format.ts",
+    test: "shared/deliverable-format.test.ts",
+    tier: 1,
+  },
+  // routing.ts 决定「验收失败后把错误摘要送给谁」：extractErrorFiles 从构建日志里
+  // 抽路径、routeVerificationErrors 按 zone 归属投递。判错不抛异常，只是摘要
+  // 投错任务（该修的拿不到、不相关的被灌满）—— 正是"很少有人盯"的那类逻辑。
+  // tier 1：整份测试 7ms。
+  { file: "shared/routing.ts", test: "src/routing.test.ts", tier: 1 },
+  // prompts.ts 是给规划大脑与重修环节的提示词生成器。它不碰内存安全，但承担着
+  // 「产出格式约束」：措辞一改，模型的输出形状跟着变（而这条链路上没有类型系统
+  // 兜底）。能钉住它的只有字符串层面的 `includes(...)` 断言 —— 正好是现有算子
+  // 能覆盖的形状。tier 1：6ms。
+  { file: "shared/prompts.ts", test: "src/prompts.test.ts", tier: 1 },
+  // electron/store.ts 是主进程的设置/持久层（108 行），桌面启动早期读的东西。
+  // 它是迄今唯一「测试写在被测模块旁」的目标（electron/store.test.ts），
+  // 会不会被 vitest 收集由 check-tests-collected 守着，不会漏挂。
+  { file: "electron/store.ts", test: "electron/store.test.ts", tier: 2 },
+
+  // ---- 2026-09-27 第十批 ----
+  // 审计日志（`audit-log.ts`）。整个模块的注释自己就写着 "Auditing must never
+  // take the pipeline down" —— 于是里面每一处判定都是「错了也不报错」的形状：
+  //   · `enforceRetention` 的 `f !== this.current` 反向 → 正在写的那个文件被删，
+  //     历史断一截，而它正是 `maxFiles` 要治的"只滚不删"泄漏的复发；
+  //   · `read()` 的 `opts.phase && parsed.phase !== opts.phase` 放宽 → 过滤失效，
+  //     看板把别的阶段的记录混进来，排查时指向错误的阶段；
+  //   · `files()` 的 `startsWith("audit-") && endsWith(".jsonl")` 放宽 → 把别人的
+  //     文件并进历史（导出时一起带走）。
+  // 复盘材料被静默改坏，比报错难查得多。tier 2：`src/audit-log.test.ts` 里还
+  // 挂着 Scheduler 的异步用例，比纯逻辑目标慢。
+  { file: "electron/audit-log.ts", tests: ["src/audit-log.test.ts"], tier: 2 },
+  // 智能体装配层（`agents/index.ts`）：一个函数决定这一轮 run 到底有没有
+  // 路由器 / 有没有 BatchGuard。判错同样是静默的 ——
+  // `enableRouter !== false` 反过来 = 显式要求开路由却被降级成轮询（能力匹配
+  // 失效但不报错）；`!builtinIds.has(m.id)` 反过来 = 内置适配器被声明覆盖；
+  // `opts.arbitration ?? "revert-batch"` 反向 = 越权写入不再回滚。
+  // 它同时被桌面与 headless 两个入口共用以防漂移，所以这里的静默降级会
+  // 两边一起静默。tier 2：需要跑多个集成测试文件。
+  { file: "electron/agents/index.ts", tests: ["src/headless-protocol.test.ts", "src/scheduler.test.ts"], tier: 2 },
 ];
 
 /**
@@ -890,9 +943,94 @@ if (targets.length === 0) {
   process.exit(2);
 }
 
-/** 已改写的文件 → 原始内容。进程退出时兜底恢复。 */
+/**
+ * 已改写的文件 → 原始内容。进程退出时兜底恢复。
+ *
+ * 注意：这只覆盖**进程自己收到信号**的死法。Windows 上被外部强杀
+ * （TerminateProcess，任务管理器 / CI 超时 / IDE 关进程树）时，SIGINT、
+ * SIGTERM 处理器和 `exit` 事件**一个都不会执行**，内存里的 pending 随进程
+ * 一起消失 —— 变异体就永久留在工作区里，且 `git diff` 之前无人察觉。
+ *
+ * 2026-09-27 实测：脚本被工具超时杀掉后，`electron/sandbox/snapshot-store.ts`
+ * 的 `continue → break` 变异体留在了源码里。所以下面这套**落盘**机制是必需的，
+ * 不是冗余：把原始内容写进磁盘，下次启动时先自愈。
+ */
 const pending = new Map();
 let restoring = false;
+
+/** 落盘备份目录（git 已忽略，见 .gitignore）。 */
+const PENDING_DIR = path.join(ROOT, "scripts", ".mutation-pending");
+const PENDING_INDEX = path.join(PENDING_DIR, "index.json");
+
+/** 相对路径，仅用于打印。 */
+function relFromRoot(p) {
+  return path.relative(ROOT, p).split(path.sep).join("/");
+}
+
+/** 改写源文件**之前**调用：把原文落到磁盘。 */
+function armPendingRecord(filePath, original) {
+  try {
+    fs.mkdirSync(PENDING_DIR, { recursive: true });
+    const backup = path.join(PENDING_DIR, `${path.basename(filePath)}.orig`);
+    fs.writeFileSync(backup, original, "utf8");
+    fs.writeFileSync(PENDING_INDEX, JSON.stringify({ file: filePath, backup }, null, 2), "utf8");
+  } catch (e) {
+    // 落盘失败不该让门禁跑不下去：内存兜底仍在，只是少了强杀保护。
+    console.error(`警告：无法写入变异备份（${e?.message ?? e}）—— 进程被强杀时将无法自动还原。`);
+  }
+}
+
+/** 一个目标跑完、源码已确认还原后调用。 */
+function clearPendingRecord() {
+  try {
+    fs.rmSync(PENDING_DIR, { recursive: true, force: true });
+  } catch {
+    /* 清不掉不影响结论 */
+  }
+}
+
+/**
+ * 启动自愈：上一次运行被强杀 → 这里把变异体还原，并**失败退出**。
+ *
+ * 退出而不是继续跑，是刻意的：源码刚被从未知状态改回来，此时得出的
+ * 「杀死/存活」结论可信度存疑，让人重跑一次比给一个脏的 PASS 强。
+ */
+function recoverPendingRecord() {
+  if (!fs.existsSync(PENDING_INDEX)) return;
+  let rec = null;
+  try {
+    rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));
+  } catch {
+    rec = null;
+  }
+  if (!rec?.file || !rec.backup || !fs.existsSync(rec.backup)) {
+    clearPendingRecord();
+    return;
+  }
+  const original = fs.readFileSync(rec.backup, "utf8");
+  const current = fs.existsSync(rec.file) ? fs.readFileSync(rec.file, "utf8") : null;
+  if (current === original) {
+    clearPendingRecord();
+    return;
+  }
+  try {
+    fs.writeFileSync(rec.file, original, "utf8");
+    clearPendingRecord();
+  } catch (e) {
+    console.error(`严重：无法还原 ${relFromRoot(rec.file)}（${e?.message ?? e}）—— 请手动 git checkout 该文件。`);
+    process.exit(2);
+  }
+  console.error(
+    [
+      `检测到上一次变异运行被强杀：${relFromRoot(rec.file)} 残留变异体，已自动还原。`,
+      `（Windows 上进程被外部终止时 SIGINT/SIGTERM 处理器不执行，内存兜底失效）`,
+      `源码已恢复 —— 请重新运行本命令；若 CI 上出现，说明上一轮是被超时杀掉的。`,
+    ].join("\n"),
+  );
+  process.exit(2);
+}
+
+recoverPendingRecord();
 
 function restoreAll() {
   if (restoring) return;
@@ -1090,7 +1228,10 @@ for (const target of targets) {
     continue;
   }
 
+  // 内存兜底（正常退出 / 收到信号）+ 磁盘备份（被强杀）。两者都要：
+  // 前者快，后者是 Windows 上唯一有效的那层。
   pending.set(filePath, original);
+  armPendingRecord(filePath, original);
   const origLines = original.split("\n");
   const ran = [];
   for (const m of mutants) {
@@ -1120,6 +1261,7 @@ for (const target of targets) {
     console.error(`严重：${target.file} 未还原！`);
     process.exit(2);
   }
+  clearPendingRecord();
   results.push({ target, baselineFailed: false, ran, ms: Date.now() - startedAt, siteTotal });
 }
 

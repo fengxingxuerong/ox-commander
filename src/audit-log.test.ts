@@ -350,3 +350,75 @@ describe("AuditLog · retention", () => {
     expect(audit.read({ limit: 1 })[0]!.detail).toBe("r8");
   });
 });
+
+describe('AuditLog · 容错与文件识别', () => {
+  it('只认 audit-*.jsonl —— 名字只满足一半的文件不进历史', () => {
+    const dir = scratch('audit-shape');
+    const audit = new AuditLog({ dir });
+    audit.append({ phase: 'settings', detail: 'real' });
+    // 两个「只满足一半」的名字：`&&` 放宽成 `||` 会把它们并进历史 ——
+    // 导出时会一起被带走，历史里就混进了不是审计日志的东西。
+    fs.writeFileSync(path.join(dir, 'audit-2026-01-01-999.txt'), '{"ts":"t","phase":"settings","detail":"半对-txt"}\n', 'utf8');
+    fs.writeFileSync(path.join(dir, 'notes.jsonl'), '{"ts":"t","phase":"settings","detail":"半对-jsonl"}\n', 'utf8');
+    expect(audit.files().map((f) => path.basename(f))).toEqual([path.basename(audit.currentFile())]);
+    expect(audit.read().map((r) => r.detail)).toEqual(['real']);
+  });
+
+  it('历史里夹着空行时，后面的记录照旧读回', () => {
+    const dir = scratch('audit-blank');
+    const audit = new AuditLog({ dir });
+    audit.append({ phase: 'run-start', detail: 'first' });
+    // 进程被杀时的半行 / 空行是常态：`continue` 改成 `break` 会让整段历史
+    // 从空行处截断，表现为「日志莫名其妙只剩一半」且无从报错。
+    fs.appendFileSync(
+      audit.currentFile(),
+      '\n' + JSON.stringify({ ts: 't', phase: 'run-end', detail: 'second' }) + '\n',
+      'utf8',
+    );
+    expect(audit.read().map((r) => r.detail)).toEqual(['first', 'second']);
+  });
+
+  it('重开时接着最新那个文件写，而不是从 000 另起一个', () => {
+    const dir = scratch('audit-reopen');
+    // 名字刻意带 003 且与今天不同日：`pickFile` 的 `length === 0` 反向时，
+    // 非空目录会一律走 newFile(0) —— 只有索引不为 0 的输入才看得出差别。
+    fs.writeFileSync(
+      path.join(dir, 'audit-2020-01-01-003.jsonl'),
+      JSON.stringify({ ts: 't', phase: 'settings', detail: 'old' }) + '\n',
+      'utf8',
+    );
+    const audit = new AuditLog({ dir });
+    audit.append({ phase: 'settings', detail: 'new' });
+    expect(path.basename(audit.currentFile())).toBe('audit-2020-01-01-003.jsonl');
+    expect(audit.read().map((r) => r.detail)).toEqual(['old', 'new']);
+  });
+
+  /**
+   * 造一个「读不出来」的条目：用**同名目录**冒充文件（readFileSync 一个目录
+   * 会抛 EISDIR）。比 mock 掉 fs 更真实 —— 它是磁盘上真会出现的东西。
+   */
+  function withUnreadableEntry(tag: string): AuditLog {
+    const dir = scratch(tag);
+    fs.mkdirSync(path.join(dir, 'audit-2020-01-01-000.jsonl'));
+    fs.writeFileSync(
+      path.join(dir, 'audit-2020-01-02-000.jsonl'),
+      JSON.stringify({ ts: 't', phase: 'run-end', detail: 'good' }) + '\n',
+      'utf8',
+    );
+    return new AuditLog({ dir });
+  }
+
+  it('某个文件读不出来时跳过它，后面的历史照旧读回', () => {
+    const audit = withUnreadableEntry('audit-unreadable');
+    expect(audit.read().map((r) => r.detail)).toEqual(['good']);
+  });
+
+  it('exportTo 跳过读不出来的文件，其余历史照旧导出', () => {
+    const audit = withUnreadableEntry('audit-export-partial');
+    const target = path.join(scratch('audit-export-out'), 'history.jsonl');
+    audit.exportTo(target);
+    const text = fs.readFileSync(target, 'utf8');
+    expect(text).toContain('good');
+    expect(text.trim().split('\n')).toHaveLength(1);
+  });
+});

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildOutputRules,
+  extractJson,
   parseDeliverable,
   parseFileBlocks,
   resolveDeliverablePath,
@@ -102,6 +103,38 @@ describe("parseFileBlocks", () => {
     const text = ["===OXFILE h.js===", "===OXEND==="].join("\n");
     expect(() => parseFileBlocks(text)).toThrow(/空内容/);
   });
+
+  // 2026-09-27 变异门禁新纳入本模块后抓到的存活点：`summary` 分支的 continue 改
+  // break 无人发现。现实形态：模型偶尔先吐总结再补文件块。若解析器把它当成
+  // 「循环结束」，后面的块整段丢失 —— 表现为 files 变空、上层回退 JSON、最终报
+  // "两种格式都无法解析"，真实原因被埋掉。所以断言 summary 之后仍有块被解析到，
+  // 而不是只断言 summary 本身。
+  it("summary 出现在文件块之前时，后面的块照旧解析（break 与 continue 的分野）", () => {
+    const text = [
+      "===OXSUMMARY=== 先给总结再交付",
+      "===OXFILE after.js===",
+      "AFTER",
+      "===OXEND===",
+    ].join("\n");
+    const out = parseFileBlocks(text);
+    expect(out.summary).toBe("先给总结再交付");
+    expect(out.files).toEqual([{ path: "after.js", content: "AFTER" }]);
+  });
+
+  it("summary 出现在两个文件块之间时，第二个块不被吞掉", () => {
+    const text = [
+      "===OXFILE first.js===",
+      "FIRST",
+      "===OXEND===",
+      "===OXSUMMARY=== 小结",
+      "===OXFILE second.js===",
+      "SECOND",
+      "===OXEND===",
+    ].join("\n");
+    const out = parseFileBlocks(text);
+    expect(out.files.map((f) => f.path)).toEqual(["first.js", "second.js"]);
+    expect(out.summary).toBe("小结");
+  });
 });
 
 describe("parseDeliverable", () => {
@@ -141,6 +174,32 @@ describe("parseDeliverable", () => {
 
   it("块未闭合且 JSON 也没有时抛出未闭合错误", () => {
     expect(() => parseDeliverable("===OXFILE x.js===\nX1\nX2")).toThrow(/未闭合/);
+  });
+
+  // 下面四条是 2026-09-27 把本模块纳入变异门禁后抓到的存活点，全落在「回退 JSON
+  // 的验收条件」上：`&& → ||` / `=== → !==` 一放宽，形状不对的 JSON 会被当成合法
+  // 交付物往下传 —— 写盘阶段才会炸，届时已经分不清是模型写错还是平台放行错。
+
+  it("files 不是数组时不算交付（漏了方括号的 JSON）", () => {
+    const text = JSON.stringify({ files: "src/loomy/a.js", summary: "我是字符串不是数组" });
+    expect(() => parseDeliverable(text)).toThrow(/JSON/);
+  });
+
+  it("files 为空数组时不算交付（有该字段但没内容）", () => {
+    expect(() => parseDeliverable(JSON.stringify({ files: [], summary: "空" }))).toThrow(/JSON/);
+  });
+
+  it("summary 不是字符串时按缺省处理而不是原样透传", () => {
+    const text = JSON.stringify({
+      files: [{ path: "src/loomy/b.js", content: "B" }],
+      summary: 42,
+    });
+    expect(parseDeliverable(text).summary).toBe("");
+  });
+
+  it("extractJson 对「有 } 无 {」与「有 { 无 }」都报同一条根因", () => {
+    expect(() => extractJson("} 前面只有右括号 {")).toThrow(/响应中没有 JSON 对象/);
+    expect(() => extractJson("{ 后面没有右括号")).toThrow(/响应中没有 JSON 对象/);
   });
 });
 
@@ -184,6 +243,17 @@ describe("resolveDeliverablePath", () => {
 
   it("绝对路径原样返回（交给 assertWritable 拒绝，不在此放行）", () => {
     expect(resolveDeliverablePath("C:\\evil\\x.js", "src/loomy")).toBe("C:\\evil\\x.js");
+  });
+
+  // POSIX 根与 UNC 两条路：Windows 本机只有盘符形态会走到，若三条判定里最后一
+  // 个 `||` 被改成 `&&`，前两种形态仍成立、只有 `/` 开头与 UNC 静默降级成"拼上
+  // zone 前缀"—— 于是一条绝对路径被当成相对路径写进 zone 里，逃逸判定的最后
+  // 一道守门不是在错的地方报错，而是干脆不发生。
+  it("POSIX 根绝对路径与 UNC 同样原样返回（不能只认盘符）", () => {
+    expect(resolveDeliverablePath("/etc/passwd", "src/loomy")).toBe("/etc/passwd");
+    expect(resolveDeliverablePath("\\\\server\\share\\x.js", "src/loomy")).toBe(
+      "\\\\server\\share\\x.js",
+    );
   });
 
   it("路径穿越不在此处理（拼前缀后仍含 ..，由 assertWritable 拒绝）", () => {

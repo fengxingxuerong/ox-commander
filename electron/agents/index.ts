@@ -35,10 +35,10 @@ export function createDefaultAdapters(meter?: UsageMeter, executorTimeoutMs?: nu
   ];
 }
 
-export function findAdapter(adapters: AgentAdapter[], agentId: string): AgentAdapter | undefined {
-  return adapters.find((a) => a.meta.id === agentId);
-}
-
+// `findAdapter` 曾在这里导出，但**生产零调用**：调度器用的是自己的私有同名
+// 方法（scheduler.ts 的 this.findAdapter），池外查找走 AgentRegistry。
+// 2026-09-27 把本文件纳入变异门禁后，它唯一的作用就是贡献一个永远杀不死的
+// 位点（没有任何测试经过它）—— 死代码按规矩删除，不进 EQUIVALENT_SITES。
 export interface AgentLayerOptions {
   /** Defaults to the built-in SenseNova adapter list. */
   adapters?: AgentAdapter[];

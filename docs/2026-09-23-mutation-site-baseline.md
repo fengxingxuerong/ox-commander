@@ -32,10 +32,10 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 #   其中 单点杀死 577 · 聚合杀死 0
 ```
 
-| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） | **2026-09-24 CI 终章** | 2026-09-25 本机复测（win32） |
+| 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） | **2026-09-24 CI 终章** | 2026-09-25 本机复测（win32） | 2026-09-27 本机复测（win32） |
 | --- | --- | --- | --- | --- | --- |
 | aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 | 未重跑（verify 内 `mutation:quick` 持续参与门禁） | 同左 | 162/162（100%） |
-| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） | **590/590（100%）· CI 三 job 首次全绿** | **603/603（100%）** |
+| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） | **590/590（100%）· CI 三 job 首次全绿** | **603/603（100%）** | **680/680（100%）**（09-27 四轮，见下） |
 | 聚合杀死数 | 未区分 | **0**（全部逐点判定） | **0**（全部逐点判定） | **0**（全部逐点判定） | **0**（全部逐点判定） |
 
 **位点总数 581 → 577 的原因**：这批清理里有若干处是按"简化源码"收口的
@@ -95,6 +95,42 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 恰好排在跳过项之前，`continue` 与 `break` 就**测不出区别**。这类"存活"不是断言不够，是
 被测对象的遍历顺序本身不确定。修法是给遍历显式排序，而不是把位点写进白名单。
 
+## 四轮快照：2026-09-27 本机 Windows 全量（680/680）
+
+基线数字最后一次更新是 2026-09-25 的 603/603，而 09-25～09-27 之间
+（v0.1.5→v0.1.7，含执行器超时可配、并发硬上限、交付改 OXFILE 原文块、
+线路速度画像、PRD 路径提取器）**新增/重写了大量判定逻辑**。本轮重跑全量，
+并按第九批口径把 4 个从未进过变异门禁的模块纳管：
+
+```
+node scripts/mutation-check.mjs --mode=site --limit=999
+# 总计：杀死 680/680（100%）   耗时 1740.5s（29.0 min）
+#   其中 单点杀死 680 · 聚合杀死 0
+```
+
+分母 603 → 680 的来路：新登记 `shared/deliverable-format.ts`（17）、
+`shared/routing.ts`（4）、`shared/prompts.ts`（1）、`electron/store.ts`（6），
+加上既有目标在这几轮里长出来的新位点（protocol / scheduler / http-clients / orchestrator 等）。
+
+**本轮唯一的存活点全在新模块 `shared/deliverable-format.ts`（首跑 12/17，5 处存活）**，
+且全部是真缺口而非等价变异 —— 这个模块是 09-26/27 实弹演习逼出来的，写完之后
+只有行为测试、**从没有过变异门禁**：
+
+| 位点 | 变异 | 为什么是缺口 | 补的断言 |
+| --- | --- | --- | --- |
+| 92 | `\|\| → &&` | `pathIsAbsolute` 三条判定里只有盘符形态被测到；POSIX 根 `/etc/passwd` 与 UNC 改坏后被拼成 `zone//etc/passwd`，逃逸判定根本不发生 | 原样返回 POSIX 根与 UNC |
+| 131 | `continue → break` | summary 行出现在文件块**之前**时（模型常见吐法），`break` 让后面的块整段丢失；旧用例 summary 永远在最后 | summary 先于块、summary 夹在两个块之间，都要解析到后续块 |
+| 159 | `&& → \|\|` | `files` 不是数组（漏方括号）或为空数组时会被当成合法交付往下传 | 两种形状都要求抛错 |
+| 162 | `=== → !==` | `summary` 非字符串时原样透传，类型契约没人守 | `summary: 42` → 期望 `""` |
+| 183 | `\|\| → &&` | 「有 `}` 无 `{`」这类畸形文本不再报统一根因，而是漏出 `JSON.parse` 的原生错 | 两种畸形都断言同一条消息 |
+
+5 条补完后复测 **17/17**；另三个新目标首跑即全杀（routing 4/4、prompts 1/1、electron/store 6/6）。
+
+**这一轮的教训是"新模块不会自己进门禁"**：交付格式这种解析**模型输出（不可信输入）**
+的模块，写完时配套的 35 条用例看着很全，但位点里 29% 是裸的。
+以后每新增一个 `shared/` 或 `electron/` 下的纯逻辑模块，登记 TARGETS 应作为**收尾动作**，
+而不是等下一次全量 audit 才被发现。
+
 ## 适用边界（引用本基线时必须一起说）
 
 1. **只在 Windows 上成立**。`path-policy` 的平台判断已做成"平台参数化"
@@ -102,11 +138,13 @@ node scripts/mutation-check.mjs --mode=site --limit=999
    `.cmd` 启动等平台相关分支的可杀性——**CI ubuntu 矩阵已验证**（2026-09-24
    首跑暴露 6 处平台假设后逐案修复，spawn-plan/kill-tree 现由 `withPlatform`
    注入双端语义，Linux 上逐点可杀）。
-2. **白名单 9 条不计入 590**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`）：
-   7 条一级（可证明等价／可证明不可达）、2 条二级（TOCTOU，构造不出输入）。
-   2026-09-24 新增：kill-tree @37（portableKill 预检查使防御冗余等价化，双防线刻意保留）、
-   path-policy @92（POSIX 域不可达，realpath(fs-root) 恒成功）。
+2. **白名单 11 条不计入 680**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`，
+   2026-09-27 复核）：kill-tree @37、path-policy @92、router @221、schema @184、
+   spawn-plan @96、http-bridge @309、sensenova-api @397/@403、context @182、
+   scheduler @345（两条：`return true → false` 与 `|| → &&` 同一行）。
    它们是**已评审的排除项**，不是分母里的水分。
+   ⚠️ scheduler @345 两条共用同一行号 —— 白名单缺 `occ`（该行第几个位点）字段，
+   同行的另一处位点会被连带关掉。
 3. `electron/main.ts` 的 5 处里，`if (!isPrimaryInstance)` 与 `if (!win)`
    **不在算子表内**（没有 `if (!x)` → `if (x)` 这个算子），靠行为测试保证。
 4. 本报告是**快照，不是现状**：引用前先 `git log --date=iso -1` 核对提交时间。
@@ -169,3 +207,59 @@ shared/usage-meter.ts   杀死 9/9（100%）   6.2s
 
 （其余 39 个目标处置前实测即全杀，逐目标行见一轮报告；处置只触碰上述三处，
 未改动其他目标的源码与测试，故不重复罗列。）
+
+## 四轮原始报告（2026-09-27 全量 48 目标）
+
+electron/sandbox/path-policy.ts   杀死 32/32（100%）   37.0s
+shared/glob.ts   杀死 23/23（100%）   25.1s
+shared/redact.ts   杀死 1/1（100%）   2.3s
+shared/prompt-text.ts   杀死 1/1（100%）   3.2s
+electron/agents/scoped-env.ts   杀死 5/5（100%）   7.9s
+shared/zone-coverage.ts   杀死 19/19（100%）   24.7s
+electron/engine/scheduler.ts   杀死 19/19（100%）   49.6s
+electron/sandbox/kill-tree.ts   杀死 10/10（100%）   22.0s
+src/store.ts   杀死 10/10（100%）   30.1s
+electron/engine/orchestrator.ts   杀死 33/33（100%）   175.9s
+electron/agents/manifest-schema.ts   杀死 55/55（100%）   93.3s
+electron/agents/registry.ts   杀死 20/20（100%）   22.9s
+electron/agents/cli-agent.ts   杀死 15/15（100%）   63.5s
+electron/agents/sensenova-api.ts   杀死 32/32（100%）   100.2s
+electron/agents/http-bridge.ts   杀死 27/27（100%）   76.8s
+electron/agents/manifest-loader.ts   杀死 16/16（100%）   28.0s
+shared/llm-client.ts   杀死 15/15（100%）   37.2s
+shared/http-clients.ts   杀死 40/40（100%）   128.8s
+shared/schema.ts   杀死 17/17（100%）   22.1s
+electron/engine/verifier.ts   杀死 9/9（100%）   24.1s
+electron/agents/run-session.ts   杀死 5/5（100%）   6.5s
+electron/sandbox/command-policy.ts   杀死 6/6（100%）   19.1s
+electron/sandbox/spawn-plan.ts   杀死 7/7（100%）   18.2s
+electron/sandbox/circuit-breaker.ts   杀死 15/15（100%）   45.3s
+electron/sandbox/timeout-gate.ts   杀死 2/2（100%）   8.5s
+electron/sandbox/file-journal.ts   杀死 11/11（100%）   104.8s
+electron/atomic-file.ts   杀死 1/1（100%）   3.1s
+electron/sandbox/snapshot-store.ts   杀死 13/13（100%）   108.0s
+electron/engine/router.ts   杀死 22/22（100%）   30.0s
+electron/keys-store.ts   杀死 19/19（100%）   25.0s
+electron/engine/batch-guard.ts   杀死 9/9（100%）   66.7s
+shared/graph.ts   杀死 8/8（100%）   27.9s
+electron/ipc/orchestration.ts   杀死 3/3（100%）   7.5s
+electron/ipc/projects.ts   杀死 4/4（100%）   10.0s
+electron/ipc/agents.ts   杀死 6/6（100%）   11.9s
+electron/ipc/context.ts   杀死 7/7（100%）   14.6s
+electron/platform.ts   杀死 9/9（100%）   21.4s
+headless/protocol.ts   杀死 66/66（100%）   123.9s
+electron/engine/zone-guard.ts   杀死 6/6（100%）   9.8s
+electron/main.ts   杀死 6/6（100%）   8.1s
+shared/usage-meter.ts   杀死 13/13（100%）   13.8s
+headless/run-spec.ts   杀死 15/15（100%）   48.0s
+shared/deliverable-format.ts   杀死 17/17（100%）   19.6s
+shared/routing.ts   杀死 4/4（100%）   4.9s
+shared/prompts.ts   杀死 1/1（100%）   2.0s
+electron/store.ts   杀死 6/6（100%）   7.5s
+
+总计：杀死 680/680（100%）   耗时 1740.5s
+  其中 单点杀死 680 · 聚合杀死 0
+口径：site —— 本次为**逐位点**判定，680 个变异各自只改一处。
+最慢：electron/engine/orchestrator.ts 175.9s · shared/http-clients.ts 128.8s · headless/protocol.ts 123.9s
+
+PASS: 无存活变异 —— 全部 680 处位点已**逐点**验证（每处单独变异都被断言发现）。

@@ -9,3 +9,4 @@ logs/
 .env.local
 
 *.tsbuildinfo
+scripts/.mutation-pending/

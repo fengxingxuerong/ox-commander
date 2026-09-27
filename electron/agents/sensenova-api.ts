@@ -101,6 +101,48 @@ export interface SensenovaAdapterOptions {
   timeoutMs?: number;
 }
 
+/**
+ * 快照 Phase 2：把 Phase 1 的 stat 条目读成正文（预算 / 跳过 / 截断规则都在这）。
+ *
+ * **为什么是模块级函数而不是私有方法**：它里面的两处 `continue` 是注释里写的
+ * 「二次防线」—— 凭据文件与读不出来的文件。而 Phase 1（`snapshot()` 的 walk）
+ * 现在用**同一个** `isSecretLikeFile` 先过滤了一遍，所以「凭据文件漏到这一层」
+ * 在真实调用路径上**不可达**：2026-09-27 逐位点审计里这两处的变异全绿 —— 不是
+ * 断言不敏感，是根本没有输入能走到（纵深防御拿不到「守住了」的证据，只能拿到
+ * 「还没被需要」）。把入参显式化成 `statEntries` 后，测试可以直接喂「上游漏过
+ * 来的 / 读不出来的」条目，防线才第一次有了可执行的证明。
+ */
+export function readSnapshotContents(rootAbs: string, statEntries: Array<{ rel: string }>): string {
+  const chunks: string[] = [];
+  let budget = SNAPSHOT_MAX_TOTAL_CHARS;
+  for (const { rel } of statEntries) {
+    if (budget <= 0) return chunks.join('\n\n');
+    // 二次防线：即使上层 walk 漏过某个凭据文件，这里也不读它的正文。
+    if (isSecretLikeFile(rel)) continue;
+    const abs = path.join(rootAbs, rel);
+    let content: string;
+    try {
+      content = fs.readFileSync(abs, 'utf8');
+    } catch {
+      // 读不出来（权限 / 已被删 / 其实是别的什么东西）就跳过，不中断整份快照。
+      continue;
+    }
+    if (looksBinary(content)) continue;
+    const body =
+      content.length > SNAPSHOT_MAX_FILE_CHARS
+        ? `${content.slice(0, SNAPSHOT_MAX_FILE_CHARS)}\n…（截断）`
+        : content;
+    const chunk = `=== ${rel} ===\n${body}`;
+    if (chunk.length > budget) {
+      chunks.push(`=== ${rel} ===（超出快照预算，省略）`);
+      return chunks.join('\n\n');
+    }
+    chunks.push(chunk);
+    budget -= chunk.length;
+  }
+  return chunks.join('\n\n');
+}
+
 export class SensenovaApiAdapter implements AgentAdapter {
   readonly meta = { id: "sensenova-api", name: "SenseNova API 执行器", kind: "api" as const };
 
@@ -127,8 +169,16 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private llm: LlmClient | undefined;
   private readonly maxConcurrentOverride: number | undefined;
   private readonly meter: UsageMeter | undefined;
-  /** 单次请求的超时；省略时走 `EXECUTOR_TIMEOUT_MS`（见 `SensenovaAdapterOptions.timeoutMs`）。 */
-  private readonly requestTimeoutMs: number;
+  /**
+   * 单次请求的超时；省略时走 `EXECUTOR_TIMEOUT_MS`（见 `SensenovaAdapterOptions.timeoutMs`）。
+   *
+   * **刻意不是 private**：这条链路是 协议 → settings → `createAgentLayer` →
+   * `createDefaultAdapters` → 本字段，四跳里前三跳都有断言，唯独最后一跳没有
+   * 出口可观测 —— 于是「宿主设了 `executorTimeoutMs` 而适配器仍在用默认 300s」
+   * 这种断链没有任何测试会发现（2026-09-27 变异门禁实测：`!== undefined` 改成
+   * `=== undefined` 全绿）。配置项的最终落点必须能被断言，才能算打通。
+   */
+  readonly requestTimeoutMs: number;
   readonly limits: AgentLimits;
   /** Per-run watchdog: hard ceiling on how long one task may stay alive. */
   private readonly gate: TimeoutGate;
@@ -380,45 +430,12 @@ export class SensenovaApiAdapter implements AgentAdapter {
     const cached = this.snapshotCache.get(rootAbs);
     if (cached && cached.fingerprint === fingerprint) return cached.value;
     // Phase 2: read contents under the existing budget/skip/truncate rules.
-    const value = this.readSnapshotContents(rootAbs, statEntries);
+    const value = readSnapshotContents(rootAbs, statEntries);
     this.snapshotCache.set(rootAbs, { fingerprint, value });
     return value;
   }
 
-  private readSnapshotContents(
-    rootAbs: string,
-    statEntries: Array<{ rel: string }>,
-  ): string {
-    const chunks: string[] = [];
-    let budget = SNAPSHOT_MAX_TOTAL_CHARS;
-    for (const { rel } of statEntries) {
-      if (budget <= 0) return chunks.join("\n\n");
-      // 二次防线：即使上层 walk 漏过某个凭据文件，这里也不读它的正文。
-      if (isSecretLikeFile(rel)) continue;
-      const abs = path.join(rootAbs, rel);
-      let content: string;
-      try {
-        content = fs.readFileSync(abs, "utf8");
-      } catch {
-        continue;
-      }
-      if (looksBinary(content)) continue;
-      const body =
-        content.length > SNAPSHOT_MAX_FILE_CHARS
-          ? `${content.slice(0, SNAPSHOT_MAX_FILE_CHARS)}\n…（截断）`
-          : content;
-      const chunk = `=== ${rel} ===\n${body}`;
-      if (chunk.length > budget) {
-        chunks.push(`=== ${rel} ===（超出快照预算，省略）`);
-        return chunks.join("\n\n");
-      }
-      chunks.push(chunk);
-      budget -= chunk.length;
-    }
-    return chunks.join("\n\n");
-  }
-
-  private writeFiles(
+private writeFiles(
     projectRoot: string,
     files: Array<{ path: string; content: string }>,
     session: RunSession,

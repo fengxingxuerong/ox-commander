@@ -8,7 +8,39 @@
 
 ### 修复
 
-- **PRD 路径提取器误报代码概念（`shared/zone-coverage.ts`）**。2026-09-27
+- **变异门禁被强杀时，变异体会永久留在工作区**（`scripts/mutation-check.mjs`）。
+  此前靠内存里的 `pending` + `exit`/`SIGINT`/`SIGTERM` 钩子兜底还原，但 Windows 上
+  进程被外部终止（任务管理器 / CI 超时 / IDE 关进程树 → `TerminateProcess`）时
+  **这些钩子一个都不执行**：2026-09-27 实测，脚本被超时杀掉后
+  `electron/sandbox/snapshot-store.ts` 的 `continue → break` 变异体留在了源码里，
+  只有 `git diff` 才看得见。现在改写源文件**之前**先把原文落盘
+  （`scripts/.mutation-pending/`，已 gitignore），下次启动时先自愈：发现残留就
+  还原该文件并 **exit 2**（而不是带着刚恢复的未知状态继续给结论）。
+
+### 新增
+
+- **变异门禁新增两个目标**（`electron/audit-log.ts`、`electron/agents/index.ts`），
+  逐位点审计各补齐断言：`audit-log` 11/11、`agents/index` 2/2。
+  并删掉 `createAgentLayer` 旁的 `findAdapter` —— 生产零调用（调度器用的是自己的
+  私有同名方法），它唯一的作用是贡献一个永远杀不死的位点。
+
+- **`executorTimeoutMs` 打通最后一跳**（`electron/agents/sensenova-api.ts`）。
+  这条链是 协议 → settings → `createAgentLayer` → 适配器，前三跳早有断言，
+  **最后一跳没有出口可观测**：宿主设了超时而适配器仍用内置默认 300s 的断链，
+  没有任何测试会发现（变异实测 `!== undefined` 改成 `=== undefined` 全绿）。
+  现在 `requestTimeoutMs` 刻意不是 private（注释写明理由），并加了两条断言钉住
+  「传入时真的用了它 / 省略时回落到 `EXECUTOR_TIMEOUT_MS`」。
+
+- **快照二次防线第一次有了可执行的证明**（`readSnapshotContents`）。
+  它里面的两处 `continue`（凭据文件 / 读不出来的文件）在真实调用链上不可达 ——
+  Phase 1 的 walk 已经用**同一个** `isSecretLikeFile` 过滤过一遍，于是逐位点审计
+  里这两处变异全绿，防线拿不到「守住了」的证据，只有「还没被需要」。
+  现在把它从私有方法提成模块级导出函数（入参显式化成 `statEntries`），测试可以
+  直接喂「上游漏过来的 / 读不出来的」条目 —— 两处变异均被杀死（已反证）。
+
+### 新增（承接上一轮）
+
+- **CLI 智能体 dispatch 的环境裁剪诊断**（`electron/agents/cli-agent.ts`）：
   第三轮 `--real` 演习实测：PRD 大脑描述 CommonJS 接口时写出
   "require/module.exports"（斜杠连接的模块系统概念），两段形态恰好骗过
   "至少两段目录"启发式，被当成真实嵌套路径提取 → zone 覆盖校验永远失败 →
