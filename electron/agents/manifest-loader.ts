@@ -183,10 +183,15 @@ export function buildAdaptersFromManifests(
             name: m.displayName,
             command: m.entry.command,
             argsTemplate: m.entry.argsTemplate,
-            ...(m.entry.probeArgs ? { probeArgs: m.entry.probeArgs } : {}),
-            ...(m.entry.envTemplate ? { envTemplate: m.entry.envTemplate } : {}),
+            // 2026-09-28：`x` 条件展开全部简化为直接传（三元算子
+            // 评估暴露的 12 处同族写法之一）。适配器的消费方式都是「读值 + ?? 默认」
+            // （`opts.probeArgs ?? ["--version"]`、`this.opts.headers ?? {}`），
+            // 「键存在但值为 undefined」与「键不存在」等价；而条件展开被判反的后果是
+            // 「声明里配了却传不进去」，只表现为智能体行为悄悄退化。
+            probeArgs: m.entry.probeArgs,
+            envTemplate: m.entry.envTemplate,
             capabilities: caps,
-            ...(limits ? { limits } : {}),
+            limits,
             ...(opts.promptDir ? { promptDir: path.join(opts.promptDir, m.id) } : {}),
           }),
         );
@@ -198,13 +203,13 @@ export function buildAdaptersFromManifests(
             id: m.id,
             name: m.displayName,
             baseUrl: m.entry.baseUrl,
-            ...(m.entry.healthPath ? { healthPath: m.entry.healthPath } : {}),
-            ...(m.entry.runsPath ? { runsPath: m.entry.runsPath } : {}),
+            healthPath: m.entry.healthPath,
+            runsPath: m.entry.runsPath,
             ...(m.entry.pollMs !== undefined ? { pollMs: m.entry.pollMs } : {}),
-            ...(m.entry.headers ? { headers: m.entry.headers } : {}),
-            ...(m.credential ? { credential: m.credential } : {}),
+            headers: m.entry.headers,
+            credential: m.credential,
             capabilities: caps,
-            ...(limits ? { limits } : {}),
+            limits,
             ...(m.credential ? { resolveToken: tokenResolver(m.credential) } : {}),
           }),
         );

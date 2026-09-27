@@ -29,7 +29,11 @@ import type { UsageMeter } from "../../shared/usage-meter";
 export function createDefaultAdapters(meter?: UsageMeter, executorTimeoutMs?: number): AgentAdapter[] {
   return [
     new SensenovaApiAdapter(undefined, {
-      ...(meter ? { meter } : {}),
+      // 2026-09-28：原为 `...(meter ? { meter } : {})`。条件展开是冗余的 ——
+      // 接收方读的是**值**（`opts?.meter`），「键存在但值为 undefined」与
+      // 「键不存在」对它没有区别；而那个三元一旦被改反，就是「传了 meter
+      // 反而不记账」，用量统计会静默消失。本文件里 5 处同类写法一并简化掉。
+      meter,
       ...(executorTimeoutMs !== undefined ? { timeoutMs: executorTimeoutMs } : {}),
     }),
   ];
@@ -109,7 +113,7 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
     ...loaded.manifests,
   ];
   const built = buildAdaptersFromManifests(declared, {
-    ...(opts.promptDir ? { promptDir: opts.promptDir } : {}),
+    promptDir: opts.promptDir,
   });
   const adapters = [...builtin, ...built.adapters];
   // A builtin adapter wins an id clash: its declaration is compiled in.
@@ -135,9 +139,13 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
       journal: new FileJournal(),
       snapshots: new SnapshotStore({ backupRoot: opts.snapshotRoot }),
       mode,
-      ...(opts.sharedPaths ? { sharedPaths: opts.sharedPaths } : {}),
-      ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
-      ...(opts.onVerdict ? { onVerdict: opts.onVerdict } : {}),
+      // 2026-09-28：三处条件展开（sharedPaths / onEvent / onVerdict）同理简化 ——
+      // BatchGuard 的消费方式是 `opts.sharedPaths ?? DEFAULT_SHARED_PATHS` 与
+      // `if (opts.onEvent) this.onEvent = ...`，都只看值。改反的后果是
+      // 「配了事件回调却收不到」，排查时只能看到"日志莫名其妙少了"。
+      sharedPaths: opts.sharedPaths,
+      onEvent: opts.onEvent,
+      onVerdict: opts.onVerdict,
     });
   }
   return {

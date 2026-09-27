@@ -470,3 +470,44 @@ describe("动态注册的落盘", () => {
     expect(path.basename(manifestFileName("a/b"))).not.toContain("/");
   });
 });
+
+// 三元算子（默认关闭，--ops=ternary）首次全量评估暴露的三处：都是「改反了照样
+// 解析成功，只是结果悄悄错」—— 默认值回填、凭据构造、畸形输入丢弃。
+describe('parseAgentManifest · 回退分支', () => {
+  it('artifactKinds 非空时原样保留，空数组才回填默认', () => {
+    const base = validCodex();
+    expect(parseAgentManifest(base).capabilities.artifactKinds).toEqual(['files']);
+    const empty = parseAgentManifest({
+      ...base,
+      capabilities: { ...base.capabilities, artifactKinds: [] },
+    });
+    expect(empty.capabilities.artifactKinds).toEqual(['files', 'logs']);
+  });
+
+  it('bearerFile 凭据被保留 —— 判成 undefined 就是静默不鉴权', () => {
+    const m = parseAgentManifest({
+      ...validCodex(),
+      credential: { kind: 'bearerFile', tokenFile: 'tok.txt' },
+    });
+    expect(m.credential).toEqual({ kind: 'bearerFile', tokenFile: 'tok.txt' });
+  });
+
+  it('http entry 的 headers 不是对象时被丢弃，不会原样透传下去', () => {
+    const m = parseAgentManifest({
+      id: 'bridge',
+      displayName: 'Bridge',
+      adapter: 'http-bridge',
+      entry: { kind: 'http', baseUrl: 'http://127.0.0.1:1', headers: 'not-an-object' },
+      capabilities: {
+        roles: ['*'],
+        zoneGlobs: ['**'],
+        supports: ['read'],
+        artifactKinds: ['files'],
+        maxConcurrency: 1,
+        selfIsolated: false,
+      },
+    });
+    expect(m.entry).toBeDefined();
+    expect((m.entry as { headers?: unknown }).headers).toBeUndefined();
+  });
+});

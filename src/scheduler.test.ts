@@ -1,3 +1,6 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { digest, Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
@@ -5,7 +8,7 @@ import { createCapabilityRouter } from "../electron/engine/router";
 import { createAgentLayer, createDefaultAdapters } from "../electron/agents";
 import { SensenovaApiAdapter } from "../electron/agents/sensenova-api";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
-import type { AgentCapabilities } from "../shared/agent-contract";
+import type { AgentCapabilities, AgentManifest } from "../shared/agent-contract";
 import type { AgentAdapter, RunHandle, Task } from "../shared/types";
 
 function task(id: string, zone: string): Task {
@@ -951,5 +954,50 @@ describe('executorTimeoutMs 的最后一跳', () => {
     expect((a as SensenovaApiAdapter).requestTimeoutMs).toBe(EXECUTOR_TIMEOUT_MS);
     const [b] = createDefaultAdapters(undefined, 1234);
     expect((b as SensenovaApiAdapter).requestTimeoutMs).toBe(1234);
+  });
+});
+
+// createAgentLayer 的两个装配分支此前没有任何用例：声明来源标记与 manifestDir 加载。
+// 三元算子一开就露出来了 —— 两处都是「改反了照样跑，只是声明悄悄失效」。
+describe('createAgentLayer · 声明来源与目录加载', () => {
+  function codexManifest(extra: Partial<AgentManifest> = {}): AgentManifest {
+    return {
+      id: 'codex-cli',
+      displayName: 'Codex CLI',
+      adapter: 'cli',
+      entry: { kind: 'cli', command: 'codex', argsTemplate: ['exec'] },
+      capabilities: {
+        roles: ['backend-dev'],
+        zoneGlobs: ['src/**'],
+        supports: ['read', 'edit'],
+        artifactKinds: ['files'],
+        maxConcurrency: 1,
+        selfIsolated: true,
+      },
+      ...extra,
+    };
+  }
+
+  it('带 source 的声明原样保留，只有缺 source 的才标成 declared', () => {
+    const layer = createAgentLayer({
+      manifests: [
+        codexManifest({ source: 'agents.d' }),
+        codexManifest({ id: 'second-cli', entry: { kind: 'cli', command: 'second', argsTemplate: [] } }),
+      ],
+    });
+    expect(layer.registry.get('codex-cli')?.manifest.source).toBe('agents.d');
+    expect(layer.registry.get('second-cli')?.manifest.source).toBe('declared');
+  });
+
+  it('manifestDir 指到的目录真的被加载（不是拿到空集）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ox-agentsd-'));
+    try {
+      fs.writeFileSync(path.join(dir, 'codex-cli.json'), JSON.stringify(codexManifest()), 'utf8');
+      const layer = createAgentLayer({ manifestDir: dir });
+      expect(layer.registry.get('codex-cli')).toBeDefined();
+      expect(layer.manifestErrors).toEqual([]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
+    }
   });
 });

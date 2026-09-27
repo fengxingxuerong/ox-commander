@@ -106,7 +106,10 @@ function parseCapabilities(raw: unknown, issues: string[]): AgentCapabilities | 
   const protocolVersion = str(raw, "protocolVersion", issues, p);
   if (issues.length > 0) return undefined;
   return {
-    ...(protocolVersion ? { protocolVersion } : {}),
+    // 2026-09-28：条件展开简化为直接传（同族，理由见 manifest-loader.ts）。
+    // 这里输出的是**声明解析结果**：消费方 `normalizeCapabilities` 与各适配器构造
+    // 都是读值（`caps.protocolVersion ?? LEGACY`），键存在但值为 undefined 等价于缺键。
+    protocolVersion,
     roles,
     zoneGlobs,
     supports,
@@ -183,8 +186,8 @@ function parseEntry(raw: unknown, adapter: string, issues: string[]): AgentEntry
           kind: "cli",
           command,
           argsTemplate,
-          ...(probeArgs ? { probeArgs } : {}),
-          ...(envTemplate ? { envTemplate } : {}),
+          probeArgs,
+          envTemplate,
         }
       : undefined;
   }
@@ -202,10 +205,10 @@ function parseEntry(raw: unknown, adapter: string, issues: string[]): AgentEntry
     ? {
         kind: "http",
         baseUrl,
-        ...(healthPath ? { healthPath } : {}),
-        ...(runsPath ? { runsPath } : {}),
+        healthPath,
+        runsPath,
         ...(pollMs !== undefined ? { pollMs } : {}),
-        ...(headers ? { headers } : {}),
+        headers,
       }
     : undefined;
 }
@@ -249,10 +252,10 @@ export function parseAgentManifest(raw: unknown, source: AgentManifest["source"]
     id: id!,
     displayName,
     adapter: adapter as AgentManifest["adapter"],
-    ...(entry ? { entry } : {}),
+    entry,
     capabilities: capabilities!,
-    ...(credential ? { credential } : {}),
-    ...(limits ? { limits } : {}),
+    credential,
+    limits,
     ...(priority !== undefined ? { priority } : {}),
     ...(enabled !== undefined ? { enabled } : {}),
     source,
