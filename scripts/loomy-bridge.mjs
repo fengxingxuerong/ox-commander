@@ -26,7 +26,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { buildLlmPool } = require(path.join(root, "dist-electron", "shared", "build-llm.js"));
 // 交付格式（OXFILE 分隔符原文块 + JSON 回退）的单一事实来源在 shared/，
 // 这里只 require 编译产物 —— 改格式改 shared/deliverable-format.ts 一处。
-const { buildOutputRules, parseDeliverable, resolveDeliverablePath } = require(
+const { buildOutputRules, parseDeliverable, resolveDeliverablePath, zoneWriteRule } = require(
   path.join(root, "dist-electron", "shared", "deliverable-format.js"),
 );
 
@@ -108,7 +108,9 @@ async function doRun(run) {
         : "",
       "",
       "硬性规则：",
-      `1. 只允许创建/修改 ${task.zone}/ 目录内的文件；禁止触碰 node_modules、.git、.env、package.json、ox-scripts。`,
+      // zoneWriteRule 区分文件级/目录级 zone（2026-09-27 --real 演习实测：
+      // 文件级 zone 用目录措辞会把模型带偏成在 zone 下建子文件）。
+      `1. ${zoneWriteRule(String(task.zone ?? ""))}；禁止触碰 node_modules、.git、.env、package.json、ox-scripts。`,
       "2. 代码用 CommonJS（module.exports），禁止任何第三方依赖。",
       // 2026-09-27 t1 超时根因治理：旧格式要求模型把代码塞进 JSON 字符串，
       // 引号密集型任务（CSV 解析）转义层叠转义，生成本身被拖到尝试时限外。

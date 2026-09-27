@@ -28,18 +28,44 @@ export interface Deliverable {
  * 生成 prompt 里的"输出格式"指令段。与 parseFileBlocks 是一纸合约的两面：
  * 这里教的格式就是那里解析的格式，测试锁定两者不漂移。
  */
+/** zone 是文件还是目录的启发式判定：带扩展名视为文件（src/core/csv.js vs src/loomy）。 */
+function isFileLikeZone(zone: string): boolean {
+  const base = zone.replace(/\\/g, "/").replace(/[\\/]+$/, "").split("/").pop() ?? "";
+  return /\.[A-Za-z0-9]+$/.test(base);
+}
+
+/**
+ * 给桥的"只允许写什么"硬性规则措辞。2026-09-27 --real 演习实测：规划官会划出
+ * 文件级 zone（zone 本身就是要交付的文件），目录措辞（"修改 ${zone}/ 目录内的
+ * 文件"）会把模型带偏成在 zone 里建子文件。两种 zone 各说各话。
+ */
+export function zoneWriteRule(zone: string): string {
+  if (isFileLikeZone(zone)) {
+    return `${zone} 是一个文件（不是目录）：只允许写入这一个文件本身，禁止在它下面创建任何子路径`;
+  }
+  return `只允许创建/修改 ${zone}/ 目录内的文件`;
+}
+
 export function buildOutputRules(zone: string): string {
   // 路径示范必须带完整 zone 前缀：2026-09-27 预检实测，写"zone 内的相对路径"
   // 会被模型理解成"相对 zone"（hello.js），到 assertWritable 处以越权拒绝。
   // 直接示范全前缀形式钉死路径基准。
+  //
+  // 文件级 zone（同日 --real 演习实测，t1 的 zone 是 src/core/csv.js）：示范若
+  // 仍写 ${zone}/xxx.js，模型照抄成 zone/index.js —— 内容全对、路径不合约、
+  // 验收白丢。文件级 zone 直接示范写 zone 文件本身。
+  const sample = isFileLikeZone(zone) ? zone : `${zone}/xxx.js`;
+  const fileNote = isFileLikeZone(zone)
+    ? `注意：${zone} 是一个文件（不是目录）——文件块的路径必须逐字写 ${zone} 本身，不要在它下面建子路径。`
+    : `注意：文件路径必须以 ${zone}/ 开头；`;
   return [
     `3. 输出格式（严格遵守，不要 markdown 围栏、不要解释文字）——对每个文件输出一个文件块：`,
-    `===OXFILE ${zone}/xxx.js===`,
+    `===OXFILE ${sample}===`,
     `<文件完整内容，原样书写：无需任何转义、不要代码围栏、保持真实换行>`,
     `===OXEND===`,
     `全部文件块之后，最后一行输出总结：`,
     `===OXSUMMARY=== <一句话总结>`,
-    `注意：文件路径必须以 ${zone}/ 开头；文件内容中禁止出现以 ===OX 开头的行；每个文件必须有自己的文件块，多文件就写多个块。`,
+    `${fileNote}文件内容中禁止出现以 ===OX 开头的行；每个文件必须有自己的文件块，多文件就写多个块。`,
   ].join("\n");
 }
 
@@ -53,6 +79,9 @@ export function resolveDeliverablePath(rel: string, zone: string): string {
   const zoneNorm = zone.replace(/\\/g, "/").replace(/[\\/]+$/, "");
   const relNorm = rel.replace(/\\/g, "/");
   if (pathIsAbsolute(relNorm)) return rel;
+  // 文件级 zone：文件里没有子文件，zone/ 下的任何子路径、裸文件名、穿越企图
+  // 的唯一合理解释都是"zone 文件本身"（fail-safe：写不出 zone 以外）。
+  if (isFileLikeZone(zoneNorm)) return zoneNorm;
   if (relNorm === zoneNorm) return relNorm;
   if (relNorm.startsWith(`${zoneNorm}/`)) return relNorm;
   return `${zoneNorm}/${relNorm}`;

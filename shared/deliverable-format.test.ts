@@ -4,6 +4,7 @@ import {
   parseDeliverable,
   parseFileBlocks,
   resolveDeliverablePath,
+  zoneWriteRule,
 } from "./deliverable-format";
 
 /**
@@ -191,5 +192,64 @@ describe("resolveDeliverablePath", () => {
 
   it("zone 自身（空文件名场景）原样保留", () => {
     expect(resolveDeliverablePath("src/loomy", "src/loomy")).toBe("src/loomy");
+  });
+});
+
+/**
+ * 2026-09-27 --real 演习实测：规划官会划出**文件级 zone**（t1 的 zone 是
+ * src/core/csv.js 这个文件本身），而旧示范把 zone 一律当目录（
+ * `===OXFILE ${zone}/xxx.js===`），模型照示范写出 src/core/csv.js/index.js
+ * —— 内容 7/7 全对却因路径不合约败掉验收。本组用例钉住文件级 zone 的
+ * 三面约定：示范、归一、措辞。
+ */
+describe("文件级 zone（zone 本身就是要交付的文件）", () => {
+  const FILE_ZONE = "src/core/csv.js";
+
+  it("resolveDeliverablePath: zone/ 子路径归一为 zone 本身（文件里没有子文件）", () => {
+    expect(resolveDeliverablePath("src/core/csv.js/index.js", FILE_ZONE)).toBe(FILE_ZONE);
+  });
+
+  it("resolveDeliverablePath: 裸文件名也归一为 zone（模型只给了 index.js）", () => {
+    expect(resolveDeliverablePath("index.js", FILE_ZONE)).toBe(FILE_ZONE);
+  });
+
+  it("resolveDeliverablePath: 恰好等于 zone 时原样", () => {
+    expect(resolveDeliverablePath(FILE_ZONE, FILE_ZONE)).toBe(FILE_ZONE);
+  });
+
+  it("resolveDeliverablePath: 穿越企图 fail-safe 归一到 zone（写不出 zone 以外）", () => {
+    expect(resolveDeliverablePath("../evil.js", FILE_ZONE)).toBe(FILE_ZONE);
+  });
+
+  it("resolveDeliverablePath: 绝对路径原样返回（仍由 assertWritable 拒绝）", () => {
+    expect(resolveDeliverablePath("C:\\evil\\x.js", FILE_ZONE)).toBe("C:\\evil\\x.js");
+  });
+
+  it("buildOutputRules: 示范直接写 zone 文件本身而非 zone/ 子路径", () => {
+    const rules = buildOutputRules(FILE_ZONE);
+    expect(rules).toContain(`===OXFILE ${FILE_ZONE}===`);
+    expect(rules).not.toContain(`===OXFILE ${FILE_ZONE}/`);
+  });
+
+  it("buildOutputRules: 说明 zone 是文件不是目录", () => {
+    expect(buildOutputRules(FILE_ZONE)).toMatch(/一个文件|文件本身|不是目录/);
+  });
+
+  it("zoneWriteRule: 文件级 zone 的措辞指向文件本身", () => {
+    const rule = zoneWriteRule(FILE_ZONE);
+    expect(rule).toContain(FILE_ZONE);
+    expect(rule).toMatch(/文件/);
+    expect(rule).not.toMatch(/目录内/);
+  });
+
+  it("zoneWriteRule: 目录级 zone 维持目录措辞（回归）", () => {
+    const rule = zoneWriteRule("src/loomy");
+    expect(rule).toContain("src/loomy");
+    expect(rule).toMatch(/目录/);
+  });
+
+  it("目录级 zone 的示范与归一行为不变（回归）", () => {
+    expect(buildOutputRules("src/loomy")).toContain("===OXFILE src/loomy/xxx.js===");
+    expect(resolveDeliverablePath("hello.js", "src/loomy")).toBe("src/loomy/hello.js");
   });
 });

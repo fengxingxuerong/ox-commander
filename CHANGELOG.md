@@ -8,6 +8,17 @@
 
 ### 新增
 
+- **文件级 zone 的交付约定**（`shared/deliverable-format.ts` + 桥）。同日 `--real`
+  演习实测：规划官会划出**文件级 zone**（t1 的 zone 是 `src/core/csv.js` 这个
+  文件本身），而桥的目录措辞（"修改 `${zone}/` 目录内的文件"）与路径示范
+  （`${zone}/xxx.js`）把模型带偏成在 zone 下建子文件（`src/core/csv.js/index.js`）
+  —— 解析器内容 7/7 合约全对，却因路径不合约败掉验收。现在三种约定各就各位：
+  ① 示范直接写 zone 文件本身（`===OXFILE src/core/csv.js===`）并声明"zone 是
+  一个文件不是目录"；② `resolveDeliverablePath` 对文件级 zone 做 fail-safe 归一
+  （zone 下任何子路径/裸文件名/穿越企图的唯一合理解释都是 zone 文件本身——
+  写不出 zone 以外，绝对路径仍交 assertWritable 拒绝）；③ 新增 `zoneWriteRule`
+  按文件级/目录级给出各自正确的"只允许写什么"措辞。目录级 zone 行为完全不变。
+
 - **桥接智能体的交付格式：OXFILE 分隔符原文块（零转义），JSON 保留为回退**
   （`shared/deliverable-format.ts` + `scripts/loomy-bridge.mjs`）。这是 2026-09-26
   实弹演习 t1（CSV 解析器）四发超时的根因治理：旧格式要求模型把完整代码文件
