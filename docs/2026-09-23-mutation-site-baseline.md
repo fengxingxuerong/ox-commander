@@ -35,7 +35,7 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 | 口径 | 2026-09-22（§16.1） | 2026-09-23（本文件） | 2026-09-23 二轮（usage 两轮后） | **2026-09-24 CI 终章** | 2026-09-25 本机复测（win32） | 2026-09-27 本机复测（win32） |
 | --- | --- | --- | --- | --- | --- |
 | aggregate（`npm run mutation`） | 152/152（100%） | 未重跑；verify 内 `mutation:quick` 为 10/10 | 未重跑（verify 内 `mutation:quick` 持续参与门禁） | 同左 | 162/162（100%） |
-| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） | **590/590（100%）· CI 三 job 首次全绿** | **603/603（100%）** | **680/680（100%）**（09-27 四轮，见下） |
+| **site（`--mode=site`）** | 486/581（**84%**） | **577/577（100%）** | **594/594（100%）**（处置后） | **590/590（100%）· CI 三 job 首次全绿** | **603/603（100%）** | **695/695（100%）**（09-27 五轮，见下） |
 | 聚合杀死数 | 未区分 | **0**（全部逐点判定） | **0**（全部逐点判定） | **0**（全部逐点判定） | **0**（全部逐点判定） |
 
 **位点总数 581 → 577 的原因**：这批清理里有若干处是按"简化源码"收口的
@@ -131,6 +131,43 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 以后每新增一个 `shared/` 或 `electron/` 下的纯逻辑模块，登记 TARGETS 应作为**收尾动作**，
 而不是等下一次全量 audit 才被发现。
 
+## 五轮快照：2026-09-27 第二轮 · 本机 Windows 全量（695/695）
+
+同日紧接着再跑一次全量（上一节 680/680 的数据在提交 `da825e4` 之前）。本轮
+新增第十批两个目标，并处置了因改动 `sensenova-api.ts` 而被 `mutation:touched`
+翻出来的两个存活点：
+
+```
+node scripts/mutation-check.mjs --mode=site --limit=999
+# 总计：杀死 695/695（100%）   耗时 1791.9s（29.9 min）
+#   其中 单点杀死 695 · 聚合杀死 0
+```
+
+分母 680 → 695 的来路：新登记 `electron/audit-log.ts`（11）、
+`electron/agents/index.ts`（2），以及 `sensenova-api.ts` 的 32 → 34
+（`readSnapshotContents` 从私有方法提成模块级函数后，原先被类方法形态排除的
+两处位点进入了统计）。
+
+**这三个存活点都不是「断言不敏感」，而是「根本没有输入能走到那一行」** ——
+按原样补断言一条也加不出来：
+
+| 位点 | 变异 | 为什么此前是绿的 | 处置 |
+| --- | --- | --- | --- |
+| `readSnapshotContents` 的凭据 `continue → break` | 二次防线 | Phase 1 的 walk 已用**同一个** `isSecretLikeFile` 过滤一遍，凭据文件永远到不了这一层 —— 防线拿不到「守住了」的证据，只有「还没被需要」 | 私有方法提成模块级导出函数，入参显式化成 `statEntries`，测试可直接喂「上游漏过来的」条目 |
+| 同上，读不出来时的 `continue → break` | 二次防线 | `stat` 成功到 `readFileSync` 失败之间只能靠 TOCTOU（文件被删/权限变），确定性输入构造不出来 | 同上；条目直接给一个不存在的 `rel` |
+| `createDefaultAdapters` 的 `!== undefined → === undefined` | 配置透传末跳 | 协议 → settings → `createAgentLayer` 前三跳都有断言，**最后一跳没有出口可观测**：宿主设了 `executorTimeoutMs` 而适配器仍用内置默认 300s，没有任何测试会发现 | `requestTimeoutMs` 刻意改为非 private（可测化），补「传入生效 / 省略回落」两条断言 |
+
+另删掉 `electron/agents/index.ts` 的 `findAdapter` —— 生产零调用（调度器用的是
+自己的私有同名方法），它唯一的作用是贡献一个永远杀不死的位点。
+
+**教训**：存活变异的处置顺序应该是「先问有没有输入能走到这一行」，再谈断言够
+不够狠。上面三处里，两处是纵深防御不可达、一处是链路末跳不可观测 —— 正确解法
+都是**把入参/落点显式化**（让它可测），而不是写进 `EQUIVALENT_SITES`。
+
+同批还修了**门禁自身**的一个洞：进程被强杀时（`TerminateProcess`）内存里的
+还原钩子一个都不执行，变异体会永久留在工作区（本轮实锤：`--file=store.ts`
+子串误命中一堆 store、命令超时被杀后 `snapshot-store.ts` 留着 `continue → break`）。
+现在改写源文件前先把原文落盘（`scripts/.mutation-pending/`），下次启动自愈。
 ## 适用边界（引用本基线时必须一起说）
 
 1. **只在 Windows 上成立**。`path-policy` 的平台判断已做成"平台参数化"
@@ -138,7 +175,7 @@ node scripts/mutation-check.mjs --mode=site --limit=999
    `.cmd` 启动等平台相关分支的可杀性——**CI ubuntu 矩阵已验证**（2026-09-24
    首跑暴露 6 处平台假设后逐案修复，spawn-plan/kill-tree 现由 `withPlatform`
    注入双端语义，Linux 上逐点可杀）。
-2. **白名单 11 条不计入 680**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`，
+2. **白名单 11 条不计入 695**（`scripts/mutation-check.mjs` 的 `EQUIVALENT_SITES`，
    2026-09-27 复核）：kill-tree @37、path-policy @92、router @221、schema @184、
    spawn-plan @96、http-bridge @309、sensenova-api @397/@403、context @182、
    scheduler @345（两条：`return true → false` 与 `|| → &&` 同一行）。
@@ -152,114 +189,59 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 ## 原始报告
 
 以下为脚本原始输出（逐目标一行：杀死数 / 总数、耗时）：
-electron/sandbox/path-policy.ts   杀死 33/33（100%）   34.2s
-shared/glob.ts   杀死 23/23（100%）   22.6s
-shared/redact.ts   杀死 1/1（100%）   1.9s
-shared/prompt-text.ts   杀死 1/1（100%）   2.2s
-electron/agents/scoped-env.ts   杀死 5/5（100%）   5.1s
-shared/zone-coverage.ts   杀死 18/18（100%）   16.5s
-electron/engine/scheduler.ts   杀死 14/14（100%）   26.6s
-electron/sandbox/kill-tree.ts   杀死 11/11（100%）   19.9s
-src/store.ts   杀死 13/13（100%）   27.5s
-electron/engine/orchestrator.ts   杀死 25/25（100%）   129.9s
-electron/agents/manifest-schema.ts   杀死 55/55（100%）   92.8s
-electron/agents/registry.ts   杀死 20/20（100%）   23.1s
-electron/agents/cli-agent.ts   杀死 15/15（100%）   56.3s
-electron/agents/sensenova-api.ts   杀死 29/29（100%）   89.2s
-electron/agents/http-bridge.ts   杀死 27/27（100%）   74.1s
-electron/agents/manifest-loader.ts   杀死 11/11（100%）   19.7s
-shared/llm-client.ts   杀死 15/15（100%）   36.0s
-shared/http-clients.ts   杀死 39/39（100%）   112.3s
-shared/schema.ts   杀死 17/17（100%）   20.0s
-electron/engine/verifier.ts   杀死 9/9（100%）   20.9s
-electron/agents/run-session.ts   杀死 5/5（100%）   5.5s
-electron/sandbox/command-policy.ts   杀死 6/6（100%）   14.3s
-electron/sandbox/spawn-plan.ts   杀死 7/7（100%）   14.6s
-electron/sandbox/circuit-breaker.ts   杀死 15/15（100%）   38.4s
-electron/sandbox/timeout-gate.ts   杀死 2/2（100%）   7.4s
-electron/sandbox/file-journal.ts   杀死 11/11（100%）   113.3s
-electron/sandbox/snapshot-store.ts   杀死 13/13（100%）   113.3s
-electron/engine/router.ts   杀死 20/20（100%）   18.7s
-electron/keys-store.ts   杀死 19/19（100%）   19.7s
-electron/engine/batch-guard.ts   杀死 10/10（100%）   57.5s
-shared/graph.ts   杀死 5/5（100%）   4.9s
-electron/ipc/orchestration.ts   杀死 3/3（100%）   6.6s
-electron/ipc/projects.ts   杀死 4/4（100%）   8.0s
-electron/ipc/agents.ts   杀死 4/4（100%）   8.1s
-electron/ipc/context.ts   杀死 7/7（100%）   13.5s
-electron/platform.ts   杀死 4/4（100%）   12.3s
-headless/protocol.ts   杀死 50/50（100%）   71.3s
-electron/engine/zone-guard.ts   杀死 6/6（100%）   7.8s
-electron/main.ts   杀死 5/5（100%）   5.2s
 
-总计：杀死 577/577（100%）   耗时 1371.2s
-  其中 单点杀死 577 · 聚合杀死 0
-口径：site —— 本次为**逐位点**判定，577 个变异各自只改一处。
-最慢：electron/engine/orchestrator.ts 129.9s · electron/sandbox/snapshot-store.ts 113.3s · electron/sandbox/file-journal.ts 113.3s
-
-PASS: 无存活变异 —— 全部 577 处位点已**逐点**验证（每处单独变异都被断言发现）。
-
-## 二轮原始报告（处置后三目标复测）
-
-electron/agents/sensenova-api.ts   杀死 29/29（100%）   73.4s
-headless/protocol.ts   杀死 55/55（100%）   63.6s
-shared/usage-meter.ts   杀死 9/9（100%）   6.2s
-
-（其余 39 个目标处置前实测即全杀，逐目标行见一轮报告；处置只触碰上述三处，
-未改动其他目标的源码与测试，故不重复罗列。）
-
-## 四轮原始报告（2026-09-27 全量 48 目标）
-
-electron/sandbox/path-policy.ts   杀死 32/32（100%）   37.0s
-shared/glob.ts   杀死 23/23（100%）   25.1s
-shared/redact.ts   杀死 1/1（100%）   2.3s
-shared/prompt-text.ts   杀死 1/1（100%）   3.2s
-electron/agents/scoped-env.ts   杀死 5/5（100%）   7.9s
-shared/zone-coverage.ts   杀死 19/19（100%）   24.7s
-electron/engine/scheduler.ts   杀死 19/19（100%）   49.6s
-electron/sandbox/kill-tree.ts   杀死 10/10（100%）   22.0s
-src/store.ts   杀死 10/10（100%）   30.1s
-electron/engine/orchestrator.ts   杀死 33/33（100%）   175.9s
-electron/agents/manifest-schema.ts   杀死 55/55（100%）   93.3s
-electron/agents/registry.ts   杀死 20/20（100%）   22.9s
-electron/agents/cli-agent.ts   杀死 15/15（100%）   63.5s
-electron/agents/sensenova-api.ts   杀死 32/32（100%）   100.2s
-electron/agents/http-bridge.ts   杀死 27/27（100%）   76.8s
-electron/agents/manifest-loader.ts   杀死 16/16（100%）   28.0s
-shared/llm-client.ts   杀死 15/15（100%）   37.2s
-shared/http-clients.ts   杀死 40/40（100%）   128.8s
-shared/schema.ts   杀死 17/17（100%）   22.1s
-electron/engine/verifier.ts   杀死 9/9（100%）   24.1s
-electron/agents/run-session.ts   杀死 5/5（100%）   6.5s
-electron/sandbox/command-policy.ts   杀死 6/6（100%）   19.1s
-electron/sandbox/spawn-plan.ts   杀死 7/7（100%）   18.2s
-electron/sandbox/circuit-breaker.ts   杀死 15/15（100%）   45.3s
-electron/sandbox/timeout-gate.ts   杀死 2/2（100%）   8.5s
-electron/sandbox/file-journal.ts   杀死 11/11（100%）   104.8s
-electron/atomic-file.ts   杀死 1/1（100%）   3.1s
-electron/sandbox/snapshot-store.ts   杀死 13/13（100%）   108.0s
-electron/engine/router.ts   杀死 22/22（100%）   30.0s
-electron/keys-store.ts   杀死 19/19（100%）   25.0s
-electron/engine/batch-guard.ts   杀死 9/9（100%）   66.7s
-shared/graph.ts   杀死 8/8（100%）   27.9s
-electron/ipc/orchestration.ts   杀死 3/3（100%）   7.5s
-electron/ipc/projects.ts   杀死 4/4（100%）   10.0s
-electron/ipc/agents.ts   杀死 6/6（100%）   11.9s
-electron/ipc/context.ts   杀死 7/7（100%）   14.6s
-electron/platform.ts   杀死 9/9（100%）   21.4s
-headless/protocol.ts   杀死 66/66（100%）   123.9s
-electron/engine/zone-guard.ts   杀死 6/6（100%）   9.8s
-electron/main.ts   杀死 6/6（100%）   8.1s
-shared/usage-meter.ts   杀死 13/13（100%）   13.8s
-headless/run-spec.ts   杀死 15/15（100%）   48.0s
-shared/deliverable-format.ts   杀死 17/17（100%）   19.6s
-shared/routing.ts   杀死 4/4（100%）   4.9s
+electron/sandbox/path-policy.ts   杀死 32/32（100%）   36.8s
+shared/glob.ts   杀死 23/23（100%）   25.9s
+shared/redact.ts   杀死 1/1（100%）   2.2s
+shared/prompt-text.ts   杀死 1/1（100%）   2.6s
+electron/agents/scoped-env.ts   杀死 5/5（100%）   6.0s
+shared/zone-coverage.ts   杀死 19/19（100%）   21.3s
+electron/engine/scheduler.ts   杀死 19/19（100%）   48.7s
+electron/sandbox/kill-tree.ts   杀死 10/10（100%）   21.2s
+src/store.ts   杀死 10/10（100%）   37.2s
+electron/engine/orchestrator.ts   杀死 33/33（100%）   169.0s
+electron/agents/manifest-schema.ts   杀死 55/55（100%）   89.7s
+electron/agents/registry.ts   杀死 20/20（100%）   22.2s
+electron/agents/cli-agent.ts   杀死 15/15（100%）   58.7s
+electron/agents/sensenova-api.ts   杀死 34/34（100%）   107.5s
+electron/agents/http-bridge.ts   杀死 27/27（100%）   76.0s
+electron/agents/manifest-loader.ts   杀死 16/16（100%）   26.7s
+shared/llm-client.ts   杀死 15/15（100%）   35.3s
+shared/http-clients.ts   杀死 40/40（100%）   113.9s
+shared/schema.ts   杀死 17/17（100%）   20.1s
+electron/engine/verifier.ts   杀死 9/9（100%）   22.4s
+electron/agents/run-session.ts   杀死 5/5（100%）   6.0s
+electron/sandbox/command-policy.ts   杀死 6/6（100%）   17.1s
+electron/sandbox/spawn-plan.ts   杀死 7/7（100%）   16.7s
+electron/sandbox/circuit-breaker.ts   杀死 15/15（100%）   42.1s
+electron/sandbox/timeout-gate.ts   杀死 2/2（100%）   7.6s
+electron/sandbox/file-journal.ts   杀死 11/11（100%）   108.7s
+electron/atomic-file.ts   杀死 1/1（100%）   2.7s
+electron/sandbox/snapshot-store.ts   杀死 13/13（100%）   138.9s
+electron/engine/router.ts   杀死 22/22（100%）   25.7s
+electron/keys-store.ts   杀死 19/19（100%）   24.9s
+electron/engine/batch-guard.ts   杀死 9/9（100%）   83.6s
+shared/graph.ts   杀死 8/8（100%）   27.8s
+electron/ipc/orchestration.ts   杀死 3/3（100%）   9.4s
+electron/ipc/projects.ts   杀死 4/4（100%）   11.5s
+electron/ipc/agents.ts   杀死 6/6（100%）   15.6s
+electron/ipc/context.ts   杀死 7/7（100%）   18.7s
+electron/platform.ts   杀死 9/9（100%）   25.2s
+headless/protocol.ts   杀死 66/66（100%）   125.5s
+electron/engine/zone-guard.ts   杀死 6/6（100%）   9.5s
+electron/main.ts   杀死 6/6（100%）   7.7s
+shared/usage-meter.ts   杀死 13/13（100%）   13.6s
+headless/run-spec.ts   杀死 15/15（100%）   47.8s
+shared/deliverable-format.ts   杀死 17/17（100%）   17.5s
+shared/routing.ts   杀死 4/4（100%）   4.8s
 shared/prompts.ts   杀死 1/1（100%）   2.0s
-electron/store.ts   杀死 6/6（100%）   7.5s
+electron/store.ts   杀死 6/6（100%）   7.6s
+electron/audit-log.ts   杀死 11/11（100%）   19.0s
+electron/agents/index.ts   杀死 2/2（100%）   11.3s
 
-总计：杀死 680/680（100%）   耗时 1740.5s
-  其中 单点杀死 680 · 聚合杀死 0
-口径：site —— 本次为**逐位点**判定，680 个变异各自只改一处。
-最慢：electron/engine/orchestrator.ts 175.9s · shared/http-clients.ts 128.8s · headless/protocol.ts 123.9s
+总计：杀死 695/695（100%）   耗时 1791.9s
+  其中 单点杀死 695 · 聚合杀死 0
+口径：site —— 本次为**逐位点**判定，695 个变异各自只改一处。
+最慢：electron/engine/orchestrator.ts 169.0s · electron/sandbox/snapshot-store.ts 138.9s · headless/protocol.ts 125.5s
 
-PASS: 无存活变异 —— 全部 680 处位点已**逐点**验证（每处单独变异都被断言发现）。
+PASS: 无存活变异 —— 全部 695 处位点已**逐点**验证（每处单独变异都被断言发现）。

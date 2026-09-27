@@ -38,6 +38,11 @@
   现在把它从私有方法提成模块级导出函数（入参显式化成 `statEntries`），测试可以
   直接喂「上游漏过来的 / 读不出来的」条目 —— 两处变异均被杀死（已反证）。
 
+- **全量逐位点基线刷新：`695/695（100%）`**
+  （`docs/2026-09-23-mutation-site-baseline.md`「五轮快照」）。49 个目标、29.9 分钟、
+  本机 Windows 全量 `--mode=site`。分母比上一轮（680）+15：新登记 `audit-log`(11)、
+  `agents/index`(2)，以及 `sensenova-api` 的 32 → 34。
+
 ### 新增（承接上一轮）
 
 - **CLI 智能体 dispatch 的环境裁剪诊断**（`electron/agents/cli-agent.ts`）：
