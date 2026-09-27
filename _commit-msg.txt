@@ -1,0 +1,37 @@
+test(gate): 处置三元存活第二批（6 文件 17 处）—— 条件展开简化 + 事件形状/轮询兜底补断言
+
+三元算子（cond ? A : B 分支互换）首次全量评估留下 56 处存活，第一批已处置
+manifest-schema / manifest-loader / agents-index 共 22 处（前一笔）。本笔处置
+第二批 6 个文件 17 处，两处补完断言后全部复跑清零。
+
+简化（接收侧容忍 undefined，与条件展开等价，一行消灭一个位点）：
+- platform @174/@175/@233/@247（manifests / manifestDir / journal /
+  requestEscalationDecision）
+- scheduler @244（requiredTags）/ @408（repairContext）
+- http-bridge @164（deadlineMs）
+- context @233（journal）
+- run-spec @234（manifestDir）/ @271（requestEscalationDecision）
+- path-policy @241（zoneMode）
+
+保留三元形态并补断言（契约是「字段缺失时连键都不出现」，`"x" in rec === false`
+由 src/ipc-handlers.test.ts 的 "omits optional fields" 守着）：
+- context / run-spec 的 run-end 记录（agentId / durationMs / errorClass）
+
+新增断言：
+- run-spec @196：verification 事件只在失败项带 logDigest（用一份混合报告，
+  一次跑完同时钉住「成功项连键都不出现」与「失败项带 boom」两个方向）
+- path-policy @209：check() 成功时只给 { ok, abs }，内部判定字段（via）不外泄
+- http-bridge @328：轮询抛错 → errorClass=resource / retryable=true；
+  正常收尾的 run 不带这两个键（反向变异会让每个成功 run 被当成可重试的失败
+  反复重派）
+
+修复：
+- path-policy @222 的 `||` 被写成 `&&`（恒假）—— 上一轮手工注入验证后未还原的
+  变异体残留，已改回 `||`
+- mutation-check：scheduler 目标补挂 src/audit-log.test.ts —— 该文件里的
+  并发上限用例才是 maxParallel()「0 → 无限」那一格的真实验证者，此前只挂
+  scheduler.test.ts，于是三元 @121 存活
+
+复跑（node scripts/mutation-check.mjs --ops=ternary --mode=site）：
+run-spec 24/24 · platform 13/13 · scheduler 25/25 · path-policy 39/39 ·
+http-bridge 36/36 · context 11/11 —— 无存活。

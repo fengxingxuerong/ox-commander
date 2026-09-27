@@ -171,10 +171,10 @@ export function createPlatform(config: PlatformConfig): Platform {
     config.layer ??
     createAgentLayer({
       enableRouter: config.enableRouter ?? settings.agentRouter !== false,
-      ...(config.manifests ? { manifests: config.manifests } : {}),
-      ...(config.manifestDir ? { manifestDir: config.manifestDir } : {}),
+      manifests: config.manifests,
+      manifestDir: config.manifestDir,
       promptDir: config.promptDir,
-      ...(config.snapshotRoot ? { snapshotRoot: config.snapshotRoot } : {}),
+      snapshotRoot: config.snapshotRoot,
       arbitration: config.arbitration ?? settings.arbitration,
       // 内置执行器那一路的超时；注入 `layer` 的调用方不受影响（那种情况由注入方负责）。
       executorTimeoutMs: executorTimeoutMsFor(settings),
@@ -194,8 +194,8 @@ export function createPlatform(config: PlatformConfig): Platform {
   const schedulerOptions = (): NonNullable<ConstructorParameters<typeof Scheduler>[2]> => ({
     ...layer.schedulerOptions,
     maxParallelRuns: config.maxParallelRuns ?? settings.maxParallelRuns,
-    ...(host.onRunStart ? { onRunStart: host.onRunStart } : {}),
-    ...(host.onRunComplete ? { onRunComplete: host.onRunComplete } : {}),
+    onRunStart: host.onRunStart,
+    onRunComplete: host.onRunComplete,
   });
 
   /**
@@ -229,9 +229,7 @@ export function createPlatform(config: PlatformConfig): Platform {
     onEscalation: () => undefined,
     // 默认落一行日志；宿主（headless）覆盖它改成发协议事件。
     onUsage: (snapshot) => log(formatUsageLine(snapshot)),
-    ...(host.requestEscalationDecision
-      ? { requestEscalationDecision: host.requestEscalationDecision }
-      : {}),
+    requestEscalationDecision: host.requestEscalationDecision,
     ...(host.callbacks ?? {}),
   };
 
@@ -244,7 +242,7 @@ export function createPlatform(config: PlatformConfig): Platform {
         ((cwd: string) => verifyProject(settings.verificationCommands, { cwd: () => cwd, onEvent: log })),
       settings,
       usage: () => meter.snapshot(),
-      ...(config.journal ? { journal: config.journal } : {}),
+      journal: config.journal,
     },
     callbacks,
   );

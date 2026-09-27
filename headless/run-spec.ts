@@ -231,14 +231,14 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     promptDir: spec.projectRoot,
     snapshotRoot: spec.snapshotRoot,
     manifests: spec.agents,
-    ...(spec.manifestDir ? { manifestDir: spec.manifestDir } : {}),
+    manifestDir: spec.manifestDir,
     llmPool: spec.llmPool,
     maxParallelRuns: spec.maxParallelRuns,
     journal,
     // Injected (tests) or self-built — the platform reports verdicts for both.
-    ...(io.layer ? { layer: io.layer } : {}),
-    ...(io.llm ? { llm: io.llm } : {}),
-    ...(io.verify ? { verify: io.verify } : {}),
+    layer: io.layer,
+    llm: io.llm,
+    verify: io.verify,
     host: {
       log: (text) => io.emit({ type: "log", text }),
       callbacks,
@@ -253,6 +253,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
           taskId: task.id,
           zone: task.zone,
           ok: outcome.ok,
+          // 同 context.ts 的 run-end 记录：事件形状的契约是「缺失时连键都不出现」，
+          // 不能简化成直接传（2026-09-28 简化时 ipc-handlers 侧当场变红）。
           ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
           ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
           ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
@@ -267,9 +269,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
           });
         }
       },
-      ...(callbacks.requestEscalationDecision
-        ? { requestEscalationDecision: callbacks.requestEscalationDecision }
-        : {}),
+      requestEscalationDecision: callbacks.requestEscalationDecision,
     },
   });
 
@@ -310,7 +310,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       io.emit({ type: "tasks", batches });
     }
     const report = await engine.execute(batches, spec.projectRoot, {
-      ...(resume ? { resume } : {}),
+      resume,
       smoke,
     });
     io.emit({ type: "done", passed: report.passed, report });

@@ -125,7 +125,15 @@ const TARGETS = [
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
-  { file: "electron/engine/scheduler.ts", test: "src/scheduler.test.ts", tier: 1 },
+  // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
+  // 并发上限用例（`never exceeds maxParallelRuns` / `treats 0 as unlimited`），
+  // 而 `maxParallel()` 的三元就在那个文件里被真实验证。此前只挂 scheduler.test.ts，
+  // 于是「0 → 无限」那一格无人守（三元算子评估里 @121 存活即由此而来）。
+  {
+    file: "electron/engine/scheduler.ts",
+    tests: ["src/scheduler.test.ts", "src/audit-log.test.ts"],
+    tier: 1,
+  },
   // kill-tree 是超时兜底的最后一道闸：A3 加固的 fallback/二次确认分支都在
   // 这里，一个算子翻转就意味着"杀不掉的进程"回来了。纯 mock 测试，毫秒级。
   { file: "electron/sandbox/kill-tree.ts", test: "src/kill-tree.test.ts", tier: 1 },

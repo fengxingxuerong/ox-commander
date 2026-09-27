@@ -479,6 +479,75 @@ describe("runSpec", () => {
     results: [{ kind: "test", ok: true, exitCode: 0, logDigest: "ok", durationMs: 5 }],
   };
 
+
+  // 下面两条都来自三元算子评估（--ops=ternary）：一处是遍历比较器反向、
+  // 一处是「事件形状」被改成键恒存在 —— 都是改完照样跑、只是结果悄悄变。
+  it('回收按名字升序遍历：kept 列表顺序不能随反向比较器而变', () => {
+    const root = scratch('prune-order');
+    const fresh = Date.now();
+    const mk = (name: string) => {
+      const dir = path.join(root, name);
+      fs.mkdirSync(dir, { recursive: true });
+      fs.utimesSync(dir, new Date(fresh), new Date(fresh));
+      return dir;
+    };
+    // 倒序创建，断言的是**结果列表**的顺序（未过期 → 进 kept）
+    mk('batch-b');
+    mk('batch-a');
+    const res = pruneStaleBackups(root, { now: fresh + 1000 });
+    expect(res.kept).toEqual(['batch-a', 'batch-b']);
+  });
+
+  it('run-end 事件在成功路径上不带 errorClass 键（事件形状是契约）', async () => {
+    const root = scratch('headless-shape');
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask('t1', 'src')]),
+      layer: createAgentLayer({ adapters: [fakeAdapter('worker')] }),
+      verify: async () => pass,
+    });
+    expect(code, JSON.stringify(events.filter((e) => e.type === 'error'))).toBe(0);
+    const end = events.find((e) => e.type === 'run' && (e as { phase?: string }).phase === 'end') as
+      | Record<string, unknown>
+      | undefined;
+    expect(end).toBeDefined();
+    expect('agentId' in end!).toBe(true);
+    expect('errorClass' in end!).toBe(false);
+  });
+
+  it("verification 事件只在失败项上带 logDigest（成功项连键都不出现）", async () => {
+    const root = scratch("headless-verify-digest");
+    const spec = parse(
+      JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [], maxRepairRounds: 0 }),
+    );
+    const { events, emit } = collect();
+    // 一份混合报告：成功项与失败项同批，一次跑完就能同时钉住两个方向。
+    const mixed: VerificationReport = {
+      passed: false,
+      results: [
+        { kind: "test", ok: true, exitCode: 0, logDigest: "should-not-appear", durationMs: 5 },
+        { kind: "build", ok: false, exitCode: 1, logDigest: "boom", durationMs: 7 },
+      ],
+    };
+    await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => mixed,
+    });
+
+    const v = events.find((e) => e.type === "verification") as
+      | Extract<HeadlessEvent, { type: "verification" }>
+      | undefined;
+    expect(v).toBeDefined();
+    const [okItem, failItem] = v!.results as unknown as Array<Record<string, unknown>>;
+    // 反向变异（`r.ok ? { logDigest } : {}`）会让这里变成 true 且失败项丢字段。
+    expect("logDigest" in okItem!).toBe(false);
+    expect(failItem!.logDigest).toBe("boom");
+  });
+
   it("runs the whole pipeline and exits 0 with a stable event order", async () => {
     const root = scratch("headless-ok");
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));

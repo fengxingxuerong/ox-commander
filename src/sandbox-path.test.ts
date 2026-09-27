@@ -296,3 +296,19 @@ describe("isCaseInsensitiveFs", () => {
     expect(isCaseInsensitiveFs()).toBe(process.platform === "win32" || process.platform === "darwin");
   });
 });
+
+describe('PathPolicy.check', () => {
+  // 三元算子评估（--ops=ternary）抓到：`return d.ok ? { ok: true, abs: d.abs } : d`
+  // 交换分支后，成功路径会**原样返回内部判定结果**（多一个 `via` 字段），
+  // 调用方拿到的形状随「写法」而变 —— 用 toEqual 严格比对形状，不是看字段值。
+  it('成功时只给调用方 { ok, abs }，内部判定字段不外泄', () => {
+    const p = policy();
+    expect(p.check('src/core/a.js')).toEqual({ ok: true, abs: path.join(root, 'src', 'core', 'a.js') });
+  });
+
+  it('失败时照旧只给 { ok: false, reason }', () => {
+    const d = policy().check('../outside.js');
+    expect(d).toMatchObject({ ok: false });
+    expect(Object.keys(d).sort()).toEqual(['ok', 'reason']);
+  });
+});

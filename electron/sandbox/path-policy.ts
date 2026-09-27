@@ -238,5 +238,5 @@ function hasTraversal(rel: string): boolean {
  * does not change which files that adapter may write.
  */
 export function createWorkspacePathPolicy(projectRoot: string, zone?: ZoneMode): PathPolicy {
-  return new PathPolicy({ projectRoot, ...(zone ? { zoneMode: zone } : {}) });
+  return new PathPolicy({ projectRoot, zoneMode: zone });
 }

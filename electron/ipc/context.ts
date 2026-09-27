@@ -230,10 +230,10 @@ export function buildPlatformLayer(
     // `buildLlm()`, so a seeder passed only by the one-shot caller below would
     // leave real runs reading an unseeded `process.env`.
     seedKeys: (envVars) => seedKeysFromStore(settingsValue, envVars),
-    ...(overrides.journal ? { journal: overrides.journal } : {}),
+    journal: overrides.journal,
     host: {
       log: overrides.log,
-      ...(overrides.callbacks ? { callbacks: overrides.callbacks } : {}),
+      callbacks: overrides.callbacks,
       // P5 observability: every run start/end is attributed and persisted, so
       // "which agent did what" survives a reload.
       onRunStart: (agentId, task) => {
@@ -245,6 +245,9 @@ export function buildPlatformLayer(
           taskId: task.id,
           zone: task.zone,
           ok: outcome.ok,
+          // 这两处**不能**简化成直接传：契约是「字段缺失时连键都不出现」
+          // （`"agentId" in record === false`），由 src/ipc-handlers.test.ts 的
+          // "omits optional fields…" 守着 —— 2026-09-28 简化时当场变红。
           ...(outcome.agentId ? { agentId: outcome.agentId } : {}),
           ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
           ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),

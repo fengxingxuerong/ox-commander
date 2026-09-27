@@ -161,7 +161,7 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
     const request: TaskRequest = {
       ...payload,
       protocolVersion: AGENT_PROTOCOL_VERSION,
-      ...(this.limits ? { deadlineMs: this.limits.runDeadlineMs } : {}),
+      deadlineMs: this.limits.runDeadlineMs,
     };
     try {
       const res = await this.fetch(`${this.baseUrl}${runsPath}`, {

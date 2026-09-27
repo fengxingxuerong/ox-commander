@@ -241,7 +241,7 @@ export class Scheduler {
     const pool = available.map((a) => this.opts.registry?.get(a.meta.id) ?? wrapLegacyDescriptor(a));
     if (!this.opts.registry) return pool;
     const allowed = new Set(
-      this.opts.registry.candidates({ task, ...(requiredTags ? { requiredTags } : {}) }).map((d) => d.manifest.id),
+      this.opts.registry.candidates({ task, requiredTags }).map((d) => d.manifest.id),
     );
     return pool.filter((d) => allowed.has(d.manifest.id));
   }
@@ -405,7 +405,7 @@ export class Scheduler {
         description,
         zone: task.zone,
         projectRoot,
-        ...(repair ? { repairContext: repair } : {}),
+        repairContext: repair,
       };
       const startedAt = Date.now();
       this.opts.onRunStart?.(agent.meta.id, task);

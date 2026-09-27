@@ -313,6 +313,36 @@ describe("HttpBridgeAdapter", () => {
     const result = await adapter.lastResult(handle);
     expect(result?.status).toBe("completed");
     expect(result?.agentId).toBe("workbuddy-bridge");
+    // 正常收尾的 run 不该被贴上"资源类、可重试"的标签 —— 反向变异
+    // （`run.lastError ? {} : { errorClass, retryable }`）会让这一格恒为 true，
+    // 调度器于是把每一个成功 run 都当成可重试的失败去反复重派。
+    expect("errorClass" in result!).toBe(false);
+    expect("retryable" in result!).toBe(false);
+  });
+
+  it("轮询抛错时结果标成 resource/可重试（瞬态失败不该被当成终态失败）", async () => {
+    // `run.lastError` 只在事件拉取抛异常时落下（HTTP 非 2xx 走的是 finish，不是这里）。
+    let polls = 0;
+    const fetchImpl = fakeFetch([
+      {
+        match: "/v1/runs/42/events",
+        reply: () => {
+          polls += 1;
+          if (polls === 1) return { status: 200, body: { events: [], status: "running" } };
+          throw new Error("ECONNRESET");
+        },
+      },
+      { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+    ]);
+    const adapter = bridge(fetchImpl);
+    const handle = await adapter.dispatch(payload());
+    // 让 poller 至少跑到第二次（pollMs=10），把 lastError 落上；run 仍在 runs 里。
+    await new Promise((r) => setTimeout(r, 60));
+    const result = await adapter.lastResult(handle);
+    expect(polls).toBeGreaterThanOrEqual(2);
+    expect(result?.errorClass).toBe("resource");
+    expect(result?.retryable).toBe(true);
+    await adapter.abort({ runId: handle.runId, agentId: "workbuddy-bridge", taskId: handle.taskId });
   });
 });
 
