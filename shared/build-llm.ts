@@ -51,18 +51,17 @@ export interface BuildPoolOptions extends BuildLlmOptions {
 }
 
 /**
- * Cross-provider pool: every (provider × key × model) becomes one route in a
- * single failover table. SenseNova contributes 3 keys × 4 models = 12 routes,
- * AMD one more, and a 429 anywhere benches only that route.
+ * 线路组装（纯）：provider 列表 → 池里的每一条 (provider × key × model) 线路。
  *
- * Providers without a key are dropped at construction; if that leaves nothing,
- * the caller gets a client whose every call fails loudly with a clear reason
- * ("failover client has no groups") rather than a silent no-op.
+ * **为什么从 `buildLlmPool` 里提出来**：这一段决定「哪个 provider 带几个 key、
+ * 几个模型进池」，而它此前只活在 client 构造内部 —— 判错方向**不抛异常**，只表现为
+ * 线路池悄悄少几条线 / 带错模型（sensenova 3×4=12 条退化成 3×1=3 条，或者反过来把
+ * SenseNova 的模型名发给 AMD 的端点）。真出 429 之前没人看得见，到时候只会以为
+ * 「今天线路不稳」。提出来之后，「池里到底有什么」第一次可以被断言。
  */
-export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
-  const env = opts.env ?? process.env;
+export function buildPoolRoutes(opts: BuildPoolOptions = {}): PoolRoute[] {
   const providers = opts.providers && opts.providers.length > 0 ? opts.providers : DEFAULT_LLM_POOL;
-  const routes: PoolRoute[] = providers.map((id) => {
+  return providers.map((id) => {
     const provider = getProvider(id);
     const extraKeys = providerKeyEnvVars(id);
     const keyVars =
@@ -73,6 +72,20 @@ export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
       models: id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel],
     };
   });
+}
+
+/**
+ * Cross-provider pool: every (provider × key × model) becomes one route in a
+ * single failover table. SenseNova contributes 3 keys × 4 models = 12 routes,
+ * AMD one more, and a 429 anywhere benches only that route.
+ *
+ * Providers without a key are dropped at construction; if that leaves nothing,
+ * the caller gets a client whose every call fails loudly with a clear reason
+ * ("failover client has no groups") rather than a silent no-op.
+ */
+export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
+  const env = opts.env ?? process.env;
+  const routes = buildPoolRoutes(opts);
   return withMeter(
     createMultiProviderFailover(routes, {
       env,

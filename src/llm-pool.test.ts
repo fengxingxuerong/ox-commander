@@ -16,7 +16,7 @@ import {
   createMultiProviderFailover,
   type FailoverGroup,
 } from "../shared/http-clients";
-import { buildLlmPool } from "../shared/build-llm";
+import { buildLlmPool, buildPoolRoutes } from "../shared/build-llm";
 import type { ChatResponse, LlmClient } from "../shared/llm-client";
 
 function ok(model: string): ChatResponse {
@@ -393,5 +393,37 @@ describe("多 provider 池的组构造", () => {
     const groups = groupsOf(client);
     expect(groups).toHaveLength(1);
     expect(groups[0]!.label).toBe("SENSENOVA_API_KEY");
+  });
+});
+
+describe('buildPoolRoutes · 池里到底有什么', () => {
+  // 这段组装此前只活在 buildLlmPool 内部：判错方向不抛异常，只表现为线路池
+  // 悄悄少几条线或带错模型 —— 真出 429 之前没人看得见。下面四条把「池的内容」
+  // 变成可以直接断言的事实。
+  it('不传 providers 时用默认池（sensenova + amd-radeon，按此顺序）', () => {
+    expect(buildPoolRoutes().map((r) => r.providerId)).toEqual(['sensenova', 'amd-radeon']);
+  });
+
+  it('传空数组时回落默认池，而不是组装出 0 条线路', () => {
+    // `providers && providers.length > 0` 放宽成 `||` 后，空数组会被当成「有」→ 池空。
+    expect(buildPoolRoutes({ providers: [] }).map((r) => r.providerId)).toEqual(['sensenova', 'amd-radeon']);
+  });
+
+  it('sensenova 带 3 key × 4 model，别的 provider 只带自己的默认模型', () => {
+    const routes = buildPoolRoutes({ providers: ['sensenova', 'amd-radeon'] });
+    const sn = routes[0]!;
+    expect(sn.keyVars).toEqual([...SENSENOVA_KEY_VARS]);
+    // `id === "sensenova"` 反向 → 只剩 1 个默认模型，12 条线路塌成 3 条。
+    expect([...sn.models]).toEqual([...SENSENOVA_MODELS]);
+    const amd = routes[1]!;
+    expect(amd.keyVars).toEqual(['AMD_API_KEY']);
+    // 反向的另一半：把 SenseNova 的模型表发给 AMD 的端点。
+    expect([...amd.models]).toEqual(['DeepSeek-V4-Flash']);
+  });
+
+  it('只点名 amd 时，池里不会有 SenseNova 的模型', () => {
+    const routes = buildPoolRoutes({ providers: ['amd-radeon'] });
+    expect(routes).toHaveLength(1);
+    expect([...routes[0]!.models]).toEqual(['DeepSeek-V4-Flash']);
   });
 });

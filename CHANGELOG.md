@@ -43,6 +43,14 @@
   本机 Windows 全量 `--mode=site`。分母比上一轮（680）+15：新登记 `audit-log`(11)、
   `agents/index`(2)，以及 `sensenova-api` 的 32 → 34。
 
+- **变异门禁第十一批：LLM 网关的线路组装三层**
+  （`shared/providers.ts` 2/2、`shared/build-llm.ts` 3/3、`shared/agent-contract.ts` 1/1）。
+  这三层是同一个问题的三个截面 —— **哪个 provider 带几个 key、几个模型进池**，
+  判错都不抛异常，只表现为线路池悄悄少几条线 / 带错模型（sensenova 的 3×4=12 条
+  塌成 3×1=3 条，或把 SenseNova 的模型名发给 AMD 的端点），真出 429 之前无人察觉。
+  同批把线路组装提成 `buildPoolRoutes`（纯函数），「池里到底有什么」第一次可断言，
+  补 4 条用例（默认池及顺序、空数组回落、各 provider 的 key/模型、单点名）。
+
 ### 新增（承接上一轮）
 
 - **CLI 智能体 dispatch 的环境裁剪诊断**（`electron/agents/cli-agent.ts`）：

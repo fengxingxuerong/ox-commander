@@ -358,6 +358,30 @@ const TARGETS = [
   // 它同时被桌面与 headless 两个入口共用以防漂移，所以这里的静默降级会
   // 两边一起静默。tier 2：需要跑多个集成测试文件。
   { file: "electron/agents/index.ts", tests: ["src/headless-protocol.test.ts", "src/scheduler.test.ts"], tier: 2 },
+
+  // ---- 2026-09-28 第十一批：LLM 网关的「线路组装」三层 ----
+  // 这三层是同一个问题的三个截面：**哪个 provider 走哪条构造路径**。判错都不是
+  // 异常，而是「线路池里少/多一条线」—— 表面照常跑，只是可用性和成本悄悄变了。
+  //
+  // providers.ts：provider 目录 + `getProvider` 的 id 匹配 + `providerKeyEnvVars`
+  // 决定 sensenova 到底带几个 key 进池（3 个 vs 1 个 = 12 条线路 vs 1 条）。
+  // 判错方向不报错：少带 key 只是 failover 的旋转面变窄，全池冷却时才知道。
+  // tier 2：两个测试文件都跑池的构造。
+  {
+    file: "shared/providers.ts",
+    tests: ["src/llm-pool.test.ts", "src/http-clients.test.ts"],
+    tier: 2,
+  },
+  // build-llm.ts 是 Electron 与 headless **共用**的大脑层构造点（工厂唯一），
+  // `provider.id === "sensenova"` 决定走多 key×多模型 failover 还是普通单客户端。
+  // 反过来 = sensenova 退化成单线路（failover 白设计）、别的 provider 却走
+  // failover 构造 —— 两头都不抛异常，只在真出 429 时才表现为"不会换线"。
+  { file: "shared/build-llm.ts", tests: ["src/failover.test.ts", "src/llm-pool.test.ts"], tier: 2 },
+  // agent-contract.ts 的 `normalizeCapabilities` 是**权限默认值的产地**：
+  // 声明里 `roles: []` / `zoneGlobs: []` 会被回填成 `["*"]` / `["**"]` ——
+  // 也就是「任意角色、任意 zone」。这里判错 = 一个本该受限的智能体被静默放大成
+  // 万能（或反过来被收死），而能力匹配表里看不出异常。tier 2：registry 测试。
+  { file: "shared/agent-contract.ts", tests: ["src/agent-registry.test.ts"], tier: 2 },
 ];
 
 /**
