@@ -41,7 +41,12 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
       opts.meter,
     );
   }
-  const apiKey = provider.apiKeyEnvVar ? (env[provider.apiKeyEnvVar] ?? "") : "";
+  // 2026-09-28：这里原本是 `provider.apiKeyEnvVar ? (env[...] ?? "") : ""`。
+  // 三元是**冗余**的 —— `apiKeyEnvVar` 为空串时（ollama 这类无需密钥的端点），
+  // `env[""]` 取不到任何东西，`?? ""` 同样落到空串。留着它只会多一个变异位点，
+  // 而那个位点交换分支后是「有 envVar 却用空串」，语义变化真实但**无从构造输入
+  // 去区分**（空串 envVar 在两条分支上结果一致）。判定简化掉，行为不变。
+  const apiKey = env[provider.apiKeyEnvVar] ?? "";
   return withMeter(createLlmClient(provider, apiKey, timeoutMs), opts.meter);
 }
 
@@ -90,7 +95,11 @@ export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
     createMultiProviderFailover(routes, {
       env,
       timeoutMs: opts.timeoutMs ?? BRAIN_TIMEOUT_MS,
-      ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
+      // 2026-09-28：原本是 `...(opts.onEvent ? { onEvent: opts.onEvent } : {})`。
+      // 条件展开同样是冗余的 —— `onEvent` 本身可选，直接传 undefined 与"不传这
+      // 个键"在接收侧完全等价。而那个三元一旦被交换，就是「传了 onEvent 反而
+      // 不往下透传」，池的轮换日志会静默消失（没有断言会红）。判定简化掉。
+      onEvent: opts.onEvent,
     }),
     opts.meter,
   );

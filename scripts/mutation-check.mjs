@@ -424,15 +424,102 @@ const OPERATORS = [
   { name: "return true → false", find: /\breturn true\b/g, to: "return false" },
   { name: "return false → true", find: /\breturn false\b/g, to: "return true" },
   { name: "继续(continue) → 中断(break)", find: /\bcontinue;/g, to: "break;" },
+  /**
+   * 三元分支互换：`cond ? A : B` → `cond ? B : A`。
+   *
+   * 为什么加它：本项目大量「回退 / 默认值」逻辑正是这个形状
+   * （`caps.roles.length > 0 ? [...caps.roles] : [...LEGACY]`、
+   * `id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel]`），
+   * 而上面 7 个算子**一个都覆盖不到** —— 这些判定此前从未被变异验证过。
+   *
+   * 它不是正则能表达的（三元会嵌套），所以走 `swap` 通道：位点由
+   * `findTernarySites` 扫描给出，变异体交换 A/B 两段。默认**不启用**
+   * （见 `--ops=`），先评估杀伤面与存活量再决定是否进门禁。
+   */
+  { name: "三元分支互换", swap: true, extra: true, optName: "ternary" },
+  /**
+   * `?? → ||`：两者的差别只在 falsy（`0` / `""` / `false`）上 ——
+   * 而"0 与留空是不是一回事"恰恰是配置类字段最容易搞错的地方
+   * （`executorTimeoutMs` 那类口径讨论就是它）。默认同样不启用。
+   */
+  { name: "?? → ||", find: /\?\?/g, to: "||", extra: true, optName: "nullish" },
 ];
+
+/**
+ * 三元位点扫描。`cond ? A : B` 的三个边界都要给出，变异体才能交换 A/B。
+ *
+ * 用**栈**而不是正则：三元右结合且会嵌套（`a ? b : c ? d : e`），
+ * 正则会把第一个 `?` 与第一个 `:` 错配，生成的代码语法就错了 —— 编译失败在本
+ * 门禁里算"杀死"，那是**假阳性**（不是断言敏感，是变异体自己写坏了）。
+ */
+function findTernarySites(text) {
+  const stack = [];
+  const sites = [];
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === "(" || c === "[" || c === "{") {
+      depth += 1;
+      continue;
+    }
+    if (c === ")" || c === "]" || c === "}") {
+      depth -= 1;
+      continue;
+    }
+    if (c === "?") {
+      // `??` / `?.` / TS 可选属性 `x?: T` 都不是三元
+      if (text[i - 1] === "?" || text[i + 1] === "?" || text[i + 1] === "." || text[i + 1] === ":") continue;
+      // TS 可选方法 `capabilities?(): AgentCapabilities` —— `?` 紧跟标识符，
+      // 那个 `:` 是**返回类型**，交换它会生成语法错的变异体（假阳性"杀死"）。
+      if (/[A-Za-z0-9_$]/.test(text[i - 1] ?? "")) continue;
+      stack.push({ at: i, depth });
+      continue;
+    }
+    if (c === ":" && stack.length > 0 && stack[stack.length - 1].depth === depth) {
+      const q = stack.pop();
+      const bEnd = ternaryBranchEnd(text, i + 1);
+      sites.push({ index: q.at, end: bEnd, aStart: q.at + 1, aEnd: i, bStart: i + 1, bEnd });
+    }
+  }
+  return sites;
+}
+
+/** B 分支的结束：回到深度 0 后遇到 `,` / `;` / `)` / `]` / `}` / 换行即止。 */
+function ternaryBranchEnd(text, from) {
+  let depth = 0;
+  for (let j = from; j < text.length; j++) {
+    const c = text[j];
+    if (c === "(" || c === "[" || c === "{") depth += 1;
+    else if (c === ")" || c === "]" || c === "}") {
+      if (depth === 0) return j;
+      depth -= 1;
+    } else if (depth === 0 && (c === "," || c === ";" || c === "\n")) return j;
+  }
+  return text.length;
+}
+
+/** 三元分支互换：把 `? A :` 与 B 整段对调。 */
+function swapBranches(source, site) {
+  const a = source.slice(site.aStart, site.aEnd);
+  const b = source.slice(site.bStart, site.bEnd);
+  return source.slice(0, site.aStart) + b + source.slice(site.aEnd, site.bStart) + a + source.slice(site.bEnd);
+}
 
 /** 聚合变异体：一次改掉该算子的**全部**位点。`replace` 带 /g 会重置 lastIndex，可复用。 */
 function aggregateMutant(source, op) {
+  if (op.swap) {
+    // 从后往前改，前面的索引才不会漂移。
+    let out = source;
+    const sites = findTernarySites(out);
+    for (let i = sites.length - 1; i >= 0; i--) out = swapBranches(out, sites[i]);
+    return out;
+  }
   return source.replace(op.find, op.to);
 }
 
 /** 逐位点变异体：只改 `site` 指出的那一处，其余原样。 */
 function siteMutant(source, site, op) {
+  if (op.swap) return swapBranches(source, site);
   return source.slice(0, site.index) + op.to + source.slice(site.end);
 }
 
@@ -888,6 +975,12 @@ function lineOf(src, index) {
  */
 function findSites(source, masked, op) {
   const sites = [];
+  if (op.swap) {
+    for (const s of findTernarySites(masked)) {
+      sites.push({ ...s, line: lineOf(source, s.index) });
+    }
+    return { sites, rawHits: sites.length, maskedHits: 0 };
+  }
   for (const m of masked.matchAll(op.find)) {
     sites.push({ index: m.index, end: m.index + m[0].length, line: lineOf(source, m.index) });
   }
@@ -958,6 +1051,16 @@ const MUTANT_VITEST_TEST_TIMEOUT_MS = Number(
 const BASELINE_VITEST_TEST_TIMEOUT_MS = Number(
   args.find((a) => a.startsWith("--baseline-test-timeout="))?.slice("--baseline-test-timeout=".length) ?? "15000",
 );
+
+/**
+ * 默认只启用「基础」算子；`extra: true` 的（三元互换、`?? → ||`）要用
+ * `--ops=ternary,nullish` 显式打开 —— 它们是**评估中**的新算子，先量过存活量
+ * 才决定是否进 `verify`，避免一次性给门禁压上几十个存活点。
+ */
+const opsArg = args.find((a) => a.startsWith("--ops="))?.slice("--ops=".length);
+const enabledExtra = new Set(String(opsArg ?? "").split(",").filter(Boolean));
+if (opsArg && enabledExtra.has("all")) for (const op of OPERATORS) if (op.optName) enabledExtra.add(op.optName);
+const ACTIVE_OPERATORS = OPERATORS.filter((op) => !op.extra || (op.optName && enabledExtra.has(op.optName)));
 
 const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) =>
   onlyFile ? t.file.includes(onlyFile) : true,
@@ -1169,7 +1272,7 @@ for (const target of targets) {
   // 每个算子的真实位点（只数可执行代码里的），聚合与逐位点两种口径共用。
   // ⚠️ 统计用 `perOpAll`（含 0 位点的算子）—— 否则"全部位点都在注释里"这种
   // 情况会因为过滤而丢掉"另有 N 处被排除"的提示，看起来像"这个文件没有算子"。
-  const perOpAll = OPERATORS.map((op) => ({ op, ...findSites(original, masked, op) }));
+  const perOpAll = ACTIVE_OPERATORS.map((op) => ({ op, ...findSites(original, masked, op) }));
   const perOp = perOpAll.filter((s) => s.sites.length > 0);
   const siteTotal = perOpAll.reduce((n, s) => n + s.sites.length, 0);
   const maskedTotal = perOpAll.reduce((n, s) => n + s.maskedHits, 0);
