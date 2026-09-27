@@ -7,7 +7,7 @@ import { AGENT_PROTOCOL_VERSION, DEFAULT_AGENT_LIMITS, type AgentAdapterV2, type
 import { TimeoutGate } from "../sandbox/timeout-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
-import { scopedEnv } from "./scoped-env";
+import { droppedSecretNames, scopedEnv } from "./scoped-env";
 import { fencedBlock, inlineField } from "../../shared/prompt-text";
 import { RunSession } from "./run-session";
 
@@ -162,6 +162,14 @@ export class CliAgentAdapter implements AgentAdapterV2 {
       extraKeys: envTemplateKeys,
     });
     for (const [k, v] of Object.entries(this.opts.envTemplate ?? {})) env[k] = renderTemplate(v, vars);
+    // 诊断（只记名字、永不记值）：如实报告最小化环境裁掉了哪些密钥变量，
+    // 让操作员能核对"没有误裁、也没有漏裁"。droppedSecretNames 与上面
+    // scopedEnv 的过滤参数完全一致，两处必须同步改。日志在 session 创建后
+    // 补推（见下方 spawn 日志前），进该 run 的事件流留证据。
+    const dropped = droppedSecretNames({
+      ...(this.opts.allowProviders ? { allowProviders: this.opts.allowProviders } : {}),
+      extraKeys: envTemplateKeys,
+    });
 
     const session = new RunSession();
     const handle: RunHandle = { runId: payload.runId, agentId: this.meta.id, taskId: payload.taskId };
@@ -205,6 +213,9 @@ export class CliAgentAdapter implements AgentAdapterV2 {
     };
     this.runs.set(payload.runId, run);
 
+    if (dropped.length > 0) {
+      session.push("log", `[${this.meta.id}] 已从子进程环境裁掉 ${dropped.length} 个密钥变量（只记名字）：${dropped.join(", ")}`);
+    }
     session.push("log", `[${this.meta.id}] spawn ${this.opts.command} ${args.join(" ")}`);
     // Watchdog: the child may hang without producing a single byte, so the idle
     // window matters as much as the hard deadline.

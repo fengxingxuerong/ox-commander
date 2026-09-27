@@ -69,6 +69,24 @@ describe("CliAgentAdapter", () => {
     expect(text).toContain("line two");
   });
 
+  it("dispatch 记录被裁掉的密钥名（只记名字、永不记值）", async () => {
+    // droppedSecretNames 接线（2026-09-27）：unwired 白名单挂了很久的"接上
+    // 日志后即可移出本表"——dispatch 的事件流现在要如实报告裁了哪些密钥名，
+    // 让操作员能核对最小化环境没有误裁也没有漏裁。值永远不出现在日志里。
+    process.env.OX_TEST_SECRET_TOKEN = "do-not-leak";
+    try {
+      const adapter = cli(["-e", ""], { envTemplate: { MY_AGENT_KEY: "x" } });
+      const handle = await adapter.dispatch(payload());
+      const events = await drainEvents(adapter, handle);
+      const text = events.map((e) => e.text).join("\n");
+      expect(text).toMatch(/裁掉.*密钥/);
+      expect(text).toContain("OX_TEST_SECRET_TOKEN");
+      expect(text).not.toContain("do-not-leak");
+    } finally {
+      delete process.env.OX_TEST_SECRET_TOKEN;
+    }
+  });
+
   it("fails the run on a non-zero exit code", async () => {
     const adapter = cli(["-e", "console.error('boom');process.exit(3)"]);
     const handle = await adapter.dispatch(payload());

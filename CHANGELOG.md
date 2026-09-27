@@ -8,6 +8,10 @@
 
 ### 新增
 
+- **CLI 智能体 dispatch 的环境裁剪诊断**（`electron/agents/cli-agent.ts`）：
+  最小化子进程环境时裁掉了哪些密钥变量，现在会如实记入该 run 的事件流
+  （只记名字、永不记值），操作员可核对"没有误裁、也没有漏裁"。
+
 - **线路速度画像：快线路优先（池层，`shared/http-clients.ts` 的
   `FailoverLlmClient`）**。2026-09-27 `--real` 演习实测驱动：旧实现按构造
   顺序静态轮换，慢线路排前时每次先被试、一次吃满 attempt 预算（glm-5.2

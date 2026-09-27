@@ -49,7 +49,7 @@ const ACCEPTED = new Map([
   // ---- 配置表：数据而非逻辑，测试用它钉住「默认轮转不含扩展模型」 ----
   ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表（kimi-k3），刻意不加入默认轮转；测试守着这一点"],
   // ---- 诊断：安全地只输出名字，尚未接到生产日志 ----
-  ["electron/agents/scoped-env.ts::droppedSecretNames", "诊断辅助，只给名字不给值；接上日志后即可移出本表"],
+  // （droppedSecretNames 已于 2026-09-27 接进 cli-agent dispatch 事件流，移出本表）
   // ---- 经编译产物被 scripts/ 桥消费：运行时 require，静态扫描不可见 ----
   ["shared/deliverable-format.ts::buildOutputRules", "OXFILE 交付格式的 prompt 指令段，loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费（同 buildLlmPool 模式）；解析侧 parseDeliverable 有同文件调用故不在本表。注意：本条理由刻意不写桥的完整文件名 —— script-wiring 门禁按字符串扫引用，写全名会把桥误判成已接入"],
   ["shared/deliverable-format.ts::resolveDeliverablePath", "交付路径宽容归一（相对 zone 补全前缀），loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费；同 buildOutputRules 条目的口径 —— 理由刻意不写桥的完整文件名，防 script-wiring 按字符串扫引用把桥误判成已接入"],
