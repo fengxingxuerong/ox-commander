@@ -202,6 +202,246 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 `cond ? x : y` 与 `a ?? default` 的形状（例如 `normalizeCapabilities` 里 4 处
 「空数组回填默认值」的判定，当前**一个都测不到**）。加算子的代价是位点数与
 存活量同步上涨，需要先在子集上试跑评估。
+## 三元算子评估：2026-09-28（875/931，94% · 56 处待处置）
+
+新增「三元分支互换」算子（`cond ? A : B` → `cond ? B : A`）后的**首次全量评估**。
+算子默认关闭，用 `--ops=ternary` 显式打开 —— 目的是先量存活量，再决定要不要进 `verify`。
+
+```
+node scripts/mutation-check.mjs --ops=ternary --mode=site --limit=999
+# 总计：杀死 875/931（94%）   耗时 2544.2s（42.4 min）
+# FAIL: 56 个变异存活
+```
+
+**基础算子仍是 701/701 全杀 —— 56 处存活全部来自新算子，且逐条看过 diff，无一是等价变异。**
+也就是说：这一刀砍下去，露出来的全是真缺口，`cond ? x : y` 这一族判定此前从未被验证过。
+
+### 分类与处置路径
+
+| 类别 | 数量 | 代表位点 | 处置路径 |
+| --- | --- | --- | --- |
+| **A 条件展开透传** `...(x ? { x } : {})` | 38 | `manifest-loader` @186/@187/@189、`agents/index` @139、`platform` @174、`scheduler` @408 | 以**简化源码**为主：接收侧容忍 `undefined` 时直接 `x: x` 与条件展开等价（一行消灭一个位点，`onEvent` 那次已验证）；不能简化的补「字段真的到了接收侧」断言 |
+| **B 默认值 / 回退三元** | 9 | `manifest-schema` @113（artifactKinds 回填默认）、@133（bearerFile 凭据构造）、`path-policy` @209（`d.ok ? 规范化 : d`） | 补断言 —— 这正是「错了也不报错」的核心族（凭据被判成 `undefined` = 静默不鉴权） |
+| **C 排序比较器** | 3 | `run-spec` @89、`sensenova-api` @428（嵌套两层） | 补断言：断言**排序结果**（谁在前），不要断言比较器实现 |
+| **D 错误信息取字段** | 4 | `http-clients` @466（`e instanceof Error ? e.message : String(e)`）、`deliverable-format` @169 | 补断言：畸形输入下错误消息里要带上原始 message，而不是 `[object Object]` |
+| **E 装配分支** | 2 | `agents/index` @106（`manifestDir ? 加载 : 空集`）、@108（`m.source ? m : 补 source`） | 补断言 |
+
+### 启用前置条件
+
+56 处处置完之前**不要**把三元算子放进 `verify`（`mutation:quick` 会跑 aggregate，
+任何一处存活都会让门禁长期红）。建议分批：按文件处置 → 该文件复跑 `--ops=ternary` 全杀 →
+再进下一批。A 类那 38 处如果集中在少数几个透传链模块上，用简化源码的方法批量消灭最快。
+
+### 完整清单（56 处，按文件分组）
+
+```
+存活总计 56 处，分布在 18 个文件
+
+## electron/agents/manifest-schema.ts  (8)
+  @109
+    - ...(protocolVersion ? { protocolVersion } : {}),
+    + ...(protocolVersion ? {}: { protocolVersion } ),
+  @113
+    - artifactKinds: artifactKinds.length > 0 ? artifactKinds : ["files", "logs"],
+    + artifactKinds: artifactKinds.length > 0 ? ["files", "logs"]: artifactKinds ,
+  @133
+    - return tokenFile ? { kind: "bearerFile", tokenFile } : undefined;
+    + return tokenFile ? undefined: { kind: "bearerFile", tokenFile } ;
+  @186
+    - ...(probeArgs ? { probeArgs } : {}),
+    + ...(probeArgs ? {}: { probeArgs } ),
+  @187
+    - ...(envTemplate ? { envTemplate } : {}),
+    + ...(envTemplate ? {}: { envTemplate } ),
+  @200
+    - const headers = isObj(raw.headers) ? (raw.headers as Record<string, string>) : undefined;
+    + const headers = isObj(raw.headers) ? undefined: (raw.headers as Record<string, string>) ;
+  @205
+    - ...(healthPath ? { healthPath } : {}),
+    + ...(healthPath ? {}: { healthPath } ),
+  @208
+    - ...(headers ? { headers } : {}),
+    + ...(headers ? {}: { headers } ),
+
+## electron/agents/manifest-loader.ts  (7)
+  @186
+    - ...(m.entry.probeArgs ? { probeArgs: m.entry.probeArgs } : {}),
+    + ...(m.entry.probeArgs ? {}: { probeArgs: m.entry.probeArgs } ),
+  @187
+    - ...(m.entry.envTemplate ? { envTemplate: m.entry.envTemplate } : {}),
+    + ...(m.entry.envTemplate ? {}: { envTemplate: m.entry.envTemplate } ),
+  @189
+    - ...(limits ? { limits } : {}),
+    + ...(limits ? {}: { limits } ),
+  @201
+    - ...(m.entry.healthPath ? { healthPath: m.entry.healthPath } : {}),
+    + ...(m.entry.healthPath ? {}: { healthPath: m.entry.healthPath } ),
+  @204
+    - ...(m.entry.headers ? { headers: m.entry.headers } : {}),
+    + ...(m.entry.headers ? {}: { headers: m.entry.headers } ),
+  @205
+    - ...(m.credential ? { credential: m.credential } : {}),
+    + ...(m.credential ? {}: { credential: m.credential } ),
+  @207
+    - ...(limits ? { limits } : {}),
+    + ...(limits ? {}: { limits } ),
+
+## electron/agents/index.ts  (7)
+  @32
+    - ...(meter ? { meter } : {}),
+    + ...(meter ? {}: { meter } ),
+  @106
+    - const loaded = opts.manifestDir ? loadManifestDir(opts.manifestDir) : { manifests: [], errors: [] };
+    + const loaded = opts.manifestDir ? { manifests: [], errors: [] }: loadManifestDir(opts.manifestDir) ;
+  @108
+    - ...(opts.manifests ?? []).map((m) => (m.source ? m : { ...m, source: "declared" as const })),
+    + ...(opts.manifests ?? []).map((m) => (m.source ? { ...m, source: "declared" as const }: m )),
+  @112
+    - ...(opts.promptDir ? { promptDir: opts.promptDir } : {}),
+    + ...(opts.promptDir ? {}: { promptDir: opts.promptDir } ),
+  @138
+    - ...(opts.sharedPaths ? { sharedPaths: opts.sharedPaths } : {}),
+    + ...(opts.sharedPaths ? {}: { sharedPaths: opts.sharedPaths } ),
+  @139
+    - ...(opts.onEvent ? { onEvent: opts.onEvent } : {}),
+    + ...(opts.onEvent ? {}: { onEvent: opts.onEvent } ),
+  @140
+    - ...(opts.onVerdict ? { onVerdict: opts.onVerdict } : {}),
+    + ...(opts.onVerdict ? {}: { onVerdict: opts.onVerdict } ),
+
+## headless/run-spec.ts  (5)
+  @89
+    - for (const entry of entries.sort((a, b) => (a.name < b.name ? -1 : 1))) {
+    + for (const entry of entries.sort((a, b) => (a.name < b.name ? 1: -1 ))) {
+  @196
+    - ...(r.ok ? {} : { logDigest: r.logDigest.slice(0, 400) }),
+    + ...(r.ok ? { logDigest: r.logDigest.slice(0, 400) }: {} ),
+  @234
+    - ...(spec.manifestDir ? { manifestDir: spec.manifestDir } : {}),
+    + ...(spec.manifestDir ? {}: { manifestDir: spec.manifestDir } ),
+  @258
+    - ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
+    + ...(outcome.errorClass ? {}: { errorClass: outcome.errorClass } ),
+  @271
+    - ? { requestEscalationDecision: callbacks.requestEscalationDecision }
+    + ? {}: { requestEscalationDecision: callbacks.requestEscalationDecision }
+
+## electron/agents/sensenova-api.ts  (4)
+  @163
+    - maxConcurrency: Number.isFinite(limit) ? Math.max(1, limit) : SENSENOVA_KEY_VARS.length,
+    + maxConcurrency: Number.isFinite(limit) ? SENSENOVA_KEY_VARS.length: Math.max(1, limit) ,
+  @241
+    - this.sharedFailover = this.meter ? meteredLlm(failover, this.meter) : failover;
+    + this.sharedFailover = this.meter ? failover: meteredLlm(failover, this.meter) ;
+  @428
+    - statEntries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    + statEntries.sort((a, b) => (a.rel < b.rel ? a.rel > b.rel ? 1 : 0: -1 ));
+  @428
+    - statEntries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    + statEntries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 0: 1 ));
+
+## electron/platform.ts  (4)
+  @174
+    - ...(config.manifests ? { manifests: config.manifests } : {}),
+    + ...(config.manifests ? {}: { manifests: config.manifests } ),
+  @175
+    - ...(config.manifestDir ? { manifestDir: config.manifestDir } : {}),
+    + ...(config.manifestDir ? {}: { manifestDir: config.manifestDir } ),
+  @233
+    - ? { requestEscalationDecision: host.requestEscalationDecision }
+    + ? {}: { requestEscalationDecision: host.requestEscalationDecision }
+  @247
+    - ...(config.journal ? { journal: config.journal } : {}),
+    + ...(config.journal ? {}: { journal: config.journal } ),
+
+## electron/engine/scheduler.ts  (3)
+  @121
+    - return n <= 0 ? Number.POSITIVE_INFINITY : n;
+    + return n <= 0 ? n: Number.POSITIVE_INFINITY ;
+  @244
+    - this.opts.registry.candidates({ task, ...(requiredTags ? { requiredTags } : {}) }).map((d) => d.manifest.id),
+    + this.opts.registry.candidates({ task, ...(requiredTags ? {}: { requiredTags } ) }).map((d) => d.manifest.id),
+  @408
+    - ...(repair ? { repairContext: repair } : {}),
+    + ...(repair ? {}: { repairContext: repair } ),
+
+## electron/agents/registry.ts  (3)
+  @73
+    - ? { credential: spec.manifest?.credential ?? adapter.credential }
+    + ? {}: { credential: spec.manifest?.credential ?? adapter.credential }
+  @76
+    - ? { limits: spec.manifest?.limits ?? adapter.limits }
+    + ? {}: { limits: spec.manifest?.limits ?? adapter.limits }
+  @230
+    - return declared ? { adapter, manifest: declared } : { adapter };
+    + return declared ? { adapter }: { adapter, manifest: declared } ;
+
+## electron/sandbox/path-policy.ts  (2)
+  @209
+    - return d.ok ? { ok: true, abs: d.abs } : d;
+    + return d.ok ? d: { ok: true, abs: d.abs } ;
+  @241
+    - return new PathPolicy({ projectRoot, ...(zone ? { zoneMode: zone } : {}) });
+    + return new PathPolicy({ projectRoot, ...(zone ? {}: { zoneMode: zone } ) });
+
+## electron/engine/orchestrator.ts  (2)
+  @483
+    - ...(o.agentId ? { agentId: o.agentId } : {}),
+    + ...(o.agentId ? {}: { agentId: o.agentId } ),
+  @484
+    - ...(o.errorClass ? { errorClass: o.errorClass } : {}),
+    + ...(o.errorClass ? {}: { errorClass: o.errorClass } ),
+
+## electron/agents/http-bridge.ts  (2)
+  @164
+    - ...(this.limits ? { deadlineMs: this.limits.runDeadlineMs } : {}),
+    + ...(this.limits ? {}: { deadlineMs: this.limits.runDeadlineMs } ),
+  @328
+    - ...(run.lastError ? { errorClass: "resource" as const, retryable: true } : {}),
+    + ...(run.lastError ? {}: { errorClass: "resource" as const, retryable: true } ),
+
+## shared/http-clients.ts  (2)
+  @455
+    - const retryAfterMs = e instanceof HttpLlmError ? e.retryAfterMs : undefined;
+    + const retryAfterMs = e instanceof HttpLlmError ? undefined: e.retryAfterMs ;
+  @466
+    - const msg = e instanceof Error ? e.message : String(e);
+    + const msg = e instanceof Error ? String(e): e.message ;
+
+## electron/engine/verifier.ts  (2)
+  @58
+    - ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    + ...(plan.windowsVerbatimArguments ? {}: { windowsVerbatimArguments: true } ),
+  @210
+    - ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+    + ...(plan.windowsVerbatimArguments ? {}: { windowsVerbatimArguments: true } ),
+
+## electron/agents/cli-agent.ts  (1)
+  @170
+    - ...(this.opts.allowProviders ? { allowProviders: this.opts.allowProviders } : {}),
+    + ...(this.opts.allowProviders ? {}: { allowProviders: this.opts.allowProviders } ),
+
+## electron/ipc/agents.ts  (1)
+  @80
+    - detail: `register（${manifest.adapter}）${res.replaced ? "覆盖原注册" : ""}${
+    + detail: `register（${manifest.adapter}）${res.replaced ? "": "覆盖原注册" }${
+
+## electron/ipc/context.ts  (1)
+  @233
+    - ...(overrides.journal ? { journal: overrides.journal } : {}),
+    + ...(overrides.journal ? {}: { journal: overrides.journal } ),
+
+## shared/deliverable-format.ts  (1)
+  @169
+    - jsonErr instanceof Error ? jsonErr.message : String(jsonErr)
+    + jsonErr instanceof Error ? String(jsonErr): jsonErr.message
+
+## electron/audit-log.ts  (1)
+  @212
+    - return m ? Number(m[1]) : 0;
+    + return m ? 0: Number(m[1]) ;
+```
+
 ## 适用边界（引用本基线时必须一起说）
 
 1. **只在 Windows 上成立**。`path-policy` 的平台判断已做成"平台参数化"
