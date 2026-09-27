@@ -101,6 +101,30 @@ describe("FailoverLlmClient", () => {
     const res = await client.chat(REQ);
     expect(res.model).toBe("m-b");
     expect(calls).toEqual(["a", "b"]);
+    // 非 HTTP 错误（超时/网络）同样视为 transient（isTransient 兜底 true）→
+    // 该线路被冷却 → 第二轮直接跳过 a 试 b（变异 true→false 会让 a 不冷却、
+    // 第二轮又先试 a，本断言将其杀死）。
+    await client.chat(REQ);
+    expect(calls).toEqual(["a", "b", "b"]);
+  });
+
+  it("benches timeout-only route after first failure (AllRoutesCoolingError)", async () => {
+    // 单线路场景：速度画像会让"有历史的线路排前"从而掩盖冷却差异，只有
+    // 独苗超时线路才能直接观察 isTransient 兜底 true 的冷却语义（变异
+    // true→false 会让第二轮再次尝试超时线路而不是抛 AllRoutesCoolingError）。
+    let clock = 0;
+    const calls: string[] = [];
+    const timeoutOnly: LlmClient = {
+      async chat() {
+        calls.push("t");
+        throw new Error("The operation was aborted due to timeout");
+      },
+    };
+    const client = new FailoverLlmClient([group("g1", [timeoutOnly])], async () => {}, { now: () => clock });
+    await expect(client.chat(REQ)).rejects.toThrow("aborted due to timeout");
+    clock += 1_000; // 未到 30s 冷却
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(AllRoutesCoolingError);
+    expect(calls).toEqual(["t"]); // 第二轮没有再次调用该线路（在冷却中）
   });
 
   it("sleeps between combos but not after the final one", async () => {
