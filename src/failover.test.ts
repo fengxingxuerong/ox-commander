@@ -169,10 +169,11 @@ describe("FailoverLlmClient cooldown & backoff", () => {
     clock = 6_999; // still cooling
     await client.chat(REQ);
     expect(calls).toEqual(["ra", "ok", "ok"]);
-    clock = 7_000; // cooldown expired → combo 0 gets attempted again (and fails again)
+    clock = 7_000; // cooldown expired. 速度画像（2026-09-27 加）：ok 有成功历史
+    // （快线路优先），ra 的失败从不记速度 → ok 先被试且成功，ra 不再被探测。
     await client.chat(REQ);
-    expect(calls).toEqual(["ra", "ok", "ok", "ra", "ok"]);
-    expect(sleeps).toEqual([7_000, 7_000]);
+    expect(calls).toEqual(["ra", "ok", "ok", "ok"]);
+    expect(sleeps).toEqual([7_000]); // 第三轮 ok 直接成功，无 backoff sleep
   });
 
   it("caps Retry-After cooldown at 5 minutes", async () => {
@@ -233,11 +234,147 @@ describe("FailoverLlmClient cooldown & backoff", () => {
     expect(calls).toEqual(["boom", "timeout", "bad", "ok"]);
     expect(sleeps).toEqual([500, 1000, 2000]);
     // 503/timeout combos are cooling; the 400 combo is not, so it is retried.
+    // 速度画像（2026-09-27 加）：ok 有成功历史（快线路优先）→ 先试 ok 且成功，
+    // bad（400 不记速度、无历史）排后不再被探测。
     clock = 1;
     const res = await client.chat(REQ);
     expect(res.model).toBe("m");
-    expect(calls).toEqual(["boom", "timeout", "bad", "ok", "bad", "ok"]);
-    expect(sleeps).toEqual([500, 1000, 2000, 500]);
+    expect(calls).toEqual(["boom", "timeout", "bad", "ok", "ok"]);
+    expect(sleeps).toEqual([500, 1000, 2000]); // 第二轮 ok 直接成功，无 backoff sleep
+  });
+
+  /**
+   * 速度画像（2026-09-27 --real 演习实测驱动）：慢线路排前时每次先被试、
+   * 一次吃满 attempt 预算（glm-5.2 529s vs 快线路 74.6s），快线路轮不到。
+   * 现在每次调用按「成功耗时画像」动态排序：已知快的先试、无历史保持原序、
+   * 失败从不记速度（失败走冷却惩罚）。本组用例用注入的 clock 模拟耗时。
+   */
+  describe("speed profile (fast-route-first ordering)", () => {
+    function slowStub(name: string, ms: number, clockRef: { clock: number }): LlmClient {
+      return {
+        async chat() {
+          clockRef.clock += ms; // 模拟线路耗时（成功耗时 = now 增量）
+          return OK(`m-${name}`)();
+        },
+      };
+    }
+
+    it("known-fast route is tried first on the next call", async () => {
+      let clock = 0;
+      const ref = { clock: 0 };
+      const calls: string[] = [];
+      // slow 首次 503（冷却 30s）——给 fast 一个入画像的机会
+      const slow = stub([async () => { calls.push("slow"); throw new HttpLlmError(503, "down"); }]);
+      const fast = stub([async () => { calls.push("fast"); ref.clock += 10; return OK("m-fast")(); }]);
+      const client = new FailoverLlmClient([group("g1", [slow, fast])], async () => {}, { now: () => ref.clock });
+      // 第一轮：slow 503 → fast 成功（10ms 入画像）
+      await client.chat(REQ);
+      expect(calls).toEqual(["slow", "fast"]);
+      // slow 冷却过期后：fast(10ms) 有历史 < slow(无历史=排后) → fast 先试
+      ref.clock += 31_000;
+      const res = await client.chat(REQ);
+      expect(res.model).toBe("m-fast");
+      expect(calls).toEqual(["slow", "fast", "fast"]);
+    });
+
+    it("among routes with history, the faster EWMA goes first", async () => {
+      let calls: string[] = [];
+      let clock = 0;
+      // slowA: 第一次成功 500ms；第二次抛 503（进冷却），给 fastB 一个成功机会
+      const slowA: LlmClient = {
+        async chat() {
+          calls.push("slowA");
+          if (calls.filter((c) => c === "slowA").length === 1) {
+            clock += 500;
+            return OK("m-slowA")();
+          }
+          throw new HttpLlmError(503, "down");
+        },
+      };
+      const fastB: LlmClient = {
+        async chat() {
+          calls.push("fastB");
+          clock += 10;
+          return OK("m-fastB")();
+        },
+      };
+      const client = new FailoverLlmClient([group("g1", [slowA, fastB])], async () => {}, { now: () => clock });
+      // 第一轮：slowA 成功（500ms 入画像）
+      await client.chat(REQ);
+      // 第二轮：slowA 503（冷却 30s）→ fastB 成功（10ms 入画像）
+      clock += 30_000;
+      await client.chat(REQ);
+      expect(calls).toEqual(["slowA", "slowA", "fastB"]);
+      // 第三轮（都无冷却）：fastB(10) < slowA(500) → fastB 先试且成功，slowA 不再被探测
+      const res = await client.chat(REQ);
+      expect(res.model).toBe("m-fastB");
+      expect(calls).toEqual(["slowA", "slowA", "fastB", "fastB"]);
+    });
+
+    it("profile updates: a later fast success keeps the route ahead of a middling one", async () => {
+      let clock = 0;
+      const calls: string[] = [];
+      // a：第一次 500ms，第二次起 10ms（快速稳定）；b：固定 300ms
+      const a: LlmClient = {
+        async chat() {
+          calls.push("a");
+          const n = calls.filter((c) => c === "a").length;
+          clock += n === 1 ? 500 : 10;
+          return OK("m-a")();
+        },
+      };
+      const b: LlmClient = {
+        async chat() {
+          calls.push("b");
+          clock += 300;
+          return OK("m-b")();
+        },
+      };
+      const client = new FailoverLlmClient([group("g1", [a, b])], async () => {}, { now: () => clock });
+      // 第一轮：a(500) 成功入画像
+      await client.chat(REQ);
+      // 第二轮：a 有历史、b 无历史 → a 先试成功（画像更新：500 → 平滑后更快）
+      await client.chat(REQ);
+      expect(calls).toEqual(["a", "a"]);
+      // 让 b 也入画像：给 a 一次 400（不冷却），b 成功（300ms）
+      const a400: LlmClient = {
+        async chat() {
+          calls.push("a");
+          throw new HttpLlmError(400, "bad");
+        },
+      };
+      const client2 = new FailoverLlmClient([group("g1", [a400, b])], async () => {}, { now: () => clock });
+      await client2.chat(REQ);
+      // a(400) 不冷却不记速度 → 第二轮排序：b 有历史(300) → b 先试成功
+      const res = await client2.chat(REQ);
+      expect(res.model).toBe("m-b");
+      expect(calls).toEqual(["a", "a", "a", "b", "b"]);
+    });
+
+    it("failures never enter the speed profile (cooldown is their only penalty)", async () => {
+      let clock = 0;
+      const calls: string[] = [];
+      const flaky: LlmClient = {
+        async chat() {
+          calls.push("flaky");
+          throw new HttpLlmError(429, "limited", 0);
+        },
+      };
+      const ok: LlmClient = {
+        async chat() {
+          calls.push("ok");
+          clock += 20;
+          return OK("m-ok")();
+        },
+      };
+      const client = new FailoverLlmClient([group("g1", [flaky, ok])], async () => {}, { now: () => clock });
+      await client.chat(REQ);
+      clock += 31_000; // flaky 冷却过期
+      const res = await client.chat(REQ);
+      // flaky 从未成功（无速度记录）→ ok（有历史）排前先试
+      expect(res.model).toBe("m-ok");
+      expect(calls).toEqual(["flaky", "ok", "ok"]);
+    });
   });
 });
 

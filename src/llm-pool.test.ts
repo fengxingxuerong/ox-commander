@@ -216,9 +216,10 @@ describe("cross-provider failover table", () => {
     expect(sleeps).toEqual([500]); // baseBackoffMs, only once
   });
 
-  it("benches only the failing route and retries it after the cooldown", async () => {
+  it("benches only the failing route and retries it after the cooldown (when the fast route is down)", async () => {
     let now = 0;
     let calls = 0;
+    let healthyCalls = 0;
     const flaky: FailoverGroup = {
       label: "amd-radeon:AMD_API_KEY",
       clients: [
@@ -236,7 +237,11 @@ describe("cross-provider failover table", () => {
       clients: [
         {
           async chat() {
-            return ok("deepseek-v4-flash");
+            healthyCalls += 1;
+            // 速度画像（2026-09-27 加）：healthy 首次成功入画像后优先被试；
+            // 第二轮 healthy 故意故障，冷却过期的 flaky 作为备用线路被接上。
+            if (healthyCalls === 1) return ok("deepseek-v4-flash");
+            throw new HttpLlmError(503, "down");
           },
         },
       ],
@@ -247,7 +252,7 @@ describe("cross-provider failover table", () => {
       failFastOnAuth: false,
     });
     expect((await client.chat({ messages: [{ role: "user", content: "hi" }] })).model).toBe("deepseek-v4-flash");
-    now += 1_100; // past the cooldown
+    now += 1_100; // past the cooldown; fast route is down → flaky (cooled, now usable) is retried
     expect((await client.chat({ messages: [{ role: "user", content: "hi" }] })).model).toBe("DeepSeek-V4-Flash");
   });
 });

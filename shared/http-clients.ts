@@ -335,6 +335,15 @@ function isTransient(e: unknown): boolean {
  */
 export class FailoverLlmClient implements LlmClient {
   private cooldowns = new Map<string, number>();
+  /**
+   * 线路速度画像（2026-09-27 --real 演习实测驱动）：旧实现按构造顺序静态
+   * 轮换，慢线路排前时每次先被试、一次吃满 attempt 预算（glm-5.2 529s vs
+   * 快线路 74.6s），快线路轮不到。现在每次调用把不在冷却的线路按
+   * 「成功耗时画像」动态排序：已知快的先试、无历史保持原顺序（排后，利用
+   * 优先）、失败从不记速度（失败走冷却惩罚）。EWMA α=0.5 平滑单次抖动。
+   */
+  private speeds = new Map<string, number>();
+  private readonly speedEwmaAlpha = 0.5;
   private readonly cooldownMs: number;
   private readonly maxBackoffMs: number;
   private readonly baseBackoffMs: number;
@@ -376,12 +385,26 @@ export class FailoverLlmClient implements LlmClient {
       throw new AllRoutesCoolingError(retryInMs);
     }
     if (skipped > 0) this.onEvent?.(`跳过 ${skipped} 个冷却中的组合`);
+    // 速度画像排序：已知快的先试，无历史排后（全无历史时稳定排序＝原顺序）。
+    attempts.sort(
+      (x, y) =>
+        (this.speeds.get(x.comboKey) ?? Number.POSITIVE_INFINITY) -
+        (this.speeds.get(y.comboKey) ?? Number.POSITIVE_INFINITY),
+    );
     let lastErr: unknown = new Error("failover client has no groups");
     for (let k = 0; k < attempts.length; k++) {
       const { client, comboKey } = attempts[k];
+      const t0 = this.now();
       try {
         const res = await client.chat(req);
         this.cooldowns.delete(comboKey);
+        // 成功才记速度（失败走冷却惩罚，不污染画像）；EWMA 平滑单次抖动。
+        const dur = this.now() - t0;
+        const prev = this.speeds.get(comboKey);
+        this.speeds.set(
+          comboKey,
+          prev === undefined ? dur : this.speedEwmaAlpha * dur + (1 - this.speedEwmaAlpha) * prev,
+        );
         return res;
       } catch (e) {
         if (req.signal?.aborted) {
