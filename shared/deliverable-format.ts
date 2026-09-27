@@ -29,15 +29,38 @@ export interface Deliverable {
  * 这里教的格式就是那里解析的格式，测试锁定两者不漂移。
  */
 export function buildOutputRules(zone: string): string {
+  // 路径示范必须带完整 zone 前缀：2026-09-27 预检实测，写"zone 内的相对路径"
+  // 会被模型理解成"相对 zone"（hello.js），到 assertWritable 处以越权拒绝。
+  // 直接示范全前缀形式钉死路径基准。
   return [
     `3. 输出格式（严格遵守，不要 markdown 围栏、不要解释文字）——对每个文件输出一个文件块：`,
-    `===OXFILE <${zone} 内的相对路径>===`,
+    `===OXFILE ${zone}/xxx.js===`,
     `<文件完整内容，原样书写：无需任何转义、不要代码围栏、保持真实换行>`,
     `===OXEND===`,
     `全部文件块之后，最后一行输出总结：`,
     `===OXSUMMARY=== <一句话总结>`,
-    `注意：文件内容中禁止出现以 ===OX 开头的行；每个文件必须有自己的文件块，多文件就写多个块。`,
+    `注意：文件路径必须以 ${zone}/ 开头；文件内容中禁止出现以 ===OX 开头的行；每个文件必须有自己的文件块，多文件就写多个块。`,
   ].join("\n");
+}
+
+/**
+ * 交付路径归一（宽容接线，不放松安全）：模型有时把路径写成相对 zone 的形式
+ * （hello.js 而非 src/loomy/hello.js，预检实测），这里统一归一成 zone 内路径。
+ * 安全闸门始终是调用方的 assertWritable 与平台独立复核 —— 本函数只做无损
+ * 归一：绝对路径原样返回（仍会被拒）、穿越前缀拼上后仍含 ..（仍会被拒）。
+ */
+export function resolveDeliverablePath(rel: string, zone: string): string {
+  const zoneNorm = zone.replace(/\\/g, "/").replace(/[\\/]+$/, "");
+  const relNorm = rel.replace(/\\/g, "/");
+  if (pathIsAbsolute(relNorm)) return rel;
+  if (relNorm === zoneNorm) return relNorm;
+  if (relNorm.startsWith(`${zoneNorm}/`)) return relNorm;
+  return `${zoneNorm}/${relNorm}`;
+}
+
+/** 与 assertWritable 同判定的绝对路径检查（盘符 / UNC / POSIX 根）。 */
+function pathIsAbsolute(p: string): boolean {
+  return /^[a-zA-Z]:[\\/]/.test(p) || /^\\\\/.test(p) || p.startsWith("/");
 }
 
 const FILE_RE = /^===OXFILE\s+(.+?)(?:\s*===)?\s*$/;

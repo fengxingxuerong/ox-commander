@@ -26,7 +26,7 @@ const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const { buildLlmPool } = require(path.join(root, "dist-electron", "shared", "build-llm.js"));
 // 交付格式（OXFILE 分隔符原文块 + JSON 回退）的单一事实来源在 shared/，
 // 这里只 require 编译产物 —— 改格式改 shared/deliverable-format.ts 一处。
-const { buildOutputRules, parseDeliverable } = require(
+const { buildOutputRules, parseDeliverable, resolveDeliverablePath } = require(
   path.join(root, "dist-electron", "shared", "deliverable-format.js"),
 );
 
@@ -150,7 +150,13 @@ async function doRun(run) {
     if (files.length === 0) throw new Error("模型未返回任何文件");
     for (const f of files) {
       if (run.abortFlag) throw new Error("已中止");
-      const rel = assertWritable(task.projectRoot, task.zone, String(f.path ?? ""));
+      // 宽容归一：模型可能把路径写成相对 zone 的形式（hello.js），归一成
+      // zone 内路径后再过安全闸 —— assertWritable 的全部检查原样保留。
+      const rel = assertWritable(
+        task.projectRoot,
+        task.zone,
+        resolveDeliverablePath(String(f.path ?? ""), String(task.zone ?? "")),
+      );
       const abs = path.join(task.projectRoot, rel);
       fs.mkdirSync(path.dirname(abs), { recursive: true });
       fs.writeFileSync(abs, String(f.content ?? ""), "utf8");

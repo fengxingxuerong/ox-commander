@@ -3,6 +3,7 @@ import {
   buildOutputRules,
   parseDeliverable,
   parseFileBlocks,
+  resolveDeliverablePath,
 } from "./deliverable-format";
 
 /**
@@ -152,6 +153,10 @@ describe("buildOutputRules", () => {
     expect(rules).toContain(ZONE);
   });
 
+  it("路径示范带完整 zone 前缀（预检实测：'zone 内的相对路径'会被模型理解成相对 zone，必须钉死基准）", () => {
+    expect(rules).toContain(`===OXFILE ${ZONE}/xxx.js===`);
+  });
+
   it("明确说明无需转义（这是新格式的核心卖点）", () => {
     expect(rules).toMatch(/无需.*转义|不要.*转义|原样/);
   });
@@ -159,5 +164,32 @@ describe("buildOutputRules", () => {
   it("禁止文件内容出现 ===OX 开头的行（解析器的防误伤前提）", () => {
     expect(rules).toMatch(/===OX/);
     expect(rules).toMatch(/禁止|不要|不得/);
+  });
+});
+
+describe("resolveDeliverablePath", () => {
+  it("相对 zone 的路径补上 zone 前缀（预检实测模型会写 hello.js）", () => {
+    expect(resolveDeliverablePath("hello.js", "src/loomy")).toBe("src/loomy/hello.js");
+  });
+
+  it("已是 zone 内完整路径原样返回", () => {
+    expect(resolveDeliverablePath("src/loomy/hello.js", "src/loomy")).toBe("src/loomy/hello.js");
+  });
+
+  it("反斜杠归一为正斜杠", () => {
+    expect(resolveDeliverablePath("src\\loomy\\hello.js", "src/loomy")).toBe("src/loomy/hello.js");
+    expect(resolveDeliverablePath("hello.js", "src\\loomy")).toBe("src/loomy/hello.js");
+  });
+
+  it("绝对路径原样返回（交给 assertWritable 拒绝，不在此放行）", () => {
+    expect(resolveDeliverablePath("C:\\evil\\x.js", "src/loomy")).toBe("C:\\evil\\x.js");
+  });
+
+  it("路径穿越不在此处理（拼前缀后仍含 ..，由 assertWritable 拒绝）", () => {
+    expect(resolveDeliverablePath("../evil.js", "src/loomy")).toBe("src/loomy/../evil.js");
+  });
+
+  it("zone 自身（空文件名场景）原样保留", () => {
+    expect(resolveDeliverablePath("src/loomy", "src/loomy")).toBe("src/loomy");
   });
 });
