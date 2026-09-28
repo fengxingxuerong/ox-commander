@@ -200,6 +200,41 @@ describe("FailoverLlmClient cooldown & backoff", () => {
     expect(sleeps).toEqual([7_000]); // 第三轮 ok 直接成功，无 backoff sleep
   });
 
+  // 第 455 行 `e instanceof HttpLlmError ? e.retryAfterMs : undefined`。
+  // 交换分支后：429 带的 Retry-After 被丢掉，冷却退回默认 30s —— 线路被多罚
+  // 23s，而服务端明明说了 7s 后可重试。onEvent 里的秒数是这件事唯一的外显处。
+  it("[455] 冷却秒数取自 Retry-After，不是默认值", async () => {
+    const events: string[] = [];
+    const limited = stub([async () => Promise.reject(new HttpLlmError(429, "limited", 7_000))]);
+    const ok = stub([async () => OK("m")()]);
+    const client = new FailoverLlmClient(
+      [group("g1", [limited, ok])],
+      async () => {},
+      { onEvent: (t) => events.push(t) },
+    );
+    await client.chat(REQ);
+    expect(events.join("\n")).toContain("冷却 7s");
+  });
+
+  // 第 466 行 `e instanceof Error ? e.message : String(e)`。
+  // 交换分支后：真正的 Error 被 `String(e)` 加成 `Error: xxx` 前缀，
+  // 非 Error 的抛出物则取 `e.message`（多半是 undefined）—— 日志里要么多一层噪音，
+  // 要么整段变成 "undefined"，排障时看不出到底挂在哪。
+  it("[466] 错误摘要取裸 message，不带 Error: 前缀", async () => {
+    const events: string[] = [];
+    const boom = stub([async () => Promise.reject(new Error("socket hang up"))]);
+    const ok = stub([async () => OK("m")()]);
+    const client = new FailoverLlmClient(
+      [group("g1", [boom, ok])],
+      async () => {},
+      { onEvent: (t) => events.push(t) },
+    );
+    await client.chat(REQ);
+    const line = events.join("\n");
+    expect(line).toContain("socket hang up");
+    expect(line).not.toContain("Error: socket hang up");
+  });
+
   it("caps Retry-After cooldown at 5 minutes", async () => {
     let clock = 0;
     const crazy = stub([async () => Promise.reject(new HttpLlmError(429, "limited", 3_600_000))]);

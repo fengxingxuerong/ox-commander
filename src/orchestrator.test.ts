@@ -1166,6 +1166,53 @@ describe("OrchestratorEngine · 取消信号 / 任务时长 / 警告闸门", () 
     })();
   });
 
+  it("[483/484] outcome 的可选字段：给出时透传，缺失时连键都不出现", () => {
+    // 第 483/484 行 `...(o.agentId ? { agentId: o.agentId } : {})` 与 errorClass 同形。
+    // 交换分支后：给了 agentId 反而被丢（"哪个智能体做的"整列变空），没给的却
+    // 硬塞一个值为 undefined 的键 —— 下游按 `in` / `Object.keys` 读形状的代码
+    // 会把它当成"有"。注意用 JSON.stringify 看不出来（undefined 键会被省略），
+    // 所以这里断言的是**键的存在性**。
+    async function metasFor(outcome: Record<string, unknown>): Promise<Array<Record<string, unknown>>> {
+      const metas: Array<Record<string, unknown>> = [];
+      const deps: OrchestratorDeps = {
+        llm: fakeLlm(),
+        scheduler: {
+          async runBatch(tasks: Task[]) {
+            return tasks.map((t: Task) => ({
+              taskId: t.id,
+              ok: true,
+              logDigest: "log",
+              events: [],
+              ...outcome,
+            }));
+          },
+        } as unknown as Scheduler,
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      };
+      const eng = new OrchestratorEngine(deps, {
+        onStage: () => {},
+        onLog: () => {},
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+        onTaskOutcome: (_id, _ok, _digest, extra) => metas.push({ ...(extra ?? {}) }),
+      });
+      await eng.execute([TASKS], ".");
+      return metas;
+    }
+
+    return (async () => {
+      const full = await metasFor({ agentId: "a1", errorClass: "resource" });
+      expect(full[0]!.agentId).toBe("a1");
+      expect(full[0]!.errorClass).toBe("resource");
+
+      const bare = await metasFor({});
+      expect("agentId" in bare[0]!).toBe(false);
+      expect("errorClass" in bare[0]!).toBe(false);
+    })();
+  });
+
   it("[408] 验证没过但开发任务也失败时，不许打「即使构建通过」的警告", () => {
     // 第 408 行 `if (anyDevFailure && report.passed)`。改成 `||` 后，
     // **"开发任务失败 + 验证也没过"**这种最需要如实报告的情形反而会打上

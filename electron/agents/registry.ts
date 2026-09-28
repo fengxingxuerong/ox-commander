@@ -69,12 +69,10 @@ export class AgentRegistry {
       adapter: spec.manifest?.adapter ?? (adapter.meta.kind === "ui" ? "http-bridge" : "local-llm"),
       ...(spec.manifest?.entry ? { entry: spec.manifest.entry } : {}),
       capabilities,
-      ...(spec.manifest?.credential ?? adapter.credential
-        ? { credential: spec.manifest?.credential ?? adapter.credential }
-        : {}),
-      ...(spec.manifest?.limits ?? adapter.limits
-        ? { limits: spec.manifest?.limits ?? adapter.limits }
-        : {}),
+      // 2026-09-28：这两处原是 `...(x ? { x } : {})`。接收侧一律 `?? ` 读、没有
+      // 任何"键是否存在"的断言，直接传与条件展开等价（三元算子评估后简化）。
+      credential: spec.manifest?.credential ?? adapter.credential,
+      limits: spec.manifest?.limits ?? adapter.limits,
       priority: spec.manifest?.priority ?? 0,
       enabled: spec.manifest?.enabled ?? true,
       source: spec.manifest?.source ?? "builtin",
@@ -227,7 +225,7 @@ export function createRegistry(
   const manifestById = new Map((opts.manifests ?? []).map((m) => [m.id, m]));
   const specs: AgentSpec[] = adapters.map((adapter) => {
     const declared = manifestById.get(adapter.meta.id);
-    return declared ? { adapter, manifest: declared } : { adapter };
+    return { adapter, manifest: declared };
   });
   return new AgentRegistry(specs);
 }

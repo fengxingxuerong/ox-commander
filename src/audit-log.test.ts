@@ -78,6 +78,23 @@ describe("AuditLog", () => {
     expect(log.read()).toHaveLength(20);
   });
 
+  // 第 212 行 `return m ? Number(m[1]) : 0;`（`index()` 解析文件名里的序号）。
+  // 交换分支后：能解析出序号时反而返回 0，于是每轮滚动都算出 `-001` ——
+  // 第二个文件把第一个**覆盖**掉，历史被自己踩掉；解析不出来时则是
+  // `Number(null[1])`，直接抛。断言的是落盘文件的序号序列，不是解析函数本身。
+  it("[212] 轮转出的文件序号递增，不会退回 001 把上一个盖掉", () => {
+    const dir = scratch("audit-index");
+    const log = new AuditLog({ dir, maxFileBytes: 200 });
+    for (let i = 0; i < 12; i++) {
+      log.append({ phase: "run-end", taskId: `t${i}`, detail: "x".repeat(60) });
+    }
+    const names = log.files().map((f) => path.basename(f));
+    expect(names.length).toBeGreaterThan(2);
+    const idx = names.map((n) => Number(/-(\d+)\.jsonl$/.exec(n)![1]));
+    expect(new Set(idx).size).toBe(idx.length); // 序号互不相同 —— 否则就是在互相覆盖
+    expect(idx).toEqual([...idx].sort((a, b) => a - b)); // 且按滚动次序递增
+  });
+
   it("appends to the newest file when reopened", () => {
     const dir = scratch("audit-reopen");
     new AuditLog({ dir }).append({ phase: "run-start", taskId: "t1" });

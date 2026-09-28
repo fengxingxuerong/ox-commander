@@ -197,6 +197,21 @@ describe("parseDeliverable", () => {
     expect(parseDeliverable(text).summary).toBe("");
   });
 
+  // 第 169 行 `jsonErr instanceof Error ? jsonErr.message : String(jsonErr)`。
+  // 交换分支后：真正的 Error 被 `String(e)` 套上 `Error: ` 前缀，非 Error 的抛出物
+  // 则去取 `e.message`（多半是 undefined）—— 聚合错误里"JSON 为什么没解析成"
+  // 这一格要么多一层噪音，要么整段变成 undefined，排障时看不出根因。
+  it("[169] 聚合错误里 JSON 那一格给裸 message，不带 Error: 前缀", () => {
+    let msg = "";
+    try {
+      parseDeliverable("完全不是交付物");
+    } catch (e) {
+      msg = (e as Error).message;
+    }
+    expect(msg).toContain("响应中没有 JSON 对象");
+    expect(msg).not.toContain("Error: 响应中没有 JSON 对象");
+  });
+
   it("extractJson 对「有 } 无 {」与「有 { 无 }」都报同一条根因", () => {
     expect(() => extractJson("} 前面只有右括号 {")).toThrow(/响应中没有 JSON 对象/);
     expect(() => extractJson("{ 后面没有右括号")).toThrow(/响应中没有 JSON 对象/);

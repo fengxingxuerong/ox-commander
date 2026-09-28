@@ -55,7 +55,9 @@ function runOnce(
         // 验证命令跑的是智能体刚写下的脚本。默认继承 process.env 会把手上的
         // 每一把 provider key 交给它 —— 桌面端的 keychain 正是播种进 process.env 的。
         env: scopedEnv(),
-        ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        // 2026-09-28：原为 `...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {})`。
+        // spawn 只看真假，`undefined` 与"不传"同义（三元算子评估后简化）。
+        windowsVerbatimArguments: plan.windowsVerbatimArguments,
       });
     } catch (err) {
       resolve({
@@ -207,7 +209,7 @@ export async function runSmokeChecks(
           shell: false,
           // 同 runOnce：冒烟命令也是智能体写的代码，不给它看凭证。
           env: scopedEnv(),
-          ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+          windowsVerbatimArguments: plan.windowsVerbatimArguments,
         });
       } catch (err) {
         resolve(`spawn failed (${plan.note}): ${String(err)}`);

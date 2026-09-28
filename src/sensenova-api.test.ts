@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { AllRoutesCoolingError, EXECUTOR_TIMEOUT_MS, createFailoverClient } from "../shared/http-clients";
+import { SENSENOVA_KEY_VARS } from "../shared/providers";
+import { UsageMeter, meteredLlm } from "../shared/usage-meter";
 import { SensenovaApiAdapter, parseFilePayload, readSnapshotContents } from "../electron/agents/sensenova-api";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/llm-client";
@@ -11,6 +13,12 @@ import type { ChatRequest, ChatResponse } from "../shared/llm-client";
 vi.mock("../shared/http-clients", async (importOriginal) => {
   const mod = await importOriginal<typeof import("../shared/http-clients")>();
   return { ...mod, createFailoverClient: vi.fn(mod.createFailoverClient) };
+});
+
+/** 同上：只为记录"自建的客户端有没有被 meter 包一层"。 */
+vi.mock("../shared/usage-meter", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../shared/usage-meter")>();
+  return { ...mod, meteredLlm: vi.fn(mod.meteredLlm) };
 });
 
 function fakeClient(reply: string | Error): LlmClient {
@@ -722,6 +730,66 @@ describe("SensenovaApiAdapter · 快照遍历的跳过不能中断后续", () =>
     const p = await promptFor(root);
     expect(p).not.toContain("a-bin.dat");
     expect(p).toContain("z-after-bin.js");
+  });
+});
+
+describe("SensenovaApiAdapter · 三元算子评估补位", () => {
+  // 第 163 行 `Number.isFinite(limit) ? Math.max(1, limit) : SENSENOVA_KEY_VARS.length`。
+  // 注入 llm 时 limit 恒为 +Infinity，交换分支后变成 `Math.max(1, Infinity)` ——
+  // 对外声明的并发上限直接成了 Infinity：调度器会一次性放行所有任务，
+  // 而"并发上限"这个字段从此不再表达任何约束。
+  it("[163] 注入客户端时并发上限取 key 变量个数，不是 Infinity", () => {
+    const adapter = new SensenovaApiAdapter(fakeClient("{}"));
+    expect(adapter.capabilities().maxConcurrency).toBe(SENSENOVA_KEY_VARS.length);
+  });
+
+  it("[163] 显式上限时取该值，不会被 key 变量个数盖掉", () => {
+    const adapter = new SensenovaApiAdapter(undefined, { maxConcurrent: 7 });
+    expect(adapter.capabilities().maxConcurrency).toBe(7);
+  });
+
+  // 第 241 行 `this.meter ? meteredLlm(failover, this.meter) : failover`。
+  // 交换分支后：给了 meter 反而**不包**（这一层的 token 永不进账，预算形同虚设），
+  // 没给 meter 却硬包一层（注入方自己的 meter 会被重复计数）。
+  it("[241] 给了 meter 就包一层（这一层的 token 必须进账）", () => {
+    vi.mocked(meteredLlm).mockClear();
+    const adapter = new SensenovaApiAdapter(undefined, { meter: new UsageMeter() });
+    void adapter.dispatch({
+      runId: "r-meter",
+      taskId: "t-meter",
+      title: "t",
+      description: "d",
+      zone: "src/**",
+      projectRoot: tmpRoot(),
+    });
+    expect(vi.mocked(meteredLlm)).toHaveBeenCalledTimes(1);
+  });
+
+  it("[241] 没给 meter 时不多包一层（避免重复计数）", () => {
+    vi.mocked(meteredLlm).mockClear();
+    const adapter = new SensenovaApiAdapter(undefined, {});
+    void adapter.dispatch({
+      runId: "r-nometer",
+      taskId: "t-nometer",
+      title: "t",
+      description: "d",
+      zone: "src/**",
+      projectRoot: tmpRoot(),
+    });
+    expect(vi.mocked(meteredLlm)).not.toHaveBeenCalled();
+  });
+
+  // 第 428 行 `statEntries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))`。
+  // 断言的是**快照里文件的先后顺序**，不是比较器本身：这个顺序既决定指纹
+  // （顺序变了 ⇒ 缓存永远不命中），也决定 prompt 里源码的呈现次序。
+  it("[428] 快照按路径升序：prompt 里文件出现的顺序不能随比较器反向而变", async () => {
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, "b-second.js"), "// b", "utf8");
+    fs.writeFileSync(path.join(root, "a-first.js"), "// a", "utf8");
+    const p = await promptFor(root);
+    expect(p).toContain("a-first.js");
+    expect(p).toContain("b-second.js");
+    expect(p.indexOf("a-first.js")).toBeLessThan(p.indexOf("b-second.js"));
   });
 });
 

@@ -158,7 +158,9 @@ export class CliAgentAdapter implements AgentAdapterV2 {
     // operator grant; nothing else beyond process basics and those keys.
     const envTemplateKeys = Object.keys(this.opts.envTemplate ?? {});
     const env = scopedEnv({
-      ...(this.opts.allowProviders ? { allowProviders: this.opts.allowProviders } : {}),
+      // 2026-09-28：`...(x ? { x } : {})` → 直接传。scopedEnv 里是 `?? []`，
+      // undefined 与"不传"等价（三元算子评估后简化）。
+      allowProviders: this.opts.allowProviders,
       extraKeys: envTemplateKeys,
     });
     for (const [k, v] of Object.entries(this.opts.envTemplate ?? {})) env[k] = renderTemplate(v, vars);
@@ -167,7 +169,7 @@ export class CliAgentAdapter implements AgentAdapterV2 {
     // scopedEnv 的过滤参数完全一致，两处必须同步改。日志在 session 创建后
     // 补推（见下方 spawn 日志前），进该 run 的事件流留证据。
     const dropped = droppedSecretNames({
-      ...(this.opts.allowProviders ? { allowProviders: this.opts.allowProviders } : {}),
+      allowProviders: this.opts.allowProviders,
       extraKeys: envTemplateKeys,
     });
 

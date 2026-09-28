@@ -484,6 +484,25 @@ describe("agent handlers", () => {
     );
   });
 
+  it("[80] 覆盖注册才说『覆盖原注册』，首次注册不能这么说", () => {
+    // 第 80 行 `res.replaced ? "覆盖原注册" : ""`。交换分支后：真的覆盖时闭口不提，
+    // 首次注册反而被记成"覆盖原注册" —— 审计里"这次动的是既有条目"这件事被说反，
+    // 事后追"谁什么时候改过这个 agent"会得出错误结论。
+    const layer = h.layer;
+    const audit = inst(h.auditInstances);
+    const details = (): string[] =>
+      audit.append.mock.calls.map((c: unknown[]) => (c[0] as { detail?: string } | undefined)?.detail ?? "");
+
+    (layer.registry.register as Mock).mockReturnValue({ ok: true, replaced: false });
+    (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest());
+    expect(details().some((d) => d.includes("覆盖原注册"))).toBe(false);
+
+    audit.append.mockClear();
+    (layer.registry.register as Mock).mockReturnValue({ ok: true, replaced: true });
+    (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest());
+    expect(details().some((d) => d.includes("覆盖原注册"))).toBe(true);
+  });
+
   it("注册成功但落不了盘时照样报成功，且把『重启后会丢』说进审计", () => {
     h.saveManifest.mockReturnValue({ ok: false, reason: "EACCES" });
     const res = (h.ipcMain as FakeIpcMain).invoke("agents:register", exampleManifest()) as {
