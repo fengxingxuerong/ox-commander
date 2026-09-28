@@ -481,8 +481,25 @@ node scripts/mutation-check.mjs --ops=ternary --mode=site --limit=999
 #   其中 单点杀死 881 · 聚合杀死 0
 ```
 
-至此三元算子 56 处存活清零，`--ops=ternary` 口径达成 site 全杀。是否把它放进
-`verify` 门禁（`mutation:quick` 走 aggregate 口径，需要算子表联动）另起决策。
+### 转正：三元算子进 verify 门禁（2026-09-28，收官当日）
+
+56 处存活清零的当日即转正：`OPERATORS` 里三元分支互换去掉 `extra: true`，
+成为默认算子 —— `mutation:quick`（verify 链，aggregate）、`mutation:site`
+（CI 抽样）、`mutation:audit`（全量）无需任何参数即包含三元位点；
+`--ops=ternary` 保留兼容旧调用。`?? → ||`（nullish）**仍保持评估中**
+（未做过全量评估，贸然进门禁会压上未知存活点）。
+
+转正基线（默认算子、无 `--ops`，与 CI/verify 同口径）：
+
+```
+node scripts/mutation-check.mjs --mode=site --limit=999
+# 总计：杀死 881/881（100%）   耗时 1259.8s（21.0 min）
+#   其中 单点杀死 881 · 聚合杀死 0
+```
+
+同轮同构验证：`mutation:quick` PASS（aggregate，8 算子每算子至少一处被覆盖）、
+`mutation:site` 抽样 341/341 PASS。此后新增三元代码自动进门禁 —— 这正是
+当初加算子的目的。
 
 ## 适用边界（引用本基线时必须一起说）
 

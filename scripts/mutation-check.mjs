@@ -444,15 +444,18 @@ const OPERATORS = [
    * `id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel]`），
    * 而上面 7 个算子**一个都覆盖不到** —— 这些判定此前从未被变异验证过。
    *
-   * 它不是正则能表达的（三元会嵌套），所以走 `swap` 通道：位点由
-   * `findTernarySites` 扫描给出，变异体交换 A/B 两段。默认**不启用**
-   * （见 `--ops=`），先评估杀伤面与存活量再决定是否进门禁。
-   */
-  { name: "三元分支互换", swap: true, extra: true, optName: "ternary" },
-  /**
-   * `?? → ||`：两者的差别只在 falsy（`0` / `""` / `false`）上 ——
-   * 而"0 与留空是不是一回事"恰恰是配置类字段最容易搞错的地方
-   * （`executorTimeoutMs` 那类口径讨论就是它）。默认同样不启用。
+    * 它不是正则能表达的（三元会嵌套），所以走 `swap` 通道：位点由
+    * `findTernarySites` 扫描给出，变异体交换 A/B 两段。
+    *
+    * 2026-09-28 评估收官：首次全量评估 56 处存活（875/931），分四批清零后
+    * `--ops=ternary --mode=site --limit=999` 达 **881/881 逐位点全杀**，
+    * 从 `extra`（评估中）转正为默认算子。保留 `--ops=ternary` 兼容旧调用。
+    */
+   { name: "三元分支互换", swap: true },
+   /**
+    * `?? → ||`：两者的差别只在 falsy（`0` / `""` / `false`）上 ——
+    * 而"0 与留空是不是一回事"恰恰是配置类字段最容易搞错的地方
+    * （`executorTimeoutMs` 那类口径讨论就是它）。默认同样不启用。
    */
   { name: "?? → ||", find: /\?\?/g, to: "||", extra: true, optName: "nullish" },
 ];
@@ -1069,9 +1072,10 @@ const BASELINE_VITEST_TEST_TIMEOUT_MS = Number(
 );
 
 /**
- * 默认只启用「基础」算子；`extra: true` 的（三元互换、`?? → ||`）要用
- * `--ops=ternary,nullish` 显式打开 —— 它们是**评估中**的新算子，先量过存活量
- * 才决定是否进 `verify`，避免一次性给门禁压上几十个存活点。
+ * 默认只启用「基础」算子 + 已转正的三元分支互换；`extra: true` 的
+ * `?? → ||` 仍要用 `--ops=nullish` 显式打开 —— 它是**评估中**的新算子，
+ * 先量过存活量才决定是否进 `verify`，避免一次性给门禁压上几十个存活点。
+ * （三元互换 2026-09-28 转正：881/881 逐位点全杀后不再需要 `--ops=ternary`。）
  */
 const opsArg = args.find((a) => a.startsWith("--ops="))?.slice("--ops=".length);
 const enabledExtra = new Set(String(opsArg ?? "").split(",").filter(Boolean));
