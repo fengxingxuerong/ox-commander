@@ -501,6 +501,14 @@ node scripts/mutation-check.mjs --mode=site --limit=999
 `mutation:site` 抽样 341/341 PASS。此后新增三元代码自动进门禁 —— 这正是
 当初加算子的目的。
 
+**转正首夜 CI 就抓到一条新形态**：cli-agent @123/@186 两处 verbatim 条件展开在
+Windows 评估里被真 spawn 行为差异杀死（不进 56 清单）、CI ubuntu 上却存活 ——
+`windowsVerbatimArguments` 是 Windows 专属选项，Node 在 Linux 上直接忽略，
+**平台可杀位点靠单平台评估会漏**。处置与 verifier.ts 同构：条件展开改直接传值
+（spawn 只看真假，`undefined` 与不传同义），位点消灭（23 → 21），不占白名单。
+另注：`--file=` 单文件审计的 `--limit` 默认 4，"4/4" 可能是被截断的假象，
+单文件审计也要带 `--limit=999`。
+
 ## 适用边界（引用本基线时必须一起说）
 
 1. **只在 Windows 上成立**。`path-policy` 的平台判断已做成"平台参数化"

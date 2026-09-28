@@ -120,7 +120,11 @@ export class CliAgentAdapter implements AgentAdapterV2 {
           // 探测即真跑一次二进制：它同样拿不到凭证（dispatch 已如此，probe 曾漏）。
           env: scopedEnv(),
           stdio: "ignore",
-          ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+          // 2026-09-28：原为 `...(plan.windowsVerbatimArguments ? { … : true } : {})`。
+          // spawn 只看真假，`undefined` 与"不传"同义（与 verifier.ts 同构）。
+          // 该选项 Windows 专属：Linux 上 Node 直接忽略，变异只有 Windows 真_spawn
+          // 行为能杀 —— 条件展开曾因此漏过 Windows 评估、在 CI ubuntu 存活。
+          windowsVerbatimArguments: plan.windowsVerbatimArguments,
         });
       } catch {
         resolve(false);
@@ -183,7 +187,8 @@ export class CliAgentAdapter implements AgentAdapterV2 {
         shell: false,
         env,
         stdio: ["ignore", "pipe", "pipe"],
-        ...(plan.windowsVerbatimArguments ? { windowsVerbatimArguments: true } : {}),
+        // 2026-09-28：同 probe() —— 直接传值，位点消灭（Linux 上该选项不可观测）。
+        windowsVerbatimArguments: plan.windowsVerbatimArguments,
       });
     } catch (err) {
       session.push("failed", `[${this.meta.id}] 启动失败：${(err as Error).message}`);
