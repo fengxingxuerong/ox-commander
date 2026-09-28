@@ -425,7 +425,10 @@ export class SensenovaApiAdapter implements AgentAdapter {
       }
     };
     walkStat(rootAbs);
-    statEntries.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
+    // 2026-09-28：rel 严格互异（每个文件在 walkStat 里只产生一条），相等分支
+    // 不可达 —— 收敛成两分支后，三元互换算子只剩「整体反转」一个变异面。
+    // 枚举序 ≠ 字典序时（如 a.txt vs a/x.txt，'.' < '/'）顺序断言仍要守住指纹稳定。
+    statEntries.sort((a, b) => (a.rel < b.rel ? -1 : 1));
     const fingerprint = JSON.stringify(statEntries);
     const cached = this.snapshotCache.get(rootAbs);
     if (cached && cached.fingerprint === fingerprint) return cached.value;

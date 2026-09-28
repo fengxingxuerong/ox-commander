@@ -452,6 +452,27 @@ describe("SensenovaApiAdapter", () => {
     readSpy.mockRestore();
   });
 
+  it("fingerprint sorts entries by rel even when walk order differs (a.txt vs a/)", () => {
+    // @428 排序比较器的看守断言：walkStat 先递归目录 a/ 再遇到文件 a.txt
+    //（readdir 字典序 "a" < "a.txt"），push 序是 [a/x.txt, a.txt]；
+    // 但 rel 字典序 "a.txt" < "a/x.txt"（'.' 0x2E < '/' 0x2F）——
+    // 指纹必须按 rel 字典序，否则同一工作区在枚举顺序不同的机器上指纹漂移、缓存失效。
+    const root = tmpRoot();
+    fs.mkdirSync(path.join(root, "a"));
+    fs.writeFileSync(path.join(root, "a", "x.txt"), "1", "utf8");
+    fs.writeFileSync(path.join(root, "a.txt"), "1", "utf8");
+    const adapter = new SensenovaApiAdapter();
+    const inner = adapter as unknown as {
+      snapshot(p: string): string;
+      snapshotCache: Map<string, { fingerprint: string; value: string }>;
+    };
+    inner.snapshot(root);
+    const fingerprint = inner.snapshotCache.get(path.resolve(root))!.fingerprint;
+    const rels = (JSON.parse(fingerprint) as Array<{ rel: string }>).map((e) => e.rel);
+    // tmpRoot 预置 package.json（p > a，排在最后，不影响反例对的检验）
+    expect(rels).toEqual(["a.txt", "a/x.txt", "package.json"]);
+  });
+
   it("waits out an all-cooling spell and retries instead of failing the task", async () => {
     const root = tmpRoot();
     const good = '{"files":[{"path":"src/ok.js","content":"// fine"}]}';

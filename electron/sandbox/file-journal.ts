@@ -137,7 +137,10 @@ export class FileJournal {
       if (!after.has(rel)) changes.push({ path: rel, op: "delete" });
     }
 
-    changes.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+    // 2026-09-28：path 严格互异（after 的 Map 键与 baseline 剩余键都不重复，
+    // 同一 rel 不会产生两条 change），相等分支不可达 —— 收敛成两分支后，
+    // 三元互换算子只剩「整体反转」一个变异面，由 changed() 的顺序断言看守。
+    changes.sort((a, b) => (a.path < b.path ? -1 : 1));
     this.lastStats = {
       files: after.size,
       create: changes.filter((c) => c.op === "create").length,
