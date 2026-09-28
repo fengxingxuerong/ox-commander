@@ -100,6 +100,27 @@ export function isPathInZone(relPath: string, zone: string): boolean {
   return false;
 }
 
+/**
+ * True when two **zones** can claim the same file — the question batching has
+ * to answer, and it is not the same question `isPathInZone(path, zone)` answers.
+ *
+ * Symmetric by construction: they overlap when either one owns the other's
+ * name. `src` vs `src/util` overlaps (the shallower one owns everything under
+ * it); `src/duration` vs `src/duration.js` overlaps for the reason spelled out
+ * on `isPathInZone`; `""` / `"."` overlap with anything because they claim the
+ * whole tree.
+ *
+ * Case-insensitive on purpose. On Linux `src/Store` and `src/store` are two
+ * directories, and merging them costs one extra serialised round; on Windows
+ * treating them as two costs two agents writing the same file. The two errors
+ * are not symmetric, so this takes the cheap one.
+ */
+export function zonesOverlap(a: string, b: string): boolean {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return isPathInZone(x, y) || isPathInZone(y, x);
+}
+
 /** True when the whole zone directory lies inside the globs. `"."` (project
  * root) only matches an unrestricted glob — a scoped agent may not claim the
  * entire tree. */

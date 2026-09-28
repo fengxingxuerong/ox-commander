@@ -7,6 +7,7 @@ import type {
 } from "../../shared/types";
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
 import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES } from "../../shared/prompts";
+import { zonesOverlap } from "../../shared/glob";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
 import type { CircuitBreaker } from "../sandbox/circuit-breaker";
@@ -353,9 +354,15 @@ export class Scheduler {
     opts?: { preferredAgentId?: string; repairOf?: Map<string, { round: number; errorLogDigest: string }> },
   ): Promise<DispatchOutcome[]> {
     const zones = tasks.map((t) => t.zone);
-    const duplicated = zones.filter((z, i) => zones.indexOf(z) !== i);
-    if (duplicated.length > 0) {
-      throw new Error(`zone conflict inside batch: ${[...new Set(duplicated)].join(", ")}`);
+    // 互斥的是**重叠**，不是同名。原判定只做字符串全等，于是 `src` 与 `src/util`
+    // 可以同批并发写同一个目录 —— 而越权检测看不见它：每一条写入都落在本批某个
+    // zone 之内，`BatchGuard` 会放过去。全等只是重叠的一个特例。
+    for (let i = 0; i < zones.length; i += 1) {
+      for (let j = i + 1; j < zones.length; j += 1) {
+        if (zonesOverlap(zones[i], zones[j])) {
+          throw new Error(`zone conflict inside batch: 「${zones[i]}」与「${zones[j]}」重叠`);
+        }
+      }
     }
 
     const agentPool = await this.planPool(tasks, opts?.preferredAgentId);

@@ -1,4 +1,5 @@
 import type { Task } from "./types";
+import { zonesOverlap } from "./glob";
 
 export class CycleError extends Error {
   constructor() {
@@ -62,8 +63,16 @@ export function skippedDescendants(tasks: Task[], skipped: ReadonlySet<string>):
 
 /**
  * Greedy batching over the topological order: repeatedly start a new batch and
- * fill it with every task whose deps are already done and whose zone is not
- * yet claimed by this batch; zone conflicts defer the task to a later batch.
+ * fill it with every task whose deps are already done and whose zone does not
+ * **overlap** a zone already claimed by this batch; conflicts defer the task to
+ * a later batch.
+ *
+ * Overlap, not string equality (`zonesOverlap`): a batch holding both `src` and
+ * `src/util` would run two agents against the same directory, and out-of-zone
+ * detection could not see the collision — each write lands inside *one* of the
+ * batch's zones, so the guard waves it through. Same-name equality is the
+ * special case this replaced (2026-09-28): it caught `src` vs `src` and let
+ * `src` vs `src/util` through.
  */
 export function planBatches(tasks: Task[]): Task[][] {
   const sorted = topologicalSort(tasks);
@@ -81,15 +90,15 @@ export function planBatches(tasks: Task[]): Task[][] {
   while (progressed) {
     progressed = false;
     const batch: Task[] = [];
-    const zonesInBatch = new Set<string>();
+    const zonesInBatch: string[] = [];
     const doneAtBatchStart = new Set(done);
     for (const t of sorted) {
       if (done.has(t.id)) continue;
       const ready = t.dependencies.every((d) => doneAtBatchStart.has(d));
-      const zoneFree = !zonesInBatch.has(t.zone);
+      const zoneFree = zonesInBatch.every((claimed) => !zonesOverlap(claimed, t.zone));
       if (ready && zoneFree) {
         batch.push(t);
-        zonesInBatch.add(t.zone);
+        zonesInBatch.push(t.zone);
         done.add(t.id);
         progressed = true;
       }

@@ -126,3 +126,71 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
     expect(fs.readFileSync(file, "utf8")).toBe("original\n");
   });
 });
+
+/**
+ * 还原写盘的重试路径。
+ *
+ * 2026-09-28 连续两次实测：`finally` 里的 `fs.writeFileSync` 抛
+ * `UNKNOWN (errno -4094)`（Windows 上杀软/索引器短暂占住刚被改写的文件），
+ * 进程就带着**活体变异体**死了 —— 下一轮门禁于是红在无关目标上。
+ * 现在还原走 `restoreSource`：重试、不抛、尽力后返回 false 并点名。
+ *
+ * 手法与 `scripts/masker-selftest.mjs` 一致：按锚点从门禁脚本里抠出函数体，
+ * 注进新作用域直接调用（不留第二份实现）。故障用"父目录不存在"制造 ——
+ * 各平台都确定性抛 ENOENT；没用 chmod 只读，因为 root 身份下它拦不住写。
+ */
+describe("restoreSource · 还原写盘不能抛在 finally 里", () => {
+  const SRC = fs.readFileSync(SCRIPT, "utf8");
+  const START_ANCHOR = "/** 同步等待（毫秒）";
+  const END_ANCHOR = "/** 一个目标跑完";
+  const start = SRC.indexOf(START_ANCHOR);
+  const end = SRC.indexOf(END_ANCHOR);
+
+  /** 抠出 sleepSync + restoreSource，注入 fs/path/ROOT/relFromRoot。 */
+  function loadRestore(): (file: string, original: string) => boolean {
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error(
+        `无法在 mutation-check.mjs 里定位 restoreSource（锚点 ${START_ANCHOR} / ${END_ANCHOR} 被改名或移动了？）`,
+      );
+    }
+    const helpers = SRC.slice(start, end);
+    const factory = new Function("fs", "path", "relFromRoot", `${helpers}\nreturn { restoreSource };`);
+    const { restoreSource } = factory(fs, path, (p: string) => path.relative(ROOT, p));
+    return restoreSource as (file: string, original: string) => boolean;
+  }
+
+  it("returns true and really puts the original back when the file is writable", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ox-restore-"));
+    scratch.push(dir);
+    const file = path.join(dir, "target.ts");
+    fs.writeFileSync(file, "MUTANT\n", "utf8");
+
+    expect(loadRestore()(file, "ORIGINAL\n")).toBe(true);
+    expect(fs.readFileSync(file, "utf8")).toBe("ORIGINAL\n");
+  });
+
+  it("gives up out-loud instead of throwing when the write keeps failing", () => {
+    // 父目录不存在 → writeFileSync 每次必抛（ENOENT），等价于"句柄一直不放"。
+    const base = fs.mkdtempSync(path.join(os.tmpdir(), "ox-restore-gone-"));
+    scratch.push(base);
+    const missing = path.join(base, "nope", "target.ts");
+
+    const messages: string[] = [];
+    const realError = console.error;
+    console.error = (m?: unknown) => void messages.push(String(m));
+    let threw: unknown = null;
+    let returned: boolean | undefined;
+    try {
+      returned = loadRestore()(missing, "ORIGINAL\n");
+    } catch (e) {
+      threw = e;
+    } finally {
+      console.error = realError;
+    }
+
+    // 抛异常就是原缺陷本身：它一抛，进程带着变异体死掉，台账也来不及说清。
+    expect(threw).toBeNull();
+    expect(returned).toBe(false);
+    expect(messages.some((m) => m.includes("反复无法还原") && m.includes("自愈"))).toBe(true);
+  });
+});

@@ -8,6 +8,35 @@
 
 ### 修复
 
+- **zone 互斥的判据从「同名」改成「重叠」**（`shared/graph.ts` 的分批 + `electron/engine/scheduler.ts`
+  的批次不变量断言）。两处此前都只做字符串全等，于是 `src` 与 `src/util` 被当成互不相干而**同批并发**：
+  两个智能体可以写同一个文件，而越权检测对这一形状是瞎的 —— 每条写入都落在本批**某个** zone 之内，
+  `BatchGuard` 会放行。zone 是模型在规划期输出的（`shared/prompts.ts:69` 要 "a concrete directory this
+  task owns"），所以不是理论风险：规划器给出 `src` + `src/store` 这种父子划分就会撞上，
+  而旧用例只测了同名冲突（`scheduler.test.ts` 的 `same`/`same`）。
+  新增 `shared/glob.ts` 的 `zonesOverlap(a, b)`：对称地问「两者会不会抢同一个文件」，
+  即 `isPathInZone(a,b) || isPathInZone(b,a)` —— 复用仲裁门的宽松语义，所以
+  `src/duration` 与 `src/duration.js` 也算同地盘。比较**刻意大小写不敏感**：Linux 上把
+  `src/Store` 与 `src/store` 并成一个只是多串行一轮，Windows 上把它们当两个的代价是同批写同一文件；
+  两种误判不对称，所以取便宜的那个。
+  代价是并行度可能下降，这是有意的：`planBatches` 只顺延冲突的那个任务，同批其余照旧并行
+  （`defers only the conflicting task` 一条钉住），另有一条反向守卫防止判据被写成"共享任何前缀都算重叠"。
+  反向验证：把 `zonesOverlap` 退回旧的全等语义 → **11 条用例红**，横跨 glob / graph / scheduler 三层，
+  而旧的"同名冲突"用例仍绿 —— 那正是原缺陷能活到今天的原因。
+  site 口径逐位点：`shared/glob.ts` 24/24、`shared/graph.ts` 8/8、`electron/engine/scheduler.ts` 18/18 全杀。
+  顺带把 `EQUIVALENT_SITES` 里 scheduler.ts 的两条行号锚点校回 345 → 346（同文件多了一行 import，
+  校回时确认那两层防御原样仍在）。
+- **还原写盘加了重试：写不进去时不再抛在 `finally` 里**。本机 2026-09-28 连续两次实测
+  `fs.writeFileSync` 抛 `UNKNOWN (errno -4094)`（Windows 上杀软 / 索引器短暂占住刚被改写的文件），
+  而那句正待在 `finally` 里 —— 它一抛，进程就带着**活体变异体**死掉。两次各砸在链条的不同段：
+  第一次 `mutation:quick` 出裸栈，第二次 `mutation:touched` 报「`shared/glob.ts` 与 `shared/graph.ts`
+  两个目标未通过」，而 graph 那一轮其实一行审计都没跑 —— 它只是启动时把 glob 的残留还原了。
+  现在 `restoreSource()` 重试 4 次（200/400/600/800ms）、写后校验内容、尽力后返回 false 并点名，
+  由 `runTarget` 末尾既有的「未还原」判定收口成 exit 2，台账留给第 1 段自愈；`restoreAll()` 同样走它。
+  证明在 `src/mutation-residue.test.ts` 的 `restoreSource` 一节：按锚点从门禁脚本里抠出函数体
+  （手法同 `masker-selftest.mjs`，不留第二份实现），故障用「父目录不存在」制造 —— 各平台确定性 ENOENT；
+  没用 chmod 只读，因为 root 身份下它拦不住写。承重性验过：把 catch 改成重新抛出（等于回到旧行为）
+  → 该用例红。
 - **强杀自愈挪到了它该在的位置：`verify` 第 1 段 `check:residue`**。下一条的方向对、位置错 ——
   `recoverPendingRecord()` 只在 `mutation:quick` 里跑，而 `npm test` 排在它**前面**。2026-09-28 实测：
   工作区留着一处 `=== → !==` 残留时，编排器的升级判定空转，vitest 单进程堆涨到 4.6GB 后

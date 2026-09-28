@@ -222,6 +222,16 @@ describe("Scheduler.runBatch", () => {
     ).rejects.toThrow(/zone conflict/);
   });
 
+  it("throws on overlapping zones, not just identical ones", async () => {
+    // runBatch 是最后一道不变量断言：调用方（planBatches）现在按 zonesOverlap 分批，
+    // 但如果有人手工塞进 `src` + `src/util`，这里必须拒绝，而不是让两个智能体
+    // 同批写同一个目录 —— 越权检测对这种形状是瞎的。
+    const sched = new Scheduler([adapterWith("a1", true)]);
+    await expect(
+      sched.runBatch([task("t1", "src"), task("t2", "src/util/deep")], "."),
+    ).rejects.toThrow(/zone conflict/);
+  });
+
   it("marks failed runs with log digest", async () => {
     const sched = new Scheduler([adapterWith("a1", false)]);
     const outcomes = await sched.runBatch([task("t1", "z")], ".");

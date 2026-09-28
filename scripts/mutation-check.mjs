@@ -727,9 +727,12 @@ const EQUIVALENT_SITES = [
    * 分支刻意保留：Scheduler 的 adapters 与 registry 在 API 上是两个独立入参，
    * 不强制同源；这行是装配方式未来变化时的 fail-safe —— 位点重回分母即提示
    * 重新核对同源假设（与 sensenova-api 快照"二次防线"同一处置逻辑）。
+   *
+   * 行号 2026-09-28 校回 345 → 346：同文件为 zone 重叠判定新增一条 import（`zonesOverlap`），
+   * 整段下移一行。校回时确认过两层防御原样仍在（`!d` 与 `||` 的短路边仍不可达）。
    */
-  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 345 },
-  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 345 },
+  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 346 },
+  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 346 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
@@ -1120,6 +1123,41 @@ function armPendingRecord(filePath, original) {
   }
 }
 
+/** 同步等待（毫秒）。还原路径都在同步流程里，不能用 await。 */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * 把原文写回源文件，**带重试**。
+ *
+ * 为什么不能直接 `fs.writeFileSync`：Windows 上杀软 / 搜索索引会短暂占住刚被改写文件的
+ * 句柄，实测 2026-09-28 两次 `UNKNOWN (errno -4094)`，打在不同文件上。而这个调用点在
+ * `finally` 里 —— 它一抛，进程就带着**活体变异体**死掉，下一轮门禁的症状会变成
+ * 「无关目标红」或干脆 vitest OOM，看着像代码坏了。
+ *
+ * 返回 false 表示尽力了：调用方（`runTarget` 末尾的写后校验）会把这一条判成严重并退出 2，
+ * 台账留在原地，下一次启动由 `recoverPendingRecord()` 还原。
+ */
+function restoreSource(filePath, original) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      fs.writeFileSync(filePath, original, "utf8");
+      if (fs.readFileSync(filePath, "utf8") === original) return true;
+      lastErr = new Error("写后校验不一致");
+    } catch (e) {
+      lastErr = e;
+    }
+    if (attempt < 5) sleepSync(200 * attempt);
+  }
+  console.error(
+    `严重：反复无法还原 ${relFromRoot(filePath)}（${lastErr?.message ?? lastErr}）—— ` +
+      "台账已保留，下一次启动会自愈；现在先重跑本命令，或手动 git checkout 该文件。",
+  );
+  return false;
+}
+
 /** 一个目标跑完、源码已确认还原后调用。 */
 function clearPendingRecord() {
   try {
@@ -1204,11 +1242,7 @@ function restoreAll() {
   if (restoring) return;
   restoring = true;
   for (const [file, original] of pending) {
-    try {
-      fs.writeFileSync(file, original, "utf8");
-    } catch {
-      console.error(`无法恢复 ${file} —— 请手动执行 git checkout -- ${path.relative(ROOT, file)}`);
-    }
+    restoreSource(file, original);
   }
   pending.clear();
 }
@@ -1417,7 +1451,7 @@ for (const target of targets) {
           `+ ${m.line} | ${(m.source.split("\n")[idx] ?? "").trim()}`;
       }
     } finally {
-      fs.writeFileSync(filePath, original, "utf8");
+      restoreSource(filePath, original);
     }
     ran.push({ op: m.op, killed, siteCount: m.siteCount, line: m.line, diag });
     process.stdout.write(killed ? "." : "X");

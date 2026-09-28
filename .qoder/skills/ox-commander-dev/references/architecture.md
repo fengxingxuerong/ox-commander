@@ -85,10 +85,14 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
   即 zone 约束**完全靠事后 `BatchGuard`**。理由是**结构性的**而不是"等回滚"（旧注释那句 "until rollback
   lands (P4)" 已按实际判据改掉）：写入门用严格前缀，若在这里认 zone，模型按约定写的
   `src/duration.js`（zone 为 `src/duration`）会在写入前就被拒 —— 那才是回归。
-- **两处 zone 判据故意不同**：写入门 `zoneAllows`（`:219-228`）用严格前缀 `rel===z || rel.startsWith(z+"/")`；
+- **三处 zone 判据故意不同**：写入门 `zoneAllows`（`:219-228`）用严格前缀 `rel===z || rel.startsWith(z+"/")`；
   仲裁门 `isPathInZone`（`shared/glob.ts:91-101`）**额外**认 `src/duration.js` 属于 zone `src/duration`
-  （`glob.ts:85-89` 注释给了理由：否则模型写同名文件会被回滚、拖垮整批）。
-  → **写入门比仲裁门严是设计**，不是要修的不一致。`zoneMode: strict` 下 `"."` 只拥有根级文件，`legacy` 下 `"."` 与 `""` 同义。
+  （`glob.ts:85-89` 注释给了理由：否则模型写同名文件会被回滚、拖垮整批）；
+  分批次用 `zonesOverlap`（`glob.ts` 2026-09-28 加），即**对称**地问「两个 zone 会不会抢同一个文件」
+  = `isPathInZone(a,b) || isPathInZone(b,a)`，并刻意大小写不敏感。
+  → **写入门比仲裁门严是设计**，不是要修的不一致；而分批必须比两者都宽（宁可多串行），
+  因为同批父子 zone 会让越权检测变瞎：每条写入都落在本批某个 zone 之内，`BatchGuard` 全放行。
+  `zoneMode: strict` 下 `"."` 只拥有根级文件，`legacy` 下 `"."` 与 `""` 同义。
 
 `CommandPolicy`（`electron/sandbox/command-policy.ts:177-216`）实际顺序：空 → `denied program` → **不在白名单** →
 元字符（命令本身 + 每个 arg）→ eval flag → git 子命令。deny 先于白名单查（`:184-189`）。

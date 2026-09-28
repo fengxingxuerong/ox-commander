@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compileGlob, isPathInZone, isUnrestrictedGlob, matchesAnyGlob, zoneWithinGlobs } from "../shared/glob";
+import { compileGlob, isPathInZone, isUnrestrictedGlob, matchesAnyGlob, zoneWithinGlobs, zonesOverlap } from "../shared/glob";
 
 describe("compileGlob", () => {
   it("matches everything beneath a directory pattern", () => {
@@ -118,6 +118,53 @@ describe("isPathInZone", () => {
   it("does not let a shorter zone swallow a longer directory name", () => {
     expect(isPathInZone("srcfoo/a.js", "src")).toBe(false);
     expect(isPathInZone("src/a.js", "src")).toBe(true);
+  });
+});
+
+describe("zonesOverlap · 两个 zone 会不会抢同一个文件", () => {
+  // 分批判据用的就是它。2026-09-28 之前分批只做字符串全等，于是 `src` 与 `src/util`
+  // 被当成互不相干、同批并发跑 —— 而越权检测看不见：每条写入都落在本批某个 zone 之内。
+  it("the shallower zone swallows the deeper one (either argument order)", () => {
+    expect(zonesOverlap("src", "src/util")).toBe(true);
+    expect(zonesOverlap("src/util", "src")).toBe(true);
+  });
+
+  it("identical zones overlap", () => {
+    expect(zonesOverlap("src/store", "src/store")).toBe(true);
+  });
+
+  it("sibling directories do not overlap — batching must stay parallel", () => {
+    // 这条是"别把它写成什么都算重叠"的守卫：过度保守会让每个批次只剩一个任务。
+    expect(zonesOverlap("src/a", "src/b")).toBe(false);
+    expect(zonesOverlap("src/util", "src/store")).toBe(false);
+    expect(zonesOverlap("srcfoo", "src")).toBe(false);
+  });
+
+  it("a root zone overlaps with everything", () => {
+    // 规划提示词明令禁止用 "."/"" 当 zone，正是因为一旦有它，本批谁都不能并行。
+    expect(zonesOverlap(".", "src/util")).toBe(true);
+    expect(zonesOverlap("", "src/util")).toBe(true);
+    expect(zonesOverlap("src/util", ".")).toBe(true);
+  });
+
+  it("module-shaped zones overlap their own module file", () => {
+    expect(zonesOverlap("src/duration", "src/duration.js")).toBe(true);
+    // 但划词兄弟不是同一个地盘（连字符不是点）。
+    expect(zonesOverlap("src/duration", "src/duration-extra")).toBe(false);
+  });
+
+  it("compares case-insensitively, on purpose", () => {
+    // Linux 上 `src/Store` 与 `src/store` 是两个目录，多串行一轮只是慢；
+    // Windows 上把它们当两个，代价是两个智能体同批写同一个文件。
+    expect(zonesOverlap("src/Store", "src/store")).toBe(true);
+    expect(zonesOverlap("SRC/store", "src/STORE")).toBe(true);
+  });
+
+  it("normalizes separators and trailing slashes before comparing", () => {
+    expect(zonesOverlap("src\\util", "src/util")).toBe(true);
+    expect(zonesOverlap("src/util/", "src/util")).toBe(true);
+    expect(zonesOverlap("./src/util", "src/util")).toBe(true);
+    expect(zonesOverlap("src\\deep\\nest", "src/deep")).toBe(true);
   });
 });
 
