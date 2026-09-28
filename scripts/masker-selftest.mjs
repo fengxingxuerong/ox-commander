@@ -32,7 +32,7 @@ if (start < 0 || end < 0) {
   process.exit(2);
 }
 const helpers = scriptSrc.slice(start, end);
-// eslint-disable-next-line no-new-func
+// 把抠出来的函数体装进新作用域（不是 eval 用户输入：helpers 来自本仓库的固定区间）。
 const { maskNonCode } = new Function(`${helpers}\nreturn { maskNonCode };`)();
 
 const OPERATORS = [

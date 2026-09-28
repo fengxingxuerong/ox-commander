@@ -1,11 +1,12 @@
-# `npm run verify` 的 19 步逐条机制
+# `npm run verify` 的逐段机制（20 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、19 段、1005 用例（996 passed + 9 skipped）。
-注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见第 8 步）：同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、20 段、1151 用例（1142 passed + 9 skipped，2026-09-28）。
+注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见第 8 步）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
 README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
 
 | # | 步骤 | 实际执行 | 失败语义 |
 | --- | --- | --- | --- |
+| 0 | `check:residue` | `mutation-check.mjs --recover-only`：只跑「强杀自愈」这一件事，不跑变异 | 有活体变异残留 → 还原 + **exit 2**（逼人重跑，不给脏 PASS）；台账坏 / 备份缺失 → **exit 2**，因为此时**无法证明**工作区干净；干净 → exit 0 |
 | 1 | `typecheck` | `tsc -p <proj> --noEmit --incremental false` ×4 套（renderer / electron / headless / vite 配置） | 编译错即红 |
 
 > **为什么不是 `tsc -b`**：增量构建缓存会**跳过它认为没变的文件**并给绿。2026-09-24 实测：
@@ -28,7 +29,31 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 15-18 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
 | 19 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
 
-**13-18 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
+**`smoke:artifact` 与四个 `smoke:*` IT 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
+
+> **本表的 `#` 是脚本序号，不等于 `verify` 串里的位置**：残留自愈记作 `#0`（它跑在最前），所以
+> `#1` 及其后的每一项在串里的位置都比表号大 1。引用某一段时**优先用 npm script 名**，别用序号 ——
+> 2026-09-28 加第 0 段之前，本手册与 README 各有三处序号已经漂过。
+
+## 0. `check:residue`：为什么自愈必须排在测试前面
+
+`mutation-check.mjs` 会**临时改写源文件**再跑测试。Windows 上进程被外部终止（IDE 关进程树 / CI 超时 /
+任务管理器，都是 `TerminateProcess`）时 SIGINT/SIGTERM 处理器**一个都不执行**，变异体就永久留在工作区。
+落盘备份 + 启动自愈（`armPendingRecord` / `recoverPendingRecord`，台账在 `scripts/.mutation-pending/`）
+是第四层兜底。
+
+**关键顺序事实**（2026-09-28 的账单）：这套自愈此前只在 `mutation:quick`（旧第 10 段）里运行，而
+`npm test` 在它**前面**。残留的 `=== → !==` 会让编排器的升级判定空转，症状是 vitest 单进程堆涨到
+~4.6GB 后 `Reached heap limit` OOM，且父进程不退出（挂住，不是失败）。排查成本 40 分钟，处置成本 30 秒。
+所以 `--recover-only` 被提成独立一段，放在链首。
+
+三种结论各自被 `src/mutation-residue.test.ts` 钉住（7 例，摘掉还原动作 / 摘掉 `unknown` 守卫都验过会变红）：
+干净 → 0；从变异体还原 → 2；台账不可用（JSON 坏 / `.orig` 缺失）→ 2 且**不许**打印"工作区干净"。
+
+维护规则：
+- 别再往链里加"第二个残留实现"——`recoverPendingRecord()` 是唯一的还原路径，`--recover-only` 只是它的门面。
+- 手工清残留**不要**用 `git checkout -- <文件>`：那会把同一文件里本轮的真实改动一起删掉。跑 `npm run check:residue`。
+- 全量 `mutation:audit`（15-28 min）**别放后台跑**（后台运行有 ~10 min 上限，会把跑到一半的运行砸成残留）。按 `--file=` 分档。
 
 ## 1. typecheck：三套互不相干的工程
 
@@ -48,8 +73,15 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 
 ## 2. lint 的覆盖面
 
-`eslint.config.mjs:16-23` 忽略 `docs/**` 与 `scripts/**` → **脚本层没有 lint，只有第 4 步的 `node --check` 一层保护**。
-`no-undef` 与 `no-explicit-any` 关掉；未用变量允许 `_` 前缀；`react-hooks` 只作用在 `src/**/*.tsx`。
+`eslint.config.mjs` 只忽略 `docs/**`。**`scripts/**` 自 2026-09-28 起也进 lint**（`.mjs` 按 ESM、`.cjs` 与
+`scripts/acceptance/*.js` 按 CommonJS，node 全局名手写在 `SCRIPT_GLOBALS` 里，不引未声明的 `globals` 包）。
+此前脚本层只有第 4 步的 `node --check` —— 那是语法，不是语义，而 `tsc` 一行脚本都不看。
+落地即抓到 4 处真死代码/未用变量（`check-unwired.mjs` 里一个从未使用的 `TYPE_RE`、两个未用 import、
+网关 `/result` 里算了不用的 `agentId`）与 1 处缺断言（`admission-gateway-it.mjs` 把合规提交的响应
+接进 `result2` 却从未检查它的状态码）。
+`no-console` 与 `require-await` 刻意不开：脚本的职责就是打印与按退出码判定，且有一批"要形状不要 await"的
+async 门面（`text()` / `json()` / `chat()`）。
+`no-undef` 与 `no-explicit-any` 在 TS 侧关掉；未用变量允许 `_` 前缀；`react-hooks` 只作用在 `src/**/*.tsx`。
 
 **`shared/**/*.ts` 有一条 `no-restricted-imports` 红线**（2026-09-25 立）：禁 `node:*` 与裸 node 内建、
 禁 `electron|react|react-dom|zustand`、禁 `../electron/**|../headless/**|../src/**`。
@@ -180,7 +212,7 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 **第 11 段，共 19 段**；
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 `check:residue` 之后的**第 12 段，共 20 段**；
   CHANGELOG 里"第 19 步"说的是"新加的那一段"，不是位置）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：

@@ -33,17 +33,17 @@ repair 循环 `while (round <= maxRounds + extraRounds)`（`:357`），默认 3 
    ——README「按天轮转」的说法不准。
 3. 快照备份 `<userData>/snapshots/<runId>`（`electron/sandbox/snapshot-store.ts:93-126`）——内容备份，**不用 git stash**。
 
-## 分层红线：现状是"约定 + 人工盯"
+## 分层红线：`shared/` 有 lint 强制，`headless/` 没有
 
 | 事实 | 证据 |
 | --- | --- |
 | `shared/` 现在确实零 node import（唯一命中是 prompt 文本里的字符串） | `shared/prompts.ts:20` |
-| 但没有机制强制：`tsconfig.json` 未设 `types: []`，`@types/node` 全局自动引入 → `shared/` 里 `import "node:fs"` 连 renderer 工程都能过 typecheck | `tsconfig.json` |
-| eslint 无 `no-restricted-imports` / 无任何 import 边界规则；无 `paths` / `baseUrl` 别名 | `eslint.config.mjs` |
-| 唯一真实保护是两套后端 tsconfig 的 `lib: ES2022`（无 DOM），所以碰 DOM 会红、碰 node 不会 | `tsconfig.electron.json` / `tsconfig.headless.json` |
-| 跨层依赖已存在：`headless/protocol.ts:16` 让"纯协议层"依赖 `electron/agents/manifest-schema`；同文件头注释自称 "pure: no fs, no process" 却在 `:14` import `node:path`、`:364` 读 `process.env.TMPDIR/TEMP` | 两处 |
+| 2026-09-25 起这条有机制强制：`no-restricted-imports` 禁 node 内建、禁宿主层、禁反向依赖上层，且**落地时零违规**（纯增量，只拦未来） | `eslint.config.mjs` 的 `shared/**/*.ts` 块 |
+| typecheck 一侧仍拦不住 node API：`tsconfig.json` 未设 `types: []`，`@types/node` 全局自动引入 —— 所以红线的承重件是 lint，不是 tsc | `tsconfig.json` |
+| 唯一真实的 **DOM** 保护是两套后端 tsconfig 的 `lib: ES2022` | `tsconfig.electron.json` / `tsconfig.headless.json` |
+| 跨层依赖已存在且**刻意未拦**：`headless/protocol.ts:16` 让"纯协议层"依赖 `electron/agents/manifest-schema`；同文件头注释自称 "pure: no fs, no process" 却在 `:14` import `node:path`、`:364` 读 `process.env.TMPDIR/TEMP`。`headless/**` 没有同类规则，因为 `run-spec.ts` 经 `electron/platform` 已把 `electron/sandbox` 拉进来 | 两处 |
 
-推论：**把纯逻辑放进 `shared/` 靠自觉**，评审时要自己 grep `node:` / `process.` / `require(`。
+推论：**`shared/` 违规会当场红，`headless/` 的跨层要靠人盯**；评审时仍然自己 grep `node:` / `process.` / `require(`。
 
 ## 三类适配器契约
 
@@ -172,4 +172,4 @@ NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 /
 | README「审计按天轮转」 | 按大小 2 MiB | `electron/audit-log.ts:64,104` |
 | `electron/agents/scoped-env.ts` 头注释「a denylist that wins over the allowlist」 | **别读成缺陷**：这里的 allowlist 指规则 2 的 `isRequired`（进程基础变量），代码确实让 denylist 压过它；而规则 1 的显式 `grants` 优先于 denylist（`:126-129` 内联注释言明，否则 `allowProviders` 永远放不了行）。两层都叫"allowlist"是措辞陷阱，改之前先分清是哪一层 | `electron/agents/scoped-env.ts:11-17` vs `:121-135` |
 | ~~`circuit-breaker.ts` 注释「`retryable: false` outcomes close nothing」~~ | **已修（改的是注释不是行为）**：`record(id, ok)` 只收 `ok: boolean`、确实不看 `retryable`，认证失败照样计入连续失败并可开熔断 —— 现在注释写的就是这个真实语义（把凭证坏掉的智能体同样关闸，避免每个任务再烧一次配额） | `electron/sandbox/circuit-breaker.ts` 的 `record` |
-| README 旧版「15 步 / 930 用例」 | 19 段 / 1005 用例（996 passed + 9 skipped，2026-09-25 本机 win32 实测；同日的 1020/1033 被"测试文件互相 import"虚报了 28 条，见 gates 第 8 步） | `package.json:36` |
+| README 旧版「15 步 / 930 用例」 | **20 段 / 1151 用例**（1142 passed + 9 skipped，2026-09-28 本机 win32 实测；历史上 09-25 是 19 段 / 1005，同日的 1020/1033 被"测试文件互相 import"虚报了 28 条） | `package.json` 的 `verify` 串 |

@@ -107,18 +107,22 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-25 本机实测 EXIT 0，19 步）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-28 本机实测 EXIT 0，20 段）：
 
 ```
-typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
-→ lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/ 与 scripts/；
+check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
+  它让修复循环空转，症状是第 9 段 vitest 堆涨到 4.6GB 后 OOM 且不退出，完全不像"工作区脏"。
+  有残留就还原并退出 2 逼人重跑；台账坏掉也退出 2，因为它无法证明工作区干净）
+→ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
+→ lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/；
+  `scripts/**` 自 2026-09-28 起也进 lint —— 那 5.7k 行是门禁判据本身，而 tsc 一行都不看；
   `shared/**` 另有分层红线：禁 node API、禁依赖宿主层与上层）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（984 用例；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（2026-09-28 实测 1142 通过 + 9 跳过；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -134,7 +138,7 @@ typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 162/162（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **603/603（100%）**，14.3 min（2026-09-25 本机 win32 实测） |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **701/701（100%）**，28.3 min（2026-09-28 本机 win32 全量，51 个目标） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
@@ -146,7 +150,8 @@ CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutat
 页为准，别拿 README 当 CI 状态。
 
 > 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
-> （含 577 → 594 → 590 → 603 四轮快照、白名单行号漂移与平台相关等价的发现-处置记录）。
+> （含 577 → 594 → 590 → 603 → 695 → 701 六轮快照、白名单行号漂移与平台相关等价的发现-处置记录，
+> 以及三元算子的首次全量评估 875/931）。
 
 真实链路冒烟（需密钥、消耗配额，不进门禁）：
 
@@ -167,7 +172,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 | `electron/engine/` | 编排器（六阶段 + repair loop）、调度器（批内 zone 互斥 + 并发闸）、能力路由、验证器、仲裁 |
 | `electron/agents/` | 统一适配层：`local-llm`（SenseNova 执行器）/ `cli`（Codex 等）/ `http-bridge`（WorkBuddy 等）+ 注册表 + manifest 校验 |
 | `electron/sandbox/` | PathPolicy / CommandPolicy / TimeoutGate / CircuitBreaker / FileJournal / SnapshotStore / spawn 规划 |
-| `shared/` | 双端共享大脑层：LLM 客户端与 failover、契约、glob、routing、prompt、schema（纯逻辑，不碰 node/DOM API —— 目前只是约定，无 lint/tsconfig 机制强制） |
+| `shared/` | 双端共享大脑层：LLM 客户端与 failover、契约、glob、routing、prompt、schema（纯逻辑，不碰 node/DOM API —— 这条由 `eslint.config.mjs` 的 `no-restricted-imports` 机制强制，不是约定） |
 | `headless/` | JSONL 协议三层：protocol（契约）/ run-spec（执行）/ headless-main（胶水） |
 | `agents.d/` | 声明式智能体接入文档与示例（运行时读 `%APPDATA%\OxCommander\agents.d\`） |
 
@@ -205,7 +210,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 ## 文档索引
 
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
-  门禁 19 步逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
+  门禁逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
   （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
 - [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
   以及逐条带证据的**未修**缺陷清单

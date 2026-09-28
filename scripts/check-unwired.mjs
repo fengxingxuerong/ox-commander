@@ -75,7 +75,8 @@ function walk(dir, out = []) {
 const files = SCAN_DIRS.flatMap((d) => walk(path.join(ROOT, d)));
 const rel = (p) => path.relative(ROOT, p).replace(/\\/g, "/");
 
-const TYPE_RE = /^export\s+(?:declare\s+)?(?:interface|type)\s+([A-Za-z_$][\w$]*)/gm;
+// 只扫「值导出」：type/interface 是编译期产物，运行时没有可调用点，
+// 按"零调用即死码"判它们会把每一个契约类型都判红。
 const VALUE_RE =
   /^export\s+(?:async\s+)?(?:function|const|class|let|var|enum)\s+([A-Za-z_$][\w$]*)/gm;
 const BRACE_RE = /^export\s*\{([^}]*)\}/gm;

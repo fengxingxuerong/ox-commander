@@ -39,6 +39,10 @@
  *   node scripts/mutation-check.mjs --list       # 只列变异（含位点数），不改文件不跑测试
  *   node scripts/mutation-check.mjs --mode=site  # **逐位点**变异（默认 aggregate，见下）
  *   node scripts/mutation-check.mjs --audit      # = --mode=site --limit=999，逐点全量
+ *   node scripts/mutation-check.mjs --recover-only
+ *       # 只做「启动自愈」这一件事：有残留就还原并退出 2，干净就退出 0，不跑变异。
+ *         verify 把它放在 `npm test` **之前**——残留会让修复循环空转，症状是 vitest
+ *         堆涨到 4GB 后 OOM 并挂住（2026-09-28 实测），而不是任何一条可读的失败。
  *
  * ## ⚠️ 两种口径：aggregate（默认）与 site
  *
@@ -1002,6 +1006,7 @@ const onlyFile = args.find((a) => a.startsWith("--file="))?.slice(7);
 const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4");
 const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
 const listOnly = args.includes("--list");
+const recoverOnly = args.includes("--recover-only");
 
 /**
  * 变异口径（见文件头「两种口径」）：
@@ -1129,10 +1134,19 @@ function clearPendingRecord() {
  *
  * 退出而不是继续跑，是刻意的：源码刚被从未知状态改回来，此时得出的
  * 「杀死/存活」结论可信度存疑，让人重跑一次比给一个脏的 PASS 强。
+ *
+ * 返回值给 `--recover-only` 用，由它决定「能说工作区干净」的那几种情形：
+ *   - `clean`            —— 根本没有台账。
+ *   - `already-restored` —— 有台账，但源文件内容与备份一致（上次其实还原成功了，
+ *                           只是没来得及清台账）。
+ *   - `unknown`          —— 有台账却读不出可用记录（JSON 坏 / 备份文件没了）。
+ *                           这时**不能**声称干净：目标文件可能仍是变异体，而我们
+ *                           已经没有还原它的手段。让人去 `git status` 自查。
+ *   - `restored`         —— 刚从变异体还原回来（内部已 exit 2，不会真的返回）。
  */
 function recoverPendingRecord() {
-  if (!fs.existsSync(PENDING_INDEX)) return;
-  let rec = null;
+  if (!fs.existsSync(PENDING_INDEX)) return "clean";
+  let rec;
   try {
     rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));
   } catch {
@@ -1140,13 +1154,17 @@ function recoverPendingRecord() {
   }
   if (!rec?.file || !rec.backup || !fs.existsSync(rec.backup)) {
     clearPendingRecord();
-    return;
+    console.error(
+      "警告：变异备份台账存在但不可用（JSON 损坏或备份文件缺失）—— 已清掉台账，" +
+        "但无法确认工作区是否还留着变异体。请执行 `git status` 与 `git diff` 自查。",
+    );
+    return "unknown";
   }
   const original = fs.readFileSync(rec.backup, "utf8");
   const current = fs.existsSync(rec.file) ? fs.readFileSync(rec.file, "utf8") : null;
   if (current === original) {
     clearPendingRecord();
-    return;
+    return "already-restored";
   }
   try {
     fs.writeFileSync(rec.file, original, "utf8");
@@ -1163,9 +1181,24 @@ function recoverPendingRecord() {
     ].join("\n"),
   );
   process.exit(2);
+  return "restored";
 }
 
-recoverPendingRecord();
+const recovery = recoverPendingRecord();
+
+if (recoverOnly) {
+  // 只做卫生检查。`unknown` 不能当成干净 —— 那句「工作区干净」必须是可证的。
+  if (recovery === "unknown") {
+    console.error("台账不可用，无法证明工作区没有残留变异体 —— 请按上面提示自查后重跑。");
+    process.exit(2);
+  }
+  console.log(
+    recovery === "already-restored"
+      ? "无变异残留：源文件与备份一致，台账已清理。"
+      : "无变异残留：工作区干净。",
+  );
+  process.exit(0);
+}
 
 function restoreAll() {
   if (restoring) return;

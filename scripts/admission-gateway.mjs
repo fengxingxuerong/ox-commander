@@ -164,7 +164,7 @@ const server = http.createServer(async (req, res) => {
     // ── 智能体侧：交结果 ──
     if (req.method === "POST" && url.pathname === "/result") {
       const body = JSON.parse((await readBody(req)) || "{}");
-      const agentId = url.searchParams.get("agent") ?? body.agent ?? "";
+      // 归属靠 runId 认（全局唯一），`/result` 的契约里本来就没有 agent 参数。
       const run = [...agents.values()].flatMap((a) => [...a.runs.values()]).find((r) => r.id === body.runId);
       if (!run) return json(res, 404, { error: "unknown run" });
       clearInterval(run.heartbeat);

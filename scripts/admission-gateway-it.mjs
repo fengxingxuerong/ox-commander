@@ -5,7 +5,6 @@
  * 用法：node scripts/admission-gateway-it.mjs   （exit 0 = 通过）
  * 自行启动：ADMISSION_PORT=8940 OX_AGENTS_DIR=<agents.d> node scripts/admission-gateway.mjs
  */
-import http from "node:http";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -140,6 +139,7 @@ const result2 = await j("POST", `${base}/result`, {
   summary: "合规交付",
 });
 const ev2 = await j("GET", `${base}/v1/runs/${dispatch2.body.runId}/events?since=0`);
+check("合规提交被接受（HTTP 200）", result2.status === 200);
 check("合规结果 → completed", ev2.body.status === "completed" && ev2.body.events.some((e) => e.kind === "completed"));
 const hello = path.join(ws, "src", "it", "hello.js");
 check("文件真实落盘且可运行", fs.existsSync(hello) && require(hello).hi() === "hi from gateway");

@@ -15,7 +15,6 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { fileURLToPath } from "node:url";
 
 const args = process.argv.slice(2);
 function argOf(flag) {

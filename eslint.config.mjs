@@ -9,9 +9,63 @@ import tsPlugin from "@typescript-eslint/eslint-plugin";
 import tsParser from "@typescript-eslint/parser";
 import reactHooks from "eslint-plugin-react-hooks";
 
+/**
+ * Node 全局名，手写而非引 `globals` 包：那个包没在 package.json 里声明，
+ * 从 config 里 import 它就是在依赖一个幽灵传递依赖（哪天 eslint 换掉它，
+ * lint 会红在一个跟代码质量无关的地方）。
+ */
+const SCRIPT_GLOBALS = {
+  process: "readonly",
+  console: "readonly",
+  Buffer: "readonly",
+  URL: "readonly",
+  __dirname: "readonly",
+  __filename: "readonly",
+  require: "readonly",
+  module: "writable",
+  exports: "writable",
+  global: "readonly",
+  setTimeout: "readonly",
+  clearTimeout: "readonly",
+  setInterval: "readonly",
+  clearInterval: "readonly",
+  setImmediate: "readonly",
+  TextEncoder: "readonly",
+  TextDecoder: "readonly",
+  AbortController: "readonly",
+  AbortSignal: "readonly",
+  fetch: "readonly",
+  structuredClone: "readonly",
+  performance: "readonly",
+};
+
+/**
+ * 脚本规则：只留能抓真问题的。`no-console` / 退出码相关的规则刻意不开 ——
+ * 这些脚本的全部职责就是打印和按退出码判定，开了只会逼人写封装。
+ */
+const SCRIPT_RULES = {
+  "no-undef": "error",
+  "no-unused-vars": ["error", { argsIgnorePattern: "^_", varsIgnorePattern: "^_", caughtErrors: "none" }],
+  "no-empty": ["error", { allowEmptyCatch: true }],
+  "no-constant-binary-expression": "error",
+  "no-constant-condition": ["error", { checkLoops: false }],
+  "no-dupe-keys": "error",
+  "no-dupe-args": "error",
+  "no-duplicate-imports": "error",
+  "no-unreachable": "error",
+  "no-unsafe-negation": "error",
+  "no-unsafe-optional-chaining": "error",
+  "no-useless-assignment": "error",
+  // `require-await` 刻意不开：脚本里有一批"长得像 fetch 响应"的 async 门面
+  // （`text()` / `json()` / `chat()` 返回 Promise 但不 await 任何东西），
+  // 它们要的是形状而不是 await，开了只会逼人塞一句假 await。
+};
+
 export default [
   {
     // Build outputs, docs assets and the vendored probe never get linted.
+    // `scripts/**` used to be here — see the block at the bottom: the gate code
+    // is the one thing `tsc` cannot see, so ESLint is its only semantic layer.
     ignores: [
       "dist/**",
       "dist-electron/**",
@@ -19,7 +73,6 @@ export default [
       "node_modules/**",
       "coverage/**",
       "docs/**",
-      "scripts/**",
     ],
   },
   js.configs.recommended,
@@ -110,5 +163,37 @@ export default [
       "react-hooks/rules-of-hooks": "error",
       "react-hooks/exhaustive-deps": "warn",
     },
+  },
+  {
+    /**
+     * `scripts/**` —— 门禁自己的代码现在有一层语义检查。
+     *
+     * 为什么值得为它单开一块：这 5.7k 行是 `verify` 的判据本身，而 `tsc` 一行都不看
+     * （此前只有 `check:scripts` 的 `node --check`，那是**语法**，不是语义）。也就是说
+     * 「门禁会不会把脏工作区读成绿」这件事以前没有任何自动化在守 —— 2026-09-28 那次
+     * 活体变异残留把第 9 段砸成 heap OOM，就是这条空档的账单。
+     *
+     * 规则刻意比 TS 侧松：脚本是一次性 CLI，`no-console` 这类会逼出无意义的封装。
+     * 留下的都是能抓真问题的：未定义标识符、赋值不用 / 无用赋值、重复键与重复导入、
+     * 不可达代码、空块。
+     */
+    files: ["scripts/**/*.mjs"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "module",
+      globals: SCRIPT_GLOBALS,
+    },
+    rules: SCRIPT_RULES,
+  },
+  {
+    // `.cjs` 与 `scripts/acceptance/` 下那份 `.js`：CommonJS 形状。
+    // 后者 vitest 不收（由 check-tests-collected 的豁免表显式记着），但一样要过语义检查。
+    files: ["scripts/**/*.{cjs,js}"],
+    languageOptions: {
+      ecmaVersion: "latest",
+      sourceType: "commonjs",
+      globals: SCRIPT_GLOBALS,
+    },
+    rules: SCRIPT_RULES,
   },
 ];

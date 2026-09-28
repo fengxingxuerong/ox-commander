@@ -8,6 +8,21 @@
 
 ### 修复
 
+- **强杀自愈挪到了它该在的位置：`verify` 第 1 段 `check:residue`**。下一条的方向对、位置错 ——
+  `recoverPendingRecord()` 只在 `mutation:quick` 里跑，而 `npm test` 排在它**前面**。2026-09-28 实测：
+  工作区留着一处 `=== → !==` 残留时，编排器的升级判定空转，vitest 单进程堆涨到 4.6GB 后
+  `Reached heap limit` OOM，**且父进程不退出**（挂住而不是失败；两次复现同一位置、几乎相同的堆轨迹）。
+  于是"上一轮被超时杀掉"这件事，下一轮门禁不会红在相关处，而是崩在完全无关的地方。
+  现在 `npm run check:residue`（= `node scripts/mutation-check.mjs --recover-only`）做同一件事，
+  还原路径仍然只有 `recoverPendingRecord()` 一份，没有复制实现。`verify` 由 19 段变 **20 段**。
+  顺带堵住一个会说谎的分支：台账 JSON 坏 / `.orig` 备份缺失时，旧逻辑静默清台账当无事发生，
+  而目标文件**可能仍是变异体** —— 现在这种情形退出 2，且不许打印"工作区干净"。
+- **`admission-gateway-it.mjs` 缺的一条断言**：合规交付的 `POST /result` 响应被接进 `result2` 却从未检查，
+  "提交被接受"只由后续事件流间接证明。现在直接断 HTTP 200。这是 `scripts/**` 进 lint 后由
+  `no-unused-vars` 抓出来的第 5 处，也是唯一一处**缺断言**（其余 4 处是死代码/未用 import）。
+- **删掉 `admission-gateway.mjs` 里算了不用的 `agentId`**：`/result` 的契约（见该文件头）本来就没有 agent
+  参数，运行归属靠全局唯一的 runId 认。留着会让读者以为交结果需要自报身份。
+
 - **变异门禁被强杀时，变异体会永久留在工作区**（`scripts/mutation-check.mjs`）。
   此前靠内存里的 `pending` + `exit`/`SIGINT`/`SIGTERM` 钩子兜底还原，但 Windows 上
   进程被外部终止（任务管理器 / CI 超时 / IDE 关进程树 → `TerminateProcess`）时
@@ -18,6 +33,19 @@
   还原该文件并 **exit 2**（而不是带着刚恢复的未知状态继续给结论）。
 
 ### 新增
+
+- **`scripts/**` 第一次有语义检查**。那 5.7k 行是 `verify` 的判据本身，而 `tsc` 一行都不看 ——
+  此前唯一的保护是 `check:scripts` 的 `node --check`，那是**语法**。`eslint.config.mjs` 现在按
+  `.mjs`（ESM）与 `.cjs` / `scripts/acceptance/*.js`（CommonJS）分两块覆盖它，node 全局名手写进
+  `SCRIPT_GLOBALS`（不引未在 package.json 声明的 `globals` 包，避免幽灵依赖）。
+  规则刻意比 TS 侧松：`no-console` 不开（脚本的职责就是打印与按退出码判定），`require-await` 不开
+  （有一批"要形状不要 await"的 async 门面 `text()`/`json()`/`chat()`）。
+  落地即抓到 4 处真死代码：`check-unwired.mjs` 的 `TYPE_RE` 声明后从未使用（改成注释记录"类型导出
+  不参与零调用判定"的意图，别让人再加回来）、`import-headless-run.mjs` 的 `fileURLToPath`、
+  `loomy-bridge.mjs` 的 `os`、上面那条 `agentId`；以及 `mutation-check.mjs` 里一处无用初始化赋值。
+- **`src/mutation-residue.test.ts`（7 例）** 钉住自愈的四条出口（干净 / 内容已一致 / 台账不可用 / 真还原）。
+  承重性反证过两次：摘掉写回那句 → "restores the mutated file" 变红；摘掉 `unknown` 守卫 →
+  两条 "refuses to call the workspace clean" 变红。它同时把"带着残留跑测试"变成一次点名失败，而不是 OOM。
 
 - **变异门禁新增两个目标**（`electron/audit-log.ts`、`electron/agents/index.ts`），
   逐位点审计各补齐断言：`audit-log` 11/11、`agents/index` 2/2。
@@ -80,6 +108,17 @@
 - **CLI 智能体 dispatch 的环境裁剪诊断**（`electron/agents/cli-agent.ts`）：
   最小化子进程环境时裁掉了哪些密钥变量，现在会如实记入该 run 的事件流
   （只记名字、永不记值），操作员可核对"没有误裁、也没有漏裁"。
+
+### 变更
+
+- **文档口径同步**：README 门禁索引节改为 20 段并补第 1 段 `check:residue`；两处硬数字按实测刷新
+  （用例 984 → 1142 通过 + 9 跳过、site 基线 603/603 → 701/701 并标注日期与"落笔即过时"）；
+  README 架构表里 `shared/` 那行原写"目前只是约定，无 lint/tsconfig 机制强制"—— 该红线 2026-09-25 起
+  已由 `no-restricted-imports` 强制，改为陈述事实而不是留旧说法。
+  skill 手册同步三处：`references/gates.md` 加第 0 段与「表内 `#` ≠ `verify` 串位置，引用优先用脚本名」
+  的约定、`references/architecture.md` 的「分层红线」一节（旧内容与同目录 gates.md 自相矛盾）、
+  `SKILL.md` 的三条硬事实与红灯速查（残留那一行的症状从"红在无关文件"改为实测的 heap OOM + 挂住，
+  处置从 `git checkout --` 改为 `npm run check:residue`，并说明前者会连同一文件里本轮的真实改动一起删）。
 
 ## [0.1.7] — 2026-09-27
 
