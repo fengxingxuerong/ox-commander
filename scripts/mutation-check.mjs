@@ -412,6 +412,12 @@ const TARGETS = [
     tests: ["src/delivery-receipt.test.ts", "src/store.test.ts"],
     tier: 1,
   },
+  // zone-cost.ts 是「少数派隔离路线」的**对外证据生成器**：越权次数、处置分布、
+  // 涉及路径、批次被切了几刀。它的每一处判定错了都不报错，只让数字悄悄偏差 ——
+  // 而那份数字是要拿去和 worktree 路线对比的，偏了就是拿错的证据下结论
+  // （路径去重漏了 = 越权看起来更频繁；pass 算进"已处置" = 回滚覆盖率虚高；
+  // 批次算成 0 段 = 互斥的代价凭空消失）。正该进变异门禁。tier 1：7ms。
+  { file: "electron/zone-cost.ts", test: "src/zone-cost.test.ts", tier: 1 },
 ];
 
 /**

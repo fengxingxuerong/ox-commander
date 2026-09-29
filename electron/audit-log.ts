@@ -31,6 +31,20 @@ export interface AuditRecord {
   /** Kept short on purpose: the first N paths plus the real total. */
   paths?: string[];
   pathsTotal?: number;
+  /**
+   * 越权种类（`batch-guard` phase），与 `conflict` 协议事件同词：
+   * `unauthorized-write`（写到了声明 zone 之外）/ `shared-drift`（共享文件漂移）。
+   *
+   * 结构化落盘的动机：越权此前只走 IPC 与协议事件流，**没有任何持久事实**，
+   * 于是"共享工作区这套互斥到底拦下过什么、代价多大"永远回答不了 ——
+   * 而这正是 zone 路线相对 worktree 路线要拿出去对比的东西。
+   */
+  conflictKind?: string;
+  /**
+   * 仲裁处置（`revert` / `quarantine` / `fail-batch` / `pass`；未配对时 `none`）。
+   * 与 `conflict` 事件的 remedy 同词、同一份配对规则（`pairConflict`）。
+   */
+  remedy?: string;
   detail?: string;
   /**
    * Board-recovery facts (facts/derived split): fields below exist so the

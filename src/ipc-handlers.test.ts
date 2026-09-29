@@ -900,12 +900,22 @@ describe("orchestration handlers", () => {
     buildEngine("p-verdict");
     const host = lastPlatformConfig().host;
     host.onVerdict({
-      conflicts: [{ kind: "overlap", paths: ["src/a.ts"] }],
+      conflicts: [{ kind: "overlap", paths: ["src/a.ts"], runs: ["r1"] }],
       remedies: [{ action: "skip", paths: ["src/a.ts"] }],
     });
     expect(win.webContents.send).toHaveBeenCalledWith(
       "ox:event",
       expect.objectContaining({ type: "conflict", kind: "overlap", paths: ["src/a.ts"], remedy: "skip" }),
+    );
+    // 同一条事实也落审计：事件流是内存的，而"这轮拦下过什么"要能跨运行统计。
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "batch-guard",
+        conflictKind: "overlap",
+        remedy: "skip",
+        paths: ["src/a.ts"],
+      }),
     );
   });
 
@@ -913,13 +923,19 @@ describe("orchestration handlers", () => {
     buildEngine("p-verdict2");
     const host = lastPlatformConfig().host;
     host.onVerdict({
-      conflicts: [{ kind: "overlap", paths: ["src/other.ts"] }],
+      conflicts: [{ kind: "overlap", paths: ["src/other.ts"], runs: [] }],
       remedies: [{ action: "skip", paths: ["src/a.ts"] }],
     });
     expect(win.webContents.send).toHaveBeenCalledWith(
       "ox:event",
       expect.objectContaining({ type: "conflict", remedy: "none" }),
     );
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    // 没有 run 归属时 detail 这个键也不出现（审计契约：缺失 !== 空串）。
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "batch-guard", remedy: "none" }),
+    );
+    expect(audit.append).not.toHaveBeenCalledWith(expect.objectContaining({ detail: undefined }));
   });
 
   it("persists the delivery receipt on the project and pushes it to the board", () => {

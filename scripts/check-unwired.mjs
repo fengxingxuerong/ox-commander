@@ -54,6 +54,10 @@ const ACCEPTED = new Map([
   ["shared/deliverable-format.ts::buildOutputRules", "OXFILE 交付格式的 prompt 指令段，loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费（同 buildLlmPool 模式）；解析侧 parseDeliverable 有同文件调用故不在本表。注意：本条理由刻意不写桥的完整文件名 —— script-wiring 门禁按字符串扫引用，写全名会把桥误判成已接入"],
   ["shared/deliverable-format.ts::resolveDeliverablePath", "交付路径宽容归一（相对 zone 补全前缀），loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费；同 buildOutputRules 条目的口径 —— 理由刻意不写桥的完整文件名，防 script-wiring 按字符串扫引用把桥误判成已接入"],
   ["shared/deliverable-format.ts::zoneWriteRule", "zone 写权限措辞（文件级/目录级各说各话），loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费；同本表上两条的口径"],
+  // ---- zone 代价报告：对外对比要用的数字，消费方在产物侧 ----
+  ["electron/zone-cost.ts::summarizeZoneCost", "共享工作区互斥的代价统计（越权次数/处置分布/涉及路径），消费方是 npm run zone:cost 那个脚本，运行时 require dist-electron 编译产物 —— 静态扫描只扫源码故不可见（同本表 buildOutputRules 口径）。理由刻意不写脚本文件名：script-wiring 按字符串扫引用，写全名会把它误判成已接入"],
+  ["electron/zone-cost.ts::planCost", "规划期并行度代价（批次被切了几刀），同一脚本同一消费方式；与 summarizeZoneCost 同批评审"],
+  ["electron/zone-cost.ts::formatZoneCostReport", "代价报告的措辞（脚本与日志共用一份），同一脚本同一消费方式；不留第二份措辞是本条的用意"],
 ]);
 
 function walk(dir, out = []) {

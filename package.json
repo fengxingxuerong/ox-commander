@@ -23,6 +23,7 @@
     "smoke:import": "node scripts/import-headless-run-it.mjs",
     "smoke:offline-e2e": "node scripts/offline-e2e-it.mjs",
     "check:unwired": "node scripts/check-unwired.mjs",
+    "zone:cost": "node scripts/zone-cost-report.mjs",
     "check:residue": "node scripts/mutation-check.mjs --recover-only",
     "check:scripts": "node scripts/check-syntax.mjs",
     "check:scripts-wired": "node scripts/check-script-wiring.mjs",

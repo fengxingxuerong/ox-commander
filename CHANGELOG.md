@@ -8,6 +8,20 @@
 
 ### 新增
 
+- **zone 路线的代价可量化了（竞品调研 P0-2）**。共享工作区 + zone 互斥是少数派路线
+  （实测 15 个同类里 12 个走 git worktree），主张必须拿数字说话，否则会被读成"没做隔离"。
+  分两步：① **补事实** —— `batch-guard` 这个 audit phase 此前在生产代码里**零生产者**
+  （越权只走 IPC/协议事件流，重载即消失），现在 `AuditRecord` 增加 `conflictKind` /
+  `remedy` 两个结构化字段，`context.ts` 的 verdict sink 在推看板的同时落一条审计事实
+  （与 `conflict` 事件共用 `pairConflict`，处置口径只有一份）；
+  ② **量化层** —— 新增纯逻辑 `electron/zone-cost.ts`（`summarizeZoneCost` 算越权次数 /
+  种类分布 / 处置分布 / 涉及与已处置路径数 / 每 run 越权率；`planCost` 算规划期被切了
+  几刀串行），`npm run zone:cost -- --audit=<dir> [--batches=<file>]` 出报告（`--selftest`
+  自检）。**只报自己这一侧的实测数字**：worktree 那侧的代价需要真跑另一种架构，
+  编一个"节省 X%"比不报更坏。模块已登记变异门禁（site 口径 9/9）；落地审计抓出
+  两处问题：排序比较器的内层三在 V8 小数组二分插入下是等价变异（键互异 ⇒ 收敛成
+  两分支）、非 zone 事实的"跳过"写成"中断"会让后半段历史静默消失 —— 均已补断言。
+
 - **有状态前置策略（跨动作状态机，竞品调研 §5.1 学 Omnigent）**：批次不是一组互不
   相干的命令 —— agent 在批次内装过依赖，之后每条命令的含义都变了。静态 CommandPolicy
   逐条孤立判定看不见这层上下文，现在补上：`electron/sandbox/action-gate.ts` 的

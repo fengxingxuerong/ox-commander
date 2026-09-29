@@ -285,6 +285,19 @@ export function buildPlatformLayer(
           // 报的处置必须是同一个，而两份实现不一致是没有测试能发现的。
           const paired = pairConflict(conflict, verdict.remedies);
           send({ type: "conflict", kind: paired.kind, paths: paired.paths, remedy: paired.remedy });
+          // 同一条事实也落审计：事件流是内存的（重载即消失），而"这轮拦下过什么"
+          // 是对外对比 zone 路线与 worktree 路线的唯一凭据。
+          auditLog.append({
+            phase: "batch-guard",
+            ok: false,
+            errorClass: "conflict",
+            conflictKind: paired.kind,
+            remedy: paired.remedy,
+            changed: paired.paths.length,
+            paths: paired.paths,
+            // 字段即承诺：没有 run 归属时 detail 这个键也不出现（契约见 audit-log）。
+            ...(conflict.runs.length > 0 ? { detail: `runs=${conflict.runs.join(",")}` } : {}),
+          });
         }
       },
       requestEscalationDecision: (taskId) =>
