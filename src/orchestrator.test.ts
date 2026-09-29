@@ -12,7 +12,8 @@ import {
 } from "../electron/engine/orchestrator";
 import type { Scheduler } from "../electron/engine/scheduler";
 import type { LlmClient } from "../shared/llm-client";
-import { DEFAULT_SETTINGS, type PrdDocument, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type EscalationAction, type PrdDocument, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
+import type { DeliveryReceipt, ReceiptConflict } from "../shared/delivery-receipt";
 
 const TASKS: Task[] = [
   {
@@ -1947,6 +1948,177 @@ describe("OrchestratorEngine · 用量回报", () => {
     const eng = build({ scheduler: fakeScheduler(false), onUsage: (s) => seen.push(s) });
 
     await eng.execute([TASKS], ".");
+
+    expect(seen).toEqual([]);
+  });
+});
+
+describe("OrchestratorEngine · 交付凭据", () => {
+  function buildReceiptEngine(opts: {
+    scheduler: Scheduler;
+    onReceipt: (r: DeliveryReceipt) => void;
+    verify?: () => Promise<VerificationReport>;
+    conflicts?: () => ReceiptConflict[];
+    maxRounds?: number;
+    requestEscalationDecision?: (taskId: string, summary: string) => Promise<EscalationAction>;
+  }): OrchestratorEngine {
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: opts.scheduler,
+      verify: opts.verify ?? (async () => makeReport(true)),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: opts.maxRounds ?? 0 },
+      ...(opts.conflicts ? { conflicts: opts.conflicts } : {}),
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+      onReceipt: opts.onReceipt,
+      ...(opts.requestEscalationDecision ? { requestEscalationDecision: opts.requestEscalationDecision } : {}),
+    });
+  }
+
+  const attributed = {
+    async runBatch(tasks: Task[]) {
+      return tasks.map((t: Task) => ({
+        taskId: t.id,
+        ok: true,
+        logDigest: "",
+        events: [],
+        agentId: "sensenova-api",
+        durationMs: 1500,
+      }));
+    },
+  } as unknown as Scheduler;
+
+  const alwaysFail = {
+    async runBatch(tasks: Task[]) {
+      return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+    },
+  } as unknown as Scheduler;
+
+  it("交付成功只发一次，且任务账带上执行器归因", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({ scheduler: attributed, onReceipt: (r) => seen.push(r) });
+
+    await eng.execute([TASKS], ".");
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.outcome).toBe("delivered");
+    expect(seen[0]!.verified).toBe(true);
+    // 验证真实通过时，"未经构建/测试验证"的免责声明整个键不出现（字段即承诺）。
+    expect(seen[0]!.unverifiedReason).toBeUndefined();
+    expect(seen[0]!.tasks).toMatchObject([
+      { id: "t1", status: "done", agentId: "sensenova-api", durationMs: 1500 },
+    ]);
+  });
+
+  it("零验证命令的交付要自己说破未经构建/测试验证", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({
+      scheduler: attributed,
+      // 空 results 在 verifyProject 里恒为 passed —— "全部验证通过"其实什么都没验。
+      verify: async () => ({ passed: true, results: [] }),
+      onReceipt: (r) => seen.push(r),
+    });
+
+    await eng.execute([TASKS], ".");
+
+    expect(seen[0]!.outcome).toBe("delivered");
+    expect(seen[0]!.verified).toBe(false);
+    expect(seen[0]!.unverifiedReason).toContain("没有配置任何验证命令");
+  });
+
+  it("重修预算耗尽发 blocked 凭据，并写明卡在哪", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({ scheduler: alwaysFail, maxRounds: 0, onReceipt: (r) => seen.push(r) });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.outcome).toBe("blocked");
+    expect(seen[0]!.verified).toBe(false);
+    expect(seen[0]!.unverifiedReason).toContain("验证仍未通过");
+    expect(seen[0]!.tasks[0]).toMatchObject({ id: "t1", status: "failed" });
+  });
+
+  it("用户跳过的任务在凭据里记成跳过，而不是完成", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({
+      scheduler: alwaysFail,
+      maxRounds: 0,
+      onReceipt: (r) => seen.push(r),
+      requestEscalationDecision: async () => "skip",
+    });
+
+    await eng.execute([TASKS], ".");
+
+    // 全部失败任务被跳过、验证通过 ⇒ 仍然交付，但凭据必须说清少做了什么。
+    expect(seen[0]!.outcome).toBe("delivered");
+    expect(seen[0]!.tasks[0]).toMatchObject({ id: "t1", status: "skipped" });
+    expect(seen[0]!.counts.skipped).toBe(1);
+    expect(seen[0]!.counts.done).toBe(0);
+    // 升级/跳过后的最终交付段（与首轮交付是两个构建点）同样不许冒充"验证通过"。
+    expect(seen[0]!.verified).toBe(true);
+    expect(seen[0]!.unverifiedReason).toBeUndefined();
+  });
+
+  it("验证失败的凭据：checks 的 headline 带失败首行，成功条目刻意留空", async () => {
+    // headline 的契约是"为什么失败"：失败条目取 digest 首行，成功条目是空串 ——
+    // 两个方向都要钉住，分支互换（失败给空、成功给 digest）才逃不掉。
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({
+      scheduler: attributed,
+      verify: async () => ({
+        passed: false,
+        results: [
+          { kind: "build", ok: false, exitCode: 1, logDigest: "err", durationMs: 10 },
+          { kind: "test", ok: true, exitCode: 0, logDigest: "all green", durationMs: 5 },
+        ],
+      }),
+      maxRounds: 0,
+      onReceipt: (r) => seen.push(r),
+    });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.outcome).toBe("blocked");
+    const build = seen[0]!.checks.find((c) => c.kind === "build")!;
+    const test = seen[0]!.checks.find((c) => c.kind === "test")!;
+    expect(build.ok).toBe(false);
+    expect(build.headline).toBe("err");
+    expect(test.ok).toBe(true);
+    expect(test.headline).toBe("");
+  });
+
+  it("宿主喂进来的越权记录进凭据（引擎自己看不到仲裁层）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({
+      scheduler: attributed,
+      conflicts: () => [{ kind: "unauthorized-write", paths: ["outside/x.js"], remedy: "revert" }],
+      onReceipt: (r) => seen.push(r),
+    });
+
+    await eng.execute([TASKS], ".");
+
+    expect(seen[0]!.conflicts).toEqual([
+      { kind: "unauthorized-write", paths: ["outside/x.js"], remedy: "revert" },
+    ]);
+  });
+
+  it("取消的路径不发凭据（现场不完整，发出去会被当成这次的结果）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const cancelled = {
+      async runBatch() {
+        throw new CancelledError();
+      },
+    } as unknown as Scheduler;
+    const eng = buildReceiptEngine({ scheduler: cancelled, onReceipt: (r) => seen.push(r) });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toBeInstanceOf(CancelledError);
 
     expect(seen).toEqual([]);
   });

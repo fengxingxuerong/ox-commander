@@ -121,6 +121,12 @@ export function buildEngine(projectId: string): OrchestratorEngine {
         }),
       onVerification: (report) => send({ type: "verification", report }),
       onEscalation: (taskId, summary) => send({ type: "escalation", taskId, summary }),
+      // 交付凭据：看板要把它整份留下来（它是这次运行唯一的对外结论），
+      // 同时 projectStore 存一份，重载窗口后仍看得到上次交付的结论。
+      onReceipt: (receipt) => {
+        projectStore.update(projectId, { receiptJson: JSON.stringify(receipt) });
+        send({ type: "receipt", receipt });
+      },
     } satisfies Partial<OrchestratorCallbacks>,
   });
   const engine = platform.engine;

@@ -1,5 +1,6 @@
 import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
+import type { DeliveryReceipt } from "../shared/delivery-receipt";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
 export interface AgentSummary {
@@ -121,6 +122,12 @@ export interface AppState {
   logs: string[];
   tasks: Record<string, TaskView>;
   verification?: VerificationReport;
+  /**
+   * 上一次运行的交付凭据（只在交付成功 / 重修耗尽两条出口上到）。
+   * 与 `verification` 的关系：那是**逐条命令**的结果，这是**一次运行的结论** ——
+   * 看板上两者并存，因为"哪些命令红了"和"这次到底交付了什么"是两个问题。
+   */
+  receipt?: DeliveryReceipt;
   escalations: EscalationView[];
   conflicts: ConflictView[];
   prd?: PrdDocument;

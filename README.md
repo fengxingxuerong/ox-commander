@@ -218,6 +218,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - [docs/2026-09-20-fullstack-review.md](docs/2026-09-20-fullstack-review.md) — 全栈评审：架构 / 风险诊断 / 优化记录（§十七 为最近一轮复核）
 - [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577→594→590 三轮，含逐目标报告与适用边界）
 - [docs/2026-09-29-competitor-research.md](docs/2026-09-29-competitor-research.md) — 多智能体编排器竞品调研（AO / Vibe Kanban / Omnigent 对位分析与可吸收清单）
+- [docs/2026-09-29-competitive-landscape-and-roadmap.md](docs/2026-09-29-competitive-landscape-and-roadmap.md) — 竞品地形与优化方案（GitHub API 取数 + README 关键词命中口径，含 Orca 深读）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）

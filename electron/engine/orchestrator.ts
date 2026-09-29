@@ -4,6 +4,14 @@ import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "..
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
+import { buildReceipt, receiptTaskStatus } from "../../shared/delivery-receipt";
+import type {
+  DeliveryReceipt,
+  ReceiptCheck,
+  ReceiptConflict,
+  ReceiptOutcome,
+  ReceiptTask,
+} from "../../shared/delivery-receipt";
 import { runSmokeChecks } from "./verifier";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches, skippedDescendants } from "../../shared/graph";
@@ -36,6 +44,15 @@ export interface OrchestratorDeps {
    * （`platform.ts` 的 meter）。成功、取消、抛错三条路径都会触发。
    */
   usage?: () => UsageSnapshot;
+  /**
+   * 本次 run 累计的越权判定（可选）。
+   *
+   * 引擎自己看不到它们 —— 仲裁发生在 `BatchGuard` 里，而 guard 挂在长期存活的
+   * agent layer 上，生命周期比一次 `execute` 长。所以由宿主（`platform.ts`）在
+   * verdict sink 上顺手收集，引擎只在收尾时取一次快照写进凭据。
+   * 没有它时凭据里的 `conflicts` 是空数组（不代表"没有越权"，只代表没人喂）。
+   */
+  conflicts?: () => ReceiptConflict[];
 }
 
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
@@ -89,6 +106,17 @@ export interface OrchestratorCallbacks {
    * 只在宿主提供了 `deps.usage` 时触发；没有它就什么都不做。
    */
   onUsage?(snapshot: UsageSnapshot): void;
+  /**
+   * 一次 run 的**交付凭据**：验证结论、任务账、越权处置与用量合成一份结构化结论。
+   *
+   * 可选是为了向后兼容（既有宿主不接也照常跑），并且在没有宿主接时不生成
+   * —— 组装它要遍历任务与检查结果，而没人读的时候那份遍历是纯浪费。
+   *
+   * 触发点有两处且**只有**两处：交付成功（outcome `delivered`）与重修预算耗尽
+   * （`blocked`）。取消与异常路径刻意不发：那种现场不完整，发出去会被当成
+   * "这次运行就这些结果"，而事实是它没跑完。
+   */
+  onReceipt?(receipt: DeliveryReceipt): void;
 }
 
 export class CancelledError extends Error {
@@ -311,6 +339,93 @@ export class OrchestratorEngine {
     }
   }
 
+  /**
+   * 组装并交出一份交付凭据。
+   *
+   * 只有宿主接了 `onReceipt` 才组装（理由见该回调的注释）——没有接收方时，
+   * 遍历全部任务与检查结果纯属浪费。
+   *
+   * 任务状态交给 `receiptTaskStatus`（纯逻辑层）判定，理由与判定顺序见它的注释。
+   */
+  /**
+   * delivered 凭据的 verified/unverifiedReason 对。零验证命令是合法配置（headless
+   * 协议允许空集），空集在 verifyProject 里恒为 passed —— "全部验证通过"其实什么
+   * 都没验，判定不改（纯文档类任务确实不需要构建），但**说法必须当场给出**。
+   * 三个构建点曾各自复制这段（2026-09-29 变异审计抓到其中一处无断言存活），
+   * 收敛成一处 —— 断言只需盯住这一个实现。
+   */
+  private verifiedFieldsFor(report: { results: unknown[] }): {
+    verified: boolean;
+    unverifiedReason?: string;
+  } {
+    return {
+      verified: report.results.length > 0,
+      ...(report.results.length === 0
+        ? { unverifiedReason: "没有配置任何验证命令，也没有冒烟样本运行过" }
+        : {}),
+    };
+  }
+
+  private emitReceipt(args: {
+    outcome: ReceiptOutcome;
+    batches: Task[][];
+    report: VerificationReport;
+    outcomes: DispatchOutcome[];
+    allDone: Set<string>;
+    skipped: Set<string>;
+    attempts: Map<string, number>;
+    preexistingKinds: string[];
+    round: number;
+    verified: boolean;
+    unverifiedReason?: string;
+  }): void {
+    const sink = this.cb.onReceipt;
+    if (!sink) return;
+    const byId = new Map(args.outcomes.map((o) => [o.taskId, o]));
+    const tasks: ReceiptTask[] = args.batches.flat().map((t) => {
+      const outcome = byId.get(t.id);
+      return {
+        id: t.id,
+        title: t.title,
+        zone: t.zone,
+        status: receiptTaskStatus({
+          skipped: args.skipped.has(t.id),
+          done: args.allDone.has(t.id),
+          // 没有派发结果时不给 `outcomeOk`：那与"派发过且成功"是两种事实。
+          ...(outcome ? { outcomeOk: outcome.ok } : {}),
+        }),
+        attempts: args.attempts.get(t.id) ?? 0,
+        ...(outcome?.agentId ? { agentId: outcome.agentId } : {}),
+        ...(outcome?.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
+        // 2026-09-29：原为 `...(outcome?.errorClass ? { … } : {})`。消费侧是可选
+        // 字段（ReceiptTask.errorClass?），直接传值与条件展开等价（三元算子转正后
+        // 该形状首次全量审计存活，据此简化消灭位点）。
+        errorClass: outcome?.errorClass,
+      };
+    });
+    const checks: ReceiptCheck[] = args.report.results.map((r) => ({
+      kind: r.kind,
+      ok: r.ok,
+      exitCode: r.exitCode,
+      preexisting: args.preexistingKinds.includes(r.kind),
+      headline: r.ok ? "" : firstLine(r.logDigest),
+    }));
+    sink(
+      buildReceipt({
+        outcome: args.outcome,
+        // 交付但没验过是合法状态（纯文档任务不需要构建），所以这两档独立：
+        // `verified` 说"有没有真验过"，`unverifiedReason` 说"为什么没有"。
+        verified: args.verified,
+        ...(args.unverifiedReason !== undefined ? { unverifiedReason: args.unverifiedReason } : {}),
+        rounds: args.round,
+        checks,
+        tasks,
+        conflicts: this.deps.conflicts?.() ?? [],
+        ...(this.deps.usage ? { usage: this.deps.usage() } : {}),
+      }),
+    );
+  }
+
   private async runPipeline(
     batches: Task[][],
     projectRoot: string,
@@ -359,6 +474,8 @@ export class OrchestratorEngine {
      * 代价是每次运行多一轮验证命令，所以它换的是归因与预算，不是速度。
      */
     let preexistingKinds = "";
+    /** 基线里就红着的命令种类：凭据里要靠它把"不是智能体造成的失败"标出来。 */
+    let preexistingKindList: string[] = [];
     if (!resume) {
       const baseline = await this.deps.verify(projectRoot);
       const bad = baseline.results.filter((r) => !r.ok);
@@ -370,6 +487,7 @@ export class OrchestratorEngine {
         // ——[413] 那条变异测试就是这么被缴械的（实测过），而且智能体本来就会
         // 在本轮的错误摘要里看到同样的文字。
         preexistingKinds = bad.map((r) => `${r.kind}(exit=${r.exitCode ?? "null"})`).join("、");
+        preexistingKindList = bad.map((r) => r.kind);
         this.cb.onLog(
           `基线验证：${bad.length} 条命令在本次运行开始前就失败（不是智能体造成的）：` +
             `${preexistingKinds}\n${bad.map((r) => `[${r.kind}] ${firstLine(r.logDigest)}`).join("\n")}`,
@@ -522,6 +640,18 @@ export class OrchestratorEngine {
             ? "警告：没有配置任何验证命令，也没有冒烟样本运行过 —— 本次交付**未经构建/测试验证**，只按任务成功放行。"
             : `全部验证通过，进入交付。${skippedNote}`,
         );
+        this.emitReceipt({
+          outcome: "delivered",
+          batches,
+          report,
+          outcomes,
+          allDone,
+          skipped,
+          attempts,
+          preexistingKinds: preexistingKindList,
+          round,
+          ...this.verifiedFieldsFor(report),
+        });
         this.cb.onStage("DONE");
         return report;
       }
@@ -605,6 +735,18 @@ export class OrchestratorEngine {
             this.cb.onVerification(finalReport);
             if (finalReport.passed) {
               this.cb.onStage("DELIVERY");
+              this.emitReceipt({
+                outcome: "delivered",
+                batches,
+                report: finalReport,
+                outcomes,
+                allDone,
+                skipped,
+                attempts,
+                preexistingKinds: preexistingKindList,
+                round,
+                ...this.verifiedFieldsFor(finalReport),
+              });
               this.cb.onStage("DONE");
               return finalReport;
             }
@@ -619,6 +761,21 @@ export class OrchestratorEngine {
           continue;
         }
 
+        this.emitReceipt({
+          outcome: "blocked",
+          batches,
+          report,
+          outcomes,
+          allDone,
+          skipped,
+          attempts,
+          preexistingKinds: preexistingKindList,
+          round,
+          // 卡住的一律记成"没验过"：验证命令跑了但红着，与"根本没跑"在凭据里
+          // 是同一种结论（这次运行没有可对外担保的东西），差别写在 reason 里。
+          verified: false,
+          unverifiedReason: `重修 ${maxRounds} 轮后验证仍未通过`,
+        });
         throw new VerificationExhaustedError(maxRounds);
       }
       round += 1;

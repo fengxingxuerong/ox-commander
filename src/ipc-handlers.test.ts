@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { dialog } from "electron";
+import { buildReceipt } from "../shared/delivery-receipt";
 
 /**
  * Behavioural tests for the per-domain IPC handlers under `electron/ipc/*`.
@@ -857,6 +858,30 @@ describe("orchestration handlers", () => {
       "ox:event",
       expect.objectContaining({ type: "conflict", remedy: "none" }),
     );
+  });
+
+  it("persists the delivery receipt on the project and pushes it to the board", () => {
+    buildEngine("p-receipt");
+    const callbacks = lastPlatformConfig().host.callbacks;
+    const receipt = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [{ kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "" }],
+      tasks: [],
+      conflicts: [],
+    });
+    callbacks.onReceipt(receipt);
+
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      "ox:event",
+      expect.objectContaining({ type: "receipt", receipt: expect.objectContaining({ outcome: "delivered" }) }),
+    );
+    // 落盘一份：窗口重载后"上次交付了什么"仍然看得到，而日志是内存的。
+    const store = h.projectInstances[h.projectInstances.length - 1] as { update: Mock };
+    expect(store.update).toHaveBeenCalledWith("p-receipt", expect.objectContaining({
+      receiptJson: JSON.stringify(receipt),
+    }));
   });
 });
 

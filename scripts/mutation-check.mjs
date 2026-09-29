@@ -394,6 +394,18 @@ const TARGETS = [
   // 也就是「任意角色、任意 zone」。这里判错 = 一个本该受限的智能体被静默放大成
   // 万能（或反过来被收死），而能力匹配表里看不出异常。tier 2：registry 测试。
   { file: "shared/agent-contract.ts", tests: ["src/agent-registry.test.ts"], tier: 2 },
+
+  // ---- 2026-09-29 第十二批：交付凭据 ----
+  // delivery-receipt.ts 是「这次运行到底交付了什么」的**唯一对外结论**，而它的
+  // 每一处判定都是静默的：状态判错（跳过报成完成、未落地报成失败）只让凭据
+  // 少说一句话，用量投影漏掉 limit 只让"有没有超预算"失去依据，headline 少算
+  // 一项计数则让结论读起来比事实乐观。这类"读起来还是一句话"的错误不会有
+  // 异常也不会有红 —— 正是变异门禁该盯的形状。tier 1：整份测试 8ms。
+  {
+    file: "shared/delivery-receipt.ts",
+    tests: ["src/delivery-receipt.test.ts", "src/store.test.ts"],
+    tier: 1,
+  },
 ];
 
 /**
@@ -709,8 +721,11 @@ const EQUIVALENT_SITES = [
    * 2026-09-27：executorTimeoutMs 轮在函数体开头插入 5 行（缓存 signature 说明注释
    *   4 行 + `executorTimeoutMsFor` 取值 1 行）→ 177 → 182。等价性论证不变：
    *   追加的 `;executorTimeoutMs=${…}` 分量与被取反的布尔分量各自独立，取反仍双射。
+   * 2026-09-29：delivery-receipt 轮再 +1 行 → 182 → 183。论证不变；本轮教训是
+   *   touched 口径抓住了全量 audit 间隔期的漂移（漂移窗口从"两次全量之间"缩短到
+   *   "每批提交之间"）—— 改完 TARGETS 内文件必须顺手核对行号锚点。
    */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 182 },
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 183 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
    * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，

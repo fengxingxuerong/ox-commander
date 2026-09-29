@@ -801,6 +801,95 @@ describe("runSpec", () => {
     );
   });
 
+  it("交付凭据：在 done 之前发一次，任务账与用量都对得上", async () => {
+    // 与用量事件同一条链路（真实 platform 装配），断言的是"宿主真的收得到凭据"。
+    const root = scratch("headless-receipt");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+    const inner = tasksResponse([fakeTask("t1", "src")]);
+    const metered: LlmClient = {
+      async chat(req) {
+        return { ...(await inner.chat(req)), usageTokens: 100 };
+      },
+    };
+
+    const code = await runSpec(spec, {
+      emit,
+      llm: metered,
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+
+    expect(code).toBe(0);
+    const receipt = events.find((e) => e.type === "receipt") as
+      | Extract<HeadlessEvent, { type: "receipt" }>
+      | undefined;
+    expect(receipt).toBeDefined();
+    expect(receipt!.receipt.outcome).toBe("delivered");
+    expect(receipt!.receipt.tasks).toMatchObject([{ id: "t1", status: "done" }]);
+    expect(receipt!.receipt.usage?.totalTokens).toBe(200);
+    expect(receipt!.receipt.verified).toBe(true);
+    // 顺序也是契约：宿主按行处理事件，凭据必须在终态之前到。
+    expect(events.findIndex((e) => e.type === "receipt")).toBeLessThan(
+      events.findIndex((e) => e.type === "done"),
+    );
+  });
+
+  it("零验证命令的交付：凭据自己说破未经构建/测试验证", async () => {
+    const root = scratch("headless-receipt-unverified");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      // 空 results 在 verifyProject 里恒为 passed —— "全部验证通过"其实什么都没验。
+      verify: async () => ({ passed: true, results: [] }),
+    });
+
+    expect(code).toBe(0);
+    const receipt = events.find((e) => e.type === "receipt") as Extract<HeadlessEvent, { type: "receipt" }>;
+    expect(receipt.receipt.outcome).toBe("delivered");
+    expect(receipt.receipt.verified).toBe(false);
+    expect(receipt.receipt.unverifiedReason).toContain("没有配置任何验证命令");
+    expect(receipt.receipt.headline).toContain("未经构建/测试验证");
+  });
+
+  it("交付凭据在重修耗尽的路径上也发（blocked，且排在 error 之前）", async () => {
+    const root = scratch("headless-receipt-blocked");
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        projectRoot: root,
+        verificationCommands: [],
+        maxRepairRounds: 0,
+        escalationPolicy: "exhaust",
+      }),
+    );
+    const { events, emit } = collect();
+    const failing: VerificationReport = {
+      passed: false,
+      results: [{ kind: "test", ok: false, exitCode: 1, logDigest: "boom", durationMs: 5 }],
+    };
+
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => failing,
+    });
+
+    expect(code).toBe(2);
+    const receipt = events.find((e) => e.type === "receipt") as Extract<HeadlessEvent, { type: "receipt" }>;
+    expect(receipt).toBeDefined();
+    expect(receipt.receipt.outcome).toBe("blocked");
+    expect(receipt.receipt.headline).toContain("未交付");
+    expect(events.findIndex((e) => e.type === "receipt")).toBeLessThan(
+      events.findIndex((e) => e.type === "error"),
+    );
+  });
+
   it("断点续跑：journal 匹配需求时跳过规划（LLM 零调用），恢复执行", async () => {
     const root = scratch("headless-resume");
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));

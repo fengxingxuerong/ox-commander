@@ -24,6 +24,7 @@ import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
+import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -184,11 +185,26 @@ export function createPlatform(config: PlatformConfig): Platform {
       breakerOptions: { onEvent: (text) => log(`[breaker] ${text}`) },
     });
 
+  /**
+   * 本次平台生命周期里累积的越权条目。
+   *
+   * 引擎看不到仲裁（guard 挂在长期存活的 layer 上，比一次 `execute` 活得久），
+   * 所以在这里顺手攒一份，交付凭据取它回答"这轮到底有没有越权、怎么处置的"。
+   * 累积**不去重**：两次越权同一路径是两次事件，凭据要能看出它反复发生。
+   */
+  const verdictConflicts: ReceiptConflict[] = [];
   // Attached after construction so an injected layer reports verdicts exactly
   // like a self-built one (tests inject a layer; the sink must still fire).
-  if (host.onVerdict && layer.schedulerOptions.guard) {
+  // 挂载条件从"宿主接了 onVerdict"放宽成"有 guard"：凭据需要这份记录，
+  // 而宿主是否关心事件流是另一回事（转发处按可选调用处理）。
+  if (layer.schedulerOptions.guard) {
     const sink = host.onVerdict;
-    layer.schedulerOptions.guard.setVerdictSink((verdict) => sink(verdict));
+    layer.schedulerOptions.guard.setVerdictSink((verdict) => {
+      for (const conflict of verdict.conflicts) {
+        verdictConflicts.push(pairConflict(conflict, verdict.remedies));
+      }
+      sink?.(verdict);
+    });
   }
 
   const schedulerOptions = (): NonNullable<ConstructorParameters<typeof Scheduler>[2]> => ({
@@ -229,6 +245,9 @@ export function createPlatform(config: PlatformConfig): Platform {
     onEscalation: () => undefined,
     // 默认落一行日志；宿主（headless）覆盖它改成发协议事件。
     onUsage: (snapshot) => log(formatUsageLine(snapshot)),
+    // 同 onUsage：默认只落一行，headless 覆盖成 `receipt` 协议事件。
+    // 桌面端走 IPC 的 send（见 electron/ipc/context.ts）。
+    onReceipt: (receipt) => log(formatReceiptLine(receipt)),
     requestEscalationDecision: host.requestEscalationDecision,
     ...(host.callbacks ?? {}),
   };
@@ -242,6 +261,7 @@ export function createPlatform(config: PlatformConfig): Platform {
         ((cwd: string) => verifyProject(settings.verificationCommands, { cwd: () => cwd, onEvent: log })),
       settings,
       usage: () => meter.snapshot(),
+      conflicts: () => verdictConflicts,
       journal: config.journal,
     },
     callbacks,

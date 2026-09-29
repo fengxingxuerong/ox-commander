@@ -22,6 +22,7 @@ import type { AgentAdapter } from "../../shared/types";
 import type { AgentManifest } from "../../shared/agent-contract";
 import type { LlmClient } from "../../shared/llm-client";
 import type { EscalationAction, ProjectSettings } from "../../shared/types";
+import { pairConflict } from "../../shared/delivery-receipt";
 
 let store: ProjectStore | null = null;
 let settingsHolder: SettingsStore | null = null;
@@ -259,14 +260,10 @@ export function buildPlatformLayer(
       // inside the long-lived layer, not inside this engine.
       onVerdict: (verdict) => {
         for (const conflict of verdict.conflicts) {
-          send({
-            type: "conflict",
-            kind: conflict.kind,
-            paths: conflict.paths,
-            remedy:
-              verdict.remedies.find((r) => r.paths.some((p) => conflict.paths.includes(p)))?.action ??
-              "none",
-          });
+          // 配对规则只有一份实现（`pairConflict`）：事件流报的处置与交付凭据里
+          // 报的处置必须是同一个，而两份实现不一致是没有测试能发现的。
+          const paired = pairConflict(conflict, verdict.remedies);
+          send({ type: "conflict", kind: paired.kind, paths: paired.paths, remedy: paired.remedy });
         }
       },
       requestEscalationDecision: (taskId) =>

@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../shared/types";
 import { useApp } from "./store";
+import { buildReceipt } from "../shared/delivery-receipt";
 
 /**
  * Renderer event mapping is the one layer no other test can reach: it sits
@@ -21,6 +22,7 @@ function reset(): void {
     escalations: [],
     conflicts: [],
     verification: undefined,
+    receipt: undefined,
     planning: false,
     planningError: undefined,
     settings: undefined,
@@ -192,6 +194,44 @@ describe("handleEvent · verification and escalation", () => {
     emit({ type: "escalation", taskId: "t1", summary: "a" });
     emit({ type: "escalation", taskId: "t2", summary: "b" });
     expect(useApp.getState().escalations.map((e) => e.taskId)).toEqual(["t1", "t2"]);
+  });
+});
+
+describe("handleEvent · receipt", () => {
+  it("keeps the conclusion and journals its headline", () => {
+    const receipt = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [{ kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "" }],
+      tasks: [{ id: "t1", title: "core", zone: "src", status: "done", attempts: 1 }],
+      conflicts: [],
+    });
+    emit({ type: "receipt", receipt });
+    expect(useApp.getState().receipt).toEqual(receipt);
+    expect(useApp.getState().logs.at(-1)).toBe(receipt.headline);
+  });
+
+  it("replaces a previous receipt when the operator runs again", () => {
+    const first = buildReceipt({
+      outcome: "blocked",
+      verified: false,
+      rounds: 1,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    });
+    const second = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    });
+    emit({ type: "receipt", receipt: first });
+    emit({ type: "receipt", receipt: second });
+    expect(useApp.getState().receipt!.outcome).toBe("delivered");
   });
 });
 

@@ -100,6 +100,7 @@ export const useApp = create<AppState>((set, get) => ({
         escalations: [],
         conflicts: [],
         verification: undefined,
+        receipt: undefined,
         prd: undefined,
         batches: undefined,
         planning: true,
@@ -280,6 +281,12 @@ export const useApp = create<AppState>((set, get) => ({
         set((s) => ({
           verification: p.report as AppState["verification"],
           logs: [...s.logs, "── 硬性验证结果已生成，见右侧面板 ──"],
+        }));
+        break;
+      case "receipt":
+        set((s) => ({
+          receipt: p.receipt as AppState["receipt"],
+          logs: [...s.logs, p.receipt ? (p.receipt as { headline: string }).headline : ""],
         }));
         break;
       case "escalation": {

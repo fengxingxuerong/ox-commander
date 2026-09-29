@@ -14,6 +14,7 @@ import { createFileJournal, createPlatform } from "../electron/platform";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import type { LlmClient } from "../shared/llm-client";
 import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
+import { pairConflict } from "../shared/delivery-receipt";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
 
 /**
@@ -183,6 +184,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     // 用量走协议事件而不是日志行：宿主可能要对账，而解析自由文本不如读字段。
     // （桌面端的默认实现是落一行 `[usage] …` 到看板日志，见 platform.ts。）
     onUsage: (snapshot) => io.emit({ type: "usage", ...snapshot }),
+    // 凭据走独立事件而不是塞进 `done`：宿主可能要把它原样落进自己的工单系统，
+    // 而 `done` 的 `report` 字段是 unknown 形状（历史契约），塞进去就得再解析一次。
+    onReceipt: (receipt) => io.emit({ type: "receipt", receipt }),
     onVerification: (report) =>
         io.emit({
           type: "verification",
@@ -261,12 +265,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
         }),
       onVerdict: (verdict) => {
         for (const c of verdict.conflicts) {
-          io.emit({
-            type: "conflict",
-            kind: c.kind,
-            paths: c.paths,
-            remedy: verdict.remedies.find((r) => r.paths.some((p) => c.paths.includes(p)))?.action ?? "none",
-          });
+          // 同 context.ts：配对规则只有 `pairConflict` 一份实现。
+          const paired = pairConflict(c, verdict.remedies);
+          io.emit({ type: "conflict", kind: paired.kind, paths: paired.paths, remedy: paired.remedy });
         }
       },
       requestEscalationDecision: callbacks.requestEscalationDecision,

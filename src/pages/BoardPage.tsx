@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { useApp } from "../store";
+import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER } from "../../shared/types";
 
@@ -29,6 +29,7 @@ export function BoardPage() {
   const tasks = useApp((s) => s.tasks);
   const logs = useApp((s) => s.logs);
   const verification = useApp((s) => s.verification);
+  const receipt = useApp((s) => s.receipt);
   const escalations = useApp((s) => s.escalations);
   const resolveEscalation = useApp((s) => s.resolveEscalation);
   const start = useApp((s) => s.confirmAndExecute);
@@ -140,6 +141,47 @@ export function BoardPage() {
               </button>
             </div>
           </section>
+
+          {/* 交付凭据：一次运行唯一的对外结论。放在验证结果**之上** —— 验证回答
+              "哪些命令红了"，凭据回答"这次到底交付了什么、凭什么"。 */}
+          {receipt && (
+            <section className="card">
+              <h3>{receipt.outcome === "delivered" ? "📦 交付凭据" : "🚧 未交付"}</h3>
+              <p className="muted">{receipt.headline}</p>
+              <p className="task-meta">
+                {receipt.counts.done}/{receipt.counts.total} 完成 · 跳过 {receipt.counts.skipped} ·
+                失败 {receipt.counts.failed} · 未启动 {receipt.counts.pending} · 重修 {receipt.rounds} 轮
+              </p>
+              <ul>
+                {receipt.checks.map((c, i) => (
+                  <li key={`${c.kind}-${i}`} className="task-meta">
+                    {c.ok ? "✅" : "❌"} {c.kind}
+                    {c.ok ? "" : `（exit=${c.exitCode ?? "null"}）`}
+                    {c.preexisting ? " · 本次运行前就已失败" : ""}
+                    {c.headline ? ` · ${c.headline}` : ""}
+                  </li>
+                ))}
+              </ul>
+              {receipt.conflicts.length > 0 && (
+                <details className="failure-details">
+                  <summary>越权 {receipt.conflicts.length} 次（已处置）</summary>
+                  {receipt.conflicts.map((c, i) => (
+                    <p key={`${c.kind}-${i}`} className="task-meta">
+                      {REMEDY_VERB[c.remedy] ?? c.remedy} · {c.kind} · {c.paths.join("、")}
+                    </p>
+                  ))}
+                </details>
+              )}
+              {receipt.usage && (
+                <p className="task-meta">
+                  {receipt.usage.totalTokens} tokens · {receipt.usage.calls} 次调用
+                  {receipt.usage.calls - receipt.usage.measuredCalls > 0
+                    ? `（${receipt.usage.calls - receipt.usage.measuredCalls} 次未上报用量）`
+                    : ""}
+                </p>
+              )}
+            </section>
+          )}
 
           {verification && (
             <section className="card">

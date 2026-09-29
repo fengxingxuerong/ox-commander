@@ -12,6 +12,12 @@ interface ProjectRecord {
   batchesJson?: string;
   /** 规划期生成的独立样本冒烟清单（SmokeCheck[]），与 batchesJson 同生共死。 */
   smokeJson?: string;
+  /**
+   * 上一次运行的**交付凭据**（DeliveryReceipt，JSON）。
+   * 与 prdJson / batchesJson 不同，它是"上一次运行的结论"而不是"下一次的输入"：
+   * 重新规划时**刻意不清**，因为窗口重载后它仍是唯一能看到的上次交付结论。
+   */
+  receiptJson?: string;
   createdAt: string;
   updatedAt: string;
 }

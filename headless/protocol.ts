@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { getProvider } from "../shared/providers";
 import { parseAgentManifestList } from "../electron/agents/manifest-schema";
 import type { AgentManifest } from "../shared/agent-contract";
+import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import {
   DEFAULT_SETTINGS,
   type ArbitrationMode,
@@ -158,6 +159,14 @@ export type HeadlessEvent =
       /** 本轮预算上限；settings 未配置时省略（字段即承诺）。 */
       limit?: number;
     }
+  /**
+   * 交付凭据：把验证结论、任务账、越权处置与用量合成一份**可对外引用的结论**。
+   *
+   * 在 `done` / `error` **之前**发一次，且只在两条出口上发 —— 交付成功与重修
+   * 预算耗尽。取消与崩溃不发（那种现场不完整，发出来会被当成"这次就这些结果"）。
+   * `usage` 事件仍然是逐字段的明细，这条是**结论层**，两者不重复。
+   */
+  | { type: "receipt"; receipt: DeliveryReceipt }
   | { type: "done"; passed: boolean; report: unknown }
   /** `exhausted: true` means the repair budget ran out (exit code 2), not a crash (1). */
   | { type: "error"; message: string; exhausted?: boolean };
