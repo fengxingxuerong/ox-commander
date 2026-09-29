@@ -29,6 +29,38 @@ export interface DispatchOutcome {
 export const DEFAULT_MAX_PARALLEL_RUNS = 4;
 
 /**
+ * 并发准入：满载的声明 agent 在本批不再接单，改派给第一个还能接的
+ * （legacy 恒可接；声明的看余量）。全满 → 无人。
+ *
+ * 它是**模块级导出函数而不是私有方法**，原因是这个判定的输入在端到端路径上
+ * 构造不出来：registry.candidates 已经在评分层把满载 agent 过滤掉了，于是
+ * router 永远不会把一个满载的声明 agent 递到这里（实测：池里只要有 legacy，
+ * router 就先选 legacy）。也就是说"满载改派"这条二次防线在真实链路上不可达，
+ * 拿不到"它守住了"的证据。把入参显式化之后，测试才能直接喂"上游失效"的组合
+ * （wanted 已满 + available 里有 legacy / 未注册者）。
+ *
+ * 2026-09-26 实弹演习实测：maxConcurrency=1 的 loomy 同批接下 t1/t2 两单 ——
+ * load 评分是软惩罚（-10/单位），压不过优先级/专属区的分差。
+ */
+export function admitConcurrency(
+  wanted: AgentAdapter | undefined,
+  inflight: ReadonlyMap<string, number>,
+  available: AgentAdapter[],
+  registry?: AgentRegistry,
+): AgentAdapter | undefined {
+  if (!wanted) return undefined;
+  const wantedDesc = registry?.get(wanted.meta.id);
+  if (!wantedDesc || wantedDesc.inferredLegacy) return wanted;
+  if ((inflight.get(wanted.meta.id) ?? 0) < wantedDesc.capabilities.maxConcurrency) return wanted;
+  return available.find((a) => {
+    if (a.meta.id === wanted.meta.id) return false;
+    const d = registry?.get(a.meta.id);
+    if (!d || d.inferredLegacy) return true;
+    return (inflight.get(a.meta.id) ?? 0) < d.capabilities.maxConcurrency;
+  });
+}
+
+/**
  * 批号与 runId 的防碰撞后缀。`Date.now()` 只有毫秒粒度，裸时间戳派生的 id 会同毫秒相撞。
  *
  * 两者的作用域不一样，所以补的东西也不一样：
@@ -72,6 +104,16 @@ export interface SchedulerOptions {
    * 则调度器行为与从前完全一致。
    */
   actionGate?: { observe(text: string): void };
+  /**
+   * 任务级冗余赛马（竞品调研 §5.3，学 Vibe Kanban，默认 1 = 关闭）。
+   *
+   * >1 时每个任务并行派给 min(raceRedundancy, 可用执行器数) 个**不同**执行器，
+   * 第一个到达终态成功者赢得该任务，其余立即 abort。产物正确性不靠赛马本身
+   * —— 批次后的统一硬门禁照旧把关；赛马是拿 token 换时间（等慢执行器的
+   * 批次里，快者先交付）。输家静默：不进审计、不记 breaker、不进任务账，
+   * 全组归因由赢家的 logDigest 承载（成员、各自结局与时长）。
+   */
+  raceRedundancy?: number;
   /**
    * 429 感知派发节流：一次 rate-limit 失败后，下一个排队任务延迟派发
    * （指数退避，封顶 rateLimitMaxBackoffMs），避免在配额墙上继续撞。
@@ -341,17 +383,7 @@ export class Scheduler {
     inflight: ReadonlyMap<string, number>,
     available: AgentAdapter[],
   ): AgentAdapter | undefined {
-    if (!wanted) return undefined;
-    const wantedDesc = this.opts.registry?.get(wanted.meta.id);
-    if (!wantedDesc || wantedDesc.inferredLegacy) return wanted;
-    if ((inflight.get(wanted.meta.id) ?? 0) < wantedDesc.capabilities.maxConcurrency) return wanted;
-    // 满载：改派第一个还能接的（legacy 恒可接；声明的看余量）。全满 → 无人。
-    return available.find((a) => {
-      if (a.meta.id === wanted.meta.id) return false;
-      const d = this.opts.registry?.get(a.meta.id);
-      if (!d || d.inferredLegacy) return true;
-      return (inflight.get(a.meta.id) ?? 0) < d.capabilities.maxConcurrency;
-    });
+    return admitConcurrency(wanted, inflight, available, this.opts.registry);
   }
 
   async runBatch(
@@ -391,8 +423,8 @@ export class Scheduler {
       : null;
 
     const jobs = tasks.map(async (task, i) => {
-      const agent = agentPool[i];
-      if (!agent) {
+      const preferred = agentPool[i];
+      if (!preferred) {
         const miss: DispatchOutcome = {
           taskId: task.id,
           ok: false,
@@ -411,7 +443,25 @@ export class Scheduler {
       const description = baseDesc.includes(CONTRACT_MARKER)
         ? baseDesc
         : `${baseDesc}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
-      const payload: TaskPayload = {
+
+      // 任务级冗余赛马（§5.3）：redundancy > 1 时同任务派 N 个不同执行器并行，
+      // 第一个到终态成功者赢，其余 abort。redundancy = 1 保持单派发路径不变。
+      // 成员从**整个可用池**取（agentPool 是 per-task 首选分配，单任务批拿不到
+      // 第二个执行器）；probe 已在 planPool 里做过，这里直接用同池候选。
+      const redundancy = Math.max(1, Math.floor(this.opts.raceRedundancy ?? 1));
+      const extras: AgentAdapter[] = [];
+      if (redundancy > 1) {
+        for (const a of await this.availableAgents()) {
+          if (extras.length >= redundancy - 1) break;
+          if (a.meta.id !== preferred.meta.id) extras.push(a);
+        }
+      }
+      const members: AgentAdapter[] = [preferred, ...extras].slice(0, redundancy);
+      const startedAt = Date.now();
+      // onRunStart 是组级事实（审计 run-start 一条）：planned 归因记首选执行者，
+      // 实际赢家由 run-end 承载 —— 与"start 计划 / end 实际"的既有语义一致。
+      this.opts.onRunStart?.(members[0]!.meta.id, task);
+      const buildPayload = (): TaskPayload => ({
         runId: `${task.id}-${Date.now()}-${i}-${(dispatchSeq += 1)}`,
         taskId: task.id,
         title: task.title,
@@ -419,49 +469,95 @@ export class Scheduler {
         zone: task.zone,
         projectRoot,
         repairContext: repair,
-      };
-      const startedAt = Date.now();
-      this.opts.onRunStart?.(agent.meta.id, task);
-      // Platform-wide concurrency cap: the pool may be wide, but the provider
-      // quota is not. Held for the whole run, released in `finally`.
-      await this.acquireSlot();
-      let handle: RunHandle | undefined;
-      try {
-        await this.awaitThrottle();
-        handle = await agent.dispatch(payload);
-        this.liveRuns.set(handle.runId, handle);
-        const outcome = await this.collectToTerminal(handle, task.id);
-        const withMeta: DispatchOutcome = {
-          ...outcome,
-          agentId: agent.meta.id,
-          durationMs: Date.now() - startedAt,
-          ...(outcome.ok ? {} : { errorClass: classifyFailure(outcome.logDigest) }),
-        };
-        this.opts.breaker?.record(agent.meta.id, withMeta.ok);
-        this.noteRateLimit(withMeta.errorClass);
+      });
+
+      if (members.length === 1) {
+        return await this.dispatchOne(members[0]!, task, buildPayload(), { startedAt });
+      }
+
+      // 赛马组：全部成员并发派发，逐个等到终态；首个 ok 者赢。
+      // 全员 silent：通知（onRunComplete / breaker / 限流记账）由编排层统一发，
+      // 输家被中止不是执行器的错，也不能让 aborted 事实污染看板恢复语义。
+      const entries = members.map((agent) => {
+        const handleRef: { current?: RunHandle } = {};
+        const p = this.dispatchOne(agent, task, buildPayload(), {
+          handleRef,
+          silent: true,
+        }).then((outcome) => ({ agent, handleRef, outcome }));
+        return { agent, handleRef, p };
+      });
+
+      const pending = new Set(entries.map((e) => e.p));
+      const failures: string[] = [];
+      let winner: { agent: AgentAdapter; outcome: DispatchOutcome } | undefined;
+      while (pending.size > 0 && !winner) {
+        const settled = await Promise.race([...pending].map(async (p) => ({ p, r: await p })));
+        pending.delete(settled.p);
+        if (settled.r.outcome.ok) {
+          winner = { agent: settled.r.agent, outcome: settled.r.outcome };
+          break;
+        }
+        // 到终态的失败者：真实失败，照记 breaker 与限流账。
+        this.opts.breaker?.record(settled.r.agent.meta.id, false);
+        this.noteRateLimit(settled.r.outcome.errorClass);
+        failures.push(
+          `${settled.r.agent.meta.id}: ${(settled.r.outcome.logDigest || "无日志").slice(0, 200)}`,
+        );
+      }
+
+      if (winner) {
+        // 赢家确定：其余成员立即 abort（killTree），并排空它们的 collect 让
+        // 适配器内部状态归位。
+        const losers: string[] = [];
+        await Promise.all(
+          entries
+            .filter((e) => e.agent.meta.id !== winner!.agent.meta.id)
+            .map(async (e) => {
+              const handle = e.handleRef.current;
+              if (handle) {
+                const adapter = this.findAdapter(handle.agentId);
+                try {
+                  await adapter?.abort(handle);
+                } catch {
+                  // abort 是尽力而为；失败不影响赢家交付
+                }
+                const tail = await this.collectToTerminal(handle, task.id).catch(() => undefined);
+                losers.push(`${e.agent.meta.id}: ${tail && tail.ok ? "完赛（晚于赢家）" : "已中止"}`);
+              } else {
+                // 还卡在 throttle/dispatch 阶段，没有 handle 可中止：排空即弃。
+                losers.push(`${e.agent.meta.id}: 未完赛（派发阶段）`);
+                await e.p.catch(() => undefined);
+              }
+            }),
+        );
+        this.opts.breaker?.record(winner.agent.meta.id, true);
+        this.noteRateLimit(winner.outcome.errorClass);
+        const digest = [
+          `[赛马] 成员：${members.map((m) => m.meta.id).join("、")}`,
+          ...losers.map((l) => `[赛马] 输家 ${l}`),
+          winner.outcome.logDigest,
+        ]
+          .filter(Boolean)
+          .join("\n");
+        const withMeta: DispatchOutcome = { ...winner.outcome, logDigest: digest };
         this.opts.onRunComplete?.(withMeta, task);
         return withMeta;
-      } catch (err) {
-        const failed: DispatchOutcome = {
-          taskId: task.id,
-          ok: false,
-          logDigest: `dispatch failed: ${(err as Error).message}`,
-          events: [],
-          agentId: agent.meta.id,
-          durationMs: Date.now() - startedAt,
-          errorClass: classifyFailure((err as Error).message) || "unknown",
-        };
-        // Exactly one record per failed dispatch. `recordFailure` increments
-        // `consecutiveFailures`, so a second call here would open a
-        // threshold-3 circuit after 2 independent failures instead of 3.
-        this.opts.breaker?.record(agent.meta.id, false);
-        this.noteRateLimit(failed.errorClass);
-        this.opts.onRunComplete?.(failed, task);
-        return failed;
-      } finally {
-        if (handle) this.liveRuns.delete(handle.runId);
-        this.releaseSlot();
       }
+
+      // 全员失败：汇总一份失败 outcome（进重修），errorClass 取最后一个。
+      const last = entries[entries.length - 1]!;
+      const lastOutcome = (await last.p.catch(() => undefined))?.outcome;
+      const summary: DispatchOutcome = {
+        taskId: task.id,
+        ok: false,
+        logDigest: [`[赛马] 全部 ${members.length} 个执行器失败：`, ...failures].join("\n"),
+        events: [],
+        agentId: last.agent.meta.id,
+        durationMs: Date.now() - startedAt,
+        errorClass: lastOutcome?.errorClass ?? "unknown",
+      };
+      this.opts.onRunComplete?.(summary, task);
+      return summary;
     });
     const outcomes = await Promise.all(jobs);
 
@@ -474,6 +570,71 @@ export class Scheduler {
       return verdict.outcomes;
     }
     return outcomes;
+  }
+
+  /**
+   * 单次派发的执行本体：并发闸 → 派发 → 收集到终态。`silent` 模式（赛马成员）
+   * 不发 onRunComplete、不记 breaker、不记限流 —— 通知职责上移到赛马编排层，
+   * 输家的 aborted 终态不能污染任务账与看板恢复语义。`handleRef`（可选）让
+   * 赛马编排层在派发返回后立刻拿到句柄，赢家确定时才能中止还在飞的输家。
+   */
+  private async dispatchOne(
+    agent: AgentAdapter,
+    task: Task,
+    payload: TaskPayload,
+    opts?: {
+      silent?: boolean;
+      handleRef?: { current?: RunHandle };
+      startedAt?: number;
+    },
+  ): Promise<DispatchOutcome> {
+    const silent = opts?.silent ?? false;
+    const startedAt = opts?.startedAt ?? Date.now();
+    // Platform-wide concurrency cap: the pool may be wide, but the provider
+    // quota is not. Held for the whole run, released in `finally`.
+    await this.acquireSlot();
+    let handle: RunHandle | undefined;
+    try {
+      await this.awaitThrottle();
+      handle = await agent.dispatch(payload);
+      if (opts?.handleRef) opts.handleRef.current = handle;
+      this.liveRuns.set(handle.runId, handle);
+      const outcome = await this.collectToTerminal(handle, task.id);
+      const withMeta: DispatchOutcome = {
+        ...outcome,
+        agentId: agent.meta.id,
+        durationMs: Date.now() - startedAt,
+        ...(outcome.ok ? {} : { errorClass: classifyFailure(outcome.logDigest) }),
+      };
+      if (!silent) {
+        this.opts.breaker?.record(agent.meta.id, withMeta.ok);
+        this.noteRateLimit(withMeta.errorClass);
+        this.opts.onRunComplete?.(withMeta, task);
+      }
+      return withMeta;
+    } catch (err) {
+      const failed: DispatchOutcome = {
+        taskId: task.id,
+        ok: false,
+        logDigest: `dispatch failed: ${(err as Error).message}`,
+        events: [],
+        agentId: agent.meta.id,
+        durationMs: Date.now() - startedAt,
+        errorClass: classifyFailure((err as Error).message) || "unknown",
+      };
+      // Exactly one record per failed dispatch. `recordFailure` increments
+      // `consecutiveFailures`, so a second call here would open a
+      // threshold-3 circuit after 2 independent failures instead of 3.
+      if (!silent) {
+        this.opts.breaker?.record(agent.meta.id, false);
+        this.noteRateLimit(failed.errorClass);
+        this.opts.onRunComplete?.(failed, task);
+      }
+      return failed;
+    } finally {
+      if (handle) this.liveRuns.delete(handle.runId);
+      this.releaseSlot();
+    }
   }
 
   private async collectToTerminal(handle: RunHandle, taskId: string): Promise<DispatchOutcome> {

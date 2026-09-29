@@ -215,6 +215,8 @@ export function createPlatform(config: PlatformConfig): Platform {
     maxParallelRuns: config.maxParallelRuns ?? settings.maxParallelRuns,
     onRunStart: host.onRunStart,
     onRunComplete: host.onRunComplete,
+    // 任务级冗余赛马（§5.3）：默认 1 = 关闭；>1 时同任务并行派 N 个执行器。
+    raceRedundancy: settings.raceRedundancy,
     // One gate per platform (= per project): the scheduler feeds it every
     // agent log line, the engine resets it at batch boundaries, the verifier
     // queries it before spawning. All three hold the same instance.

@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { digest, Scheduler } from "../electron/engine/scheduler";
+import { admitConcurrency, digest, Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
 import { createAgentLayer, createDefaultAdapters } from "../electron/agents";
@@ -1007,6 +1007,166 @@ describe("Scheduler · 批内并发准入（maxConcurrency 是硬上限）", () 
 // 仍在用内置默认 300s」这种断链，改坏了也不会有任何测试变红（2026-09-27
 // 变异门禁实测：`!== undefined` 改成 `=== undefined` 全绿）。这两条断言把
 // 最后一跳钉住：值要真的落到适配器的单次请求超时上，而不是停在装配层。
+describe("Scheduler · 并发准入的改派分支（入参显式化后可直接喂）", () => {
+  // 这两条钉住 admitConcurrency 的 spare 查找里 `!d || d.inferredLegacy` 这一支。
+  // 端到端路径**构造不出**它的输入：registry.candidates 在评分层就把满载 agent
+  // 滤掉了，router 于是永远不会把"满载的声明 agent"递到准入闸（实测：只要池里
+  // 有 legacy，router 先选 legacy）。所以判定被提成模块级函数，测试直接喂
+  // "上游失效"的组合 —— 这是让二次防线拿到证据的唯一办法。
+  const declared = (id: string, mc: number) =>
+    Object.assign(adapterWith(id, true), {
+      capabilities: () => ({
+        roles: ["*"],
+        zoneGlobs: ["**"],
+        supports: ["read", "edit", "create", "run-test"],
+        artifactKinds: ["files"],
+        maxConcurrency: mc,
+        selfIsolated: false,
+      }),
+    }) as AgentAdapter;
+
+  it("满载改派时 legacy agent 恒可接（无并发概念的池子是兜底资源）", () => {
+    const a1 = declared("a1", 1);
+    const legacy = adapterWith("v1", true);
+    const registry = new AgentRegistry([{ adapter: a1 }, { adapter: legacy }]);
+    // a1 已在飞 1 单且上限 1 → 满载；spare 查找必须接住 legacy。
+    expect(admitConcurrency(a1, new Map([["a1", 1]]), [a1, legacy], registry)?.meta.id).toBe("v1");
+  });
+
+  it("满载改派时未注册者也接（`!d` 半边不是死代码）", () => {
+    const a1 = declared("a1", 1);
+    const ghost = adapterWith("ghost", true);
+    const registry = new AgentRegistry([{ adapter: a1 }]);
+    // registry 里没有 ghost：这一支是防御分支（正常情况下 available 来自注册
+    // 列表），但它决定"未注册者会不会被静默跳过" —— 必须有一条断言守着。
+    expect(admitConcurrency(a1, new Map([["a1", 1]]), [a1, ghost], registry)?.meta.id).toBe("ghost");
+  });
+});
+
+describe("Scheduler · 任务级冗余赛马（raceRedundancy）", () => {
+  // 赛马编排层的终局有三类：赢家交付 / 全员失败 / 池子不够退化为单派发。
+  // 每一类都要走到，否则判定里的分支拿不到证据（2026-09-30 touched 审计：
+  // 434/452/471/482/492/503 六处存活，全部因为没有任何用例开启赛马）。
+  function racer(
+    id: string,
+    opts: {
+      ok: boolean;
+      dispatched?: string[];
+      aborted?: string[];
+      /** 终态前的闸门：不释放就一直在飞，只有 abort 能把它放下来。 */
+      gate?: Promise<void>;
+      /** 日志文本；空串用来验证失败摘要的"无日志"兜底。 */
+      logText?: string;
+      /** 失败终态的事件文本（与 logText 一起为空时，logDigest 才是空串）。 */
+      failText?: string;
+      /** abort 之后的收尾 collect 到什么终态（true = 完赛，false = 已中止）。 */
+      tailOk?: boolean;
+      /** abort 的副作用：真实适配器被中止后 collect 一定会结束，闸门要靠它放行。 */
+      onAbort?: () => void;
+    },
+  ): AgentAdapter {
+    let calls = 0;
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        opts.dispatched?.push(id);
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        calls += 1;
+        yield { kind: "log", text: opts.logText ?? `working ${id}`, timestamp: Date.now() };
+        if (calls === 1 && opts.gate) await opts.gate;
+        yield {
+          kind: opts.ok ? "completed" : calls === 1 ? "failed" : opts.tailOk ? "completed" : "aborted",
+          text: opts.ok ? "done" : opts.failText ?? "exit 1",
+          timestamp: Date.now(),
+        };
+      },
+      async abort() {
+        opts.aborted?.push(id);
+        opts.onAbort?.();
+      },
+    };
+  }
+
+  function deferred(): { promise: Promise<void>; release: () => void } {
+    let release!: () => void;
+    const promise = new Promise<void>((r) => {
+      release = r;
+    });
+    return { promise, release };
+  }
+
+  it("两个执行器赛马：先到终态者赢，输家被中止", async () => {
+    const dispatched: string[] = [];
+    const aborted: string[] = [];
+    const slow = deferred();
+    const winner = racer("fast", { ok: true, dispatched });
+    const loser = racer("slow", {
+      ok: false,
+      dispatched,
+      aborted,
+      gate: slow.promise,
+      tailOk: false,
+      onAbort: slow.release,
+    });
+    const sched = new Scheduler([winner, loser], [], { raceRedundancy: 2 });
+    const outcome = (await sched.runBatch([task("t1", "z1")], "."))[0]!;
+    expect(outcome.ok).toBe(true);
+    expect(outcome.agentId).toBe("fast");
+    expect(dispatched.slice().sort()).toEqual(["fast", "slow"]);
+    expect(aborted).toEqual(["slow"]);
+    expect(outcome.logDigest).toContain("[赛马] 成员：fast、slow");
+    expect(outcome.logDigest).toContain("[赛马] 输家 slow: 已中止");
+  });
+
+  it("输家晚于赢家完赛时照实记为完赛（不是已中止）", async () => {
+    const dispatched: string[] = [];
+    const aborted: string[] = [];
+    const slow = deferred();
+    const winner = racer("fast", { ok: true, dispatched });
+    const loser = racer("slow", {
+      ok: false,
+      dispatched,
+      aborted,
+      gate: slow.promise,
+      tailOk: true,
+      onAbort: slow.release,
+    });
+    const sched = new Scheduler([winner, loser], [], { raceRedundancy: 2 });
+    const outcome = (await sched.runBatch([task("t1", "z1")], "."))[0]!;
+    expect(outcome.ok).toBe(true);
+    expect(outcome.logDigest).toContain("[赛马] 输家 slow: 完赛（晚于赢家）");
+  });
+
+  it("全员失败：汇总一份失败 outcome，无日志者写「无日志」", async () => {
+    const dispatched: string[] = [];
+    const a1 = racer("a1", { ok: false, dispatched, logText: "", failText: "" });
+    const a2 = racer("a2", { ok: false, dispatched, logText: "", failText: "" });
+    const sched = new Scheduler([a1, a2], [], { raceRedundancy: 2 });
+    const outcome = (await sched.runBatch([task("t1", "z1")], "."))[0]!;
+    expect(outcome.ok).toBe(false);
+    expect(dispatched).toEqual(["a1", "a2"]);
+    expect(outcome.logDigest).toContain("[赛马] 全部 2 个执行器失败：");
+    expect(outcome.logDigest).toContain("a1: 无日志");
+    expect(outcome.logDigest).toContain("a2: 无日志");
+  });
+
+  it("冗余度 > 1 但池里只有一个执行器 → 退化为单派发（不进赛马摘要）", async () => {
+    const dispatched: string[] = [];
+    const only = racer("solo", { ok: true, dispatched });
+    const sched = new Scheduler([only], [], { raceRedundancy: 2 });
+    const outcome = (await sched.runBatch([task("t1", "z1")], "."))[0]!;
+    expect(outcome.ok).toBe(true);
+    expect(dispatched).toEqual(["solo"]);
+    // 单派发路径不组赛马组：摘要里不该出现赛马头（否则就是被当成赛马组处理了）
+    expect(outcome.logDigest).not.toContain("[赛马]");
+  });
+});
+
 describe('executorTimeoutMs 的最后一跳', () => {
   it('createAgentLayer 传入时，内置执行器真的用它做单次请求超时', () => {
     const layer = createAgentLayer({ executorTimeoutMs: 4321 });

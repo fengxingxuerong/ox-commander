@@ -321,6 +321,23 @@ export function SettingsPage() {
           这个上限防止一个大批次把 API 配额打成 429。
         </p>
         <div className="form-row">
+          <label htmlFor="race-redundancy">赛马冗余度</label>
+          <input
+            id="race-redundancy"
+            type="number"
+            min={1}
+            max={6}
+            value={draft.raceRedundancy}
+            onChange={(e) =>
+              patch({ raceRedundancy: Math.max(1, Math.min(6, Math.floor(Number(e.target.value) || 1))) })
+            }
+          />
+        </div>
+        <p className="muted">
+          每个任务同时派给几个执行器赛马（1 表示关闭）。第一个完成的赢家交付，其余立即中止；
+          产物正确性仍由批次后的统一硬门禁把关。代价是输家的 token 消耗照实计入。
+        </p>
+        <div className="form-row">
           <label htmlFor="max-tokens-per-run">Token 预算上限</label>
           <input
             id="max-tokens-per-run"

@@ -164,6 +164,12 @@ export interface ProjectSettings {
    */
   maxParallelRuns: number;
   /**
+   * 任务级冗余赛马（默认 1 = 关闭）。>1 时每个任务并行派给 N 个不同执行器，
+   * 第一个到终态成功者赢、其余中止 —— 拿 token 换时间，产物正确性仍由批次后
+   * 的统一硬门禁把关。
+   */
+  raceRedundancy: number;
+  /**
    * Providers whose routes share one failover table, in preference order.
    * SenseNova contributes 3 keys × 4 models = 12 routes; AMD adds one more.
    * Empty ⇒ fall back to the single `llmProvider`.
@@ -224,5 +230,6 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   agentRouter: true,
   arbitration: "revert-batch",
   maxParallelRuns: 4,
+  raceRedundancy: 1,
   llmPool: ["sensenova", "amd-radeon"],
 };
