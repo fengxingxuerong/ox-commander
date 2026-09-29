@@ -2,6 +2,7 @@ import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskS
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { UsageSnapshot } from "../shared/usage-meter";
+import type { LineHealth } from "../shared/http-clients";
 import type { BoardRecoveryView } from "../electron/board-derive";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
@@ -137,6 +138,14 @@ export interface AppState {
    * 可信边界，UI 必须把它和总数一起显示，否则"3k tokens"会被读成全部支出。
    */
   usage?: UsageSnapshot;
+  /**
+   * 每条 LLM 线路的健康事实（冷却剩余、失败次数、其中明确 429 的次数）。
+   *
+   * 有故障转移池才有这份表（单 provider 直连时没有线路可报）。它回答的是
+   * "现在还有几条线能用、是哪几条在被限流" —— 用量回答的是"一共烧了多少"，
+   * 两者是不同维度，别混成一张表。
+   */
+  lineHealth?: LineHealth[];
   /**
    * True when the audit trail ends mid-run (run-start without a matching
    * run-end): the last run was killed before it could finish. Set by

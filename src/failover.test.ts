@@ -5,7 +5,9 @@ import {
   createFailoverClient,
   FailoverLlmClient,
   HttpLlmError,
+  lineHealthOf,
   type FailoverGroup,
+  type LineHealth,
 } from "../shared/http-clients";
 import type { ChatRequest, ChatResponse, LlmClient } from "../shared/llm-client";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
@@ -573,5 +575,62 @@ describe("FailoverLlmClient · 调用方取消", () => {
     const res = await pool.chat(REQ);
     expect(res.model).toBe("m-b");
     expect(seen).toEqual(["a", "b"]);
+  });
+});
+
+describe("线路健康（P1-2）：冷却与限流账要能被界面读到", () => {
+  // 此前冷却表只活在 client 内部（`onEvent` 只落一行给人看的话），界面拿不到
+  // 字段 —— "还有几条线能用、哪条在被限流"这件事没有出口。下面几条把这份事实
+  // 钉住：判定在纯函数 `lineHealthOf` 里，UI 与协议事件共用同一份口径。
+  it("lineHealthOf：冷却中给剩余毫秒，到期即回到可用（过期不是永久判死）", () => {
+    const cooldowns = new Map([["g1#0", 10_000]]);
+    const stats = new Map([["g1#0", { failures: 2, rateLimitHits: 1 }]]);
+    expect(lineHealthOf(["g1#0"], cooldowns, stats, 4_000)).toEqual([
+      { key: "g1#0", cooling: true, remainingMs: 6_000, failures: 2, rateLimitHits: 1 },
+    ]);
+    // 到期那一刻：cooling 必须为 false、remainingMs 为 0（不是负数也不是哨兵）
+    expect(lineHealthOf(["g1#0"], cooldowns, stats, 10_000)).toEqual([
+      { key: "g1#0", cooling: false, remainingMs: 0, failures: 2, rateLimitHits: 1 },
+    ]);
+  });
+
+  it("lineHealthOf：没失败过的线路也要在表里（零值，不是缺行）", () => {
+    const lines = lineHealthOf(["g1#0", "g1#1"], new Map(), new Map(), 0);
+    expect(lines.map((l) => l.key)).toEqual(["g1#0", "g1#1"]);
+    expect(lines.every((l) => l.cooling === false && l.failures === 0 && l.rateLimitHits === 0)).toBe(true);
+  });
+
+  it("429 才算限流，5xx 只算失败（两个计数不是一个东西）", async () => {
+    let clock = 0;
+    const limited = stub([async () => Promise.reject(new HttpLlmError(429, "limited"))]);
+    const broken = stub([async () => Promise.reject(new HttpLlmError(500, "boom"))]);
+    const ok = stub([async () => OK("m")()]);
+    const client = new FailoverLlmClient(
+      [group("g1", [limited, broken, ok])],
+      async () => {},
+      { now: () => clock },
+    );
+    await client.chat(REQ);
+    clock = 1_000;
+    const health = client.health();
+    expect(health).toHaveLength(3);
+    expect(health[0]).toMatchObject({ key: "g1#0", cooling: true, failures: 1, rateLimitHits: 1 });
+    expect(health[1]).toMatchObject({ key: "g1#1", cooling: true, failures: 1, rateLimitHits: 0 });
+    expect(health[2]).toMatchObject({ key: "g1#2", cooling: false, failures: 0, rateLimitHits: 0 });
+  });
+
+  it("onHealth：建好就推一份全表，失败/恢复各再推一次", async () => {
+    const seen: LineHealth[][] = [];
+    const rate = stub([async () => Promise.reject(new HttpLlmError(429, "limited"))]);
+    const ok = stub([async () => OK("m")()]);
+    const client = new FailoverLlmClient([group("g1", [rate, ok])], async () => {}, {
+      onHealth: (lines) => seen.push(lines),
+    });
+    // 构造即推：宿主不必等第一次失败才知道池里有什么
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.map((l) => l.key)).toEqual(["g1#0", "g1#1"]);
+    await client.chat(REQ);
+    expect(seen.length).toBeGreaterThan(1);
+    expect(seen.at(-1)![0]!.rateLimitHits).toBe(1);
   });
 });

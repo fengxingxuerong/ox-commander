@@ -1,5 +1,5 @@
 import { getProvider, providerKeyEnvVars, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, DEFAULT_LLM_POOL } from "./providers";
-import { BRAIN_TIMEOUT_MS, createFailoverClient, createLlmClient, createMultiProviderFailover, type PoolRoute } from "./http-clients";
+import { BRAIN_TIMEOUT_MS, createFailoverClient, createLlmClient, createMultiProviderFailover, type LineHealth, type PoolRoute } from "./http-clients";
 import type { LlmClient } from "./llm-client";
 import { meteredLlm, type UsageMeter } from "./usage-meter";
 
@@ -10,6 +10,11 @@ export interface BuildLlmOptions {
   timeoutMs?: number;
   /** Failover decision sink (rotation failures, cooldown skips); wired to the caller's log stream. */
   onEvent?: (text: string) => void;
+  /**
+   * 线路健康的结构化出口（P1-2）：哪条线路在冷却、还剩多久、被限流几次。
+   * 文本 sink 只适合给人看，界面要的是字段。
+   */
+  onHealth?: (lines: LineHealth[]) => void;
   /**
    * Token 用量汇总器。工厂是**唯一**的构造点（Electron 与 headless 共用），
    * 所以在这里包一层就能覆盖两个宿主的大脑层调用 —— 而不是在调用点各记一次。
@@ -37,6 +42,7 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
         env,
         timeoutMs,
         onEvent: opts.onEvent,
+        onHealth: opts.onHealth,
       }),
       opts.meter,
     );
@@ -100,6 +106,7 @@ export function buildLlmPool(opts: BuildPoolOptions = {}): LlmClient {
       // 个键"在接收侧完全等价。而那个三元一旦被交换，就是「传了 onEvent 反而
       // 不往下透传」，池的轮换日志会静默消失（没有断言会红）。判定简化掉。
       onEvent: opts.onEvent,
+      onHealth: opts.onHealth,
     }),
     opts.meter,
   );

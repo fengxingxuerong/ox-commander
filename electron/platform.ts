@@ -22,7 +22,7 @@ import type { BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { ActionGate } from "./sandbox/action-gate";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
-import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
+import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
@@ -77,6 +77,13 @@ export interface PlatformHost {
   onVerdict?(verdict: BatchVerdict): void;
   /** Escalation decision; omit to keep the engine's fail-fast/typed-error path. */
   requestEscalationDecision?(taskId: string, summary: string): Promise<EscalationAction>;
+  /**
+   * 线路健康的事实出口（P1-2）：哪条线路在冷却、还剩多久、被限流了几次。
+   * 由 `buildLlm()` 建的故障转移客户端在构造时与每次失败/恢复时推送；
+   * 桌面推给渲染进程、headless 可发协议事件。**不注入 layer 的那条路径
+   * 不会有任何线路** —— 那是事实（池里没有线路），不是缺陷。
+   */
+  onLineHealth?(lines: LineHealth[]): void;
   /**
    * Extra engine callbacks the host owns (stage persistence, richer task
    * payloads, verification rendering). Merged last, so a host-supplied callback
@@ -144,6 +151,8 @@ export interface Platform {
    * 上报用量的次数 —— 那个差值就是这份数字的可信边界。
    */
   usage(): UsageSnapshot;
+  /** 最近一份线路健康事实（池里每条线路的冷却与限流账）。空数组 = 没有线路。 */
+  lineHealth(): LineHealth[];
 }
 
 /**
@@ -230,6 +239,13 @@ export function createPlatform(config: PlatformConfig): Platform {
    * nothing (the engine below does exactly that) the config seeder still runs,
    * otherwise the key store would only be reachable from one-shot clients.
    */
+  // 线路健康：故障转移客户端建好就推一份（池里有什么），之后每次失败/恢复再推。
+  // 存一份最新的，`lineHealth()` 让宿主也能主动拉（headless 与测试用）。
+  let latestLines: LineHealth[] = [];
+  const onHealth = (lines: LineHealth[]): void => {
+    latestLines = lines;
+    host.onLineHealth?.(lines);
+  };
   const buildLlm = (seedKeys?: (envVars: Set<string>) => void): LlmClient => {
     if (config.llm) return meteredLlm(config.llm, meter);
     // The host's seeder mutates `process.env` (it owns the key store); the set
@@ -238,11 +254,18 @@ export function createPlatform(config: PlatformConfig): Platform {
     if (seed) seed(new Set<string>());
     const pool = config.llmPool ?? settings.llmPool ?? [];
     return pool.length > 0
-      ? buildLlmPool({ providers: pool, timeoutMs: brainTimeoutMsFor(settings), onEvent: log, meter })
+      ? buildLlmPool({
+          providers: pool,
+          timeoutMs: brainTimeoutMsFor(settings),
+          onEvent: log,
+          meter,
+          onHealth,
+        })
       : buildLlmClient(settings.llmProvider, {
           timeoutMs: brainTimeoutMsFor(settings),
           onEvent: log,
           meter,
+          onHealth,
         });
   };
 
@@ -286,7 +309,14 @@ export function createPlatform(config: PlatformConfig): Platform {
     callbacks,
   );
 
-  return { engine, layer, schedulerOptions, buildLlm, usage: () => meter.snapshot() };
+  return {
+    engine,
+    layer,
+    schedulerOptions,
+    buildLlm,
+    usage: () => meter.snapshot(),
+    lineHealth: () => latestLines,
+  };
 }
 
 export interface FileJournalHandle {

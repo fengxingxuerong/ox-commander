@@ -295,6 +295,12 @@ export interface FailoverOptions {
   /** Observability sink: combo failures, cooldown skips, rotation decisions. */
   onEvent?: (text: string) => void;
   /**
+   * 线路健康的结构化出口（P1-2）：每次有线路进冷却/失败账变化后推一份全表。
+   * 文本 sink（`onEvent`）只适合给人看，UI 要的是**字段**（哪条线路在冷却、
+   * 还剩多久、被限流了几次）。
+   */
+  onHealth?: (lines: LineHealth[]) => void;
+  /**
    * Whether 401/403 aborts the whole pool (default) or just benches that route.
    *
    * Within one provider, an auth failure means the credentials are wrong, so
@@ -307,6 +313,49 @@ export interface FailoverOptions {
 
 /** Retry-After-derived cooldowns are capped so a hostile/crazy header cannot shelve a combo for hours. */
 const RETRY_AFTER_COOLDOWN_CAP_MS = 300_000;
+
+/** 一条线路的累计失败账：`rateLimitHits` 是其中**明确收到 429** 的那部分。 */
+export interface LineStats {
+  failures: number;
+  rateLimitHits: number;
+}
+
+export interface LineHealth {
+  /** `provider#index`，与冷却表/速度画像同一个键。 */
+  key: string;
+  cooling: boolean;
+  /** 冷却剩余毫秒；不在冷却时为 0（不是"剩余多少"的哨兵值）。 */
+  remainingMs: number;
+  failures: number;
+  rateLimitHits: number;
+}
+
+/**
+ * 冷却表 + 失败账 → 每条线路的健康事实。
+ *
+ * 判定（在不在冷却里、还剩多久）收在这里而不是散在各处：UI 与协议事件共用同一份
+ * 口径，"冷却中"这件事只在 `until > now` 时成立 —— 到期的条目**必须**回到
+ * 可服务状态，否则一条线路会被永久判死。
+ */
+export function lineHealthOf(
+  keys: readonly string[],
+  cooldowns: ReadonlyMap<string, number>,
+  stats: ReadonlyMap<string, LineStats>,
+  now: number,
+): LineHealth[] {
+  return [...new Set(keys)].map((key) => {
+    const until = cooldowns.get(key);
+    const cooling = until !== undefined && until > now;
+    const s = stats.get(key);
+    return {
+      key,
+      cooling,
+      remainingMs: cooling ? until - now : 0,
+      failures: s?.failures ?? 0,
+      rateLimitHits: s?.rateLimitHits ?? 0,
+    };
+  });
+}
 
 /** Thrown when every failover combo is still cooling down; retrying immediately cannot succeed. */
 export class AllRoutesCoolingError extends Error {
@@ -335,6 +384,8 @@ function isTransient(e: unknown): boolean {
  */
 export class FailoverLlmClient implements LlmClient {
   private cooldowns = new Map<string, number>();
+  /** 线路失败账：只有**真的收到 429** 才计 `rateLimitHits`（5xx/超时只算 failures）。 */
+  private stats = new Map<string, LineStats>();
   /**
    * 线路速度画像（2026-09-27 --real 演习实测驱动）：旧实现按构造顺序静态
    * 轮换，慢线路排前时每次先被试、一次吃满 attempt 预算（glm-5.2 529s vs
@@ -349,7 +400,10 @@ export class FailoverLlmClient implements LlmClient {
   private readonly baseBackoffMs: number;
   private readonly now: () => number;
   private readonly onEvent?: (text: string) => void;
+  private readonly onHealth?: (lines: LineHealth[]) => void;
   private readonly failFastOnAuth: boolean;
+  /** 池里每条线路的键（`label#index`），构造时一次算好 —— 健康表要覆盖全部线路。 */
+  private readonly keys: string[];
 
   constructor(
     private groups: FailoverGroup[],
@@ -361,7 +415,17 @@ export class FailoverLlmClient implements LlmClient {
     this.baseBackoffMs = opts?.baseBackoffMs ?? 500;
     this.now = opts?.now ?? Date.now;
     this.onEvent = opts?.onEvent;
+    this.onHealth = opts?.onHealth;
     this.failFastOnAuth = opts?.failFastOnAuth ?? true;
+    this.keys = groups.flatMap((g) => g.clients.map((_, ci) => `${g.label}#${ci}`));
+    // 推一份初始表：宿主不必等到第一次失败才知道池里有什么。
+    this.onHealth?.(this.health());
+  }
+
+  /** 当前每条线路的健康事实（冷却剩余 + 失败账）。池里**全部**线路都在表里 ——
+   *  没失败过的线路也要出现，否则界面上看不出"池子一共几条、现在还剩几条能用"。 */
+  health(): LineHealth[] {
+    return lineHealthOf(this.keys, this.cooldowns, this.stats, this.now());
   }
 
   async chat(req: ChatRequest): Promise<ChatResponse> {
@@ -397,7 +461,8 @@ export class FailoverLlmClient implements LlmClient {
       const t0 = this.now();
       try {
         const res = await client.chat(req);
-        this.cooldowns.delete(comboKey);
+        // 成功且此前在冷却 ⇒ 健康状态变了（那条线路回到可服务），推一份。
+        if (this.cooldowns.delete(comboKey)) this.onHealth?.(this.health());
         // 成功才记速度（失败走冷却惩罚，不污染画像）；EWMA 平滑单次抖动。
         const dur = this.now() - t0;
         const prev = this.speeds.get(comboKey);
@@ -425,6 +490,7 @@ export class FailoverLlmClient implements LlmClient {
         lastErr = e;
         if (nonRetryable) {
           // Multi-provider pool: bench this route only, keep the healthy ones.
+          this.recordFailure(comboKey, status);
           const cd = this.setCooldown(comboKey, e);
           this.onEvent?.(`${comboKey} 认证失败（${status}），仅冷却该线路 ${Math.round(cd / 1000)}s`);
           // Waiting cannot fix a bad credential — skip the backoff and move on.
@@ -434,6 +500,7 @@ export class FailoverLlmClient implements LlmClient {
           continue;
         }
         if (isTransient(e)) {
+          this.recordFailure(comboKey, status);
           const cd = this.setCooldown(comboKey, e);
           this.onEvent?.(
             `${comboKey} 失败（${errorDigest(e)}），冷却 ${Math.round(cd / 1000)}s`,
@@ -449,6 +516,15 @@ export class FailoverLlmClient implements LlmClient {
       }
     }
     throw lastErr;
+  }
+
+  /** 记一次失败并推健康快照；只有真的收到 429 才计入限流那一格。 */
+  private recordFailure(comboKey: string, status?: number): void {
+    const s = this.stats.get(comboKey) ?? { failures: 0, rateLimitHits: 0 };
+    s.failures += 1;
+    if (status === 429) s.rateLimitHits += 1;
+    this.stats.set(comboKey, s);
+    this.onHealth?.(this.health());
   }
 
   private setCooldown(comboKey: string, e: unknown): number {
@@ -471,6 +547,8 @@ export interface FailoverClientOptions {
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
   onEvent?: (text: string) => void;
+  /** 线路健康的结构化出口（P1-2）；见 `FailoverOptions.onHealth`。 */
+  onHealth?: (lines: LineHealth[]) => void;
 }
 
 /** Generic failover factory: one group per key env var, models rotated within each group. */
@@ -493,7 +571,7 @@ export function createFailoverClient(
       ),
     });
   }
-  return new FailoverLlmClient(groups, undefined, { onEvent: opts.onEvent });
+  return new FailoverLlmClient(groups, undefined, { onEvent: opts.onEvent, onHealth: opts.onHealth });
 }
 
 // `createSensenovaFailoverClient(env)` was removed here. It differed from
@@ -554,6 +632,7 @@ export function createMultiProviderFailover(
   const providerCount = new Set(routes.map((r) => r.providerId)).size;
   return new FailoverLlmClient(groups, undefined, {
     onEvent: opts.onEvent,
+    onHealth: opts.onHealth,
     failFastOnAuth: opts.failFastOnAuth ?? providerCount <= 1,
   });
 }

@@ -326,6 +326,9 @@ export const useApp = create<AppState>((set, get) => ({
         set((s) => ({ usage: snap, logs: [...s.logs, formatUsageLine(snap)] }));
         break;
       }
+      case "line-health":
+        set(() => ({ lineHealth: (p as { lines: AppState["lineHealth"] }).lines }));
+        break;
       case "escalation": {
         const { taskId, summary } = p as { taskId: string; summary: string };
         set((s) => ({

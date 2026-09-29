@@ -11,7 +11,8 @@ import {
 } from "../electron/platform";
 import { createAgentLayer } from "../electron/agents";
 import { buildLlmPool } from "../shared/build-llm";
-import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
+import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
+import { SENSENOVA_MODELS } from "../shared/providers";
 import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 
@@ -599,5 +600,32 @@ describe("设置里的 brainTimeoutMs 真的传进了大脑客户端", () => {
     expect(vi.mocked(buildLlmPool).mock.calls[0]![0]).toMatchObject({
       timeoutMs: BRAIN_POOL_TIMEOUT_MS,
     });
+  });
+
+  it("线路健康：池里每条线路都进表，宿主拿到的是字段（P1-2 的宿主出口）", () => {
+    // 冷却表此前只活在故障转移客户端内部，宿主没有任何结构化出口 —— 界面
+    // 问不出"还有几条线能用、哪条在被限流"。这条钉住 `buildLlm()` 把这份表
+    // 推给宿主、且 `lineHealth()` 拿到的就是最后一份。
+    const key = "SENSENOVA_API_KEY";
+    const had = process.env[key];
+    process.env[key] = "test-key-line-health";
+    try {
+      const seen: LineHealth[][] = [];
+      const platform = createPlatform({
+        settings: settings({ llmPool: ["sensenova"] }),
+        promptDir: tempDir(),
+        host: { log: () => undefined, onLineHealth: (l) => seen.push(l) },
+      });
+      platform.buildLlm();
+      expect(seen.length).toBeGreaterThan(0);
+      const last = seen.at(-1)!;
+      // 1 个 key × N 个模型 = N 条线路；没失败过的线路也要在表里（零值）
+      expect(last).toHaveLength(SENSENOVA_MODELS.length);
+      expect(last.every((l) => l.cooling === false && l.failures === 0)).toBe(true);
+      expect(platform.lineHealth()).toEqual(last);
+    } finally {
+      if (had === undefined) delete process.env[key];
+      else process.env[key] = had;
+    }
   });
 });

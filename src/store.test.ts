@@ -23,6 +23,8 @@ function reset(): void {
     conflicts: [],
     verification: undefined,
     receipt: undefined,
+    usage: undefined,
+    lineHealth: undefined,
     planning: false,
     planningError: undefined,
     settings: undefined,
@@ -326,6 +328,16 @@ describe("handleEvent · usage", () => {
   it("全部调用都上报时日志里不出现未上报那一格", () => {
     emit({ type: "usage", totalTokens: 7, calls: 1, measuredCalls: 1, byModel: {} });
     expect(useApp.getState().logs.at(-1)).toBe("[usage] 7 tokens · 1 次调用");
+  });
+});
+
+describe("handleEvent · line-health", () => {
+  it("keeps the per-line health table（冷却与限流账是界面事实）", () => {
+    const lines = [
+      { key: "sensenova:SENSENOVA_API_KEY#0", cooling: true, remainingMs: 5_000, failures: 2, rateLimitHits: 1 },
+    ];
+    emit({ type: "line-health", lines });
+    expect(useApp.getState().lineHealth).toEqual(lines);
   });
 });
 

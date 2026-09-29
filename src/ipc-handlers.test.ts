@@ -962,6 +962,22 @@ describe("orchestration handlers", () => {
     }));
   });
 
+  it("pushes line health (cooldown + rate-limit tally) to the board", () => {
+    // 冷却表此前只活在故障转移客户端内部，界面没有出口 —— 这条钉住平台把
+    // 它推给宿主这件事（字段，不是一行给人看的话）。
+    buildEngine("p-lines");
+    const host = lastPlatformConfig().host;
+    expect(host.onLineHealth).toBeTypeOf("function");
+    const lines = [
+      { key: "sensenova:SENSENOVA_API_KEY#0", cooling: true, remainingMs: 5_000, failures: 2, rateLimitHits: 1 },
+    ];
+    host.onLineHealth!(lines);
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      "ox:event",
+      expect.objectContaining({ type: "line-health", lines }),
+    );
+  });
+
   it("pushes the run's token usage to the board as its own event", () => {
     // 用量走独立事件而不是日志行：看板要的是**字段**（`calls - measuredCalls`
     // 决定这份数字可信到什么程度），而平台默认实现只落一行 `[usage] …`。

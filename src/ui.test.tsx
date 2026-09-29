@@ -141,6 +141,7 @@ function resetStore() {
     newProjectName: "",
     newRequirement: "",
     usage: undefined,
+    lineHealth: undefined,
   });
 }
 
@@ -355,6 +356,28 @@ describe("BoardPage", () => {
     expect(screen.getByText("7 tokens · 1 次调用")).toBeTruthy();
     expect(screen.getByText("预算上限 1000 tokens")).toBeTruthy();
     expect(screen.queryByText(/这道闸看不见它们/)).toBeNull();
+  });
+
+  it("线路健康上板：冷却剩余与限流次数都要看得见", () => {
+    seedBoard();
+    useApp.setState({
+      lineHealth: [
+        { key: "sensenova:SENSENOVA_API_KEY#0", cooling: true, remainingMs: 7_000, failures: 3, rateLimitHits: 2 },
+        { key: "sensenova:SENSENOVA_API_KEY#1", cooling: false, remainingMs: 0, failures: 0, rateLimitHits: 0 },
+      ],
+    });
+    render(<BoardPage />);
+    expect(screen.getByText("线路健康")).toBeTruthy();
+    expect(screen.getByText(/冷却中（约 7s）/)).toBeTruthy();
+    expect(screen.getByText(/sensenova:SENSENOVA_API_KEY#0 · 失败 3 次（限流 2）/)).toBeTruthy();
+    // 可用那条也要在表里：界面要能回答"还剩几条能用"
+    expect(screen.getByText(/可用 · sensenova:SENSENOVA_API_KEY#1/)).toBeTruthy();
+  });
+
+  it("没有线路数据时不该摆一张空表", () => {
+    seedBoard();
+    render(<BoardPage />);
+    expect(screen.queryByText("线路健康")).toBeNull();
   });
 
   it("看板页挂审计日志：落盘的历史跟着实时流同栏可见（改前应挂的基线用例）", () => {

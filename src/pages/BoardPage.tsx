@@ -32,6 +32,7 @@ export function BoardPage() {
   const verification = useApp((s) => s.verification);
   const receipt = useApp((s) => s.receipt);
   const usage = useApp((s) => s.usage);
+  const lines = useApp((s) => s.lineHealth);
   const escalations = useApp((s) => s.escalations);
   const resolveEscalation = useApp((s) => s.resolveEscalation);
   const interrupted = useApp((s) => s.interrupted);
@@ -171,6 +172,22 @@ export function BoardPage() {
               <p className="task-meta">{fact.summary}</p>
               {fact.limit !== undefined && <p className="task-meta">预算上限 {fact.limit} tokens</p>}
               {fact.blindNote ? <p className="muted">{fact.blindNote}</p> : null}
+            </section>
+          )}
+
+          {/* 线路健康：现在还有几条线能用、哪几条在被限流。与上面的用量是**两个
+              维度**（一共烧了多少 vs 哪条线还能用），所以分开摆。 */}
+          {lines && lines.length > 0 && (
+            <section className="card">
+              <h3>线路健康</h3>
+              <ul>
+                {lines.map((l) => (
+                  <li key={l.key} className="task-meta">
+                    {l.cooling ? `冷却中（约 ${Math.ceil(l.remainingMs / 1000)}s）` : "可用"} ·{" "}
+                    {l.key} · 失败 {l.failures} 次（限流 {l.rateLimitHits}）
+                  </li>
+                ))}
+              </ul>
             </section>
           )}
 

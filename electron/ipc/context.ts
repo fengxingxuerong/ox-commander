@@ -300,6 +300,9 @@ export function buildPlatformLayer(
           });
         }
       },
+      // 线路健康：哪条线路在冷却、被限流了几次。走独立事件而不是日志行 ——
+      // 界面要的是字段（不是一行给人看的话），而且要能在重载后重新拉一次。
+      onLineHealth: (lines) => send({ type: "line-health", lines }),
       requestEscalationDecision: (taskId) =>
         new Promise<EscalationAction>((resolve) => {
           // The escalation event itself is already sent by onEscalation; here
