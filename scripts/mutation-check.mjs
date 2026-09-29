@@ -418,6 +418,12 @@ const TARGETS = [
   // （路径去重漏了 = 越权看起来更频繁；pass 算进"已处置" = 回滚覆盖率虚高；
   // 批次算成 0 段 = 互斥的代价凭空消失）。正该进变异门禁。tier 1：7ms。
   { file: "electron/zone-cost.ts", test: "src/zone-cost.test.ts", tier: 1 },
+  // headless 的常驻服务形态（serve）：路由判据与状态派生全是"错了也不报错"的形状 ——
+  // 404 兜底成首页、POST 当 GET 收下、receipt 一到就报"已交付"（崩溃也会留下半截
+  // 事件流，只有终态能区分跑完与跑挂）、事件文本不转义（文本来自模型输出 = 不可信
+  // 输入）。它同时是"离开工位也能看"这一格的唯一实现，静默错等于没有。
+  // tier 1：整份测试 58ms（端口 0 由系统分配，不撞 smoke 的固定端口）。
+  { file: "headless/serve.ts", test: "src/headless-serve.test.ts", tier: 1 },
 ];
 
 /**

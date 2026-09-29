@@ -54,6 +54,18 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 {"type":"error","message":"requirement 必须是非空字符串；maxRepairRounds 必须是不小于 0 的数字；arbitration 必须是 report-only / deny-all / revert-batch / quarantine"}
 ```
 
+## 1.1 两种宿主形态
+
+同一个协议、同一个 `runSpec`、同一套事件语义，两种接法：
+
+| 形态 | 入口 | 适合 |
+| --- | --- | --- |
+| **管道**（一次跑完） | `node dist-headless/headless/main.js` —— stdin 收 spec，stdout 吐 JSONL，结束给退出码 | CI、被别的 Agent 当子进程驱动 |
+| **服务**（常驻） | `node dist-headless/headless/serve-main.js [--port=8787]` —— HTTP + SSE | 人在浏览器里看、远程机器上挂着看 |
+
+服务形态的三个端点（详见 §8）：`GET /`（状态页）、`GET /events`（SSE 事件流，含历史补齐）、
+`POST /run`（投递 spec，一次只跑一个，第二个拿 409）。
+
 ## 2. 事件表
 
 | type | 载荷 | 何时 |
@@ -251,3 +263,26 @@ skipped / attempts / round / extraRounds / lastDigest。
 注意：恢复的完成状态在"全员成功但验证失败 → 全员重跑"分支中被保护，
 不会被清掉。e2e runner 支持 `--workspace <dir>` 指回被杀运行的工作区
 与 `--max-minutes <n>` 调整墙钟。
+
+## 8. 服务形态（serve，2026-09-29 新增）
+
+```bash
+node dist-headless/headless/serve-main.js --port=8787
+# → OxCommander serve: http://127.0.0.1:8787/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec）
+```
+
+| 端点 | 方法 | 返回 |
+| --- | --- | --- |
+| `/` | GET | 一页自包含 HTML：状态 + 最近一份交付凭据 + 最近 30 条事件（页面活着时经 SSE 追加） |
+| `/state` | GET | `{status, events[], receipt?, exitCode?, updatedAt?}`，`status` 为 `idle`/`running`/`delivered`/`failed` |
+| `/events` | GET | SSE 流。**先补齐历史事件**（带 `id:` 序号，可 `Last-Event-ID` 续），再推后续 |
+| `/run` | POST | body 是 spec JSON → 立即 `202 {"accepted":true}`，run 在后台跑；已在跑则 `409`，body 非法 JSON 则 `400` |
+
+四条必须知道的语义：
+
+1. **状态只由终态事件派生**：`receipt` 到了不算交付 —— 一次崩溃也会留下半截事件流，
+   只有 `done` / `error` 能区分"跑完了"和"跑挂了"。
+2. **一次只跑一个 run**，第二个 POST 拿 409 且响应体写明原因。并发编排是引擎内部
+   的事（批次与并发闸），这里再叠一层队列只会让"到底哪个在跑"变成猜谜。
+3. **后连上的客户端能拿到完整历史**：断线重连靠 `id:` 序号，不是"只推新的"。
+4. **无鉴权、无 TLS**：这是本机 / 内网 / SSH 隧道后的观察面。要放到公网前面，自己挂一层。

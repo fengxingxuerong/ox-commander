@@ -76,6 +76,18 @@ echo '{"requirement":"...","projectRoot":"D:/path/to/project"}' | node dist-head
 # 协议字段、事件与退出码见 docs/headless-protocol.md
 ```
 
+**或者起一个常驻服务**（浏览器/CI/远程都能看，同一套事件语义）：
+
+```bash
+node dist-headless/headless/serve-main.js --port=8787
+# → http://127.0.0.1:8787/ 看状态与交付凭据
+#   /events 是 SSE 事件流（后连上的客户端会先补齐历史）
+#   POST /run 投递 spec（一次只跑一个，第二个拿 409）
+```
+
+> serve 形态补的是「离开工位也能看」这一格 —— 实测 15 个同类项目里只有我们缺它
+> （Orca 有桌面 + 手机伴生 + SSH worktree）。⚠️ 无鉴权、无 TLS：本机/内网/SSH 隧道后用。
+
 ## 获取与安装
 
 **方式一：下载安装包**（推荐，不用装 Node）

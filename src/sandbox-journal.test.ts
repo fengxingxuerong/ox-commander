@@ -315,7 +315,10 @@ describe("FileJournal", () => {
     // real gap but not a flaky one: 1.5× is the floor, typically much more.
     expect(journalMs).toBeLessThan(zgMs * 1.5);
     expect(snapshot.files.size).toBe(300);
-  });
+    // 判据是**比值**，与墙钟无关；但这条要写 300×4KB 再扫两遍，全量并行跑
+    // （52 个测试文件）时磁盘抖动能把它推过 vitest 默认的 5s。给到 30s：
+    // 负载抖动不是缺陷，把它报成失败只会让人去改一条本来正确的性能断言。
+  }, 30_000);
 });
 
 describe("SnapshotStore", () => {
