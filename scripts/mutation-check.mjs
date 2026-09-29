@@ -1100,9 +1100,17 @@ const enabledExtra = new Set(String(opsArg ?? "").split(",").filter(Boolean));
 if (opsArg && enabledExtra.has("all")) for (const op of OPERATORS) if (op.optName) enabledExtra.add(op.optName);
 const ACTIVE_OPERATORS = OPERATORS.filter((op) => !op.extra || (op.optName && enabledExtra.has(op.optName)));
 
-const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) =>
-  onlyFile ? t.file.includes(onlyFile) : true,
-);
+const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) => {
+  if (!onlyFile) return true;
+  // 匹配语义（2026-09-29 收紧）：全路径精确优先；短名回退按「路径末段」。
+  // 此前是 `t.file.includes(onlyFile)` —— touched 审 `src/store.ts` 时传
+  // `--file=store`，却把 keys-store / snapshot-store / electron-store 全拖进
+  // 同一轮审计：任何一个的基线失败都会让 `src/store.ts` 的审计段整体退出
+  // 非 0（2026-09-29 CI windows verify 即被 snapshot-store 的基线拖红，
+  // 且本地无法复现）。短名仍可能同名（两个 store.ts），那是手动用法的
+  // 冗余，可接受；touched 已改为传完整路径，走精确分支。
+  return t.file === onlyFile || t.file === `${onlyFile}.ts` || t.file.endsWith(`/${onlyFile}.ts`);
+});
 if (targets.length === 0) {
   console.error(`没有匹配的目标：--file=${onlyFile} --tier=${maxTier}`);
   process.exit(2);
@@ -1446,8 +1454,14 @@ for (const target of targets) {
 
   // 基线：原文件必须通过，否则后面结论不可信。这里用长超时 —— 要的是
   // 「这套测试本来是好的」这个事实，不是「它有多快」。
-  if (!testsPassAll(target, BASELINE_TIMEOUT_MS, BASELINE_VITEST_TEST_TIMEOUT_MS)) {
+  // 失败时带出 vitest 输出尾部：2026-09-29 CI windows 上 snapshot-store
+  // 基线失败只留一句「基线失败，无结论」，本地无法复现、远程无法判读。
+  const baselineCapture = { outputs: [] };
+  if (!testsPassAll(target, BASELINE_TIMEOUT_MS, BASELINE_VITEST_TEST_TIMEOUT_MS, baselineCapture)) {
     console.error(`基线失败：${testFilesOf(target).join(", ")} 在原始代码上不通过，跳过 ${target.file}`);
+    for (const o of baselineCapture.outputs) {
+      console.error(`[baseline:${o.file}] status=${o.status ?? "ok"}\n${o.tail}`);
+    }
     results.push({ target, baselineFailed: true, ran: [], ms: Date.now() - startedAt });
     continue;
   }

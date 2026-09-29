@@ -106,7 +106,11 @@ for (const f of hits) {
   console.log(`\n=== site 口径审计：${f} ===`);
   const r = spawnSync(
     process.execPath,
-    [path.join(ROOT, "scripts", "mutation-check.mjs"), "--mode=site", `--file=${path.basename(f, ".ts")}`, "--limit=999"],
+    // 传**完整相对路径**而不是 basename：mutation-check 的 --file 匹配
+    // 收紧为「全路径精确 / 路径末段」后，全路径命中唯一目标。此前传
+    // basename（如 store）会把同名/含名的其他目标拖进同一轮，任何一个
+    // 基线失败都会算到当前目标头上（2026-09-29 CI windows 教训）。
+    [path.join(ROOT, "scripts", "mutation-check.mjs"), "--mode=site", `--file=${f}`, "--limit=999"],
     { cwd: ROOT, stdio: "inherit" },
   );
   if (r.status !== 0) failed.push(f);
