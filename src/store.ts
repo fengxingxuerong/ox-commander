@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { AppState, TaskView } from "./types";
 import type { Stage, TaskStatus } from "../shared/types";
+import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
 
 const api = () => window.oxCommander;
 
@@ -318,6 +319,13 @@ export const useApp = create<AppState>((set, get) => ({
           logs: [...s.logs, p.receipt ? (p.receipt as { headline: string }).headline : ""],
         }));
         break;
+      case "usage": {
+        // 事件载荷是 `Record<string, unknown>`：先过 unknown 再落类型，与其余
+        // case 的 `as AppState[...]` 同源（不做逐字段校验，协议保证形状）。
+        const snap = p as unknown as UsageSnapshot;
+        set((s) => ({ usage: snap, logs: [...s.logs, formatUsageLine(snap)] }));
+        break;
+      }
       case "escalation": {
         const { taskId, summary } = p as { taskId: string; summary: string };
         set((s) => ({

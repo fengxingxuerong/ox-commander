@@ -1,6 +1,7 @@
 import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { UsageSnapshot } from "../shared/usage-meter";
 import type { BoardRecoveryView } from "../electron/board-derive";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
@@ -129,6 +130,13 @@ export interface AppState {
    * 看板上两者并存，因为"哪些命令红了"和"这次到底交付了什么"是两个问题。
    */
   receipt?: DeliveryReceipt;
+  /**
+   * 本次运行的 token 用量（进程内：大脑层 + 内置执行器）。
+   *
+   * `calls - measuredCalls` 是**端点没上报用量**的次数 —— 那个差值就是这份数字的
+   * 可信边界，UI 必须把它和总数一起显示，否则"3k tokens"会被读成全部支出。
+   */
+  usage?: UsageSnapshot;
   /**
    * True when the audit trail ends mid-run (run-start without a matching
    * run-end): the last run was killed before it could finish. Set by

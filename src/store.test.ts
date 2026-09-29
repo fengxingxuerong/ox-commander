@@ -307,6 +307,28 @@ describe("handleEvent · receipt", () => {
   });
 });
 
+describe("handleEvent · usage", () => {
+  // 用量事件接的是「本次运行烧了多少 token」，而 `calls - measuredCalls` 是这份
+  // 数字的**可信边界** —— 端点不上报用量的那部分调用永远进不了 totalTokens，
+  // 界面必须把它和总数一起给，否则"42 tokens"会被读成全部支出。
+  it("keeps the snapshot and journals a usage line", () => {
+    const snapshot = {
+      totalTokens: 42,
+      calls: 3,
+      measuredCalls: 1,
+      byModel: { "ollama/qwen2.5:14b": 42 },
+    };
+    emit({ type: "usage", ...snapshot });
+    expect(useApp.getState().usage).toMatchObject(snapshot);
+    expect(useApp.getState().logs.at(-1)).toBe("[usage] 42 tokens · 3 次调用 · 2 次未上报用量 · ollama/qwen2.5:14b=42");
+  });
+
+  it("全部调用都上报时日志里不出现未上报那一格", () => {
+    emit({ type: "usage", totalTokens: 7, calls: 1, measuredCalls: 1, byModel: {} });
+    expect(useApp.getState().logs.at(-1)).toBe("[usage] 7 tokens · 1 次调用");
+  });
+});
+
 describe("handleEvent · conflict", () => {
   it("records a zone-conflict verdict with its paths", () => {
     emit({ type: "conflict", kind: "overlap", paths: ["src/a.ts", "src/b.ts"], remedy: "revert" });

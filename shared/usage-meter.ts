@@ -162,19 +162,56 @@ export function meteredLlm(inner: LlmClient, meter: UsageMeter): LlmClient {
   };
 }
 
-/** 一行人类可读的汇总，供看板/协议日志直接落。 */
-export function formatUsageLine(s: UsageSnapshot): string {
-  const parts = [`${s.totalTokens} tokens`, `${s.calls} 次调用`];
+export interface UsageFact {
+  totalTokens: number;
+  calls: number;
+  measuredCalls: number;
+  /** `calls - measuredCalls`：端点**没有**上报用量的调用次数 —— 这份数字的可信边界。 */
+  unmetered: number;
+  /** `provider/model → token`，按 token 降序（展示口径只排一次，UI 与日志共用）。 */
+  models: { key: string; tokens: number }[];
+  /** 一行人类可读汇总；`models` 为空时不含模型段。 */
+  summary: string;
+  /** 未配置预算时**键不出现**（字段即承诺，不给宿主歧义）。 */
+  limit?: number;
+  /** 配了预算又存在盲区时的提示；其余情况键不出现。 */
+  blindNote?: string;
+}
+
+/**
+ * 用量快照 → UI 要展示的全部事实。
+ *
+ * 判定（有没有盲区、要不要提示、模型怎么排）全部收在这里：UI 与日志行共用同一份
+ * 拼接，避免两处各写一遍"N 次未上报用量"。`unmetered` 是这份数字的**可信边界** ——
+ * 它必须和总数一起显示，否则"3k tokens"会被读成全部支出。
+ */
+export function usageFact(s: UsageSnapshot): UsageFact {
   const unmetered = s.calls - s.measuredCalls;
-  if (unmetered > 0) parts.push(`${unmetered} 次未上报用量`);
   const models = Object.entries(s.byModel)
     .sort((a, b) => b[1] - a[1])
-    .map(([key, tokens]) => `${key}=${tokens}`);
-  if (models.length > 0) parts.push(models.join(" / "));
-  const line = `[usage] ${parts.join(" · ")}`;
-  // 配了预算、又有一半调用看不见 ⇒ 这行必须自己说破：否则"3k / 上限 100k"
+    .map(([key, tokens]) => ({ key, tokens }));
+  const parts = [`${s.totalTokens} tokens`, `${s.calls} 次调用`];
+  if (unmetered > 0) parts.push(`${unmetered} 次未上报用量`);
+  if (models.length > 0) parts.push(models.map((m) => `${m.key}=${m.tokens}`).join(" / "));
+  return {
+    totalTokens: s.totalTokens,
+    calls: s.calls,
+    measuredCalls: s.measuredCalls,
+    unmetered,
+    models,
+    summary: parts.join(" · "),
+    ...(s.limit !== undefined ? { limit: s.limit } : {}),
+    ...(s.limit !== undefined && unmetered > 0
+      ? { blindNote: budgetBlindNote({ limit: s.limit, unmeasuredCalls: unmetered }) }
+      : {}),
+  };
+}
+
+/** 一行人类可读的汇总，供看板/协议日志直接落。 */
+export function formatUsageLine(s: UsageSnapshot): string {
+  const f = usageFact(s);
+  const line = `[usage] ${f.summary}`;
+  // 配了预算、又有一部分调用看不见 ⇒ 这行必须自己说破：否则"3k / 上限 100k"
   // 读起来像"还很安全"，而真实支出可能早就过了上限。
-  return s.limit !== undefined && unmetered > 0
-    ? `${line}；注意：${budgetBlindNote({ limit: s.limit, unmeasuredCalls: unmetered })}`
-    : line;
+  return f.blindNote ? `${line}；注意：${f.blindNote}` : line;
 }

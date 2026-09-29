@@ -961,6 +961,24 @@ describe("orchestration handlers", () => {
       receiptJson: JSON.stringify(receipt),
     }));
   });
+
+  it("pushes the run's token usage to the board as its own event", () => {
+    // 用量走独立事件而不是日志行：看板要的是**字段**（`calls - measuredCalls`
+    // 决定这份数字可信到什么程度），而平台默认实现只落一行 `[usage] …`。
+    buildEngine("p-usage");
+    const callbacks = lastPlatformConfig().host.callbacks;
+    const snapshot = {
+      totalTokens: 42,
+      calls: 3,
+      measuredCalls: 1,
+      byModel: { "ollama/qwen2.5:14b": 42 },
+    };
+    callbacks.onUsage(snapshot);
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      "ox:event",
+      expect.objectContaining({ type: "usage", totalTokens: 42, calls: 3, measuredCalls: 1 }),
+    );
+  });
 });
 
 describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {

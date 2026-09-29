@@ -140,6 +140,7 @@ function resetStore() {
     projectsError: undefined,
     newProjectName: "",
     newRequirement: "",
+    usage: undefined,
   });
 }
 
@@ -322,6 +323,38 @@ describe("BoardPage", () => {
       expect(window.oxCommander.resolveEscalation).toHaveBeenCalledWith("t9", "skip");
       expect(screen.getByText("已处理")).toBeTruthy();
     });
+  });
+
+  it("本次运行用量上板：可信边界与预算盲区都念出来", () => {
+    seedBoard();
+    useApp.setState({
+      usage: {
+        totalTokens: 42,
+        calls: 3,
+        measuredCalls: 1,
+        byModel: { "ollama/qwen2.5:14b": 42 },
+        limit: 1000,
+      },
+    });
+    render(<BoardPage />);
+    expect(screen.getByText("本次运行用量")).toBeTruthy();
+    expect(
+      screen.getByText("42 tokens · 3 次调用 · 2 次未上报用量 · ollama/qwen2.5:14b=42"),
+    ).toBeTruthy();
+    expect(screen.getByText("预算上限 1000 tokens")).toBeTruthy();
+    // 有预算 + 有未上报 ⇒ 必须说破"这道闸看不见它们"，否则数字被读成全部支出
+    expect(screen.getByText(/这道闸看不见它们/)).toBeTruthy();
+  });
+
+  it("全部调用都上报时不喊盲区（别把安全读成危险）", () => {
+    seedBoard();
+    useApp.setState({
+      usage: { totalTokens: 7, calls: 1, measuredCalls: 1, byModel: {}, limit: 1000 },
+    });
+    render(<BoardPage />);
+    expect(screen.getByText("7 tokens · 1 次调用")).toBeTruthy();
+    expect(screen.getByText("预算上限 1000 tokens")).toBeTruthy();
+    expect(screen.queryByText(/这道闸看不见它们/)).toBeNull();
   });
 
   it("看板页挂审计日志：落盘的历史跟着实时流同栏可见（改前应挂的基线用例）", () => {

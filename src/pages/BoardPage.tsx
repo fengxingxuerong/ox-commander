@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER } from "../../shared/types";
+import { usageFact } from "../../shared/usage-meter";
 
 const STAGE_LABELS: Record<string, string> = {
   PRD: "① 需求理解",
@@ -30,6 +31,7 @@ export function BoardPage() {
   const logs = useApp((s) => s.logs);
   const verification = useApp((s) => s.verification);
   const receipt = useApp((s) => s.receipt);
+  const usage = useApp((s) => s.usage);
   const escalations = useApp((s) => s.escalations);
   const resolveEscalation = useApp((s) => s.resolveEscalation);
   const interrupted = useApp((s) => s.interrupted);
@@ -41,6 +43,8 @@ export function BoardPage() {
   const pause = () => void window.oxCommander.pause();
   const resume = () => void window.oxCommander.resume();
   const setPage = useApp((s) => s.setPage);
+  // 用量事实的判定（可信边界、盲区提示、模型排序）都在 usageFact 里，UI 只负责摆。
+  const fact = usage ? usageFact(usage) : undefined;
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
   // Board recovery: on mount, rebuild the view from the durable audit trail
   // (facts/derived split). Idempotent — the store merge is additive, and the
@@ -158,6 +162,17 @@ export function BoardPage() {
               </button>
             </div>
           </section>
+
+          {/* 本次运行的 token 用量。`calls - measuredCalls`（端点没上报用量的次数）
+              必须和总数一起显示 —— 否则"3k tokens"会被读成全部支出。 */}
+          {fact && (
+            <section className="card">
+              <h3>本次运行用量</h3>
+              <p className="task-meta">{fact.summary}</p>
+              {fact.limit !== undefined && <p className="task-meta">预算上限 {fact.limit} tokens</p>}
+              {fact.blindNote ? <p className="muted">{fact.blindNote}</p> : null}
+            </section>
+          )}
 
           {/* 交付凭据：一次运行唯一的对外结论。放在验证结果**之上** —— 验证回答
               "哪些命令红了"，凭据回答"这次到底交付了什么、凭什么"。 */}

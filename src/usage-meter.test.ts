@@ -3,6 +3,7 @@ import {
   BudgetExceededError,
   formatUsageLine,
   meteredLlm,
+  usageFact,
   UsageMeter,
   type UsageSnapshot,
 } from "../shared/usage-meter";
@@ -303,5 +304,46 @@ describe("UsageMeter · 预算闸对「未上报用量」的调用是半盲的",
     const noLimit = formatUsageLine({ totalTokens: 3, calls: 4, measuredCalls: 1, byModel: {} });
     expect(noLimit).toContain("3 次未上报用量");
     expect(noLimit).not.toContain("看不见");
+  });
+});
+
+describe("usageFact · 用量事实（UI 与日志共用同一份拼接）", () => {
+  const snap = (over: Partial<UsageSnapshot> = {}): UsageSnapshot => ({
+    totalTokens: 42,
+    calls: 3,
+    measuredCalls: 1,
+    byModel: { "a/one": 10, "b/two": 32 },
+    ...over,
+  });
+
+  it("可信边界与模型排序都在这份事实里（模型按 token 降序）", () => {
+    const f = usageFact(snap());
+    expect(f.unmetered).toBe(2);
+    expect(f.models.map((m) => m.key)).toEqual(["b/two", "a/one"]);
+    expect(f.summary).toBe("42 tokens · 3 次调用 · 2 次未上报用量 · b/two=32 / a/one=10");
+  });
+
+  it("全部调用都上报 ⇒ 摘要里不出现未上报那一格，unmetered 为 0", () => {
+    const f = usageFact(snap({ calls: 2, measuredCalls: 2, byModel: {} }));
+    expect(f.unmetered).toBe(0);
+    expect(f.summary).toBe("42 tokens · 2 次调用");
+  });
+
+  it("没配预算 ⇒ limit 与 blindNote 两个键都不出现（字段即承诺）", () => {
+    const f = usageFact(snap());
+    expect("limit" in f).toBe(false);
+    expect("blindNote" in f).toBe(false);
+  });
+
+  it("配了预算但每跳都上报 ⇒ 有 limit、无盲区提示", () => {
+    const f = usageFact(snap({ calls: 1, measuredCalls: 1, limit: 1000 }));
+    expect(f.limit).toBe(1000);
+    expect("blindNote" in f).toBe(false);
+  });
+
+  it("配了预算且有未上报 ⇒ blindNote 带上限与未上报次数", () => {
+    const f = usageFact(snap({ limit: 1000 }));
+    expect(f.blindNote).toContain("未上报用量");
+    expect(f.blindNote).toContain("maxTokensPerRun=1000");
   });
 });

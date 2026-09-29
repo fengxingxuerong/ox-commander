@@ -144,6 +144,10 @@ export function buildEngine(projectId: string): OrchestratorEngine {
         }
         send({ type: "receipt", receipt });
       },
+      // 用量走独立事件而不是日志行：platform 的默认实现只落一行 `[usage] …`，
+      // 而看板要的是**字段**（`calls - measuredCalls` 决定这份数字可信到什么程度）。
+      // 三条出口（交付 / 取消 / 抛错）都会到 —— 失败的运行一样烧了 token。
+      onUsage: (snapshot) => send({ type: "usage", ...snapshot }),
     } satisfies Partial<OrchestratorCallbacks>,
   });
   const engine = platform.engine;
