@@ -68,8 +68,55 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `conflict` | `kind, paths[], remedy` | 批结束时检出 zone 越权 / 共享文件漂移 |
 | `verification` | `passed, results[{kind, ok, exitCode}]` | 每一轮硬性验证（摘要，不含日志正文） |
 | `escalation` | `taskId, summary` | 重修耗尽需要宿主决策（`escalationPolicy=abort/skip/redispatch_once` 时） |
+| `usage` | `totalTokens, calls, measuredCalls, byModel{}, limit?` | 本次运行的 token 用量（进程内：大脑层 + 内置执行器）。在 `done`/`error` **之前**发一次，成功 / 取消 / 抛错三条路径都会到。`calls - measuredCalls` 是端点**没有**上报用量的次数，即这份数字的可信边界；外部 CLI / HTTP 桥接智能体跑在别的进程里，不计入 |
+| `receipt` | `receipt`（交付凭据，见 §2.2） | 一次运行的**结论**：验证结论 + 任务账 + 越权处置 + 用量。在 `done`/`error` **之前**发一次，且只发两条出口（交付成功 / 重修耗尽） |
 | `done` | `passed, report` | 终态：交付 |
 | `error` | `message, exhausted?` | 终态：致命错误。`exhausted: true` 对应退出码 2 |
+
+### 2.2 交付凭据（`receipt` 事件）
+
+别的编排器把 N 份 diff 摆给你挑，`receipt` 是 OxCommander 的回答：**这次到底交付了什么、凭什么。**
+
+```jsonc
+{
+  "type": "receipt",
+  "receipt": {
+    "outcome": "delivered",              // 或 "blocked"
+    "verified": true,                    // 有没有被构建/测试真正验过（与 outcome 独立）
+    "unverifiedReason": "…",             // verified 为 false 时的原因；没有时**键不出现**
+    "rounds": 1,                         // 实际跑过的重修轮数
+    "checks": [                          // 逐条验证命令
+      { "kind": "test", "ok": true, "exitCode": 0, "preexisting": false, "headline": "" }
+    ],
+    "tasks": [                           // 逐任务账
+      { "id": "t1", "title": "…", "zone": "src", "status": "done", "attempts": 1,
+        "agentId": "sensenova-api", "durationMs": 1500 }
+    ],
+    "conflicts": [                       // 越权与处置（remedy 语义同 `conflict` 事件）
+      { "kind": "unauthorized-write", "paths": ["outside/x.js"], "remedy": "revert" }
+    ],
+    "usage": { "totalTokens": 120, "calls": 4, "measuredCalls": 3 },
+    "counts": { "total": 3, "done": 2, "failed": 0, "skipped": 1, "pending": 0,
+                "conflicts": 1, "checksFailed": 0, "preexisting": 0 },
+    "headline": "已交付：2/3 个任务完成（跳过 1 个），重修 1 轮；2 条验证命令通过"
+  }
+}
+```
+
+四条必须知道的语义：
+
+1. **`outcome` 与 `verified` 是两件事**。`verificationCommands: []` 是合法配置，而空集在
+   `verifyProject` 里恒为通过 —— 于是"全部验证通过"其实什么都没验。那种情况 `outcome` 仍是
+   `delivered`，但 `verified: false` 且 `unverifiedReason` 会说破。
+2. **`checks[].preexisting`** 标出"这条命令在本次运行**开始前**就是红的"（基线验证发现了）。
+   它不属于任何智能体的账 —— 没有这个标记时，交付里的红命令会被误读成这批改动写坏了。
+3. **`tasks[].status` 四档**：`done` / `failed` / `skipped` / `pending`。用户跳过的记 `skipped`
+   （它也被算进"已完成"集合，但那是"不需要再做"，不是"做出来了"）；有成功结果却还没落地的
+   记 `pending` 而不是 `failed`（全员重跑会清掉完成记录）。
+4. **取消与崩溃不发 receipt**。那种现场不完整，发出去会被当成"这次就这些结果"，而事实是它没跑完。
+
+桌面端同一份对象走 `ox:event` 的 `receipt` 事件进看板，并落进项目记录（`receiptJson`），
+所以重载窗口后仍然看得到上次交付的结论。
 
 ### 2.1 被中断时宿主能看到什么
 
