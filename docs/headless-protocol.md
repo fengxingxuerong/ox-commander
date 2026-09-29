@@ -33,6 +33,7 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `protocolVersion` | string | | `ox-headless/1` | 宿主声明自己按哪个版本写的，会在 `hello` 事件里回显 |
 | `prd` | object | | — | 已确认的 PRD（`goal` / `features` / `techStack` / `acceptanceCriteria`）；提供则跳过 PRD 生成阶段 |
 | `llmProvider` | string | | `sensenova` | 大脑层 provider，取值见 `shared/providers.ts` |
+| `llmPool` | string[] | | `["sensenova","amd-radeon"]` | provider 池（按偏好排序），**共用一张故障转移冷却表**：429 只冷却命中线路，请求立即落到同 key 其他模型 → 其他 key → 其他 provider。空数组 ⇒ 退回单 `llmProvider`。SenseNova 的贡献是「已配 key 数 × 模型数」条线路（由 `shared/providers.ts` 的两张表决定，别写死数字） |
 | `maxRepairRounds` | number ≥ 0 | | `3` | 重修轮上限 |
 | `verificationCommands` | array | | npm build/typecheck/test | `[{kind: "build"\|"typecheck"\|"test", command, args}]` |
 | `escalationPolicy` | enum | | `abort` | 见 §3 |

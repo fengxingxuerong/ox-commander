@@ -2,6 +2,14 @@
 
 [![verify](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml/badge.svg)](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+![mutation gate](https://img.shields.io/badge/mutation-逐位点全杀-blueviolet)
+
+> **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
+>
+> 判错逻辑本身被**逐位点**证明过：最新一次全量 **881/881**（51 目标，2026-09-28），此后新增目标
+> 单独审计同样全杀（+16、+9）。全量数字以[基线文档](docs/2026-09-23-mutation-site-baseline.md)
+> 与 CI 为准 —— 它随目标增长，README 里的任何数字都会过时。
+> 同类项目里没有第二家用这种方式自证。
 
 **总指挥智能体**：把项目需求拆解为 PRD → 任务 → zone 互斥批次，按能力路由并行下发给执行器
 （SenseNova API 池 / Codex 等 CLI / HTTP 桥接智能体），经 build + typecheck + test 多轮硬性验证后交付。
@@ -9,9 +17,22 @@ Electron 桌面端 + headless CLI 双入口。
 
 > **设计定位（与同类编排器的差异）**
 >
-> 同类项目大多走「git worktree 隔离」路线——每个智能体在独立目录里互不干扰。
+> 同类项目大多走「git worktree 隔离」路线——每个智能体在独立目录里互不干扰
+> （2026-09-29 实测：15 个同类项目里 12 个走这条路，[调研报告](docs/2026-09-29-competitive-landscape-and-roadmap.md)）。
 > OxCommander 走的是**共享工作区 + zone 互斥**：智能体像真实团队一样在同一棵树里
 > 按目录分派并行，越权由仲裁层回滚/隔离。另一条路线，两种取舍：
+>
+> | 特征 | OxCommander | Orca（80k★） | paperclip（92k★） | ruflo（73k★） |
+> | --- | --- | --- | --- | --- |
+> | 命题 | 自动拆解 → 并行 → **硬门禁闭环** → 交付 | ADE：把 N 个 CLI agent 摆在一个桌面里跑 | 管 AI 员工团队（组织/审批/预算） | 多模型 swarm 框架 |
+> | 谁拆解需求 | **引擎自动 PRD → 任务 → 批次** | 人手动扇出 prompt | 人建 org chart 与目标 | 工作流自编排 |
+> | 终点 | 一份过了门禁的交付 + 凭据 | N 份 diff，人挑赢家 | 审批与成本看板 | 任务执行结果 |
+> | 执行器 | **自带 LLM 池**，不依赖订阅 | 带你自己订阅 | 带你自己订阅 | 带你自己订阅 |
+> | 隔离 | zone 互斥（可跨模块协同改接口） | worktree 物理隔离 | 不涉及代码合并 | docker / swarm |
+> | 沙箱 | 路径七级判定 + 白名单 + 双超时 + 熔断 | README 零命中 | 治理层策略 | 有 |
+> | 谁适合 | 要**可担保的交付结果** | 要同时跑很多 agent 自己比 | 要管一支 AI 团队 | 要搭 swarm 应用 |
+>
+> 本项目自身的能力面：
 >
 > | 特征 | OxCommander |
 > | --- | --- |
@@ -22,6 +43,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算） |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）|
+> | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话 |
 
 ```
 需求 → PRD → PLANNING → DEVELOPMENT（zone 互斥并行） → VERIFICATION（build/typecheck/test） → DELIVERY → DONE
@@ -123,7 +145,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（2026-09-28 实测 1142 通过 + 9 跳过；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（2026-09-29 实测 1247 通过 + 9 跳过；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
