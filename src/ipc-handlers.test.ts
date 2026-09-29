@@ -627,6 +627,24 @@ describe("agent handlers", () => {
     expect(audit.read).toHaveBeenNthCalledWith(3, { limit: 1000 });
   });
 
+  it("board:recovery derives the view from the full audit trail", async () => {
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockReturnValue([
+      { ts: "2026-09-29T10:00:00.000Z", phase: "run-start", projectId: "p1", taskId: "t1", title: "A", zone: "z" },
+      { ts: "2026-09-29T10:05:00.000Z", phase: "stage", projectId: "p1", stage: "VERIFICATION" },
+    ]);
+    // No limit argument: recovery needs the whole trail, not a tail window.
+    const res = (await (h.ipcMain as FakeIpcMain).invoke("board:recovery")) as {
+      tasks: Record<string, unknown>;
+      stage?: string;
+      interrupted: boolean;
+    };
+    expect(audit.read).toHaveBeenCalledWith();
+    expect(res.stage).toBe("VERIFICATION");
+    expect(res.interrupted).toBe(true);
+    expect(res.tasks.t1).toMatchObject({ status: "running", title: "A", attempts: 1 });
+  });
+
   it("lists audit file basenames only", () => {
     const audit = inst(h.auditInstances);
     (audit.files as Mock).mockReturnValue(["/deep/dir/audit-1.jsonl"]);
@@ -801,6 +819,50 @@ describe("orchestration handlers", () => {
       /agent exploded/,
     );
     expect(getRunningProjectId()).toBeNull();
+  });
+
+  it("writes board-recovery facts into the audit trail (projectId/title/stage/receipt)", async () => {
+    buildEngine("p-rec");
+    const config = lastPlatformConfig();
+    const audit = inst(h.auditInstances);
+    (audit.append as Mock).mockClear();
+
+    // The task passed to onRunStart carries the plan's title — the one fact a
+    // bare run-start otherwise lacks for board recovery.
+    config.host.onRunStart("agent-x", { id: "t1", title: "登录页", zone: "src/auth" });
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "run-start",
+        projectId: "p-rec",
+        agentId: "agent-x",
+        taskId: "t1",
+        title: "登录页",
+        zone: "src/auth",
+      }),
+    );
+
+    config.host.onRunComplete({ ok: false, errorClass: "timeout", logDigest: "boom" }, { id: "t1", zone: "src/auth" });
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "run-end", projectId: "p-rec", taskId: "t1", ok: false }),
+    );
+
+    config.host.callbacks.onStage("VERIFICATION");
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "stage", projectId: "p-rec", stage: "VERIFICATION" }),
+    );
+
+    const receipt = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    });
+    config.host.callbacks.onReceipt(receipt);
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "receipt", projectId: "p-rec", receipt }),
+    );
   });
 
   it("cancels every engine and aborts parked escalations", async () => {

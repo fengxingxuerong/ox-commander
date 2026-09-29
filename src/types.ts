@@ -1,6 +1,7 @@
 import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { BoardRecoveryView } from "../electron/board-derive";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
 export interface AgentSummary {
@@ -128,6 +129,14 @@ export interface AppState {
    * 看板上两者并存，因为"哪些命令红了"和"这次到底交付了什么"是两个问题。
    */
   receipt?: DeliveryReceipt;
+  /**
+   * True when the audit trail ends mid-run (run-start without a matching
+   * run-end): the last run was killed before it could finish. Set by
+   * loadRecovery; cleared once a new run starts writing facts.
+   */
+  interrupted?: boolean;
+  /** ts of the last audit fact, shown next to the recovery banner. */
+  lastActivityTs?: string;
   escalations: EscalationView[];
   conflicts: ConflictView[];
   prd?: PrdDocument;
@@ -160,6 +169,8 @@ export interface AppState {
   loadSettings(): Promise<void>;
   saveSettings(settings: ProjectSettings): Promise<void>;
   resolveEscalation(taskId: string, action: EscalationAction): Promise<void>;
+  /** Rebuilds the board from audit facts on mount (facts/derived split). */
+  loadRecovery(): Promise<void>;
   handleEvent(payload: Record<string, unknown>): void;
 }
 
@@ -193,6 +204,8 @@ declare global {
       recentAudit(limit?: number): Promise<AuditRecordView[]>;
       auditFiles(): Promise<string[]>;
       exportAudit(): Promise<AuditExportResult>;
+      /** Board view derived from the audit trail (durable facts). */
+      boardRecovery(): Promise<BoardRecoveryView>;
       onEvent(handler: (payload: unknown) => void): () => void;
     };
   }

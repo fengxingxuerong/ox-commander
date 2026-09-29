@@ -8,6 +8,17 @@
 
 ### 新增
 
+- **看板重开即恢复（facts/derived 分离，学 AO）**：此前看板状态只活在引擎内存推送里，
+  窗口重载或进程树被腰斩（`--real` 演习两轮都栽在这）后就是一块空白板。现在审计 JSONL
+  补齐三块事实 —— run-start/run-end 带 `projectId` + `title`，新增 `stage`（阶段推进）与
+  `receipt`（交付凭据，落盘前过脱敏）两个 phase —— 配套纯函数推导层
+  `electron/board-derive.ts`（`deriveBoardView`：无 IO 无时钟，审计事实 → 任务账/阶段/
+  凭据/**interrupted 腰斩标记**），新 IPC `board:recovery` 在看板挂载时恢复上次运行的
+  进度；被腰斩的运行在看板顶部亮横幅。attempts 从 run-start 次数推导，修复轮重派不清
+  空归因，与实时推送同语义。模块已登记变异门禁 TARGETS（site 口径 18/18 逐位点全杀）；
+  落地审计顺手抓出两处新代码存活（receipt 恢复三元、恢复提示行的 `||` 单真条件）均已
+  补断言清零。
+
 - **交付凭据（delivery receipt）**：一次 run 结束时**对外可验**的结构化结论。此前验证结论、
   任务账、越权处置、用量散在四类事件里，要看"这次到底交付了什么、凭什么"得自己拼时间轴；
   现在 `shared/delivery-receipt.ts` 把引擎已掌握的事实归一成一份凭据（纯函数、字段即承诺：

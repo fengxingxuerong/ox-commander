@@ -172,7 +172,9 @@ export const useApp = create<AppState>((set, get) => ({
   confirmAndExecute: async () => {
     const { activeProjectId } = get();
     if (!activeProjectId) return;
-    set({ page: "board", stage: "DEVELOPMENT" });
+    // A new run supersedes any recovered history: the interrupted flag belongs
+    // to the *previous* run and must not survive into this one.
+    set({ page: "board", stage: "DEVELOPMENT", interrupted: undefined, lastActivityTs: undefined });
     try {
       await api().startOrchestration(activeProjectId);
     } catch (err) {
@@ -234,6 +236,33 @@ export const useApp = create<AppState>((set, get) => ({
       set((s) => ({
         escalations: s.escalations.map((e) => (e.taskId === taskId ? (before ?? e) : e)),
         logs: [...s.logs, `[错误] 决策失败: ${message}`],
+      }));
+    }
+  },
+
+  loadRecovery: async () => {
+    // Board recovery (facts/derived split): on mount the board asks the main
+    // process for the view derived from the audit trail. Before this, a
+    // reload — or a killed process tree — left the board blank even though
+    // the durable facts of the last run were sitting on disk.
+    try {
+      const view = await api().boardRecovery();
+      set((s) => ({
+        tasks: { ...s.tasks, ...view.tasks },
+        ...(view.stage ? { stage: view.stage } : {}),
+        ...(view.receipt ? { receipt: view.receipt } : {}),
+        interrupted: view.interrupted,
+        lastActivityTs: view.lastActivityTs,
+        logs:
+          view.interrupted || Object.keys(view.tasks).length > 0
+            ? [...s.logs, "── 已从审计日志恢复上次运行的进度 ──"]
+            : s.logs,
+      }));
+    } catch (err) {
+      // Recovery is an enhancement, never a blocker: an unreadable trail must
+      // not stop the board from working exactly as before.
+      set((s) => ({
+        logs: [...s.logs, `[提示] 审计恢复不可用: ${(err as Error).message}`],
       }));
     }
   },

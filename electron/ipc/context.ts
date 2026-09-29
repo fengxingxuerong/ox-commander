@@ -213,9 +213,18 @@ export function buildPlatformLayer(
     log: (text: string) => void;
     journal?: { save(snapshot: RunSnapshot): void };
     callbacks?: Partial<OrchestratorCallbacks>;
+    /**
+     * Which project this platform runs for. Written into the audit trail so
+     * board recovery can attribute run facts per project (older records
+     * without it are treated as unattributed history by the derive layer).
+     */
+    projectId?: string;
   },
 ): Platform {
   const auditLog = ensureAudit();
+  const auditProject = overrides.projectId
+    ? { projectId: overrides.projectId }
+    : {};
   return createPlatform({
     settings: settingsValue,
     promptDir: promptDir(),
@@ -236,13 +245,25 @@ export function buildPlatformLayer(
       log: overrides.log,
       callbacks: overrides.callbacks,
       // P5 observability: every run start/end is attributed and persisted, so
-      // "which agent did what" survives a reload.
+      // "which agent did what" survives a reload. The title/projectId extras
+      // are board-recovery facts: the derive layer rebuilds the task view from
+      // run-start/run-end pairs alone.
       onRunStart: (agentId, task) => {
-        auditLog.append({ phase: "run-start", agentId, taskId: task.id, zone: task.zone });
+        auditLog.append({
+          phase: "run-start",
+          ...auditProject,
+          // Planned attribution (who the scheduler picked); the actual runner
+          // is recorded on run-end and is what the board displays.
+          agentId,
+          taskId: task.id,
+          title: task.title,
+          zone: task.zone,
+        });
       },
       onRunComplete: (outcome, task) => {
         auditLog.append({
           phase: "run-end",
+          ...auditProject,
           taskId: task.id,
           zone: task.zone,
           ok: outcome.ok,

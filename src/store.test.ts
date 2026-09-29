@@ -74,6 +74,78 @@ describe("handleEvent · log", () => {
   });
 });
 
+describe("loadRecovery · 审计事实恢复", () => {
+  it("merges the derived view into state and flags an interrupted run", async () => {
+    const g = globalThis as { oxCommander?: { boardRecovery?: unknown } };
+    g.oxCommander = {
+      boardRecovery: async () => ({
+        tasks: {
+          t1: { taskId: "t1", title: "A", zone: "z", status: "done", attempts: 1 },
+          t2: { taskId: "t2", title: "B", zone: "z", status: "running", attempts: 1 },
+        },
+        stage: "VERIFICATION",
+        interrupted: true,
+        lastActivityTs: "2026-09-29T10:00:00.000Z",
+      }),
+    };
+    await useApp.getState().loadRecovery();
+    const s = useApp.getState();
+    expect(s.tasks.t1).toMatchObject({ status: "done" });
+    expect(s.tasks.t2).toMatchObject({ status: "running" });
+    expect(s.stage).toBe("VERIFICATION");
+    expect(s.interrupted).toBe(true);
+    expect(s.lastActivityTs).toBe("2026-09-29T10:00:00.000Z");
+    expect(s.logs.at(-1)).toContain("恢复");
+  });
+
+  it("restores the delivery receipt of the last run", async () => {
+    const last = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    });
+    const g = globalThis as { oxCommander?: { boardRecovery?: unknown } };
+    g.oxCommander = {
+      boardRecovery: async () => ({
+        tasks: { t1: { taskId: "t1", title: "A", zone: "z", status: "done", attempts: 1 } },
+        receipt: last,
+        interrupted: false,
+      }),
+    };
+    await useApp.getState().loadRecovery();
+    const s = useApp.getState();
+    // A clean run (not interrupted) still restores the receipt…
+    expect(s.receipt).toEqual(last);
+    expect(s.interrupted).toBe(false);
+    // …and announces the recovery, because facts were merged at all.
+    expect(s.logs.at(-1)).toContain("恢复");
+  });
+
+  it("keeps live state when the trail has nothing to say, without a recovery log line", async () => {
+    emit({ type: "log", text: "运行中日志" });
+    const g = globalThis as { oxCommander?: { boardRecovery?: unknown } };
+    g.oxCommander = { boardRecovery: async () => ({ tasks: {}, interrupted: false }) };
+    await useApp.getState().loadRecovery();
+    const s = useApp.getState();
+    expect(s.interrupted).toBe(false);
+    expect(s.logs.at(-1)).toBe("运行中日志");
+  });
+
+  it("survives a broken recovery call: the board still works, reason logged", async () => {
+    const g = globalThis as { oxCommander?: { boardRecovery?: unknown } };
+    g.oxCommander = { boardRecovery: async () => Promise.reject(new Error("audit unreadable")) };
+    await useApp.getState().loadRecovery();
+    const s = useApp.getState();
+    expect(s.interrupted).toBe(false);
+    expect(s.tasks).toEqual({});
+    expect(s.logs.at(-1)).toContain("审计恢复不可用");
+    expect(s.logs.at(-1)).toContain("audit unreadable");
+  });
+});
+
 describe("handleEvent · taskStatus", () => {
   it("creates a task view from the first status event", () => {
     emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 1, title: "实现解析器", zone: "src/core" });

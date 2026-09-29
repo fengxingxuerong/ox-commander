@@ -13,6 +13,7 @@ import {
   abortAllEscalations,
   buildPlatformLayer,
   enginesOf,
+  ensureAudit,
   getRunningProjectId,
   resolveEscalation,
   send,
@@ -23,6 +24,7 @@ import {
   writeJournal,
 } from "./context";
 import type { EscalationAction, PrdDocument, SmokeCheck, Task } from "../../shared/types";
+import { deriveBoardView } from "../board-derive";
 
 /**
  * Scaffold scripts written into each project workspace. The workspace is a plain
@@ -103,9 +105,13 @@ export function buildEngine(projectId: string): OrchestratorEngine {
   const platform = buildPlatformLayer(settings, {
     log: (text) => send({ type: "log", text }),
     journal,
+    projectId,
     callbacks: {
       onStage: (stage) => {
         projectStore.update(projectId, { stage });
+        // Durable fact: the board rebuilds "where was I" from this after a
+        // restart. Cheap JSONL line, no read-modify-write.
+        ensureAudit().append({ phase: "stage", projectId, stage });
         send({ type: "stage", stage });
       },
       onTaskStatus: (taskId, status, attempts) => send({ type: "taskStatus", taskId, status, attempts }),
@@ -125,6 +131,17 @@ export function buildEngine(projectId: string): OrchestratorEngine {
       // 同时 projectStore 存一份，重载窗口后仍看得到上次交付的结论。
       onReceipt: (receipt) => {
         projectStore.update(projectId, { receiptJson: JSON.stringify(receipt) });
+        // Durable fact: the receipt also lands in the audit trail so board
+        // recovery can show the last delivery verdict after a full restart.
+        // Audit JSONL is durable: redact before it hits disk. The receipt is
+        // a plain JSON object, so a stringify→redact→parse round-trip is the
+        // same boundary the run-end digest already uses.
+        try {
+          const redacted = JSON.parse(redactSecrets(JSON.stringify(receipt))) as typeof receipt;
+          ensureAudit().append({ phase: "receipt", projectId, receipt: redacted });
+        } catch {
+          // never let recovery bookkeeping break the run
+        }
         send({ type: "receipt", receipt });
       },
     } satisfies Partial<OrchestratorCallbacks>,
@@ -160,6 +177,12 @@ export function registerOrchestrationHandlers(): void {
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
     return { prd, batches };
   });
+
+  // Board recovery (facts/derived split): the renderer asks for the board view
+  // derived from the audit trail when it mounts, so a restart shows the last
+  // run's progress instead of a blank board. The derive layer is a pure
+  // function; this handler is only the IO boundary around it.
+  ipcMain.handle("board:recovery", () => deriveBoardView(ensureAudit().read()));
 
   ipcMain.handle("orchestration:start", async (_e, projectId: string) => {
     const running = getRunningProjectId();

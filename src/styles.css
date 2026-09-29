@@ -416,6 +416,17 @@ button.small {
   height: calc(100vh - 120px);
 }
 
+/* 审计恢复横幅：上次运行被腰斩时提醒操作者"下面是恢复出来的进度" */
+.recovery-banner {
+  margin: -8px 0 16px;
+  padding: 10px 14px;
+  border: 1px solid rgba(230, 126, 34, 0.45);
+  border-radius: 8px;
+  background: rgba(230, 126, 34, 0.08);
+  color: var(--text-primary, inherit);
+  font-size: 13px;
+}
+
 .col {
   overflow-y: auto;
   padding-right: 2px;

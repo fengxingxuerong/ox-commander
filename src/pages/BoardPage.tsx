@@ -32,6 +32,9 @@ export function BoardPage() {
   const receipt = useApp((s) => s.receipt);
   const escalations = useApp((s) => s.escalations);
   const resolveEscalation = useApp((s) => s.resolveEscalation);
+  const interrupted = useApp((s) => s.interrupted);
+  const lastActivityTs = useApp((s) => s.lastActivityTs);
+  const loadRecovery = useApp((s) => s.loadRecovery);
   const start = useApp((s) => s.confirmAndExecute);
   const activeProjectId = useApp((s) => s.activeProjectId);
   const cancel = () => void window.oxCommander.cancel();
@@ -39,6 +42,13 @@ export function BoardPage() {
   const resume = () => void window.oxCommander.resume();
   const setPage = useApp((s) => s.setPage);
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+  // Board recovery: on mount, rebuild the view from the durable audit trail
+  // (facts/derived split). Idempotent — the store merge is additive, and the
+  // live push events keep overwriting from here on.
+  useEffect(() => {
+    void loadRecovery();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only by design
+  }, []);
   // Terminal behavior: the log view follows new output, unless the operator
   // has scrolled up to inspect history — then pinning pauses until they
   // scroll back near the bottom.
@@ -75,6 +85,13 @@ export function BoardPage() {
         </button>
         {workspaceError && <span className="error-text">{workspaceError}</span>}
       </header>
+
+      {interrupted && (
+        <div className="recovery-banner" role="alert">
+          ⚠️ 上一次运行未正常收尾（进程被中断），以下为审计日志恢复的当时进度。
+          {lastActivityTs ? ` 最后活动时间：${new Date(lastActivityTs).toLocaleString()}` : ""}
+        </div>
+      )}
 
       <div className="board-columns">
         {/* 左栏：阶段进度 + 任务列表（DAG 分组） */}

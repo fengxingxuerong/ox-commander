@@ -67,9 +67,11 @@ export function executorTimeoutMsFor(settings: Pick<ProjectSettings, "executorTi
 export interface PlatformHost {
   /** Board log / protocol event sink. */
   log(text: string): void;
-  /** Audit sink for run attribution. Omit when the host streams instead. */
-  onRunStart?(agentId: string, task: { id: string; zone: string }): void;
-  onRunComplete?(outcome: DispatchOutcome, task: { id: string; zone: string }): void;
+  /** Audit sink for run attribution. Omit when the host streams instead.
+   * `title` is board-recovery context: the engine passes the full Task, but
+   * hosts before the facts/derived split only ever needed id/zone. */
+  onRunStart?(agentId: string, task: { id: string; zone: string; title?: string }): void;
+  onRunComplete?(outcome: DispatchOutcome, task: { id: string; zone: string; title?: string }): void;
   /** Zone-violation verdict sink (rollback / isolation / report-only outcomes). */
   onVerdict?(verdict: BatchVerdict): void;
   /** Escalation decision; omit to keep the engine's fail-fast/typed-error path. */

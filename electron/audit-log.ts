@@ -1,7 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
+import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { Stage } from "../shared/types";
 
-export type AuditPhase = "run-start" | "run-end" | "batch-guard" | "agent-change" | "settings";
+export type AuditPhase =
+  | "run-start"
+  | "run-end"
+  | "batch-guard"
+  | "agent-change"
+  | "settings"
+  /** 流水线阶段推进（board:recovery 用它恢复"上次跑到哪"）。 */
+  | "stage"
+  /** 一次 execute 的交付凭据收官（整份 DeliveryReceipt，已脱敏）。 */
+  | "receipt";
 
 export interface AuditRecord {
   /** ISO timestamp, stamped by the writer. */
@@ -21,6 +32,20 @@ export interface AuditRecord {
   paths?: string[];
   pathsTotal?: number;
   detail?: string;
+  /**
+   * Board-recovery facts (facts/derived split): fields below exist so the
+   * board can rebuild its view from the audit trail alone after a restart.
+   * They are optional and only written by the hosts that know the project
+   * context — older records simply lack them, and the derive layer treats
+   * missing attribution as "unattributed history".
+   */
+  projectId?: string;
+  /** Task title from the plan, recorded at run-start (run-end doesn't know it). */
+  title?: string;
+  /** Pipeline stage, recorded whenever the engine announces a transition. */
+  stage?: Stage;
+  /** The final delivery receipt of a run, redacted before it hits disk. */
+  receipt?: DeliveryReceipt;
 }
 
 export interface AuditLogOptions {

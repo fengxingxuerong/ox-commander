@@ -124,6 +124,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  */
 const TARGETS = [
   { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts", tier: 1 },
+  // 2026-09-29：board-recovery 的纯函数推导层（facts/derived split）。新文件
+  // 必须显式入表 —— touched 口径靠这张表映射，漏挂=永远无人审计。
+  { file: "electron/board-derive.ts", test: "src/board-derive.test.ts", tier: 1 },
   { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
   { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
