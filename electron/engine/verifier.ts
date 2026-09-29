@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { SmokeCheck, VerificationCommand, VerificationReport } from "../../shared/types";
 import { digest } from "./scheduler";
 import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-policy";
+import type { ActionGateLike } from "../sandbox/action-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
 import { scopedEnv } from "../agents/scoped-env";
@@ -15,6 +16,12 @@ export interface VerifierDeps {
    * shell metacharacters).
    */
   policy?: CommandPolicy;
+  /**
+   * Cross-action escalation (optional): queried after the static policy passes.
+   * The same batch-scoped instance the scheduler observes — installs seen in
+   * agent logs tighten what the verifier will spawn afterwards.
+   */
+  actionGate?: ActionGateLike;
   /** Per-command ceiling; the process tree is killed when it expires. 300s default. */
   timeoutMs?: number;
   /** Observability sink (rejections, timeouts). */
@@ -146,6 +153,21 @@ export async function verifyProject(
       });
       break;
     }
+    // Static policy passed — now the cross-action layer: a command that is
+    // fine in isolation may still be escalated by what happened earlier in
+    // the batch (installs observed in agent logs …).
+    const escalated = deps.actionGate?.check(cmd.command, cmd.args);
+    if (escalated && !escalated.ok) {
+      deps.onEvent?.(`[verifier] 升级拒绝：${escalated.reason}`);
+      results.push({
+        kind: cmd.kind,
+        ok: false,
+        exitCode: null,
+        logDigest: `[沙箱] 升级拒绝：${escalated.reason}`,
+        durationMs: 0,
+      });
+      break;
+    }
     const r = await runOnce(cmd, deps.cwd(), spawnImpl, timeoutMs, deps.onEvent);
     results.push({
       kind: r.kind,
@@ -164,6 +186,8 @@ export interface SmokeRunnerDeps {
   spawnImpl?: typeof spawn;
   /** 冒烟命令同样过沙箱门（默认策略）。 */
   policy?: CommandPolicy;
+  /** 跨动作升级审查（可选），与 verifyProject 同一实例。 */
+  actionGate?: ActionGateLike;
   timeoutMs?: number;
   onEvent?: (text: string) => void;
 }
@@ -193,6 +217,19 @@ export async function runSmokeChecks(
         ok: false,
         exitCode: null,
         logDigest: `[沙箱] 冒烟命令被拒绝：${verdict.reason}\n[${check.title}]`,
+        durationMs: 0,
+      });
+      break;
+    }
+    // 静态门放行后叠加跨动作升级：冒烟命令是大脑的生成产物，批次内出现过
+    // 依赖安装/发布/推送痕迹后，隐式下载类命令（npx 等）升级为拒绝。
+    const escalated = deps.actionGate?.check(check.command, check.args);
+    if (escalated && !escalated.ok) {
+      results.push({
+        kind: "smoke",
+        ok: false,
+        exitCode: null,
+        logDigest: `[沙箱] 冒烟命令升级拒绝：${escalated.reason}\n[${check.title}]`,
         durationMs: 0,
       });
       break;

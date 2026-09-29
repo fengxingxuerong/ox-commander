@@ -20,6 +20,7 @@ import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
 import type { BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
+import { ActionGate } from "./sandbox/action-gate";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
@@ -214,6 +215,10 @@ export function createPlatform(config: PlatformConfig): Platform {
     maxParallelRuns: config.maxParallelRuns ?? settings.maxParallelRuns,
     onRunStart: host.onRunStart,
     onRunComplete: host.onRunComplete,
+    // One gate per platform (= per project): the scheduler feeds it every
+    // agent log line, the engine resets it at batch boundaries, the verifier
+    // queries it before spawning. All three hold the same instance.
+    actionGate: gate,
   });
 
   /**
@@ -254,17 +259,27 @@ export function createPlatform(config: PlatformConfig): Platform {
     ...(host.callbacks ?? {}),
   };
 
+  // Cross-action state machine (§5.1): scoped to this platform instance, so
+  // concurrent projects never share observations.
+  const gate = new ActionGate();
+
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
       scheduler: new Scheduler(layer.adapters, settings.enabledAgents, schedulerOptions()),
       verify:
         config.verify ??
-        ((cwd: string) => verifyProject(settings.verificationCommands, { cwd: () => cwd, onEvent: log })),
+        ((cwd: string) =>
+          verifyProject(settings.verificationCommands, {
+            cwd: () => cwd,
+            onEvent: log,
+            actionGate: gate,
+          })),
       settings,
       usage: () => meter.snapshot(),
       conflicts: () => verdictConflicts,
       journal: config.journal,
+      actionGate: gate,
     },
     callbacks,
   );

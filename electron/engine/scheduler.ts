@@ -67,6 +67,12 @@ export interface SchedulerOptions {
   /** Sink for routing decisions, e.g. forwarded to the board log. */
   onRouting?: (decision: RoutingDecision, task: Task) => void;
   /**
+   * 跨动作状态机的观察面（竞品调研 §5.1）：每条 agent 日志喂给它，批次内
+   * 出现过依赖安装/发布/推送痕迹后，验证命令面据此升级审查。可选 —— 不传
+   * 则调度器行为与从前完全一致。
+   */
+  actionGate?: { observe(text: string): void };
+  /**
    * 429 感知派发节流：一次 rate-limit 失败后，下一个排队任务延迟派发
    * （指数退避，封顶 rateLimitMaxBackoffMs），避免在配额墙上继续撞。
    */
@@ -479,6 +485,9 @@ export class Scheduler {
     let terminalOk = false;
     for await (const event of adapter.collect(handle)) {
       if (event.kind === "log") {
+        // Observation surface of the cross-action state machine: what the
+        // agent did (installs, publishes, pushes) betrays itself in its log.
+        this.opts.actionGate?.observe(event.text);
         logs.push(event.text);
       } else if (event.kind === "completed") {
         terminalOk = true;

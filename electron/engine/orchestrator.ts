@@ -13,6 +13,7 @@ import type {
   ReceiptTask,
 } from "../../shared/delivery-receipt";
 import { runSmokeChecks } from "./verifier";
+import type { ActionGateLike } from "../sandbox/action-gate";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches, skippedDescendants } from "../../shared/graph";
 import { routeVerificationErrors } from "../../shared/routing";
@@ -53,6 +54,12 @@ export interface OrchestratorDeps {
    * 没有它时凭据里的 `conflicts` 是空数组（不代表"没有越权"，只代表没人喂）。
    */
   conflicts?: () => ReceiptConflict[];
+  /**
+   * 跨动作状态机（竞品调研 §5.1，可选）：批次边界上由引擎 reset —— 批次是
+   * "已发生过什么"的生命周期单位。观察面（agent 日志）与执行面（验证命令
+   * 升级审查）分别由 scheduler 和 verifier 持有同一个实例。
+   */
+  actionGate?: ActionGateLike;
 }
 
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
@@ -520,6 +527,9 @@ export class OrchestratorEngine {
 
       for (const [bi, batch] of batches.entries()) {
         await this.gate();
+        // Batch boundary = the cross-action state machine's lifetime unit:
+        // facts observed in batch N must not escalate batch N+1's verdicts.
+        this.deps.actionGate?.reset();
         const notDone = batch.filter((t) => !allDone.has(t.id) && !skipped.has(t.id));
         // 配额守卫：上游依赖未成功的任务本轮不派发（依赖会在重修轮重试，
         // 成功后下游自动解锁）——避免在注定失败的下游上白烧 API 配额。
@@ -619,6 +629,8 @@ export class OrchestratorEngine {
         const smokeResults = await runSmokeChecks(smoke, {
           cwd: projectRoot,
           onEvent: (text) => this.cb.onLog(text),
+          // 冒烟命令来自大脑生成 —— 跨动作升级审查对它最有价值。
+          actionGate: this.deps.actionGate,
         });
         report = {
           passed: smokeResults.every((r) => r.ok),

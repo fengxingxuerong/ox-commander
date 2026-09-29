@@ -8,6 +8,18 @@
 
 ### 新增
 
+- **有状态前置策略（跨动作状态机，竞品调研 §5.1 学 Omnigent）**：批次不是一组互不
+  相干的命令 —— agent 在批次内装过依赖，之后每条命令的含义都变了。静态 CommandPolicy
+  逐条孤立判定看不见这层上下文，现在补上：`electron/sandbox/action-gate.ts` 的
+  `ActionGate`（观察面 = scheduler 每条 agent 日志；执行面 = verifier 两条路径 spawn
+  前查询；批次边界由引擎 reset），规则在纯函数里（`extractActionFacts` /
+  `escalatedVerdict`，site 口径 13/13 逐位点全杀）：批次内出现过依赖安装/发布/推送
+  痕迹 → `npx` 的隐式 registry 下载升级为拒绝；发生过对外发布/推送 → 追加依赖变更
+  升级为拒绝。同批修补静态缺口：`npm publish` / `adduser` / `login` / `logout` /
+  `token` / `config` 六个子命令此前无人拦（npm 在白名单、子命令未判定），AI 生成的
+  冒烟命令 `npm publish` 会真的执行 —— 现在与 git 子命令同构落地为沙箱地板。
+  `maxTokensPerRun` 的"动作前拦截"升级留待后续（用量记账当前是事后口径，独立事项）。
+
 - **看板重开即恢复（facts/derived 分离，学 AO）**：此前看板状态只活在引擎内存推送里，
   窗口重载或进程树被腰斩（`--real` 演习两轮都栽在这）后就是一块空白板。现在审计 JSONL
   补齐三块事实 —— run-start/run-end 带 `projectId` + `title`，新增 `stage`（阶段推进）与

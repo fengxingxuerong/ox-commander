@@ -944,6 +944,62 @@ describe("Scheduler · 批内并发准入（maxConcurrency 是硬上限）", () 
     expect(dispatched).toEqual(["v1", "v1"]);
     expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
   });
+
+  it("满载改派时 legacy agent 恒可接（无并发概念的池子是兜底资源）", async () => {
+    // admitConcurrency 满载改派循环的 legacy 分支：`!d || d.inferredLegacy →
+    // return true`。此前只测过声明 agent 的余量分支 —— 「return true → false」
+    // 变异存活（2026-09-29 touched 审计）。legacy 改派目标必须被接住。
+    const dispatched: string[] = [];
+    const declared = Object.assign(adapterWith("a1", true, { dispatched }), {
+      capabilities: () => ({
+        roles: ["*"],
+        zoneGlobs: ["**"],
+        supports: ["read", "edit", "create", "run-test"],
+        artifactKinds: ["files"],
+        maxConcurrency: 1,
+        selfIsolated: false,
+      }),
+    }) as AgentAdapter;
+    const legacy = adapterWith("v1", true, { dispatched });
+    const registry = new AgentRegistry([{ adapter: declared }, { adapter: legacy }]);
+    const sched = new Scheduler([declared, legacy], [], { registry, router: createCapabilityRouter() });
+    // suggestedRole 无匹配 → candidates 空 → 兜底按 index 轮换：t1→a1、t2→v1
+    // （legacy 恒可接）、t3→a1 已满 → **spare 查找**跳过 a1、命中 v1 —— 变异
+    // 必须在 spare 分支上被杀（t2 走的是 wanted 直派路径，杀不到它）。
+    const nobody = (id: string): Task => ({
+      id, title: id, description: "d", zone: `${id}-zone`, dependencies: [], suggestedRole: "nobody",
+    });
+    const outcomes = await sched.runBatch([nobody("t1"), nobody("t2"), nobody("t3")], ".");
+    expect(dispatched).toEqual(["a1", "v1", "v1"]);
+    expect(outcomes.map((o) => o.ok)).toEqual([true, true, true]);
+  });
+
+  it("满载改派只考虑 registry 注册过的 agent（registry 是准入事实来源）", async () => {
+    // admitConcurrency 的 spare 查找遍历的 available 池在更早的环节就来自
+    // registry 注册列表 —— 未注册的 adapter 即使塞进构造列表也不会被改派
+    // 选中，t2 如实 no-agent。这也说明 `!d` 半边是防御分支：正常路径下
+    // available 里不存在 registry 缺席者。
+    const dispatched: string[] = [];
+    const declared = Object.assign(adapterWith("a1", true, { dispatched }), {
+      capabilities: () => ({
+        roles: ["*"],
+        zoneGlobs: ["**"],
+        supports: ["read", "edit", "create", "run-test"],
+        artifactKinds: ["files"],
+        maxConcurrency: 1,
+        selfIsolated: false,
+      }),
+    }) as AgentAdapter;
+    const ghost = adapterWith("ghost", true, { dispatched });
+    const registry = new AgentRegistry([{ adapter: declared }]);
+    const sched = new Scheduler([declared, ghost], [], { registry, router: createCapabilityRouter() });
+    const nobody = (id: string): Task => ({
+      id, title: id, description: "d", zone: `${id}-zone`, dependencies: [], suggestedRole: "nobody",
+    });
+    const outcomes = await sched.runBatch([nobody("t1"), nobody("t2")], ".");
+    expect(dispatched).toEqual(["a1"]);
+    expect(outcomes.map((o) => o.ok)).toEqual([true, false]);
+  });
 });
 
 // executorTimeoutMs 的四跳链路：协议 → settings → createAgentLayer → 适配器。

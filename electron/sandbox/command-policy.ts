@@ -97,6 +97,31 @@ export const DEFAULT_DENIED_GIT_SUBCOMMANDS: readonly string[] = [
 ];
 
 /**
+ * npm-family subcommands that verification/smoke commands never need: they
+ * publish to a registry, touch account credentials, or mutate npm config.
+ * Before this floor existed, an AI-generated smoke command `npm publish`
+ * sailed through — `npm` is on the allow list and subcommands were unjudged
+ * (2026-09-29, competitor research §5.1). `install`/`add` stay allowed:
+ * restoring build dependencies is a legitimate verification action.
+ */
+export const DEFAULT_DENIED_NPM_SUBCOMMANDS: readonly string[] = [
+  "publish",
+  "adduser",
+  "login",
+  "logout",
+  "token",
+  "config",
+];
+
+/**
+ * The package-manager family whose subcommands the npm floor judges. Single
+ * source of truth: the ActionGate escalation rules import this instead of
+ * redefining it, so a new package manager added here is covered by both
+ * layers at once.
+ */
+export const NPM_FAMILY: ReadonlySet<string> = new Set(["npm", "pnpm", "yarn", "bun"]);
+
+/**
  * Shell metacharacters. These matter even though nothing is ever spawned with
  * `shell: true`: on Windows, `.cmd`/`.bat` shims (npm, yarn, gradle …) are
  * executed through `cmd.exe` by libuv, which re-parses the argument string.
@@ -139,6 +164,8 @@ export interface CommandPolicyOptions {
   denyEvalFlags?: boolean;
   /** Extra git subcommands to refuse. */
   denyGitSubcommands?: readonly string[];
+  /** Extra npm-family subcommands to refuse (extends the default floor). */
+  denyNpmSubcommands?: readonly string[];
 }
 
 export type CommandDecision = { ok: true } | { ok: false; reason: string };
@@ -160,6 +187,7 @@ export class CommandPolicy {
   private readonly allow: Set<string>;
   private readonly deny: Set<string>;
   private readonly denyGit: Set<string>;
+  private readonly denyNpm: Set<string>;
   private readonly denyMeta: boolean;
   private readonly denyEval: boolean;
 
@@ -169,6 +197,10 @@ export class CommandPolicy {
     this.denyGit = new Set([
       ...DEFAULT_DENIED_GIT_SUBCOMMANDS,
       ...(opts.denyGitSubcommands ?? []),
+    ]);
+    this.denyNpm = new Set([
+      ...DEFAULT_DENIED_NPM_SUBCOMMANDS,
+      ...(opts.denyNpmSubcommands ?? []),
     ]);
     this.denyMeta = opts.denyShellMetacharacters ?? true;
     this.denyEval = opts.denyEvalFlags ?? true;
@@ -210,6 +242,14 @@ export class CommandPolicy {
       const sub = (args[0] ?? "").toLowerCase();
       if (this.denyGit.has(sub)) {
         return { ok: false, reason: `git 子命令被沙箱禁止：git ${sub}` };
+      }
+    }
+    // npm-family publish/credential/config subcommands: verification and smoke
+    // commands never need them. Same shape as the git check above.
+    if (NPM_FAMILY.has(base)) {
+      const sub = (args[0] ?? "").toLowerCase();
+      if (this.denyNpm.has(sub)) {
+        return { ok: false, reason: `${base} 子命令被沙箱禁止：${base} ${sub}（验证/冒烟命令不需要对外发布、账号或配置操作）` };
       }
     }
     return { ok: true };

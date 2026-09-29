@@ -127,6 +127,9 @@ const TARGETS = [
   // 2026-09-29：board-recovery 的纯函数推导层（facts/derived split）。新文件
   // 必须显式入表 —— touched 口径靠这张表映射，漏挂=永远无人审计。
   { file: "electron/board-derive.ts", test: "src/board-derive.test.ts", tier: 1 },
+  // 2026-09-29：跨动作状态机（竞品调研 §5.1）—— 规则在纯函数里（escalatedVerdict /
+  // extractActionFacts），ActionGate 是薄壳；同批接入 CommandPolicy 的 npm 子命令地板。
+  { file: "electron/sandbox/action-gate.ts", test: "src/action-gate.test.ts", tier: 1 },
   { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
   { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
@@ -622,6 +625,28 @@ const EQUIVALENT_SITES = [
    * 不回落分支）→ 193 → 221。
    */
   { file: "electron/engine/router.ts", op: "&& → ||", line: 221 },
+  /**
+   * `electron/engine/scheduler.ts` `admitConcurrency` 满载改派循环里的
+   * `if (!d || d.inferredLegacy) return true;` —— **架构上不可达**（防御分支）。
+   *
+   * 两个半边都到不了：
+   * 1. `!d`（registry 缺席者）—— spare 遍历的 available 列表来自 registry 注册
+   *    结果（planPool 按注册表过滤），registry 缺席的适配器根本不进 available
+   *    （src/scheduler.test.ts「registry 是准入事实来源」用例实证：ghost 塞进
+   *    构造列表也轮不到 spare）。
+   * 2. `d.inferredLegacy`（legacy 改派目标）—— router 评分带 inflight 惩罚：
+   *    声明 agent 一满载，router 下一轮就把任务导向 legacy 候选（candidates 里
+   *    legacy 恒匹配），任务在 346 行 `return wanted` 就被放行 —— spare 循环
+   *    只在 router 推荐了满载者时才执行，而 legacy 在候选里时 router 的惩罚
+   *    总在 spare 之前消化掉流量。探针实证：变异体下 dispatched 与原版逐位一致。
+   *
+   * 2026-09-29 touched 审计（本次 actionGate 接线触及 scheduler.ts）暴露。
+   * **刻意保留**：registry 过滤或 router 评分若将来变化，这里是第二道闸。
+   * ⚠️ 行号是锚点：scheduler.ts 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认上面的不可达论证仍成立。
+   */
+  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 352 },
+  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 352 },
   { file: "shared/schema.ts", op: "|| → &&", line: 184 },
   /**
    * `electron/sandbox/spawn-plan.ts:96` `return false → true`（`isFile` 的 catch）。

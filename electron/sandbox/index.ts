@@ -21,10 +21,20 @@ export {
   DEFAULT_ALLOWED_COMMANDS,
   DEFAULT_DENIED_COMMANDS,
   DEFAULT_DENIED_GIT_SUBCOMMANDS,
+  DEFAULT_DENIED_NPM_SUBCOMMANDS,
+  NPM_FAMILY,
   createDefaultCommandPolicy,
   type CommandDecision,
   type CommandPolicyOptions,
 } from "./command-policy";
+export {
+  ActionGate,
+  EMPTY_FACTS,
+  escalatedVerdict,
+  extractActionFacts,
+  type ActionFacts,
+  type ActionGateLike,
+} from "./action-gate";
 export {
   buildSpawnSpec,
   needsCmdWrapper,
