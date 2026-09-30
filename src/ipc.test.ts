@@ -143,6 +143,7 @@ describe("registerIpc · channel contract", () => {
       "audit:export",
       "audit:files",
       "audit:recent",
+      "audit:trail",
       "board:recovery",
       "keys:save",
       "keys:security",

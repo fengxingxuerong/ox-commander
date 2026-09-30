@@ -1256,7 +1256,10 @@ describe("runSpec", () => {
     const agents = events.find((e) => e.type === "agents") as Extract<HeadlessEvent, { type: "agents" }>;
     expect(agents).toBeTruthy();
     expect(agents.agents.map((a) => a.id)).toContain("codex-cli");
-  });
+    // 这条不注入 layer，会真走一遍 manifest 目录加载 + cli 适配器的 probe
+    // （spawn `codex --version`）。单机跑约 3s，全量并行时磁盘/进程抖动会推过
+    // vitest 默认的 5s —— 断言本身与墙钟无关，给到 30s，别把负载报成断链。
+  }, 30_000);
 
   it("onEngine 在规划之前就把引擎交给宿主（暂停不能等规划完才可用）", async () => {
     // P1-5：桌面有 pause/resume，CLI 与常驻服务此前没有对等能力。宿主（HTTP
