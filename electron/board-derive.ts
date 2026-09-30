@@ -63,6 +63,86 @@ export interface BoardRecoveryView {
 /** Phases that carry board state; everything else (settings, guards) is noise here. */
 const TASK_PHASES = new Set(["run-start", "run-end"]);
 
+/** 一次派发的事实（P1-3 上下文回溯的最小单位）。 */
+export interface TrailRun {
+  startedAt?: string;
+  /** 缺席 = 这次派发**没有收尾**（进程被腰斩 / 重派时前一次还没回来）。 */
+  endedAt?: string;
+  /** 真正跑完的执行器：来自 run-end，而不是 run-start 的计划值。 */
+  agentId?: string;
+  ok?: boolean;
+  durationMs?: number;
+  errorClass?: string;
+  digest?: string;
+}
+
+export interface TaskTrail {
+  taskId: string;
+  title?: string;
+  zone?: string;
+  /** 按时间顺序（旧 → 新）的每一次派发。 */
+  runs: TrailRun[];
+}
+
+/**
+ * 一个任务的**运行履历**（P1-3：上下文回溯）。
+ *
+ * `deriveBoardView` 只给"现在是什么状态"，而这个回答"它经历过什么" —— 重修轮里
+ * 同一个任务会被派给不同的执行器，前一次为什么失败（`errorClass` / `digest`）、
+ * 换谁重派的，正是"查前任 agent 的决策与改动"要的东西。
+ *
+ * 配对规则与 `deriveBoardView` 同源（run-start 开、run-end 关）：
+ *   · 前一次还没闭合又来了新的 start ⇒ 先把未闭合那条收进履历（事实不能丢），
+ *     它**没有 `endedAt`** —— 那是"被腰斩"的唯一诚实表达；
+ *   · run-end 早于任何 start（start 被轮转掉了）⇒ 照样算一次派发，只是没有开始时间。
+ */
+export function taskTrail(records: AuditRecord[], taskId: string): TaskTrail {
+  const runs: TrailRun[] = [];
+  let title: string | undefined;
+  let zone: string | undefined;
+  let open: TrailRun | undefined;
+
+  for (const record of records) {
+    if (record.taskId !== taskId || !TASK_PHASES.has(record.phase)) continue;
+    if (record.title) title = record.title;
+    if (record.zone) zone = record.zone;
+
+    if (record.phase === "run-start") {
+      if (open) runs.push(open);
+      open = {
+        startedAt: record.ts,
+        ...(record.agentId ? { agentId: record.agentId } : {}),
+      };
+      continue;
+    }
+
+    const base: TrailRun = open ?? {};
+    runs.push({
+      ...base,
+      endedAt: record.ts,
+      ...(record.agentId ? { agentId: record.agentId } : {}),
+      ...(record.durationMs !== undefined ? { durationMs: record.durationMs } : {}),
+      ...(record.ok !== undefined ? { ok: record.ok } : {}),
+      ...(record.ok
+        ? {}
+        : {
+            errorClass: record.errorClass ?? "unknown",
+            digest: record.detail ?? "无日志",
+          }),
+    });
+    open = undefined;
+  }
+  // 尾部仍未闭合 ⇒ 最后一次派发没有收尾（腰斩），照样进履历。
+  if (open) runs.push(open);
+
+  return {
+    taskId,
+    runs,
+    ...(title ? { title } : {}),
+    ...(zone ? { zone } : {}),
+  };
+}
+
 /**
  * Reduces the audit trail into a board view.
  *

@@ -646,6 +646,58 @@ describe("agent handlers", () => {
     expect(res.tasks.t1).toMatchObject({ status: "running", title: "A", attempts: 1 });
   });
 
+  it("audit:trail 从完整审计推导一个任务的运行履历（P1-3 上下文回溯）", async () => {
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockReturnValue([
+      { ts: "T-start", phase: "run-start", projectId: "p1", taskId: "t1", title: "A", zone: "z", agentId: "plan-a" },
+      // 别家任务的事实：履历只收 taskId 精确匹配的，这条不得混进来。
+      { ts: "T-other", phase: "run-start", projectId: "p1", taskId: "t2", title: "B", zone: "y", agentId: "x" },
+      {
+        ts: "T-end",
+        phase: "run-end",
+        projectId: "p1",
+        taskId: "t1",
+        agentId: "exec-b",
+        ok: false,
+        durationMs: 1200,
+        errorClass: "timeout",
+        detail: "boom",
+      },
+    ]);
+    const res = (await (h.ipcMain as FakeIpcMain).invoke("audit:trail", "t1")) as Record<string, unknown>;
+    // 履历要的是"这个任务的全部历史"，窗口取满 5000 而不是 audit:recent 的 100。
+    expect(audit.read).toHaveBeenCalledWith({ limit: 5000 });
+    // agentId 以 run-end 的真实执行器为准（重派后 run-start 的计划值会过期）。
+    expect(res).toEqual({
+      taskId: "t1",
+      title: "A",
+      zone: "z",
+      runs: [
+        {
+          startedAt: "T-start",
+          endedAt: "T-end",
+          agentId: "exec-b",
+          durationMs: 1200,
+          ok: false,
+          errorClass: "timeout",
+          digest: "boom",
+        },
+      ],
+    });
+  });
+
+  it("audit:trail 空串/非字符串 taskId：守卫直接空回执，不碰审计", () => {
+    // 守卫行 `typeof taskId !== "string" || taskId === ""` 的三个变异体
+    // （||→&&、===→!==、!==→===）都会让某一种非法输入穿过守卫走到
+    // read()/taskTrail —— 「read 不被调用」与「taskId 回显空串」一起把它们钉死。
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockClear();
+    const ipc = h.ipcMain as FakeIpcMain;
+    expect(ipc.invoke("audit:trail", "")).toEqual({ taskId: "", runs: [] });
+    expect(ipc.invoke("audit:trail", 42)).toEqual({ taskId: "", runs: [] });
+    expect(audit.read).not.toHaveBeenCalled();
+  });
+
   it("lists audit file basenames only", () => {
     const audit = inst(h.auditInstances);
     (audit.files as Mock).mockReturnValue(["/deep/dir/audit-1.jsonl"]);

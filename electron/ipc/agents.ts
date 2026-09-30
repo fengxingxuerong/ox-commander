@@ -12,6 +12,7 @@ import {
   saveManifestFile,
 } from "../agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "../agents/manifest-schema";
+import { taskTrail } from "../board-derive";
 import type { AgentDescriptor } from "../../shared/agent-contract";
 import {
   agentDir,
@@ -143,6 +144,15 @@ export function registerObservabilityHandlers(): void {
   /** Recent audit records, newest last. */
   ipcMain.handle("audit:recent", (_e, limit?: number) => {
     return ensureAudit().read({ limit: Math.max(1, Math.min(limit ?? 100, 1000)) });
+  });
+
+  /**
+   * 一个任务的运行履历（P1-3 上下文回溯）：每次派发谁跑的、多久、为什么失败。
+   * 派生规则在纯函数 `taskTrail` 里 —— 宿主只负责把事实喂进去。
+   */
+  ipcMain.handle("audit:trail", (_e, taskId?: string) => {
+    if (typeof taskId !== "string" || taskId === "") return { taskId: "", runs: [] };
+    return taskTrail(ensureAudit().read({ limit: 5000 }), taskId);
   });
 
   ipcMain.handle("audit:files", () => ensureAudit().files().map((f) => path.basename(f)));

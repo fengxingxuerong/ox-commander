@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditRecord } from "../electron/audit-log";
-import { deriveBoardView } from "../electron/board-derive";
+import { deriveBoardView, taskTrail } from "../electron/board-derive";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 
 /**
@@ -211,5 +211,75 @@ describe("deriveBoardView", () => {
       { ts: "2026-09-29T11:00:00.000Z", phase: "settings", detail: "x" },
     ]) as unknown as Record<string, unknown>;
     expect("lastActivityTs" in noise).toBe(false);
+  });
+});
+
+describe("taskTrail · 一个任务的运行履历（P1-3 上下文回溯）", () => {
+  // deriveBoardView 只说"现在是什么状态"；这条说"它经历过什么" —— 重修轮里同一个
+  // 任务会换执行器，前一次为什么失败、换谁重派的，正是要回溯的东西。
+  it("按时间顺序列出每一次派发，执行器取 run-end 的真实值", () => {
+    const trail = taskTrail(
+      [
+        start({ ts: "t-0", agentId: "planned-a", title: "登录页", zone: "src/auth" }),
+        end({ ts: "t-1", agentId: "actual-b", ok: false, errorClass: "timeout", detail: "boom", durationMs: 12 }),
+        start({ ts: "t-2", agentId: "planned-b" }),
+        end({ ts: "t-3", agentId: "actual-c", ok: true, durationMs: 34 }),
+      ],
+      "t1",
+    );
+    expect(trail.runs).toHaveLength(2);
+    expect(trail.runs[0]).toEqual({
+      startedAt: "t-0",
+      endedAt: "t-1",
+      agentId: "actual-b",
+      ok: false,
+      durationMs: 12,
+      errorClass: "timeout",
+      digest: "boom",
+    });
+    // 第二次成功：不该把上一条的错误带过来（失败与成功是两次派发）
+    expect(trail.runs[1]).toEqual({ startedAt: "t-2", endedAt: "t-3", agentId: "actual-c", ok: true, durationMs: 34 });
+    expect(trail.title).toBe("登录页");
+    expect(trail.zone).toBe("src/auth");
+  });
+
+  it("只挑这个任务的事实，别家的不算", () => {
+    const trail = taskTrail([start({ taskId: "t2" }), end({ taskId: "t2" }), start({ ts: "x" })], "t1");
+    expect(trail.runs).toHaveLength(1);
+    expect(trail.runs[0]!.startedAt).toBe("x");
+  });
+
+  it("被腰斩的那次没有收尾：endedAt 缺席（不是填个假时间）", () => {
+    const trail = taskTrail([start({ ts: "s1", agentId: "a1" })], "t1");
+    expect(trail.runs).toEqual([{ startedAt: "s1", agentId: "a1" }]);
+    expect("endedAt" in trail.runs[0]!).toBe(false);
+  });
+
+  it("前一次没闭合又重派 ⇒ 两条都在（事实不能丢）", () => {
+    const trail = taskTrail([start({ ts: "s1" }), start({ ts: "s2" }), end({ ts: "e2", ok: true })], "t1");
+    expect(trail.runs).toHaveLength(2);
+    expect("endedAt" in trail.runs[0]!).toBe(false); // 第一次被腰斩
+    expect(trail.runs[1]).toEqual({ startedAt: "s2", endedAt: "e2", ok: true });
+  });
+
+  it("run-end 早于任何 start（start 被轮转掉）⇒ 照样算一次派发", () => {
+    const trail = taskTrail([end({ ts: "e0", ok: false, errorClass: "auth", detail: "401" })], "t1");
+    expect(trail.runs).toEqual([
+      { endedAt: "e0", ok: false, errorClass: "auth", digest: "401" },
+    ]);
+    expect("startedAt" in trail.runs[0]!).toBe(false);
+  });
+
+  it("没配对的其它 phase（stage / receipt / batch-guard）不进履历", () => {
+    const trail = taskTrail(
+      [
+        { ts: "x", phase: "stage", stage: "VERIFICATION", taskId: "t1" },
+        { ts: "x", phase: "batch-guard", taskId: "t1", changed: 2 },
+        start({}),
+        end({ ok: true }),
+      ],
+      "t1",
+    );
+    expect(trail.runs).toHaveLength(1);
   });
 });
