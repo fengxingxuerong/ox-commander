@@ -41,17 +41,25 @@ async function main(): Promise<void> {
   const port = portFromArgv(process.argv.slice(2));
   const srv = await startServe({
     ...(port !== undefined ? { port } : {}),
-    run: async (payload: unknown, emit: (e: HeadlessEvent) => void): Promise<number> => {
+    run: async (
+      payload: unknown,
+      emit: (e: HeadlessEvent) => void,
+      control?: (engine: { pause(): void; resume(): void }) => void,
+    ): Promise<number> => {
       const parsed = parseSpec(typeof payload === "string" ? payload : JSON.stringify(payload ?? {}));
       if (!parsed.ok) {
         emit({ type: "error", message: parsed.message });
         return 1;
       }
-      return runSpec(parsed.spec, { emit });
+      return runSpec(parsed.spec, {
+        emit,
+        // 引擎交给服务：POST /pause / POST /resume 才能真的影响这次 run（P1-5）。
+        ...(control ? { onEngine: control } : {}),
+      });
     },
   });
   process.stdout.write(
-    `OxCommander serve: http://127.0.0.1:${srv.port}/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec）\n`,
+    `OxCommander serve: http://127.0.0.1:${srv.port}/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec，POST /pause · /resume 暂停继续）\n`,
   );
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {

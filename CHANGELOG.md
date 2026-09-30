@@ -78,6 +78,28 @@
   看板「线路健康」卡片（状态 / 剩余秒 / 失败次数 / 限流次数）。site 口径
   `http-clients` 56/56、`build-llm` 8/8、`src/store.ts` 21/21，逐位点全杀。
 
+- **补齐 CLI 与桌面的能力差（竞品调研 P1-5，部分）**，按"差在哪"分三处落地：
+
+  - **CLI 的验证命令现在收第四种 `kind: smoke`**。协议层的校验表此前只写了
+    `build / typecheck / test`，而 `VerificationKind` 有四种 —— 于是 CLI 宿主传一条
+    冒烟命令会被整段拒掉，同样的命令在桌面端却是合法的（那边不经这层校验）。
+    能力差不该长在校验表里。
+  - **常驻服务有 `pause` / `resume` 了**（`POST /pause`、`POST /resume`）：引擎通过
+    `runSpec` 的新出口 `onEngine` 交到服务手上（在规划**之前**就给 —— 晚给了 PRD/任务
+    分解这两段最烧 token 的部分就永远暂停不了），没有 run 在跑时返回 409 并写清原因，
+    暂停状态进 `/state` 与状态页，run 结束时键必须消失（字段即承诺）。此前只有桌面有
+    暂停/继续，headless 一侧完全没有对等能力。
+  - **CLI 的 `snapshotRoot` / `manifestDir` 补上"真的生效"的断言**。此前所有 headless
+    用例都**注入 layer**（自带这两个值），于是"spec 里那个路径有没有真的交给快照层 /
+    清单加载"这件事没人看 —— 断链了也不会红。现在两条用例走平台自建那条路，并都做了
+    反向注入验证（把传参改成 undefined，用例当场变红）。
+
+### 未做（P1-5 剩余）
+
+- 桌面侧仍未暴露 `snapshotRoot` / `manifestDir` / `escalationPolicy`：`ProjectSettings`
+  没有这三个字段，Electron 侧写死读 `userData/agents.d` 与 `userData/snapshots`，设置页
+  也没有入口。P1-2 的**账号热切换**（启用/禁用某条线路、调整线路顺序）同样未做。
+
 - **任务级冗余赛马（竞品调研 §5.3，学 Vibe Kanban）**：`raceRedundancy`（默认 1 = 关闭）
   让一个任务同时派给 N 个**不同**执行器，第一个到终态成功者赢、其余立即 abort。产物
   正确性不靠赛马 —— 批次后的统一硬门禁照旧把关，赛马是拿 token 换时间（等慢执行器的

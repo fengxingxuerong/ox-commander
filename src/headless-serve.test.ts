@@ -101,6 +101,16 @@ describe("serve · 路由", () => {
     expect(routeRequest(s, "GET", "/run").status).toBe(405);
   });
 
+  it("暂停/继续是 POST-only 的控制面，不是状态查询", () => {
+    const s = createServeState();
+    // GET 一个控制端点不该被当成"查一下状态"：静默接受会让人以为暂停成功了。
+    expect(routeRequest(s, "GET", "/pause").status).toBe(405);
+    expect(routeRequest(s, "GET", "/resume").status).toBe(405);
+    // POST 只是**指令**，由调用方转给引擎；路由本身不做副作用（可逐位点审）。
+    expect(routeRequest(s, "POST", "/pause").control).toBe("pause");
+    expect(routeRequest(s, "POST", "/resume").control).toBe("resume");
+  });
+
   it("404s unknown paths instead of falling back to the page", () => {
     // 兜底到首页会让"打错地址"看起来像"服务正常"。
     expect(routeRequest(createServeState(), "GET", "/nope").status).toBe(404);
@@ -222,6 +232,54 @@ describe("serve · HTTP", () => {
     // 405 而不是 400/202：GET 进到 POST 分支会去解析空 body，报成"body 不是合法
     // JSON"—— 那个错误和"你用错方法了"是两回事，混起来排查时指向错的地方。
     expect(res.status).toBe(405);
+  });
+
+  it("暂停/继续真的递到引擎，且在状态里看得见（P1-5 的 CLI 对等能力）", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((r) => (release = r));
+    const calls: string[] = [];
+    const srv = await startServe({
+      run: async (_payload, emit, control) => {
+        emit({ type: "log", text: "working" });
+        control?.({
+          pause: () => calls.push("pause"),
+          resume: () => calls.push("resume"),
+        });
+        await gate;
+        return 0;
+      },
+    });
+    open.push(srv);
+    const post = await fetch(`http://127.0.0.1:${srv.port}/run`, {
+      method: "POST",
+      body: JSON.stringify({ requirement: "x", projectRoot: "." }),
+    });
+    expect(post.status).toBe(202);
+
+    const pause = await fetch(`http://127.0.0.1:${srv.port}/pause`, { method: "POST" });
+    expect(pause.status).toBe(200);
+    expect(await pause.json()).toEqual({ paused: true });
+    expect(calls).toEqual(["pause"]);
+    // 状态里要看得见，否则"服务说暂停了、界面看不出来"又是一个自报状态
+    const paused = await (await fetch(`http://127.0.0.1:${srv.port}/state`)).json();
+    expect(paused.paused).toBe(true);
+    expect((await (await fetch(`http://127.0.0.1:${srv.port}/`)).text())).toContain("已暂停");
+
+    const resume = await fetch(`http://127.0.0.1:${srv.port}/resume`, { method: "POST" });
+    expect(await resume.json()).toEqual({ paused: false });
+    expect(calls).toEqual(["pause", "resume"]);
+    // 恢复后键必须消失（字段即承诺：没有这个键就是没暂停）
+    const after = await (await fetch(`http://127.0.0.1:${srv.port}/state`)).json();
+    expect("paused" in after).toBe(false);
+    release!();
+  });
+
+  it("没有 run 在跑时暂停无从谈起（409，并把原因说清）", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/pause`, { method: "POST" });
+    expect(res.status).toBe(409);
+    expect(await res.text()).toContain("没有 run 在跑");
   });
 
   it("rejects a non-JSON body with 400", async () => {

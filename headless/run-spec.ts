@@ -8,7 +8,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { VerificationExhaustedError } from "../electron/engine";
-import type { OrchestratorCallbacks, RunSnapshot } from "../electron/engine";
+import type { OrchestratorCallbacks, OrchestratorEngine, RunSnapshot } from "../electron/engine";
 import type { AgentLayer } from "../electron/agents";
 import { createFileJournal, createPlatform } from "../electron/platform";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
@@ -115,6 +115,12 @@ export interface RunSpecIo {
   verify?: (cwd: string) => Promise<VerificationReport>;
   /** Override root validation (tests). */
   isDirectory?: (absPath: string) => boolean;
+  /**
+   * 拿到引擎实例的出口（P1-5）：桌面有 `pause` / `resume`，CLI/常驻服务此前没有
+   * 对等能力 —— 宿主（HTTP 服务）要靠它才能把"先停一下"这件事递到引擎里。
+   * 在规划**之前**就给出，否则 PRD/任务分解那两段（最烧 token 的部分）无法暂停。
+   */
+  onEngine?: (engine: OrchestratorEngine) => void;
 }
 
 /**
@@ -292,6 +298,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   });
 
   const engine = platform.engine;
+  io.onEngine?.(engine);
 
   try {
     let batches: Task[][];

@@ -174,6 +174,26 @@ describe("parseSpec", () => {
  * **错误收集不全**：`parseSpec` 的设计承诺是"一次把所有问题报给宿主"
  * （见 `collects every problem at once`），而 break 会让它半途而废。
  */
+describe("parseCommands · smoke 是合法 kind（CLI 与桌面的能力差）", () => {
+  // `VerificationKind` 有四种，而协议层的校验表此前只收三种 —— CLI 宿主传一条
+  // smoke 验证命令会被整段拒掉，同样的命令在桌面端却是合法的（那边不经这层
+  // 校验）。能力差不该长在校验表里：这条钉住"四种都收"。
+  it("冒烟命令被接受，且与桌面端同形状", () => {
+    const r = parseSpec(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        verificationCommands: [{ kind: "smoke", command: "node", args: ["scripts/smoke.mjs"] }],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.spec.settings.verificationCommands).toEqual([
+        { kind: "smoke", command: "node", args: ["scripts/smoke.mjs"] },
+      ]);
+    }
+  });
+});
+
 describe("parseCommands · 逐项校验不中途放弃（变异测试发现的缺口）", () => {
   function issueLines(commands: unknown[]): string {
     const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, verificationCommands: commands }));
@@ -1182,6 +1202,82 @@ describe("runSpec", () => {
     expect(conflict.remedy).toBe("revert");
     // The rogue file is gone: revert is the default arbitration mode.
     expect(fs.existsSync(path.join(root, "outside/x.js"))).toBe(false);
+  });
+
+  it("spec 里的 snapshotRoot 真的成了备份根（不注入 layer 的路径）", async () => {
+    // 上面的用例**注入 layer**（自带 snapshotRoot），于是"spec 里那个路径有没有
+    // 真的交给快照层"这件事没人看 —— 断链了也不会红。这里不注入 layer，走平台
+    // 自建那条路：快照必须落在宿主指定的位置，而不是默认临时目录。
+    const root = scratch("headless-snaproot");
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/a.js"), "a", "utf8");
+    const snapRoot = path.join(root, "snaps-from-spec");
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, snapshotRoot: snapRoot }));
+    await runSpec(spec, {
+      emit: () => undefined,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      verify: async () => pass,
+    });
+    expect(fs.existsSync(snapRoot)).toBe(true);
+  });
+
+  it("spec 里的 manifestDir 真的被加载（不注入 layer 的路径）", async () => {
+    // 同上：注入 layer 的用例绕过了"spec.manifestDir → loadManifestDir"这一跳。
+    // 断链的后果是 CLI 宿主传的 agents.d 目录被静默忽略 —— 不抛异常，只是池里
+    // 少一个智能体。可观测出口是 `agents` 事件：它列出这一 run 实际认识的智能体。
+    const root = scratch("headless-manifestdir");
+    const dir = path.join(root, "agents.d");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "codex-cli.json"),
+      JSON.stringify({
+        id: "codex-cli",
+        displayName: "Codex CLI",
+        adapter: "cli",
+        entry: { kind: "cli", command: "codex", argsTemplate: ["exec"] },
+        capabilities: {
+          roles: ["backend-dev"],
+          zoneGlobs: ["src/**"],
+          supports: ["read", "edit"],
+          artifactKinds: ["files"],
+          maxConcurrency: 1,
+          selfIsolated: true,
+        },
+      }),
+      "utf8",
+    );
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, manifestDir: dir }));
+    const { events, emit } = collect();
+    await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      verify: async () => pass,
+    });
+    const agents = events.find((e) => e.type === "agents") as Extract<HeadlessEvent, { type: "agents" }>;
+    expect(agents).toBeTruthy();
+    expect(agents.agents.map((a) => a.id)).toContain("codex-cli");
+  });
+
+  it("onEngine 在规划之前就把引擎交给宿主（暂停不能等规划完才可用）", async () => {
+    // P1-5：桌面有 pause/resume，CLI 与常驻服务此前没有对等能力。宿主（HTTP
+    // 服务）要靠这个出口才能把"先停一下"递到引擎里 —— 出口给晚了，PRD/任务分解
+    // 这两段（最烧 token 的部分）就永远暂停不了。
+    const root = scratch("headless-onengine");
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root }));
+    let seen: unknown;
+    await runSpec(spec, {
+      emit: () => undefined,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      verify: async () => pass,
+      onEngine: (e) => {
+        seen = e;
+      },
+    });
+    // 交付的是**引擎本体**（带控制面），不是一个只有 run 方法的壳。
+    expect(seen).toBeTruthy();
+    expect(typeof (seen as { pause?: unknown }).pause).toBe("function");
+    expect(typeof (seen as { resume?: unknown }).resume).toBe("function");
   });
 });
 

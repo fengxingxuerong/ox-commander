@@ -195,7 +195,12 @@ const KNOWN_FIELDS = new Set<string>([
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
 const ARBITRATION_MODES: readonly ArbitrationMode[] = ["report-only", "deny-all", "revert-batch", "quarantine"];
-const VERIFICATION_KINDS: readonly VerificationKind[] = ["build", "typecheck", "test"];
+/**
+ * `VerificationKind` 有四种，这里此前只收了三种（漏 `smoke`）—— 于是 CLI 宿主
+ * 传一条 smoke 验证命令会被整段拒掉，而同样的命令在桌面端是合法的（那边走
+ * 设置里的 `verificationCommands`，不经过这层校验）。能力差不该长在校验表里。
+ */
+const VERIFICATION_KINDS: readonly VerificationKind[] = ["build", "typecheck", "test", "smoke"];
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);

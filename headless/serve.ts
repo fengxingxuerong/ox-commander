@@ -33,6 +33,17 @@ export interface ServeState {
   receipt?: DeliveryReceipt;
   /** 最近一次状态变化的时间（ISO）。 */
   updatedAt?: string;
+  /**
+   * 当前 run 是否被暂停（P1-5）：只在暂停期间为 true，恢复后**键消失**
+   * （字段即承诺 —— "没有这个键"就是"没暂停"，不给宿主第三种状态可读）。
+   */
+  paused?: boolean;
+}
+
+/** 宿主能递给引擎的控制面；`startServe` 只转发，不解释语义。 */
+export interface EngineControl {
+  pause(): void;
+  resume(): void;
 }
 
 export interface ServeOptions {
@@ -79,6 +90,8 @@ export interface Routed {
   body: string;
   /** SSE 流需要拿走 socket，不能走普通响应 —— 由调用方单独处理。 */
   stream?: "events";
+  /** 控制面指令：由调用方转给引擎（纯路由不做副作用）。 */
+  control?: "pause" | "resume";
 }
 
 /**
@@ -99,6 +112,11 @@ export function routeRequest(state: ServeState, method: string, path: string): R
     return { status: 200, headers: { "Content-Type": "text/event-stream" }, body: "", stream: "events" };
   }
   if (path === "/run") return { status: 405, headers: {}, body: "POST a spec to /run" };
+  // 控制面（P1-5）：暂停/继续只能 POST，GET 要拿到 405 而不是被当成状态查询。
+  if (path === "/pause" || path === "/resume") {
+    if (method !== "POST") return { status: 405, headers: {}, body: `use POST ${path}` };
+    return { status: 200, headers: {}, body: "", control: path === "/pause" ? "pause" : "resume" };
+  }
   return { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" }, body: "not found" };
 }
 
@@ -130,6 +148,9 @@ export function serveIndexHtml(state: ServeState): string {
       return `<li><b>${esc(e.type)}</b> ${esc(text)}</li>`;
     })
     .join("\n");
+  const pauseNote = state.paused
+    ? `<p class=muted>已暂停：当前任务跑完就停，不再派新的（POST /resume 继续）。</p>`
+    : "";
   const receipt = state.receipt
     ? `<h2>交付凭据</h2><p>${esc(state.receipt.headline)}</p>
        <pre>${esc(JSON.stringify(state.receipt, null, 2))}</pre>`
@@ -144,6 +165,7 @@ pre{background:#f6f8fa;padding:12px;overflow:auto}
 li{white-space:pre-wrap;word-break:break-word}
 </style>
 <h1>OxCommander · ${STATUS_LABEL[state.status]}</h1>
+${pauseNote}
 <p class=muted>状态 ${esc(state.status)}${
     state.exitCode !== undefined ? ` · 退出码 ${state.exitCode}` : ""
   }${state.updatedAt ? ` · ${esc(state.updatedAt)}` : ""} · 共 ${state.events.length} 条事件</p>
@@ -182,13 +204,20 @@ export interface ServeServer {
 export function startServe(opts: {
   port?: number;
   now?: () => string;
-  run: (payload: unknown, emit: (e: HeadlessEvent) => void) => Promise<number>;
+  run: (
+    payload: unknown,
+    emit: (e: HeadlessEvent) => void,
+    /** run 把自己的引擎交给服务，服务才能转发暂停/继续（P1-5）。 */
+    control?: (engine: EngineControl) => void,
+  ) => Promise<number>;
 }): Promise<ServeServer> {
   const state = createServeState();
   const clients = new Set<http.ServerResponse>();
   const now = opts.now;
   /** 一次只跑一个 run：第二个 POST 拿 409，而不是悄悄排队。 */
   let busy = false;
+  /** 当前 run 的引擎控制面；没有 run 在跑时为 undefined。 */
+  let engine: EngineControl | undefined;
 
   const broadcast = (evt: HeadlessEvent): void => {
     serveEmit(state, evt, now);
@@ -224,16 +253,40 @@ export function startServe(opts: {
         res.writeHead(202, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: true }));
         void opts
-          .run(payload, broadcast)
+          .run(payload, broadcast, (e) => {
+            engine = e;
+          })
           .then((code) => serveFinish(state, code, now))
           .finally(() => {
             busy = false;
+            engine = undefined;
+            // 跑完了就没有"暂停中"这回事：键必须消失，否则状态页会一直显示暂停。
+            delete state.paused;
           });
       });
       return;
     }
 
     const routed = routeRequest(state, method, url);
+    if (routed.control) {
+      // 没有 run 在跑时暂停/继续无从谈起 —— 409，并把原因写进响应体。
+      if (!engine) {
+        res.writeHead(409, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("当前没有 run 在跑，暂停/继续无从谈起");
+        return;
+      }
+      if (routed.control === "pause") {
+        engine.pause();
+        state.paused = true;
+      } else {
+        engine.resume();
+        delete state.paused;
+      }
+      state.updatedAt = (now ?? (() => new Date().toISOString()))();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ paused: state.paused === true }));
+      return;
+    }
     if (routed.stream === "events") {
       res.writeHead(200, {
         "Content-Type": "text/event-stream",
