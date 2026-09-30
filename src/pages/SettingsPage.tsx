@@ -100,6 +100,30 @@ export function SettingsPage() {
     }));
   };
 
+  const disabledKeys = draft.disabledKeyVars ?? [];
+
+  const toggleDisabledKey = (envVar: string) => {
+    setDraft((d) => {
+      const off = d.disabledKeyVars ?? [];
+      return {
+        ...d,
+        disabledKeyVars: off.includes(envVar) ? off.filter((x) => x !== envVar) : [...off, envVar],
+      };
+    });
+  };
+
+  /** 线路顺序 = `llmPool` 的数组顺序：越靠前越先被试。 */
+  const movePoolMember = (id: string, delta: number) => {
+    setDraft((d) => {
+      const pool = [...(d.llmPool ?? [])];
+      const i = pool.indexOf(id);
+      const j = i + delta;
+      if (i < 0 || j < 0 || j >= pool.length) return d;
+      [pool[i], pool[j]] = [pool[j]!, pool[i]!];
+      return { ...d, llmPool: pool };
+    });
+  };
+
   const togglePoolMember = (id: string) => {
     setDraft((d) => {
       const pool = d.llmPool ?? [];
@@ -181,15 +205,26 @@ export function SettingsPage() {
           同 key 换模型 → 换 key → 换提供商，全程对调用方透明。
         </p>
         {PROVIDER_CATALOG.map((p) => (
-          <label key={p.id} className="agent-toggle">
-            <input
-              type="checkbox"
-              checked={(draft.llmPool ?? []).includes(p.id)}
-              onChange={() => togglePoolMember(p.id)}
-            />
-            {p.displayName}
-            <span className="muted"> · {p.defaultModel}</span>
-          </label>
+          <div className="form-row" key={p.id}>
+            <label className="agent-toggle">
+              <input
+                type="checkbox"
+                checked={(draft.llmPool ?? []).includes(p.id)}
+                onChange={() => togglePoolMember(p.id)}
+              />
+              {p.displayName}
+              <span className="muted"> · {p.defaultModel}</span>
+            </label>
+            {/* 顺序即优先级：越靠前越先被试（线路轮换的第一顺位） */}
+            <div className="edit-row">
+              <button className="small" title="上移（更先被试）" onClick={() => movePoolMember(p.id, -1)}>
+                ↑
+              </button>
+              <button className="small" title="下移" onClick={() => movePoolMember(p.id, 1)}>
+                ↓
+              </button>
+            </div>
+          </div>
         ))}
         <p className="muted">
           商汤 = {SENSENOVA_KEY_VARS.length} 密钥 × {SENSENOVA_MODELS.length} 模型 ={" "}
@@ -224,6 +259,16 @@ export function SettingsPage() {
                 </button>
               )}
             </div>
+            {/* 账号热切换：停用 = 这个 key 名下的整组线路立刻不进池，而密钥值还在盘上
+                （随时能开回来）。与"清除"是两件事：清除是删凭据，停用是摘账号。 */}
+            <label className="agent-toggle">
+              <input
+                type="checkbox"
+                checked={disabledKeys.includes(k.envVar)}
+                onChange={() => toggleDisabledKey(k.envVar)}
+              />
+              停用这个账号
+            </label>
           </div>
         ))}
         {Object.keys(keyInputs).some((v) => keyInputs[v] !== "") && (

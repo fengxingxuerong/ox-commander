@@ -256,6 +256,8 @@ export function createPlatform(config: PlatformConfig): Platform {
     return pool.length > 0
       ? buildLlmPool({
           providers: pool,
+          // 账号热切换（P1-2）：停用的密钥不进池 —— 密钥仍在盘上，随时能开回来。
+          disabledKeyVars: settings.disabledKeyVars,
           timeoutMs: brainTimeoutMsFor(settings),
           onEvent: log,
           meter,

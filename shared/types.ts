@@ -176,6 +176,15 @@ export interface ProjectSettings {
    */
   llmPool: string[];
   /**
+   * 停用的密钥变量名（账号级开关，P1-2 的"热切换"）。
+   *
+   * 一条线路 = provider × key × model，所以**摘掉一个 key 就是摘掉它名下的整组
+   * 线路** —— 这就是"不用删密钥也能让某个账号下线"的那一层。留在这里而不是
+   * 删掉密钥值，是因为密钥还在盘上（随时能开回来），而池子的形状会立刻变小。
+   * 空数组 / 缺省 = 全部启用。
+   */
+  disabledKeyVars?: string[];
+  /**
    * 本次运行的 token 预算软上限（大脑层 + 内置执行器共用一道闸）。
    * 达到上限后下一次 LLM 调用在发出前被拒（`BudgetExceededError`）；
    * 单次调用本身可以穿透上限，但会如实记录。`undefined` / `0` 表示不限 ——
@@ -262,4 +271,5 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   maxParallelRuns: 4,
   raceRedundancy: 1,
   llmPool: ["sensenova", "amd-radeon"],
+  disabledKeyVars: [],
 };

@@ -86,6 +86,36 @@ describe("provider catalog", () => {
   });
 });
 
+describe("buildPoolRoutes · 账号热切换（停用的密钥不进池）", () => {
+  // P1-2 的"账号热切换"：一条线路 = provider × key × model，摘掉一个 key 就是摘掉
+  // 它名下的整组线路。密钥值不删（还在盘上，随时能开回来），只有池子的形状变小。
+  const sensenovaOnly = { providers: ["sensenova"] };
+
+  it("停用一个 key ⇒ 它名下的整组线路消失，其余照旧", () => {
+    const full = buildPoolRoutes(sensenovaOnly);
+    expect(full[0]!.keyVars).toEqual([...SENSENOVA_KEY_VARS]);
+    const cut = buildPoolRoutes({ ...sensenovaOnly, disabledKeyVars: ["SENSENOVA_API_KEY_2"] });
+    expect(cut[0]!.keyVars).toEqual(["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_3"]);
+    // 模型面不受影响：被摘的是"账号"，不是"能力"
+    expect(cut[0]!.models).toEqual([...SENSENOVA_MODELS]);
+  });
+
+  it("一个 provider 的 key 全被停用 ⇒ 它整体离线（不是留一条空 route）", () => {
+    const routes = buildPoolRoutes({
+      providers: ["sensenova", "amd-radeon"],
+      disabledKeyVars: [...SENSENOVA_KEY_VARS],
+    });
+    // 空 route 会让"池里还有这一家"看起来成立 —— 必须整条消失。
+    expect(routes.map((r) => r.providerId)).toEqual(["amd-radeon"]);
+  });
+
+  it("无密钥端点（ollama）没有账号可切，不受停用表影响", () => {
+    const routes = buildPoolRoutes({ providers: ["ollama"], disabledKeyVars: ["ANYTHING"] });
+    expect(routes).toHaveLength(1);
+    expect(routes[0]!.providerId).toBe("ollama");
+  });
+});
+
 describe("countPoolRoutes", () => {
   const routes = [
     { providerId: "sensenova", keyVars: SENSENOVA_KEY_VARS, models: SENSENOVA_MODELS },

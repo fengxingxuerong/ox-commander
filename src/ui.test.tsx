@@ -544,6 +544,31 @@ describe("SettingsPage", () => {
     await waitFor(() => expect(save.disabled).toBe(false));
   });
 
+  it("停用某个账号：写进设置的是「停用」而不是删密钥（P1-2 热切换）", async () => {
+    // 停用 = 这个 key 名下的整组线路立刻不进池，而密钥值还在盘上（随时能开回来）；
+    // 与"清除"是两件事。写错成清除就是不可逆操作。
+    render(<SettingsPage />);
+    await screen.findByLabelText("提供商");
+    const toggles = await screen.findAllByLabelText("停用这个账号");
+    expect(toggles.length).toBeGreaterThan(0);
+    fireEvent.click(toggles[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.disabledKeyVars).toEqual(["SENSENOVA_API_KEY"]);
+  });
+
+  it("线路顺序可调：↓ 把靠前的提供商挪到后面", async () => {
+    render(<SettingsPage />);
+    await screen.findByLabelText("提供商");
+    // 顺序即优先级：越靠前越先被试。默认 sensenova 在 amd-radeon 之前。
+    fireEvent.click(screen.getAllByTitle("下移")[0]!);
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.llmPool).toEqual(["amd-radeon", "sensenova"]);
+  });
+
   it("reports the LLM connection test result", async () => {
     render(<SettingsPage />);
     fireEvent.click(await screen.findByRole("button", { name: /测试连接/ }));

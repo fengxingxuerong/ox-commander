@@ -602,6 +602,19 @@ describe("设置里的 brainTimeoutMs 真的传进了大脑客户端", () => {
     });
   });
 
+  it("停用的密钥真的传进了池（账号热切换不是只改设置里的字）", () => {
+    // 设置里多一个字段不等于生效：断在这一跳的表现是"界面写着已停用，池子里它还在跑"。
+    vi.mocked(buildLlmPool).mockClear();
+    createPlatform({
+      settings: settings({ disabledKeyVars: ["SENSENOVA_API_KEY_2"] }),
+      promptDir: tempDir(),
+      host: { log: () => undefined },
+    });
+    expect(vi.mocked(buildLlmPool).mock.calls[0]![0]).toMatchObject({
+      disabledKeyVars: ["SENSENOVA_API_KEY_2"],
+    });
+  });
+
   it("线路健康：池里每条线路都进表，宿主拿到的是字段（P1-2 的宿主出口）", () => {
     // 冷却表此前只活在故障转移客户端内部，宿主没有任何结构化出口 —— 界面
     // 问不出"还有几条线能用、哪条在被限流"。这条钉住 `buildLlm()` 把这份表

@@ -59,6 +59,8 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
 export interface BuildPoolOptions extends BuildLlmOptions {
   /** Provider ids in preference order; defaults to `DEFAULT_LLM_POOL`. */
   providers?: readonly string[];
+  /** 停用的密钥变量名（账号热切换）；命中者不进池。 */
+  disabledKeyVars?: readonly string[];
 }
 
 /**
@@ -69,20 +71,30 @@ export interface BuildPoolOptions extends BuildLlmOptions {
  * 线路池悄悄少几条线 / 带错模型（sensenova 3×4=12 条退化成 3×1=3 条，或者反过来把
  * SenseNova 的模型名发给 AMD 的端点）。真出 429 之前没人看得见，到时候只会以为
  * 「今天线路不稳」。提出来之后，「池里到底有什么」第一次可以被断言。
+ *
+ * `disabledKeyVars`（账号热切换）在这里生效：**摘掉一个 key 就是摘掉它名下的整组
+ * 线路**；一个 provider 的 key 全被摘完时它整体离线（route 消失，而不是留一条空
+ * route —— 空 route 会让"池里有这一家"看起来成立）。无密钥端点用空串表示，它没有
+ * 账号可切，因此不受停用表影响。
  */
 export function buildPoolRoutes(opts: BuildPoolOptions = {}): PoolRoute[] {
   const providers = opts.providers && opts.providers.length > 0 ? opts.providers : DEFAULT_LLM_POOL;
-  return providers.map((id) => {
+  const off = new Set(opts.disabledKeyVars ?? []);
+  const routes: PoolRoute[] = [];
+  for (const id of providers) {
     const provider = getProvider(id);
     const extraKeys = providerKeyEnvVars(id);
-    const keyVars =
+    const all =
       extraKeys.length > 0 ? extraKeys : provider.apiKeyEnvVar ? [provider.apiKeyEnvVar] : [""];
-    return {
+    const keyVars = all.filter((v) => !off.has(v));
+    if (keyVars.length === 0 && all[0] !== "") continue;
+    routes.push({
       providerId: id,
       keyVars,
       models: id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel],
-    };
-  });
+    });
+  }
+  return routes;
 }
 
 /**
