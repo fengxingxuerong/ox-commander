@@ -11,6 +11,7 @@ import { SnapshotStore } from "../sandbox/snapshot-store";
 import { FileJournal } from "../sandbox/file-journal";
 import type { SchedulerOptions } from "../engine/scheduler";
 import type { UsageMeter } from "../../shared/usage-meter";
+import { remoteExecutorNote } from "./remote-endpoint";
 
 /**
  * Agent registry: the SenseNova API executor is the default worker. Failover
@@ -121,6 +122,14 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
   const builtinIds = new Set(builtin.map((a) => a.meta.id));
   for (const m of declared) if (!builtinIds.has(m.id)) declaredById.set(m.id, m);
 
+  // 远程执行器的边界要说破：远端 http-bridge 改的是远端文件，本地的越权检测、
+  // 仲裁与回滚对它全部静默失效（不是报错，是看不见）。加载时就说一次，别等
+  // 操作者看着"零越权"的看板以为万事大吉。
+  for (const m of declared) {
+    if (m.entry?.kind !== "http") continue;
+    const note = remoteExecutorNote(m.id, m.entry.baseUrl);
+    if (note) opts.onEvent?.(note);
+  }
   const registry = createRegistry(adapters, { manifests: [...declaredById.values()] });
   const breaker = opts.breaker ?? new CircuitBreaker(opts.breakerOptions ?? {});
   const schedulerOptions: SchedulerOptions = { registry, breaker };

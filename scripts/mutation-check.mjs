@@ -375,7 +375,14 @@ const TARGETS = [
   // `opts.arbitration ?? "revert-batch"` 反向 = 越权写入不再回滚。
   // 它同时被桌面与 headless 两个入口共用以防漂移，所以这里的静默降级会
   // 两边一起静默。tier 2：需要跑多个集成测试文件。
-  { file: "electron/agents/index.ts", tests: ["src/headless-protocol.test.ts", "src/scheduler.test.ts"], tier: 2 },
+  // 2026-09-30：远程执行器的边界提示也挂在这一层（P1-4），它的断言在
+  // `src/remote-endpoint.test.ts` —— 一个模块被拆成多个测试文件时**都要挂**，
+  // 只挂一个等于另一半没有门禁。
+  {
+    file: "electron/agents/index.ts",
+    tests: ["src/headless-protocol.test.ts", "src/scheduler.test.ts", "src/remote-endpoint.test.ts"],
+    tier: 2,
+  },
 
   // ---- 2026-09-28 第十一批：LLM 网关的「线路组装」三层 ----
   // 这三层是同一个问题的三个截面：**哪个 provider 走哪条构造路径**。判错都不是
@@ -424,6 +431,12 @@ const TARGETS = [
   // 输入）。它同时是"离开工位也能看"这一格的唯一实现，静默错等于没有。
   // tier 1：整份测试 58ms（端口 0 由系统分配，不撞 smoke 的固定端口）。
   { file: "headless/serve.ts", test: "src/headless-serve.test.ts", tier: 1 },
+  // remote-endpoint.ts 判定"这个桥接在不在本机"。判错方向不报错，只改一句话的
+  // 有无 —— 而那句话正是**唯一**提醒"本地越权检测对远端改动失效"的地方：
+  // 把远端判成本机 = 担保变成假的（看板显示零越权，其实是没检测到）；
+  // 把本机判成远端 = 每次加载都喊狼来了，真出事那句已经被淹没。
+  // tier 1：整份测试 6ms。
+  { file: "electron/agents/remote-endpoint.ts", test: "src/remote-endpoint.test.ts", tier: 1 },
 ];
 
 /**

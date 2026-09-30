@@ -1,0 +1,23 @@
+{
+  "id": "remote-runner",
+  "displayName": "远程执行器（另一台机器上的 ox-agent/2 桥）",
+  "adapter": "http-bridge",
+  "entry": {
+    "kind": "http",
+    "baseUrl": "http://192.168.1.9:8787",
+    "healthPath": "/health",
+    "runsPath": "/runs",
+    "pollMs": 1000
+  },
+  "credential": { "kind": "env", "envVar": "REMOTE_RUNNER_TOKEN" },
+  "capabilities": {
+    "roles": ["backend-dev", "frontend-dev"],
+    "zoneGlobs": ["src/**"],
+    "supports": ["read", "edit", "create"],
+    "artifactKinds": ["files"],
+    "maxConcurrency": 2,
+    "selfIsolated": true
+  },
+  "limits": { "runDeadlineMs": 900000 },
+  "enabled": true
+}
