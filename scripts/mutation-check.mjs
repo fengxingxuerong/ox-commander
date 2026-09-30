@@ -761,11 +761,16 @@ const EQUIVALENT_SITES = [
    * 2026-09-27：executorTimeoutMs 轮在函数体开头插入 5 行（缓存 signature 说明注释
    *   4 行 + `executorTimeoutMsFor` 取值 1 行）→ 177 → 182。等价性论证不变：
    *   追加的 `;executorTimeoutMs=${…}` 分量与被取反的布尔分量各自独立，取反仍双射。
-   * 2026-09-29：delivery-receipt 轮再 +1 行 → 182 → 183。论证不变；本轮教训是
-   *   touched 口径抓住了全量 audit 间隔期的漂移（漂移窗口从"两次全量之间"缩短到
-   *   "每批提交之间"）—— 改完 TARGETS 内文件必须顺手核对行号锚点。
-   */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 183 },
+ * 2026-09-29：delivery-receipt 轮再 +1 行 → 182 → 183。论证不变；本轮教训是
+ *   touched 口径抓住了全量 audit 间隔期的漂移（漂移窗口从"两次全量之间"缩短到
+ *   "每批提交之间"）—— 改完 TARGETS 内文件必须顺手核对行号锚点。
+ * 2026-09-30：P1-5 桌面三字段轮在 signature 上方插入 4 行（manifestDir/snapshotRoot
+ *   取值 2 行 + 注释 2 行）→ 183 → 187。论证不变；同日独立推演曾试图用 A/B/A
+ *   序列杀死它（值互换下 A→B→A 的第三次调用会命中第一次的键），但推演结论是
+ *   杀不死 —— 双射下键与输入的绑定方向不可观察，缓存命中边界恒等，与上面的
+ *   等价性论证互为印证。
+ */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 187 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
    * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，

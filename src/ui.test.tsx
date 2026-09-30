@@ -709,6 +709,29 @@ describe("SettingsPage", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("settings.json 只读");
   });
+
+  it("三个 P1-5 控件（升级策略 / 快照根 / 清单目录）进保存载荷；路径空串存 undefined", async () => {
+    render(<SettingsPage />);
+    await screen.findByLabelText("提供商");
+    fireEvent.change(screen.getByLabelText("重修耗尽处置"), { target: { value: "redispatch_once" } });
+    fireEvent.change(screen.getByLabelText("快照备份根目录"), { target: { value: "  D:/custom-snaps  " } });
+    fireEvent.change(screen.getByLabelText("智能体清单目录"), { target: { value: "D:/custom-agents.d" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.escalationPolicy).toBe("redispatch_once");
+    expect(saved.snapshotRoot).toBe("D:/custom-snaps"); // 两端空白要 trim
+    expect(saved.manifestDir).toBe("D:/custom-agents.d");
+
+    // 空串与"想回到默认"同义：存 undefined（省略字段 = 用内置默认），不能存空串 ——
+    // 空串进到 `||` 回退里虽然也是默认，但省略字段才是 DEFAULT_SETTINGS 的合并语义。
+    fireEvent.change(screen.getByLabelText("快照备份根目录"), { target: { value: "   " } });
+    fireEvent.click(screen.getByRole("button", { name: "保存设置" }));
+    await waitFor(() => expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.length).toBeGreaterThanOrEqual(2));
+    const back = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(back.snapshotRoot).toBeUndefined();
+    expect(back.escalationPolicy).toBe("redispatch_once"); // 其他控件的状态不被清空
+  });
 });
 
 describe("AuditPanel", () => {

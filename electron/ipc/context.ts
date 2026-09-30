@@ -178,16 +178,20 @@ export function ensureAgentLayer(settingsValue: ProjectSettings): AgentLayer {
   // ⚠️ 执行器超时必须进 signature：这个 layer 是**缓存的单例**，而适配器在构造时
   // 就把 `timeoutMs` 存成了字段（`client()` 之后不再读 settings）。大脑层不需要进
   // —— 它在 `buildLlm` 里每次都现读。改了设置却不重建 layer，改的就是个摆设。
+  // manifestDir / snapshotRoot 同理（P1-5）：SnapshotStore 与清单加载器也在构造时
+  // 把根目录存成字段，两个路径因此都进 signature —— 设置页改了必须真的生效。
   const executorTimeoutMs = executorTimeoutMsFor(settingsValue);
+  const manifestDir = settingsValue.manifestDir || agentDir();
+  const snapshotRootDir = settingsValue.snapshotRoot || snapshotRoot();
   const signature =
     `router=${settingsValue.agentRouter !== false};arbitration=${settingsValue.arbitration}` +
-    `;executorTimeoutMs=${executorTimeoutMs}`;
+    `;executorTimeoutMs=${executorTimeoutMs};manifestDir=${manifestDir};snapshotRoot=${snapshotRootDir}`;
   if (agentLayer && layerSignature === signature) return agentLayer;
   const layer = createAgentLayer({
     enableRouter: settingsValue.agentRouter !== false,
-    manifestDir: agentDir(),
+    manifestDir,
     promptDir: promptDir(),
-    snapshotRoot: snapshotRoot(),
+    snapshotRoot: snapshotRootDir,
     arbitration: settingsValue.arbitration,
     executorTimeoutMs,
     onRouting: (decision, task) => logLine(agentRoutingLogLine(decision, task)),
@@ -225,11 +229,20 @@ export function buildPlatformLayer(
   const auditProject = overrides.projectId
     ? { projectId: overrides.projectId }
     : {};
+  // P1-5：两个根路径可由设置覆盖（空串/省略 = 内置默认）。引擎/快照仓每次 run
+  // 都在这里重建，所以改动对下一次运行即时生效，无需重启。
+  const manifestDir = settingsValue.manifestDir || agentDir();
+  const snapshotRootDir = settingsValue.snapshotRoot || snapshotRoot();
+  // 升级决策策略（P1-5）：`ask`（默认）= 弹窗等人；其余四种与 headless 协议同义。
+  // redispatch 的"每任务一次"账本挂在本次 platform 上 —— buildEngine 每次 run
+  // 重建 platform，账本天然 per-run，不会跨运行累积。
+  const escalation = settingsValue.escalationPolicy ?? "ask";
+  const autoRedispatched = new Set<string>();
   return createPlatform({
     settings: settingsValue,
     promptDir: promptDir(),
-    snapshotRoot: snapshotRoot(),
-    manifestDir: agentDir(),
+    snapshotRoot: snapshotRootDir,
+    manifestDir,
     enableRouter: settingsValue.agentRouter !== false,
     arbitration: settingsValue.arbitration,
     maxParallelRuns: settingsValue.maxParallelRuns,
@@ -303,12 +316,33 @@ export function buildPlatformLayer(
       // 线路健康：哪条线路在冷却、被限流了几次。走独立事件而不是日志行 ——
       // 界面要的是字段（不是一行给人看的话），而且要能在重载后重新拉一次。
       onLineHealth: (lines) => send({ type: "line-health", lines }),
-      requestEscalationDecision: (taskId) =>
-        new Promise<EscalationAction>((resolve) => {
-          // The escalation event itself is already sent by onEscalation; here
-          // we only park the resolver until the renderer answers.
-          pendingEscalations.set(taskId, resolve);
-        }),
+      // exhaust 刻意让决策回调整个缺席（字段即承诺）：引擎随后把"重修预算
+      // 耗尽"报成结构化错误（与 CLI 的 exit 2 同义），而不是挂在一个永远
+      // 不会有人回答的 Promise 上。escalation 事件照发 —— 升级发生过这件事
+      // 本身仍要可见，只是没有决策入口。
+      ...(escalation !== "exhaust"
+        ? {
+            requestEscalationDecision: (taskId: string): Promise<EscalationAction> => {
+              if (escalation === "skip") return Promise.resolve("skip");
+              if (escalation === "abort") return Promise.resolve("abort");
+              if (escalation === "redispatch_once") {
+                if (!autoRedispatched.has(taskId)) {
+                  autoRedispatched.add(taskId);
+                  return Promise.resolve("redispatch");
+                }
+                // 与 CLI 的 redispatch_once 同义：第二次升级自动终止 ——
+                // "重派一次"承诺的就是只重派一次，第二次再问没有意义。
+                return Promise.resolve("abort");
+              }
+              // ask（默认）：The escalation event itself is already sent by
+              // onEscalation; here we only park the resolver until the
+              // renderer answers.
+              return new Promise<EscalationAction>((resolve) => {
+                pendingEscalations.set(taskId, resolve);
+              });
+            },
+          }
+        : {}),
     },
   });
 }

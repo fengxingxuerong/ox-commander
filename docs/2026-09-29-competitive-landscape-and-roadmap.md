@@ -133,7 +133,7 @@
 | **P1-2** | **用量 / 限流可视化 + 账号热切换**：run 级 token、每条线路的冷却与 429 计数、剩余额度可视 | Orca 的 usage tracking + account switcher。我们有 `usage` 事件与冷却表，只差一层 UI | `src/pages/settings`（线路池页已有）+ 协议事件 | UI 断言（`@testing-library/react`）+ 协议字段断言 | ⚠️ **半完成**（`d6b9c03`）：**用量可视化已落地**（看板卡片 + 可信边界 + 预算盲区提示，site 口径 18/21/4 全杀）；**限流计数与账号热切换未做**（冷却表与 429 计数仍是日志口径，没有界面，也没有账号切换入口） |
 | **P1-3** | **断点续跑 + 上下文回溯**：按 `runId` 续跑未完成任务；提供"查前任 agent 的决策与改动"接口 | gastown 的持久工作追踪 + "agent 可查前任 jsonl 日志"。我们有 JSONL 审计，缺查询接口 | `electron/engine/` + `electron/audit-log.ts` | 续跑 E2E（离线零配额，复用 `smoke:offline-e2e` 路子） |
 | **P1-4** | **远程执行器**：把现有 `http-bridge` 适配器扩成 remote runner（远端机器跑执行器，本地只做编排与审计） | Orca 的 SSH Worktree。我们是共享工作区，不需要 SSH worktree，但需要"算力在哪 agent 在哪" | `electron/agents/http-bridge` | 契约测试（不打真实远端，走离线桩） |
-| **P1-5** | **补齐 CLI / 桌面能力差**：CLI 补 `snapshotRoot`/`manifestDir`/`escalationPolicy`；桌面补 `pause`/`resume` 与第 4 种 smoke kind | 自己的欠账，不是竞品压力。CLI 与桌面不对齐会让"可编程"这条优势打折 | `headless/run-spec.ts`、`electron/ipc.ts` | 两侧各一条断言 + `check:packaged-paths` 复查 |
+| **P1-5** | **补齐 CLI / 桌面能力差**：CLI 补 `snapshotRoot`/`manifestDir`/`escalationPolicy`；桌面补 `pause`/`resume` 与第 4 种 smoke kind | 自己的欠账，不是竞品压力。CLI 与桌面不对齐会让"可编程"这条优势打折 | `headless/run-spec.ts`、`electron/ipc.ts` | 两侧各一条断言 + `check:packaged-paths` 复查。✅ **已完成（2026-09-30）**：CLI 收 `smoke` kind、serve 加 `pause`/`resume`、CLI 两个路径补"真的生效"断言（`8faea69`）；桌面侧 `ProjectSettings` 暴露 `snapshotRoot`/`manifestDir`/`escalationPolicy`（升级处置默认 `ask`，补齐与协议同义的四种自动策略），设置页加入口，两路径进 layer 缓存 signature |
 
 ### P2 — 生态与治理外延（等 P0/P1 站稳再做）
 

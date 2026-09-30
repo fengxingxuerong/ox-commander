@@ -216,6 +216,36 @@ export interface ProjectSettings {
    * **一次请求**，超时后线路轮换接着试下一条；run 时限到点则是收口并保留现场。
    */
   executorTimeoutMs?: number;
+
+  /**
+   * 快照备份根（桌面端；headless 走 spec 同名字段）。中断批次的越权写入备份
+   * 与回滚材料落在这里。省略或空串 = 内置默认（userData/snapshots）。
+   *
+   * 改这里**不会迁移**已有备份 —— 旧根目录里的东西留在原地；空串与省略同义
+   * （`||` 回退），想回到默认就清空输入框。
+   */
+  snapshotRoot?: string;
+
+  /**
+   * agents.d 声明式清单目录（桌面端；headless 走 spec 同名字段）。运行时注册
+   * 的智能体 manifest 写在这里，重启后从这里恢复。省略或空串 = 内置默认
+   * （userData/agents.d）。
+   */
+  manifestDir?: string;
+
+  /**
+   * 重修轮耗尽时的升级处置。`"ask"`（默认）= 弹窗等人决定，是桌面端独有的
+   * 第五种语义；其余四个值与 headless 协议的 escalationPolicy **完全同义**
+   * （`headless/protocol.ts` 的 `EscalationPolicy`），给无人值守场景用：
+   *
+   * - `abort`：自动终止运行（等价于人在弹窗里点了"终止"）；
+   * - `skip`：跳过失败任务继续（下游可能连带失败，引擎会说明）；
+   * - `redispatch_once`：每任务自动重派一次，再次升级自动终止 —— 与 CLI 的
+   *   账本语义一致，账本挂在单次 platform 上（每次 run 重建，天然 per-run）；
+   * - `exhaust`：决策回调整个缺席，引擎把"重修预算耗尽"报成结构化错误
+   *   （与 CLI 的 exit 2 同义），而不是永远等一个不会来的人。
+   */
+  escalationPolicy?: "ask" | "abort" | "skip" | "redispatch_once" | "exhaust";
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

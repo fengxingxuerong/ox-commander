@@ -429,6 +429,48 @@ export function SettingsPage() {
         <p className="muted">
           智能体只应改动自己 zone 内的文件；越权改动默认会被回滚（内容备份在应用数据目录，不使用 git stash/checkout）。
         </p>
+        <div className="form-row">
+          <label htmlFor="escalation-policy">重修耗尽处置</label>
+          <select
+            id="escalation-policy"
+            value={draft.escalationPolicy ?? "ask"}
+            onChange={(e) =>
+              patch({ escalationPolicy: e.target.value as ProjectSettings["escalationPolicy"] })
+            }
+          >
+            <option value="ask">弹窗询问（默认）</option>
+            <option value="abort">自动终止运行</option>
+            <option value="skip">自动跳过失败任务</option>
+            <option value="redispatch_once">自动重派一次（再败即止）</option>
+            <option value="exhaust">不询问，按预算耗尽收口</option>
+          </select>
+        </div>
+        <p className="muted">
+          重修轮数用完仍有任务失败时怎么办。默认停下来等人决定；挂后台跑长单（无人值守）时可选自动处置
+          —— 与 headless 协议的 escalationPolicy 同义。「重派一次」按任务记账，同一任务第二次升级会自动终止。
+        </p>
+        <div className="form-row">
+          <label htmlFor="snapshot-root">快照备份根目录</label>
+          <input
+            id="snapshot-root"
+            value={draft.snapshotRoot ?? ""}
+            placeholder="默认：应用数据目录/snapshots"
+            onChange={(e) => patch({ snapshotRoot: e.target.value.trim() || undefined })}
+          />
+        </div>
+        <div className="form-row">
+          <label htmlFor="manifest-dir">智能体清单目录</label>
+          <input
+            id="manifest-dir"
+            value={draft.manifestDir ?? ""}
+            placeholder="默认：应用数据目录/agents.d"
+            onChange={(e) => patch({ manifestDir: e.target.value.trim() || undefined })}
+          />
+        </div>
+        <p className="muted">
+          两个路径留空即用内置默认（应用数据目录下）。改动对<strong>下一次运行</strong>生效；
+          已有的备份与清单留在原处，不会自动迁移。
+        </p>
       </section>
 
       <AgentsPanel />

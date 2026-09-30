@@ -193,6 +193,7 @@ import {
   enginesOf,
   ensureAgentLayer,
   getRunningProjectId,
+  resolveEscalation,
   seedKeysFromStore,
   setRunningProjectId,
   workspaceRoot,
@@ -1202,5 +1203,88 @@ describe("buildPlatformLayer · agentRouter 的第三态", () => {
       log: () => {},
     });
     expect(lastPlatformConfig().enableRouter).toBe(false);
+  });
+});
+
+describe("buildPlatformLayer · 桌面侧三字段（P1-5 补齐）", () => {
+  it("manifestDir / snapshotRoot 进了 layer 的缓存 signature —— 改了重建，不改复用", () => {
+    // 与 executorTimeoutMs 同理的失效面：agent layer 是**缓存的单例**，SnapshotStore
+    // 与清单加载器在构造时就把根目录存成字段。signature 里漏掉这两个值的话，
+    // 设置页改了路径、layer 还是旧的 —— 界面上有输入框，实际改不动。
+    const base = { ...DEFAULT_SETTINGS };
+    const mid = h.createAgentLayerFn.mock.calls.length;
+
+    ensureAgentLayer({ ...base, manifestDir: "D:/custom-agents.d", snapshotRoot: "D:/custom-snaps" });
+    expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(
+      expect.objectContaining({ manifestDir: "D:/custom-agents.d", snapshotRoot: "D:/custom-snaps" }),
+    );
+    const after = h.createAgentLayerFn.mock.calls.length;
+    expect(after).toBeGreaterThan(mid);
+
+    ensureAgentLayer({ ...base, manifestDir: "D:/custom-agents.d", snapshotRoot: "D:/custom-snaps" });
+    expect(h.createAgentLayerFn.mock.calls.length).toBe(after); // 同 signature → 复用
+
+    ensureAgentLayer({ ...base, manifestDir: "D:/other-agents.d", snapshotRoot: "D:/custom-snaps" });
+    expect(h.createAgentLayerFn.mock.calls.length - after).toBe(1); // 值变了 → 重建
+  });
+
+  it("空串与省略都回退内置默认路径", () => {
+    ensureAgentLayer({ ...DEFAULT_SETTINGS, manifestDir: "", snapshotRoot: "" });
+    expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        manifestDir: path.join(tmp, "agents.d"),
+        snapshotRoot: path.join(tmp, "snapshots"),
+      }),
+    );
+  });
+
+  it("buildPlatformLayer 把自定义路径传给平台层", () => {
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer(
+      { ...DEFAULT_SETTINGS, manifestDir: "D:/m", snapshotRoot: "D:/s" },
+      { log: () => {} },
+    );
+    expect(lastPlatformConfig()).toMatchObject({ manifestDir: "D:/m", snapshotRoot: "D:/s" });
+  });
+
+  it("默认（ask）升级决策挂起等人，resolveEscalation 能解", async () => {
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS }, { log: () => {} });
+    const host = lastPlatformConfig().host;
+    const pending = host.requestEscalationDecision("t-ask", "summary");
+    expect(resolveEscalation("t-ask", "skip")).toBe(true);
+    await expect(pending).resolves.toBe("skip");
+  });
+
+  it("skip / abort 策略自动决策且不进弹窗队列", async () => {
+    buildPlatformLayer({ ...DEFAULT_SETTINGS, escalationPolicy: "skip" }, { log: () => {} });
+    const host = lastPlatformConfig().host;
+    await expect(host.requestEscalationDecision("t1", "s")).resolves.toBe("skip");
+    expect(resolveEscalation("t1", "skip")).toBe(false); // 没东西挂起 —— 无需人答
+
+    buildPlatformLayer({ ...DEFAULT_SETTINGS, escalationPolicy: "abort" }, { log: () => {} });
+    const host2 = lastPlatformConfig().host;
+    await expect(host2.requestEscalationDecision("t1", "s")).resolves.toBe("abort");
+    expect(resolveEscalation("t1", "abort")).toBe(false);
+  });
+
+  it("redispatch_once 每任务只自动重派一次，再次升级自动终止；账本按任务隔离", async () => {
+    buildPlatformLayer(
+      { ...DEFAULT_SETTINGS, escalationPolicy: "redispatch_once" },
+      { log: () => {} },
+    );
+    const host = lastPlatformConfig().host;
+    await expect(host.requestEscalationDecision("t1", "s")).resolves.toBe("redispatch");
+    // 与 CLI 的 redispatch_once 同义：第二次升级自动终止 —— 承诺的就是只重派一次。
+    await expect(host.requestEscalationDecision("t1", "s")).resolves.toBe("abort");
+    await expect(host.requestEscalationDecision("t1", "s")).resolves.toBe("abort");
+    // 账本按任务记：别的任务的第一次升级照样拿到 redispatch。
+    await expect(host.requestEscalationDecision("t2", "s")).resolves.toBe("redispatch");
+  });
+
+  it("exhaust 决策回调整个缺席（引擎随后把预算耗尽报成结构化错误）", () => {
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS, escalationPolicy: "exhaust" }, { log: () => {} });
+    expect(lastPlatformConfig().host.requestEscalationDecision).toBeUndefined();
   });
 });

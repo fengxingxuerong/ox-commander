@@ -96,9 +96,31 @@
 
 ### 未做（P1-5 剩余）
 
-- 桌面侧仍未暴露 `snapshotRoot` / `manifestDir` / `escalationPolicy`：`ProjectSettings`
-  没有这三个字段，Electron 侧写死读 `userData/agents.d` 与 `userData/snapshots`，设置页
-  也没有入口。P1-2 的**账号热切换**（启用/禁用某条线路、调整线路顺序）同样未做。
+- ~~桌面侧仍未暴露 `snapshotRoot` / `manifestDir` / `escalationPolicy`~~ **已补齐（见下一条
+  「桌面侧三字段」）**。P1-2 的**账号热切换**（启用/禁用某条线路、调整线路顺序）仍未做。
+
+- **桌面侧三字段（P1-5 收尾）**：`ProjectSettings` 新增 `snapshotRoot` / `manifestDir` /
+  `escalationPolicy` 三个可选字段，设置页「执行策略」加三个入口；此前 Electron 侧写死读
+  `userData/agents.d` 与 `userData/snapshots`，设置页没有入口 —— CLI 宿主能配的东西
+  桌面配不了，能力差长在了配置面上。
+
+  - **两个路径**：省略或空串 = 内置默认（空串进输入框清空即回默认，`||` 回退）。改路径
+    **不迁移**旧备份/旧清单 —— 它们留在原处。layer 是缓存单例而 SnapshotStore 与清单
+    加载器在构造时就把根目录存成字段，所以两个路径都进了 layer 的缓存 signature
+    （与 `executorTimeoutMs` 同一防漂移手法：改了设置必须真的重建，否则改的是摆设）；
+    平台层每次 run 重建，路径改动对下一次运行即时生效。
+  - **升级处置策略**：重修轮耗尽时的默认处置。桌面在此前只有"弹窗等人"一种语义的
+    基础上，补齐与 headless 协议同义的四种自动策略（`abort` / `skip` / `redispatch_once` /
+    `exhaust`），外加桌面特有的 `ask`（默认，现状不变）作为第五种 —— 无人值守跑长单
+    不再被弹窗卡住。`redispatch_once` 的"每任务一次"账本挂在单次 platform 上（每次
+    run 重建，天然 per-run，与 CLI 账本语义一致）；`exhaust` 刻意让决策回调整个缺席
+    （字段即承诺），引擎随后把"预算耗尽"报成结构化错误而不是挂在一个永远不会有人
+    回答的 Promise 上 —— escalation 事件照发，升级发生过这件事仍可见，只是没有决策入口。
+
+  测试：`ensureAgentLayer` signature 三态（改→重建 / 同→复用 / 空串→默认路径）、
+  `buildPlatformLayer` 传参、升级策略五格（ask 挂起可解 / skip·abort 自动且不进弹窗队列 /
+  redispatch_once 一次账本按任务隔离 / exhaust 回调缺席）+ 设置页 UI 载荷断言（含
+  trim 与空串→undefined）。
 
 - **任务级冗余赛马（竞品调研 §5.3，学 Vibe Kanban）**：`raceRedundancy`（默认 1 = 关闭）
   让一个任务同时派给 N 个**不同**执行器，第一个到终态成功者赢、其余立即 abort。产物
