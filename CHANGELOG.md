@@ -104,6 +104,29 @@
     清单加载"这件事没人看 —— 断链了也不会红。现在两条用例走平台自建那条路，并都做了
     反向注入验证（把传参改成 undefined，用例当场变红）。
 
+- **headless 常驻服务形态（竞品调研 P1-1，对标 orca serve）**：`ox serve` —— HTTP + SSE
+  复用现有 JSONL 事件流，配轻量状态页，把「离开工位也能看」这一格补上。刻意**不做**移动
+  原生 App（推送基建 + 双端发版成本远高于收益），Web 状态页拿走其主要价值，且能被 CI /
+  远程复用。`headless/serve.ts`（状态派生 / 路由 / SSE / 状态页）+ `serve-main.ts` 入口，
+  测试走真 HTTP + 动态端口（端口 0，不碰真实配置）。变异审计 site 口径 25/25 全杀。
+  后续的 `pause` / `resume` 与第四种验证 kind 见上一条 P1-5。
+
+- **远程执行器「边界说破」（竞品调研 P1-4）**：`http-bridge` 适配器本就支持任意
+  `baseUrl`，这一格缺的不是"能不能连"，而是**没人说破代价**。新增
+  `electron/agents/remote-endpoint.ts`（`isLoopbackBaseUrl` / `remoteExecutorNote`，
+  site 口径 3/3），装配层在加载非回环 http 声明时发一条边界说明：本地的 zone 越权检测、
+  冲突仲裁、快照回滚对远端改动**静默失效**（不是报错，是看不见），远端侧隔离由它自己
+  负责。配 `agents.d/remote-runner.example.json` 与 README 一节（`runDeadlineMs` 要算
+  网络往返、`pollMs` 调大、凭证不写进 manifest）。
+
+- **任务运行履历 `audit:trail`（P1-3 上下文回溯 · 后端）**：`board-derive.ts` 新增
+  `taskTrail` 纯函数 —— `deriveBoardView` 回答"现在是什么状态"，它回答"经历过什么"：
+  每次派发谁跑的、多久、为什么失败（`errorClass` / 日志摘录）、重派后**真正跑完**的执行器
+  是谁（以 run-end 为准，run-start 的计划值会过期）。配对规则与看板推导同源；被腰斩的
+  那次没有 `endedAt` —— 那是唯一的诚实表达。桌面 IPC 通道 `audit:trail` + preload 暴露，
+  非法 taskId 守卫直接空回执、不碰审计存储。断点续跑与 UI 消费属 P1-3 后续批次。
+  变异审计 site 口径：`ipc/agents.ts` 17/17、`board-derive.ts` 32/32 全杀。
+
 ### 未做（P1-5 剩余）
 
 - ~~桌面侧仍未暴露 `snapshotRoot` / `manifestDir` / `escalationPolicy`~~ **已补齐（见下一条
