@@ -1,3 +1,4 @@
+import fs from "node:fs";
 import path from "node:path";
 import { FileJournal, isInsideZone, type FileChange } from "../sandbox/file-journal";
 import { SnapshotStore, type RevertResult, type SnapshotToken } from "../sandbox/snapshot-store";
@@ -17,6 +18,17 @@ export interface Remedy {
   action: "pass" | "fail-batch" | "revert" | "quarantine";
   paths: string[];
   detail: string;
+}
+
+/**
+ * 仍挂在账上的越权删除（一致性评审缺陷 #11 的修复单位）。
+ *
+ * `firstRunId` 是**首次检出**它的批次 —— 被重报不刷新归因，否则一个删除越拖
+ * 越"新鲜"，最后谁都说不清是哪一批删的。
+ */
+export interface CarriedDeletion {
+  path: string;
+  firstRunId: string;
 }
 
 /** Files whose change must never be attributed to one task (config, manifests). */
@@ -56,6 +68,63 @@ export interface BatchVerdict {
   outcomes: DispatchOutcome[];
   conflicts: Conflict[];
   remedies: Remedy[];
+  /**
+   * 越权删除台账的当前未解决清单（本批结算后仍缺在盘上的）。
+   *
+   * 为什么必须有它：`report-only` / `deny-all` / `quarantine` 三档都不恢复被删
+   * 文件，而下一批的基线从磁盘重建 —— 没有这本账，同一次删除**只响一次**就从
+   * 台账上消失，被删的源文件可以静默一路带到交付（一致性评审缺陷 #11）。
+   * 它是"重报"不是"新发生"：不影响本批判定（不重复 fail 后续批次），但每次都
+   * 进事件流、审计与交付凭据。字段即承诺：账上没有时连这个键都不出现。
+   */
+  carried?: CarriedDeletion[];
+}
+
+export interface DeletionLedgerUpdate {
+  /** 新状态：未解决的 path → 首次检出的批次。 */
+  ledger: Map<string, string>;
+  /** 本次结算中已恢复、从账上销掉的路径（宿主会 onEvent 说一声）。 */
+  resolved: string[];
+  /** 未解决全量清单（按 path 排序 —— 审计与凭据要求跨机器稳定顺序）。 */
+  carried: CarriedDeletion[];
+}
+
+/**
+ * 越权删除台账的状态转移（纯函数；磁盘探测经 `stillMissing` 注入）。
+ *
+ * 三条规则，每条都对着缺陷 #11 的一个面：
+ * · **销账看盘不看批**：文件回到盘上（任何人恢复的）即销 —— 台账说的是
+ *   "现在缺什么"，不是"谁欠过什么"；
+ * · **入账看盘不看报**：本批新检出的越权删除，若同批就被恢复（`revert-batch`
+ *   的常态）则不入账 —— 冲突条目已经报过这次越权，账上只留**仍缺**的；
+ * · **首见批次不漂移**：已在账上的路径被重报时保留原 `firstRunId` ——
+ *   归因永远指向删除真正发生的那一批。
+ */
+export function updateDeletionLedger(
+  prev: ReadonlyMap<string, string>,
+  input: {
+    runId: string;
+    freshDeletions: readonly string[];
+    stillMissing: (rel: string) => boolean;
+  },
+): DeletionLedgerUpdate {
+  const ledger = new Map<string, string>();
+  const resolved: string[] = [];
+  for (const [p, firstRunId] of prev) {
+    if (input.stillMissing(p)) ledger.set(p, firstRunId);
+    else resolved.push(p);
+  }
+  for (const p of input.freshDeletions) {
+    if (!input.stillMissing(p)) continue;
+    if (!ledger.has(p)) ledger.set(p, input.runId);
+  }
+  // 比较器刻意两分支（键来自 Map 必然互异）—— 理由同 zone-cost.sortedEntries：
+  // 「相等返回 0」那一格不可达，留着只会多一个杀不死的位点。
+  const carried = [...ledger.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([path, firstRunId]) => ({ path, firstRunId }));
+  resolved.sort();
+  return { ledger, resolved, carried };
 }
 
 /**
@@ -76,6 +145,14 @@ export class BatchGuard {
   private readonly onEvent?: (text: string) => void;
   /** Mutable: a host that is handed an already-built guard can still attach. */
   private onVerdict?: (verdict: BatchVerdict, scope: BatchScope) => void;
+  /**
+   * 越权删除台账：未解决的 path → 首次检出的批次。
+   *
+   * Mutable and cross-batch on purpose —— guard 的生命周期比一次 `execute` 长，
+   * 而台账要跨批次累积（否则同一次删除只响一次就消失，缺陷 #11）。由
+   * `settleLedger` 在每条出口结算，是这里唯一写入它的地方。
+   */
+  private deletions: Map<string, string> = new Map();
 
   constructor(opts: BatchGuardOptions = {}) {
     this.journal = opts.journal ?? new FileJournal();
@@ -124,18 +201,25 @@ export class BatchGuard {
    * Compares the workspace with the baseline, arbitrates, and returns the
    * (possibly rewritten) outcomes. Clean batches pass through untouched and the
    * backups are dropped.
+   *
+   * 每条出口都过 `settleLedger`（单一出口纪律）：越权删除台账必须在**clean 批
+   * 也结算** —— 缺陷 #11 的形态恰恰是"下一批干干净净，被删的文件从此没人再提"。
    */
   async settle(scope: BatchScope, outcomes: DispatchOutcome[]): Promise<BatchVerdict> {
     const token = this.journalTokenOf(scope);
     const changes = this.journal.changed(token);
     scope.changes = changes;
     const conflicts = this.detect(changes, scope.zones);
+    // 本批检出的越权删除（台账入账候选）。clean 批必然为空 —— zone 外的
+    // delete 一定在 unauthorized 里，有它就有 conflict。
+    const freshDeletions = changes
+      .filter((c) => c.op === "delete" && !scope.zones.some((z) => isInsideZone(c.path, z)))
+      .map((c) => c.path);
 
     if (conflicts.length === 0) {
       if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
       const clean: BatchVerdict = { outcomes, conflicts: [], remedies: [] };
-      this.onVerdict?.(clean, scope);
-      return clean;
+      return this.settleLedger(scope, clean, freshDeletions);
     }
 
     const remedies: Remedy[] = conflicts.map((c) => ({
@@ -150,12 +234,16 @@ export class BatchGuard {
     if (this.mode === "report-only") {
       this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（report-only，仅记录，不改判）`);
       if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
-      return this.hand(scope, { outcomes, conflicts, remedies });
+      return this.settleLedger(scope, { outcomes, conflicts, remedies }, freshDeletions);
     }
     if (this.mode === "deny-all") {
       this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（deny-all，保留现场）`);
       if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
-      return this.hand(scope, { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies });
+      return this.settleLedger(
+        scope,
+        { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies },
+        freshDeletions,
+      );
     }
 
     const allPaths = [...new Set(conflicts.flatMap((c) => c.paths))];
@@ -175,16 +263,22 @@ export class BatchGuard {
         this.onEvent?.("未配置快照存储，仅报告越权（无法回滚）");
       }
       if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
-      return this.hand(scope, {
-        outcomes: this.markBatchFailed(outcomes, conflicts, {
-          ...(revertResult ? { reverted: revertResult } : {}),
-        }),
-        conflicts,
-        remedies,
-      });
+      // 台账在回滚**之后**结算：revert 把删除恢复了，stillMissing 为假 ⇒ 不入账。
+      return this.settleLedger(
+        scope,
+        {
+          outcomes: this.markBatchFailed(outcomes, conflicts, {
+            ...(revertResult ? { reverted: revertResult } : {}),
+          }),
+          conflicts,
+          remedies,
+        },
+        freshDeletions,
+      );
     }
 
     // quarantine: move the offending files aside instead of destroying them.
+    // 被**删除**的越权文件无档可隔（盘上已经没有了）—— 正是它们留在台账上。
     let moved = 0;
     let failed = 0;
     for (const rel of allPaths) {
@@ -194,7 +288,40 @@ export class BatchGuard {
     }
     this.onEvent?.(`已将 ${moved} 个越权文件移入隔离区${failed > 0 ? `（${failed} 个失败）` : ""}`);
     if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
-    return this.hand(scope, { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies });
+    return this.settleLedger(
+      scope,
+      { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies },
+      freshDeletions,
+    );
+  }
+
+  /**
+   * 台账结算（每条 settle 出口的最后一站）：销账已恢复的、入账仍缺的、把未解决
+   * 清单挂上 verdict 再交给宿主。刻意**不改判**（不 markBatchFailed、不动
+   * outcomes）—— carried 是上一批的账，重复 fail 本批会把归因搅浑，那是被否掉的
+   * 「严格冻结」方案；本档语义是"每批都被看见，直到恢复或 run 结束"。
+   */
+  private settleLedger(
+    scope: BatchScope,
+    verdict: BatchVerdict,
+    freshDeletions: string[],
+  ): BatchVerdict {
+    const update = updateDeletionLedger(this.deletions, {
+      runId: scope.runId,
+      freshDeletions,
+      stillMissing: (rel) => !fs.existsSync(path.join(scope.rootAbs, rel)),
+    });
+    this.deletions = update.ledger;
+    if (update.resolved.length > 0) {
+      this.onEvent?.(`越权删除的文件已恢复，台账销账：${update.resolved.join("、")}`);
+    }
+    if (update.carried.length === 0) return this.hand(scope, verdict);
+    const firstSeen = [...new Set(update.carried.map((c) => c.firstRunId))].sort();
+    this.onEvent?.(
+      `台账仍有 ${update.carried.length} 个越权删除的文件未恢复：` +
+        `${update.carried.map((c) => c.path).join("、")}（首见批次 ${firstSeen.join("、")}）`,
+    );
+    return this.hand(scope, { ...verdict, carried: update.carried });
   }
 
   /** Single exit point: every verdict goes to the host before it is returned. */

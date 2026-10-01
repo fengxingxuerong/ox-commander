@@ -9,7 +9,7 @@ import {
   type SnapshotFsLike,
   type SnapshotToken,
 } from "../electron/sandbox/snapshot-store";
-import { BatchGuard, DEFAULT_SHARED_PATHS } from "../electron/engine/batch-guard";
+import { BatchGuard, DEFAULT_SHARED_PATHS, updateDeletionLedger } from "../electron/engine/batch-guard";
 import { ZoneGuard } from "../electron/engine/zone-guard";
 import { Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
@@ -377,6 +377,76 @@ describe("SnapshotStore", () => {
     expect(result.removed).toEqual([]);
     expect(read(root, "package.json")).toBe('{"name":"hijacked"}'); // 保留现场
     expect(result.skipped[0]?.reason).toContain("无备份");
+  });
+
+  /**
+   * R3「不误伤优先于多修复」的**生产形态**反例。
+   *
+   * 上一条用例把 `created` 留空（未传）—— 那只覆盖了"整批什么都没新建"这一格。
+   * 而真实调用路径（`batch-guard.ts` 的 revert-batch 分支）传的永远是**显式数组**：
+   * 只要本批新建过任何一个文件，`created` 就非空；一个 zone 外的既有文件
+   * （典型是用户自己的 `package.json`）既没有备份、也不在那个数组里。
+   *
+   * 这正是最危险的组合 —— 任何"把非空当成有证据"的写法（例如把判据简化成
+   * `created.size === 0`，读作"没有新建记录"）都会在这里放行删除，把用户的文件删掉，
+   * 且默认档下每轮重修再删一次。断言必须锁住"逐条按路径判定"，而不是看数组空不空。
+   */
+  it("R3：created 非空但不含目标 ⇒ 必须保留（不能把「有新建记录」当成「这是新建」）", async () => {
+    const root = scratch("snap-created-other");
+    const backupRoot = scratch("snap-created-other-backups");
+    write(root, "src/a.js", "a");
+    write(root, "package.json", '{"name":"the-user-project","deps":{}}'); // zone 外既有文件
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-co", root, zones: ["src"] });
+    write(root, "package.json", '{"name":"rewritten-by-the-batch"}');
+
+    // 本批确实新建了东西（created 非空）—— 但那不是 package.json
+    const result = await store.revert(token, {
+      paths: ["package.json"],
+      created: ["src/generated.js"],
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(read(root, "package.json")).toBe('{"name":"rewritten-by-the-batch"}');
+    expect(result.skipped.map((s) => s.path)).toContain("package.json");
+    expect(result.skipped.find((s) => s.path === "package.json")?.reason).toContain("保留现状不删");
+  });
+
+  it("R3 反向：created 明确含目标 ⇒ 该删的仍要删（不误伤不等于不处置）", async () => {
+    // 与上一条配对，防止"一律保留"式的过度保守：有正面证据时必须真的处置。
+    const root = scratch("snap-created-hit");
+    const backupRoot = scratch("snap-created-hit-backups");
+    write(root, "src/a.js", "a");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-ch", root, zones: ["src"] });
+    write(root, "package.json", '{"name":"generated"}');
+    write(root, "src/other.js", "o");
+
+    const result = await store.revert(token, {
+      paths: ["package.json"],
+      created: ["src/other.js", "package.json"], // 非空，且含目标
+    });
+
+    expect(result.removed).toEqual(["package.json"]);
+    expect(read(root, "package.json")).toBeNull();
+  });
+
+  /** 反斜杠写法也必须命中同一条判据（否则 Windows 上证据形同虚设）。 */
+  it("R3：created 里的路径按同一套归一化比对（反斜杠写法也认得出证据）", async () => {
+    const root = scratch("snap-created-slash");
+    const backupRoot = scratch("snap-created-slash-backups");
+    write(root, "src/a.js", "a");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-cs", root, zones: ["src"] });
+    write(root, "rogue/x.js", "r");
+
+    const result = await store.revert(token, {
+      paths: ["rogue/x.js"],
+      created: ["rogue\\x.js"],
+    });
+
+    expect(result.removed).toEqual(["rogue/x.js"]);
+    expect(read(root, "rogue/x.js")).toBeNull();
   });
 
   it("create-evidence still deletes a file the batch made outside the zones", async () => {
@@ -1380,6 +1450,92 @@ describe("BatchGuard arbitration", () => {
     const drift = verdict.conflicts.find((c) => c.kind === "shared-drift");
     expect(drift).toBeDefined();
     expect(drift!.paths).toEqual(["shared/x.js"]);
+  });
+
+  /**
+   * 台账入账的两个边界。`&& → ||` 会让"zone **内**的合法删除"也被当成越权欠账
+   * —— 而那正是最容易被读成"任务把用户文件删了"的误报；`=== → !==` 会让 zone 外的
+   * create/modify 一起进候选（它们在 `stillMissing` 处被挡下，所以只在下面这条
+   * 多条目用例里才分得开）。断言打在 `carried` 上：它是台账对外的唯一事实出口。
+   */
+  it("zone 内的删除不进台账（合法删除不能被读成欠账）", async () => {
+    const root = scratch("guard-ledger-inzone");
+    const guard = new BatchGuard({ mode: "report-only" });
+    write(root, "src/a.js", "a");
+    const scope = await guard.begin("r-inzone", root, ["src"]);
+    // begin 之后才删，diff 才看得见这条 delete。
+    fs.rmSync(path.join(root, "src/a.js"));
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+    // zone 内删除属于本任务职权，既不是冲突、更不该挂上"未恢复的越权删除"。
+    expect(verdict.conflicts).toEqual([]);
+    expect(verdict.carried).toBeUndefined();
+  });
+
+  /**
+   * 本批多个越权删除必须**一次收齐**，且顺序稳定。
+   *
+   * 三个位点各断一个面：`continue → break` 会只记第一个（后面的删除从台账上
+   * 消失，正是缺陷 #11 的复发形态）；`!stillMissing` 取反会让真正仍缺的一条都
+   * 不入账；排序比较器的两个分支互换会让顺序变成降序 —— 而凭据与审计要求同一
+   * 份事实在任何机器上都得出同一串，顺序本身就是被承诺的东西。
+   */
+  it("本批全部越权删除一次收齐，且按路径稳定排序", async () => {
+    const root = scratch("guard-ledger-multi");
+    const guard = new BatchGuard({ mode: "report-only" });
+    // 故意按 b 在前写入：结果顺序必须来自排序，不能来自遍历顺序。
+    write(root, "rogue/b.js", "b");
+    write(root, "rogue/a.js", "a");
+    const scope = await guard.begin("r-multi", root, ["src"]);
+    fs.rmSync(path.join(root, "rogue/b.js"));
+    fs.rmSync(path.join(root, "rogue/a.js"));
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
+    expect(verdict.conflicts).toHaveLength(1);
+    expect(verdict.conflicts[0]!.kind).toBe("unauthorized-write");
+    expect(verdict.carried).toEqual([
+      { path: "rogue/a.js", firstRunId: "r-multi" },
+      { path: "rogue/b.js", firstRunId: "r-multi" },
+    ]);
+  });
+});
+
+describe("updateDeletionLedger · 台账状态转移（纯函数）", () => {
+  /**
+   * `continue` 与 `break` 的差别只在"被跳过的条目之后还有没有条目"这一格 ——
+   * 前面条目被跳过、后面条目仍需入账时才分得开。写成 `break` 的后果很具体：
+   * 本批只记第一个越权删除，其余从台账上消失（正是缺陷 #11 的复发形态）。
+   *
+   * 同时钉住 `!stillMissing` 的极性：取反会把"仍缺"的整条滤掉，而它恰恰是
+   * 台账唯一该记的东西。
+   */
+  it("前面条目被跳过时，后面的越权删除仍要入账（continue 不是 break）", () => {
+    const update = updateDeletionLedger(new Map(), {
+      runId: "r1",
+      // 第一条已回到盘上（不该入账），第二条仍缺 —— 它必须活下来。
+      freshDeletions: ["gone/restored.js", "gone/still-missing.js"],
+      stillMissing: (rel) => rel === "gone/still-missing.js",
+    });
+    expect(update.carried).toEqual([{ path: "gone/still-missing.js", firstRunId: "r1" }]);
+  });
+
+  it("销账看盘：文件回到盘上即从台账销掉，并进 resolved", () => {
+    const update = updateDeletionLedger(new Map([["src/a.js", "r0"]]), {
+      runId: "r1",
+      freshDeletions: [],
+      stillMissing: () => false,
+    });
+    expect(update.carried).toEqual([]);
+    expect(update.resolved).toEqual(["src/a.js"]);
+  });
+
+  it("首见批次不漂移：重报保留原 firstRunId", () => {
+    const update = updateDeletionLedger(new Map([["src/a.js", "r0"]]), {
+      runId: "r9",
+      freshDeletions: ["src/a.js"],
+      stillMissing: () => true,
+    });
+    expect(update.carried).toEqual([{ path: "src/a.js", firstRunId: "r0" }]);
   });
 });
 

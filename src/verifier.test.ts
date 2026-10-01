@@ -159,6 +159,9 @@ describe("runSmokeChecks", () => {
     );
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.exitCode).toBe(2);
+    // 非超时分支：digest 里那一行必须是真实退出码，不能写成 timeout
+    // （与上一条 timeout 用例合起来把三分支两两分开）。
+    expect(results[0]!.logDigest).toContain("[exit]2");
   });
 
   it("stdin 样例数据被完整传入子进程", async () => {
@@ -195,6 +198,9 @@ describe("runSmokeChecks", () => {
     expect(results[0]!.exitCode).toBeNull();
     expect(results[0]!.durationMs).toBeGreaterThanOrEqual(40);
     expect(events.some((t) => t.includes("超过") && t.includes("终止进程树"))).toBe(true);
+    // 超时行必须如实写成 timeout，不能写成退出码（超时时根本没有退出码）。
+    // 这是 digest 里给人排障看的那一行事实。
+    expect(results[0]!.logDigest).toContain("[exit]timeout");
   });
 
   it("首败即停：多条冒烟中第一条失败后不再执行后续", async () => {
@@ -209,6 +215,44 @@ describe("runSmokeChecks", () => {
     );
     expect(calls).toBe(1); // 第二条冒烟未执行
     expect(results.length).toBe(1);
+  });
+
+  /**
+   * R1「判据必须独立于被判定方」的回归钉。
+   *
+   * 旧实现把退出码编码进输出串（`${log}\n[exit]${code}`）再用
+   * `/\n\[exit\](\d+)/` **取第一个匹配**解析回来。于是子进程只要在自己的
+   * stdout 里打印一行 `[exit]0`，真实退出码即便是 1，判定也会读到那个更早出现
+   * 的"0"并判**通过** —— 被判定方一行打印就撤销了自己的失败。
+   *
+   * 现在退出码只来自 `close` 事件（它与 OS 之间的直接约定，子进程写不到），
+   * 输出文本只用于**正向**的期望片段匹配。这条用例锁住这个语义：
+   * 伪造的退出码标记不得影响判定。
+   */
+  it("子进程伪造 [exit]0 也改不了判定：真实退出码非零必须判失败（R1）", async () => {
+    const results = await runSmokeChecks(
+      [check({ expectContains: [] })],
+      {
+        cwd: ".",
+        // 真实退出码 1，但在 stdout 里抢先打印一行形如退出码标记的文本
+        spawnImpl: fakeSpawnImpl({ out: "BOOM: 我失败了\n[exit]0\n", code: 1 }) as never,
+      },
+    );
+    expect(results[0]!.ok).toBe(false); // 伪造无效
+    expect(results[0]!.exitCode).toBe(1); // 如实上报真实退出码
+  });
+
+  it("子进程伪造 [exit]0 且退出码为 0 时才算通过（正向条件仍须真达成）", async () => {
+    const results = await runSmokeChecks(
+      [check({ expectContains: ["EXPECTED"] })],
+      {
+        cwd: ".",
+        // 退出码 0，但期望片段缺失 —— 打印退出码标记不能顶替真实产出
+        spawnImpl: fakeSpawnImpl({ out: "[exit]0\n", code: 0 }) as never,
+      },
+    );
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.logDigest).toMatch(/缺失期望片段/);
   });
 });
 

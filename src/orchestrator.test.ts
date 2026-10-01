@@ -2094,6 +2094,96 @@ describe("OrchestratorEngine · 交付凭据", () => {
     expect(test.headline).toBe("");
   });
 
+  /**
+   * R2「失败必须可归因到责任方」的反例：**不在基线里的失败不得被标成 preexisting**。
+   *
+   * 归因判据是逐条按 `kind` 匹配基线（`emitReceipt` 的
+   * `preexistingKinds.includes(r.kind)`），它回答的是那句关键的话：
+   * "这条红是动手前就有的（不是智能体的账），还是这批改动造成的（是它的账）"。
+   *
+   * 构造：基线只有 `test` 红；交付闸上 `test` 依旧红（**基线噪音**）、
+   * `build` 新红（**本次改动造成的真失败**）。两种事实同时在场 —— 任何
+   * "整体取反"或"一律标同一值"的写法都会在下面两条断言上露馅。
+   *
+   * 为什么这是反例而不是重复覆盖：把新失败洗成基线噪音，后果不是日志难看，
+   * 而是**修复循环失去目标** —— 引擎会认为"这条红不归任何人"，于是不去修它，
+   * 同时凭据对外宣称"其中 N 条本次运行前就是红的"，把智能体写坏的构建说成
+   * 目标项目的历史问题。这正是 R2 要挡住的方向。
+   */
+  it("基线噪音与真失败必须分开：不在基线里的失败不得标成 preexisting（R2）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    let verifyCalls = 0;
+    const eng = buildReceiptEngine({
+      scheduler: attributed,
+      verify: async () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) {
+          // 基线（动手之前）：只有 test 是红的 —— 这是"不是你的账"那一份
+          return {
+            passed: false,
+            results: [
+              { kind: "test", ok: false, exitCode: 1, logDigest: "Cannot find module 'left-pad'", durationMs: 3 },
+            ],
+          };
+        }
+        // 交付闸：test 照旧红（基线噪音）+ build 新红（本次改动造成）
+        return {
+          passed: false,
+          results: [
+            { kind: "build", ok: false, exitCode: 1, logDigest: "TS2304: Cannot find name 'x'", durationMs: 4 },
+            { kind: "test", ok: false, exitCode: 1, logDigest: "Cannot find module 'left-pad'", durationMs: 3 },
+          ],
+        };
+      },
+      maxRounds: 0,
+      onReceipt: (r) => seen.push(r),
+    });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    expect(seen).toHaveLength(1);
+    const build = seen[0]!.checks.find((c) => c.kind === "build")!;
+    const test = seen[0]!.checks.find((c) => c.kind === "test")!;
+    // 决定性断言①：新失败是智能体的账，不许被洗成基线噪音
+    expect(build.preexisting).toBe(false);
+    // 决定性断言②（反向）：基线里就红的必须照旧标出，否则"不是你的账"这条信息也丢了
+    expect(test.preexisting).toBe(true);
+    // 汇总只数基线噪音那一条，而不是把所有失败都算上
+    expect(seen[0]!.counts.preexisting).toBe(1);
+    expect(seen[0]!.counts.checksFailed).toBe(2);
+    // ⚠️ 结论行的「本次运行前就是红的」措辞**只在 delivered 分支**（blocked 分支
+    // 只讲卡在哪，见 `receiptHeadlineFor`）。所以这里不断 headline —— 归因事实
+    // 由上面逐条 checks 的 preexisting 承担，那才是 R2 的承重点。
+    expect(seen[0]!.outcome).toBe("blocked");
+  });
+
+  it("基线全绿时不谎报任何 preexisting（否则真实归因被噪音淹没）", async () => {
+    // 与上一条配对：基线干净时，交付闸上出现的每一条失败都必须是智能体的账。
+    const seen: DeliveryReceipt[] = [];
+    let verifyCalls = 0;
+    const eng = buildReceiptEngine({
+      scheduler: attributed,
+      verify: async () => {
+        verifyCalls += 1;
+        if (verifyCalls === 1) return makeReport(true); // 基线全绿
+        return {
+          passed: false,
+          results: [
+            { kind: "build", ok: false, exitCode: 1, logDigest: "boom", durationMs: 2 },
+          ],
+        };
+      },
+      maxRounds: 0,
+      onReceipt: (r) => seen.push(r),
+    });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    expect(seen[0]!.checks.find((c) => c.kind === "build")!.preexisting).toBe(false);
+    expect(seen[0]!.counts.preexisting).toBe(0);
+    expect(seen[0]!.headline).not.toContain("本次运行前就是红的");
+  });
+
   it("宿主喂进来的越权记录进凭据（引擎自己看不到仲裁层）", async () => {
     const seen: DeliveryReceipt[] = [];
     const eng = buildReceiptEngine({

@@ -26,6 +26,9 @@ import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
+import { commandPolicyOverrides, describePolicy } from "../shared/policy-file";
+import { loadPolicyDir } from "./sandbox/policy-dir";
+import { CommandPolicy } from "./sandbox/command-policy";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -104,6 +107,13 @@ export interface PlatformConfig {
    */
   manifests?: readonly AgentManifest[];
   manifestDir?: string;
+  /**
+   * 策略即代码的目录（`policy.d/`）。省略 = 只用内置规则。
+   *
+   * 与 `manifestDir` 同构但方向相反：manifest 描述"谁来做"（越具体越好），
+   * policy 描述"做到哪为止"（只增不减 —— 契约里没有"允许"这一格）。
+   */
+  policyDir?: string;
   /** Enable capability routing; defaults to `settings.agentRouter !== false`. */
   enableRouter?: boolean;
   arbitration?: ArbitrationMode;
@@ -290,6 +300,20 @@ export function createPlatform(config: PlatformConfig): Platform {
   // concurrent projects never share observations.
   const gate = new ActionGate();
 
+  /**
+   * 策略即代码（`policy.d/`）。
+   *
+   * 加载一次、合成一份、只往严的方向叠（契约里没有"允许某条命令"这一格 ——
+   * 见 `commandPolicyOverrides`）。坏文件不拦 run，但**每条问题都说出来**：
+   * 静默跳过会让"我以为禁掉了"变成假的，而那正是安全策略最坏的失败方式。
+   */
+  const loaded = loadPolicyDir(config.policyDir);
+  const policy = loaded.files > 0 ? loaded.policy : undefined;
+  for (const err of loaded.errors) log(`[policy] ${err.file}：${err.issues.join("；")}`);
+  if (policy) log(`[policy] 已加载 ${loaded.files} 份策略：${describePolicy(policy)}`);
+  const buildPolicy = (): CommandPolicy =>
+    new CommandPolicy({ ...commandPolicyOverrides(policy!) });
+
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
@@ -301,6 +325,9 @@ export function createPlatform(config: PlatformConfig): Platform {
             cwd: () => cwd,
             onEvent: log,
             actionGate: gate,
+            // 策略即代码（`policy.d/`）：内置地板之上再叠加一层本地规则。
+            // 验证跑的是**智能体刚写下的脚本**，这里是最该被策略管住的地方。
+            ...(policy ? { policy: buildPolicy() } : {}),
           })),
       settings,
       usage: () => meter.snapshot(),

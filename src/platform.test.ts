@@ -419,6 +419,59 @@ describe("createPlatform · router 开关的三态（变异测试发现的缺口
   });
 });
 
+describe("createPlatform · policy.d 接线（策略即代码）", () => {
+  function policyDirWith(name: string, body: unknown): string {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, name), JSON.stringify(body), "utf8");
+    return dir;
+  }
+
+  /**
+   * `policy.d/` 的三元位点：`loaded.files > 0 ? loaded.policy : undefined` 与
+   * `...(policy ? { policy: … } : {})`。
+   *
+   * 两个位点都在"同一个 run 里策略到底有没有生效"这条链上：分支互换会让**有**策略
+   * 时把它丢掉（安全边界静默消失 —— 最坏的失败方式），或在**没有**策略时塞进一个
+   * 空对象（把"没写策略"变成"写了一份空策略"）。
+   *
+   * 观测点选日志与命令沙箱行为，而不是内部变量：策略是安全边界，要断的是
+   * "它真的管住了命令"，不是"这个字段有值"。
+   */
+  it("策略目录为空 ⇒ 日志不谎报已加载", () => {
+    const logs: string[] = [];
+    createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: tempDir(), // 存在但没有任何 *.json
+      host: { log: (t) => logs.push(t) },
+    });
+    // 没有生效策略就不该出现"已加载 N 份"；否则等于对外承诺了一条不存在的规则。
+    expect(logs.filter((l) => l.includes("已加载"))).toEqual([]);
+  });
+
+  it("有策略文件 ⇒ 日志说出加载了几份，且该规则真的管住了验证命令", async () => {
+    const logs: string[] = [];
+    const root = tempDir();
+    const platform = createPlatform({
+      settings: settings({
+        // node 在内置白名单里。策略把它禁掉之后，这条验证命令必须在 spawn
+        // **之前**被沙箱拒绝 —— 断的是行为，不是"某个字段有值"。
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, denyCommands: ["node"] }),
+      host: { log: (t) => logs.push(t) },
+    });
+
+    // 位点一：files > 0 才让 policy 有值；位点二：有值才展开进 verifyProject。
+    // 任一分支互换 ⇒ policy 丢失 ⇒ node -v 被内置白名单放行 ⇒ 下面的 rejects 不成立。
+    await expect(platform.engine.execute([], root)).rejects.toThrow(/repair rounds/);
+    expect(logs.some((l) => l.includes("已加载") && l.includes("1"))).toBe(true);
+    expect(logs.join("\n")).toContain("命令被沙箱禁止");
+  });
+});
+
 /**
  * The drift guard proper: build a platform the way each host builds one and
  * compare the structural fields. If a future change wires the desktop host

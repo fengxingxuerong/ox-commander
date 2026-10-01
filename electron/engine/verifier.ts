@@ -193,12 +193,32 @@ export interface SmokeRunnerDeps {
 }
 
 /**
+ * 一次冒烟子进程的**原始事实**。
+ *
+ * 刻意不把退出码编码进 `log` 再解析回来：那样判据就落在了被判定方能写的
+ * 字节里 —— 子进程只要在 stdout 打印一行形如 `[exit]0` 的文本，就能把
+ * 自己真实的失败改写成一串更早出现的"通过"标记（取第一个匹配时必然如此）。
+ * 退出码只能来自 `close` 事件，这是它与操作系统之间的直接约定。
+ */
+interface SmokeOutcome {
+  /** 已按 `MAX_LOG_BYTES` 截断的子进程输出（含截断标注）。 */
+  log: string;
+  /** `close` 事件给出的真实退出码；被信号杀死或 spawn 失败时为 null。 */
+  exitCode: number | null;
+  /** 超时终止（此时退出码无意义）。 */
+  timedOut: boolean;
+}
+
+/**
  * 独立样本冒烟：运行规划期生成的真实样例命令（防自证盲区层）。
  *
  * 与 verifyProject 的区别：命令来自大脑的 decompose 产物（针对交付后的主入口），
- * 支持通过 stdin 喂样例数据，且 ok = 退出码 0 且 stdout 包含全部 expectContains
- * 片段。同样过 CommandPolicy 沙箱门 —— 冒烟命令也不得越界。首败即停，
- * 与 verifyProject 保持一致，让失败进入重修循环。
+ * 支持通过 stdin 喂样例数据，且 ok = **真实退出码为 0** 且 stdout 包含全部
+ * expectContains 片段。同样过 CommandPolicy 沙箱门 —— 冒烟命令也不得越界。
+ * 首败即停，与 verifyProject 保持一致，让失败进入重修循环。
+ *
+ * ⚠️ 判定不读子进程的输出文本（R1「判据必须独立于被判定方」）：`ok` 只看
+ * `close` 事件的退出码与期望片段是否出现，子进程无法通过在输出里写字影响自己的判定。
  */
 export async function runSmokeChecks(
   checks: SmokeCheck[],
@@ -237,7 +257,7 @@ export async function runSmokeChecks(
 
     const startedAt = Date.now();
     const plan = buildSpawnSpec(check.command, check.args);
-    const output = await new Promise<string>((resolve) => {
+    const outcome = await new Promise<SmokeOutcome>((resolve) => {
       let timedOut = false;
       let child: ReturnType<typeof spawnImpl>;
       try {
@@ -249,7 +269,7 @@ export async function runSmokeChecks(
           windowsVerbatimArguments: plan.windowsVerbatimArguments,
         });
       } catch (err) {
-        resolve(`spawn failed (${plan.note}): ${String(err)}`);
+        resolve({ log: `spawn failed (${plan.note}): ${String(err)}`, exitCode: null, timedOut: false });
         return;
       }
       const timer = setTimeout(() => {
@@ -271,40 +291,49 @@ export async function runSmokeChecks(
         logBytes += c.length;
         log += c.toString("utf8");
       };
+      const withDroppedMark = (): string => {
+        if (droppedBytes === 0) return log;
+        return (
+          log +
+          `\n[沙箱] 输出超过 ${Math.round(MAX_LOG_BYTES / 1024)}KB 预算，已丢弃约 ${Math.round(droppedBytes / 1024)}KB`
+        );
+      };
       child.stdout?.on("data", onChunk);
       child.stderr?.on("data", onChunk);
       child.on("error", (err) => {
         clearTimeout(timer);
-        resolve(`${log}\nspawn failed: ${String(err)}`);
+        resolve({ log: `${log}\nspawn failed: ${String(err)}`, exitCode: null, timedOut });
       });
+      // 退出码只从这里来：`close` 是子进程与操作系统之间的直接约定，
+      // 子进程无法通过在 stdout 写字影响它（R1）。
       child.on("close", (code) => {
         clearTimeout(timer);
-        const droppedMark =
-          droppedBytes > 0
-            ? `\n[沙箱] 输出超过 ${Math.round(MAX_LOG_BYTES / 1024)}KB 预算，已丢弃约 ${Math.round(droppedBytes / 1024)}KB`
-            : "";
-        resolve(`${log}${droppedMark}\n[exit]${timedOut ? "timeout" : String(code)}`);
+        resolve({ log: withDroppedMark(), exitCode: timedOut ? null : code, timedOut });
       });
       if (check.stdin !== undefined) child.stdin?.write(check.stdin);
       child.stdin?.end();
     });
 
-    const timedOut = output.includes("\n[exit]timeout");
-    const exitMatch = /\n\[exit\](\d+)/.exec(output);
-    const missing = (check.expectContains ?? []).filter((frag) => !output.includes(frag));
-    const ok = !timedOut && exitMatch !== null && exitMatch[1] === "0" && missing.length === 0;
+    // 判定只看结构化事实：真实退出码 + 期望片段是否出现。
+    // 期望片段仍是对输出文本的匹配 —— 但它是**正向**要求（必须出现什么），
+    // 子进程无法用"多打印一行"把失败改写成通过，只能靠真的输出正确内容达成。
+    const missing = (check.expectContains ?? []).filter((frag) => !outcome.log.includes(frag));
+    const ok = !outcome.timedOut && outcome.exitCode === 0 && missing.length === 0;
 
     const digestParts = [
       `[smoke] ${check.title}`,
       `命令：${check.command} ${check.args.join(" ")}`,
-      output,
+      // 退出码作为**独立的一行事实**随日志留档，方便排障时肉眼核对；
+      // 它不参与判定解析（上面已经用过了），所以造假这行没有意义。
+      `[exit]${outcome.timedOut ? "timeout" : String(outcome.exitCode)}`,
+      outcome.log,
     ];
     if (missing.length > 0) digestParts.push(`缺失期望片段：${JSON.stringify(missing)}`);
 
     results.push({
       kind: "smoke",
       ok,
-      exitCode: timedOut ? null : exitMatch ? Number(exitMatch[1]) : null,
+      exitCode: outcome.exitCode,
       logDigest: digest(digestParts.join("\n")),
       durationMs: Date.now() - startedAt,
     });
