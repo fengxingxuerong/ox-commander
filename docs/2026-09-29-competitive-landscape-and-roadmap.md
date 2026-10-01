@@ -140,8 +140,8 @@
 | # | 做什么 | 对标 | 备注 |
 | --- | --- | --- | --- |
 | P2-1 | GitHub / Linear 原生集成：从 issue 建任务、在 diff 行留批注回传给 agent | Orca、vibe-kanban | 需要 OAuth 与权限模型，先做只读 |
-| P2-2 | **策略即代码**：把 `agents.d/` 的声明式思路扩到 `policy.d/`（路径/命令/预算/审批写成文件，可评审、可版本化） | bernstein 的 policy as code | 与 A2/A3 同源，是我们能做且别人没在编码场景做的 |
-| P2-3 | 审批门（高风险改动停下等人确认） | paperclip 的 approvals、bernstein 的 approval | 与 P2-2 同批做 |
+| P2-2 | **策略即代码**：把 `agents.d/` 的声明式思路扩到 `policy.d/`（路径/命令/预算/审批写成文件，可评审、可版本化） | bernstein 的 policy as code | 与 A2/A3 同源，是我们能做且别人没在编码场景做的。🔶 **部分完成（2026-10-01，`1792325`）**：命令面已落地 —— `shared/policy-file.ts`（契约，只加严不放宽，没有"允许"这一格）+ `electron/sandbox/policy-dir.ts`（目录加载）+ `platform.ts` 接线，只读 `*.json`、未知版本整份丢弃、坏文件不拦 run 但每条问题都说出来。**未做**：路径面（`path-policy` 的 forbidden 与 zone）与预算面（`maxTokensPerRun`）还没接进同一份策略文件；审批面见 P2-3 |
+| P2-3 | 审批门（高风险改动停下等人确认） | paperclip 的 approvals、bernstein 的 approval | 与 P2-2 同批做。**前置已就位**：`policy.d` 提供了"声明式规则可评审、可版本化"的落点，审批策略可以直接长在同一份文件上 |
 
 ### 5.1 明确不做（附理由，别被带着跑）
 
