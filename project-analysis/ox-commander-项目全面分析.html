@@ -1,0 +1,875 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OxCommander 项目全面分析报告</title>
+<style>
+  :root{
+    --bg:#0f1419; --bg2:#161b22; --bg3:#1c2129; --line:#2d333b;
+    --fg:#e6edf3; --fg2:#9aa5b1; --fg3:#6e7681;
+    --red:#f85149; --amber:#d29922; --green:#3fb950; --blue:#58a6ff; --purple:#bc8cff;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;}
+  .wrap{max-width:1080px;margin:0 auto;padding:48px 28px 96px}
+  header{border-bottom:1px solid var(--line);padding-bottom:28px;margin-bottom:40px}
+  h1{font-size:32px;margin:0 0 10px;letter-spacing:-.5px}
+  h2{font-size:22px;margin:56px 0 18px;padding-bottom:10px;border-bottom:1px solid var(--line)}
+  h3{font-size:17px;margin:32px 0 12px;color:var(--blue)}
+  h4{font-size:15px;margin:22px 0 8px;color:var(--fg)}
+  p{margin:12px 0}
+  .sub{color:var(--fg2);font-size:14px}
+  code{font-family:var(--mono);font-size:13px;background:var(--bg3);
+    padding:2px 6px;border-radius:4px;color:#ffa657}
+  pre{background:var(--bg2);border:1px solid var(--line);border-radius:8px;
+    padding:14px 16px;overflow-x:auto;font-family:var(--mono);font-size:12.5px;line-height:1.6}
+  pre code{background:none;padding:0;color:var(--fg)}
+  table{width:100%;border-collapse:collapse;margin:16px 0;font-size:13.5px}
+  th,td{border:1px solid var(--line);padding:9px 12px;text-align:left;vertical-align:top}
+  th{background:var(--bg3);font-weight:600;color:var(--fg)}
+  tr:nth-child(even) td{background:rgba(255,255,255,.015)}
+  ul,ol{margin:12px 0;padding-left:24px}
+  li{margin:6px 0}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:18px 20px;margin:18px 0}
+  .card.red{border-left:4px solid var(--red)}
+  .card.amber{border-left:4px solid var(--amber)}
+  .card.green{border-left:4px solid var(--green)}
+  .card.blue{border-left:4px solid var(--blue)}
+  .tag{display:inline-block;font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px;
+    margin-right:6px;vertical-align:middle;letter-spacing:.3px}
+  .t-red{background:rgba(248,81,73,.16);color:#ff7b72;border:1px solid rgba(248,81,73,.4)}
+  .t-amber{background:rgba(210,153,34,.16);color:#e3b341;border:1px solid rgba(210,153,34,.4)}
+  .t-green{background:rgba(63,185,80,.16);color:#56d364;border:1px solid rgba(63,185,80,.4)}
+  .t-blue{background:rgba(88,166,255,.16);color:#79c0ff;border:1px solid rgba(88,166,255,.4)}
+  .t-gray{background:rgba(110,118,129,.18);color:#8b949e;border:1px solid rgba(110,118,129,.4)}
+  .kpi{display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin:22px 0}
+  .kpi div{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:14px 16px}
+  .kpi b{display:block;font-size:24px;color:var(--blue);font-family:var(--mono);line-height:1.2}
+  .kpi span{font-size:12px;color:var(--fg2)}
+  .flow{background:var(--bg2);border:1px solid var(--line);border-radius:9px;
+    padding:16px;font-family:var(--mono);font-size:12.5px;line-height:2;overflow-x:auto;white-space:pre}
+  .ok::before{content:"✓ ";color:var(--green);font-weight:700}
+  .no::before{content:"✗ ";color:var(--red);font-weight:700}
+  .warn::before{content:"! ";color:var(--amber);font-weight:700}
+  .note{font-size:12.5px;color:var(--fg3);margin-top:6px}
+  hr{border:0;border-top:1px solid var(--line);margin:36px 0}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>OxCommander 项目全面分析报告</h1>
+  <p class="sub">
+    分析对象：<code>D:\ox\ox-commander</code> · 版本 <code>0.1.7</code> · 许可证 MIT<br>
+    分析日期：2026-10-01 · 方法：源码通读 + 本机真实执行门禁 + 运行时探针验证
+  </p>
+</header>
+
+<div class="card red">
+  <h3 style="margin-top:0">首要结论：项目当前工作区门禁是红的</h3>
+  <p>这不是纸面判断，是本机真实的执行结果：</p>
+  <pre><code>npm run verify  →  EXIT 2   （卡在第 2 段 typecheck，20 段只跑完第 1 段）
+npm test        →  18 失败 / 1311 通过 / 9 跳过
+npm run build   →  EXIT 1
+lint / check:unwired  →  绿</code></pre>
+  <p><b>唯一根因</b>（一处，18 条失败全部由它派生）：</p>
+  <pre><code>electron/engine/batch-guard.ts(301,46): error TS2339:
+  Property 'deletions' does not exist on type 'BatchGuard'.
+electron/engine/batch-guard.ts(306,10): error TS2339:
+  Property 'deletions' does not exist on type 'BatchGuard'.</code></pre>
+  <p>运行时表现：<code>TypeError: prev is not iterable</code> @ <code>batch-guard.ts:113</code>，
+  因为 <code>updateDeletionLedger(this.deletions, …)</code> 里的 <code>this.deletions</code> 是
+  <code>undefined</code>。<code>BatchGuard</code> 类里<b>漏了字段声明与初始化</b> —— 补一行的量级：</p>
+  <pre><code>private deletions: Map&lt;string, string&gt; = new Map();</code></pre>
+  <p class="note">性质判定：这是一次<b>未提交的半成品改动</b>（不是长期缺陷）。见下一节。</p>
+</div>
+
+<h2>1. 项目画像</h2>
+
+<p><b>一句话定位</b>：把项目需求自动拆解为 PRD → 任务 → zone 互斥批次，按能力路由并行下发给执行器，
+经 build + typecheck + test 硬门禁验证后交付「一份过了门禁的结果」。</p>
+
+<div class="kpi">
+  <div><b>~45k</b><span>手写代码行数（TS/MJS/CJS）</span></div>
+  <div><b>257</b><span>提交数（37 天，08-26 → 10-01）</span></div>
+  <div><b>53</b><span>测试文件（vitest）</span></div>
+  <div><b>1338</b><span>测试用例总数</span></div>
+  <div><b>57</b><span>变异测试目标模块</span></div>
+  <div><b>20</b><span>verify 门禁段数</span></div>
+</div>
+
+<h3>1.1 模块构成与代码分布</h3>
+<table>
+  <tr><th>目录</th><th>行数</th><th>职责</th></tr>
+  <tr><td><code>src/</code></td><td>24,127</td><td>Renderer（React 18 + Zustand）：projects / prd-review / board / settings 四页 + AgentsPanel。<b>含全部测试文件</b>，故行数被测试放大</td></tr>
+  <tr><td><code>electron/</code></td><td>9,743</td><td>主进程：编排引擎、适配器层、沙箱层、IPC。系统的重心</td></tr>
+  <tr><td><code>scripts/</code></td><td>6,059</td><td>门禁判据本体（变异测试、接线检查、离线 E2E 等）</td></tr>
+  <tr><td><code>shared/</code></td><td>3,769</td><td>双端共享大脑层：LLM 客户端与 failover、契约、routing、prompt、schema</td></tr>
+  <tr><td><code>headless/</code></td><td>1,268</td><td>JSONL 协议三层：protocol / run-spec / headless-main（+ serve 常驻服务）</td></tr>
+</table>
+
+<h3>1.2 技术栈与运行要求</h3>
+<table>
+  <tr><th>维度</th><th>选型</th><th>观察</th></tr>
+  <tr><td>运行时</td><td>Node ≥ 20.19（<code>engines</code>）</td><td>真实依赖是 <code>AbortSignal.any</code>；缺失时按<b>特性</b>判定并显式报错，不是崩栈</td></tr>
+  <tr><td>前端</td><td>React 18.3 + Zustand 4.5</td><td>依赖极简（生产依赖仅 3 个包），无 UI 框架/路由库</td></tr>
+  <tr><td>构建</td><td>Vite 8 + tsc（4 套 tsconfig）</td><td>renderer / electron / headless / vite 配置各自独立 typecheck</td></tr>
+  <tr><td>测试</td><td>Vitest 4 + @testing-library/react + jsdom</td><td>覆盖率 92.00% stmts / 86.68% branch（项目自报，本次未复测）</td></tr>
+  <tr><td>桌面</td><td>Electron 33 + electron-builder 26</td><td>产出 Windows nsis/portable、Linux AppImage/deb；<b>macOS 刻意不产出</b>（无签名凭据）</td></tr>
+  <tr><td>lint</td><td>ESLint 9 flat config + typescript-eslint 8</td><td>对 <code>shared/**</code> 用 <code>no-restricted-imports</code> 强制分层红线（机制而非约定）</td></tr>
+</table>
+
+<h3>1.3 开发节奏</h3>
+<p>37 天 257 次提交，平均每天约 7 次。提交类型分布：<code>feat</code> 68 · <code>test</code> 59 ·
+<code>fix</code> 58 · <code>docs</code> 47 · <code>chore</code> 12 · 其余 13。</p>
+<p class="sub">值得注意的形态：<b>test 与 fix 几乎与 feat 等量</b>，说明作者把「加功能」与「补验证/修缺陷」
+当作同等权重的工作 —— 这与它自建变异测试门禁的取向一致。</p>
+
+<h2>2. 架构分析</h2>
+
+<h3>2.1 分层与依赖方向</h3>
+<table>
+  <tr><th>层</th><th>目录</th><th>约束</th><th>强制手段</th></tr>
+  <tr><td>UI</td><td><code>src/</code></td><td>只经 <code>ox:event</code> 单通道与主进程通信</td><td>preload 白名单暴露</td></tr>
+  <tr><td>宿主</td><td><code>electron/</code></td><td>可碰 node / Electron API</td><td>—</td></tr>
+  <tr><td>大脑层</td><td><code>shared/</code></td><td><b>纯逻辑</b>：禁 node 内建、禁 DOM、禁依赖上层</td><td class="ok"><b>ESLint <code>no-restricted-imports</code> 强制</b>（不是约定）</td></tr>
+  <tr><td>协议层</td><td><code>headless/</code></td><td>对外 JSONL 契约</td><td class="no"><b>无同等机制</b>，跨层需人盯</td></tr>
+</table>
+
+<div class="card blue">
+  <h4 style="margin-top:0">值得学习的设计：分级落地「分层红线」</h4>
+  <p><code>shared/</code> 的分层约束有一条真实机制：<code>eslint.config.mjs</code> 给
+  <code>shared/**/*.ts</code> 配了 <code>no-restricted-imports</code>，禁 <code>node:*</code> 与裸 node 内建、
+  禁 <code>electron|react|react-dom|zustand</code>、禁反向依赖 <code>../electron/**</code> 等。
+  落地时该层对外 import 数为 0，属零违规的纯增量，只拦未来。</p>
+  <p>但作者<b>没有</b>把这个规则无脑套到 <code>headless/**</code>，理由写在注释里：
+  <code>run-spec.ts</code> 经 <code>electron/platform</code> 已把 <code>electron/sandbox</code> 拉进来，
+  加规则当场就红。这种「先承认现状、不靠规则硬压」的处理比强行统一更可靠。</p>
+</div>
+
+<h3>2.2 一次 run 的端到端数据流</h3>
+<div class="flow">两个入口
+  Electron：orchestration:planning → generatePrd → decompose
+            （落 ProjectStore.batchesJson）→ orchestration:start → execute
+            runningProjectId 是单飞闸；renderer 只有一条事件通道 ox:event
+  headless：stdin 全量 JSON → parseSpec → runSpec → stdout JSONL
+            退出码 0=delivered / 2=repair 耗尽 / 1=fatal
+
+六阶段（代码控制，LLM 不能改写阶段序列）
+  PRD → PLANNING → DEVELOPMENT → VERIFICATION → DELIVERY → DONE
+                        ↑____________ repair loop（按 zone 归因重修）____________|
+
+三处落盘点（都走 writeFileAtomic）
+  1. checkpoint journal：计划完成 / 每批 / 每轮收尾
+  2. 审计 JSONL：run-start / run-end（<b>仅桌面有</b>；headless 改发协议事件）
+  3. 快照备份 &lt;userData&gt;/snapshots/&lt;runId&gt;（内容备份，不用 git stash）</div>
+
+<h3>2.3 编排引擎（electron/engine/orchestrator.ts，798 行）</h3>
+
+<h4>六阶段与 repair loop</h4>
+<p>阶段推进由代码硬控。核心循环在 <code>runPipeline</code>：</p>
+<pre><code>while (round &lt;= maxRounds + extraRounds) {   // orchestrator.ts:509
+  assertWallClock()                          // :510  墙钟上限
+  await this.gate()                          // :511  暂停闸
+  ... 逐批 runBatch ...
+  onStage("VERIFICATION")                    // :621
+  if (!anyDevFailure &amp;&amp; report.passed) { ...DELIVERY... }   // :641
+  routeVerificationErrors(...)               // :676  按 zone 归因
+}</code></pre>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：动手前先跑基线（orchestrator.ts:472-503）</h4>
+  <p>在派发任何任务<b>之前</b>，先把同样的验证命令跑一遍。若目标项目本来就红着，会给每份重修上下文
+  附上 <code>[本次运行前就已失败]</code> 标记。</p>
+  <p>解决的问题很实际：智能体看到一份与自己无关的失败，会去修不属于自己的东西；而引擎的
+  「验证未过但无失败任务 → 全员重跑」分支会把同一份失败再烧三轮预算。标注之后，谁造成的谁负责。</p>
+  <p class="note">代价是每次运行多一轮验证命令（verifier 首败即停，所以基线只报出第一条红）。
+  换的是归因与预算，不是速度 —— 作者自己把这个权衡写明了。</p>
+</div>
+
+<h4>错误按 zone 归因</h4>
+<p><code>routeVerificationErrors(report, pendingNow, projectRoot)</code>（<code>:676</code>）把验证错误
+路由到「拥有失败文件的那个 zone」，每个任务只看到自己该负责的错误（外加无法归因的），而不是整份日志。
+这是 repair loop 能定向重修的前提。</p>
+
+<h4>几处务实的状态处理</h4>
+<ul>
+  <li><b>取消不留悬挂任务</b>（<code>:326-347</code>）：cancel 时 <code>inFlight</code> 里的任务补发
+  <code>cancelled</code> 终态，否则看板会一直转圈。</li>
+  <li><b>用量三条出口都上报</b>（<code>:341-346</code>）：成功 / 取消 / 抛错都取一次快照，理由是
+  「失败的运行一样烧了 token，只在成功路径上报会让最贵的那次恰好看不见」。</li>
+  <li><b>被跳过的上游只给一次机会</b>（<code>:539-555</code>）：用户跳过的任务，其下游缺的产物永远不会出现，
+  追加重修轮是纯烧钱 —— 试过一轮后不再派发，且只播报一次。</li>
+  <li><b>断点续跑不跑基线</b>（<code>:486</code>）：工作区已被上一轮改过，「基线」概念不成立。</li>
+  <li><b>环节重试幂等</b>：竣工验收 <code>[383] failed 之后又来 completed 时仍算失败</code> —— 失败不能被后续事件洗白。</li>
+</ul>
+
+<h4>发现的问题</h4>
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>「零验证命令」会静默放行</b> —— <code>verifier.ts:181</code> 用
+  <code>results.every(r =&gt; r.ok)</code> 判定，空数组时 <code>every</code> 返回 <code>true</code>。</p>
+  <p>作者已意识到并做了缓解：<code>verifiedFieldsFor</code>（<code>orchestrator.ts:364-374</code>）要求
+  <code>report.results.length &gt; 0</code> 才算 <code>verified</code>，日志也会喊「本次交付<b>未经构建/测试验证</b>」。
+  但<b>判定本身是 passed</b>，任务会进入 DELIVERY。</p>
+  <p class="note">定性：纯文档类项目确实是合法配置（headless 协议允许空集），所以这是「有意的语义 + 已加固的说法」，
+  不是纯缺陷。但如果宿主误配了空验证命令，引擎不会阻拦，只会在日志/凭据里说明。</p>
+</div>
+
+<h3>2.4 调度器（scheduler.ts，671 行）</h3>
+
+<div class="card blue">
+  <h4 style="margin-top:0">设计亮点：批内互斥判据从「同名」升级为「重叠」</h4>
+  <p><code>scheduler.ts:398-404</code> 对收到的批次做两两校验，重叠即 <code>throw</code>：</p>
+  <pre><code>if (zonesOverlap(zones[i], zones[j])) throw new Error("zone conflict inside batch: …")</code></pre>
+  <p>注释（<code>:395-397</code>）写明这是修过的语义：原实现只做字符串全等，
+  于是 zone <code>src</code> 与 <code>src/util</code> 会同批并发写同一目录，而越权检测看不见
+  —— 因为每条写入都落在本批某个 zone 之内。</p>
+</div>
+
+<p><b>并发度由四层叠加</b>：</p>
+<ol>
+  <li>平台级槽位：<code>maxParallel()</code> 默认 4（<code>:29</code>），FIFO 移交（<code>:182-189</code>）</li>
+  <li>429 节流闸：<code>awaitThrottle()</code>，指数退避 base 30s / cap 300s（<code>:242-261</code>）</li>
+  <li>agent 级并发声明：<code>admitConcurrency(...)</code>（<code>:347</code>）</li>
+  <li>冗余赛马：<code>raceRedundancy &gt; 1</code> 时再取 <code>redundancy-1</code> 个执行器（<code>:451-459</code>）</li>
+</ol>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>no-router 回退路径绕过并发准入</b></p>
+  <p><code>scheduler.ts:328</code> 的 <code>available[i % available.length]</code> 只过
+  <code>admitBreaker</code>，<b>不过 <code>admitConcurrency</code></b>；而 router 路径（<code>:347</code>）会过。</p>
+  <p>触发条件：关闭能力路由（<code>settings.agentRouter === false</code>）＋ 某 agent 声明
+  <code>maxConcurrency: 1</code> → 同批可被塞多个任务。</p>
+  <p class="note">缓解事实：该回退路径只服务 legacy 池（无并发概念的池子在设计上恒可接），
+  且 <code>router.ts:150-158</code> 的硬拦确实按声明生效。影响面限于「关掉 router 但池里混了声明式 agent」的组合。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>赛马输家的写入不参与回滚</b></p>
+  <p><code>scheduler.ts:481-488</code> 把同一任务派给多个执行器，它们<b>并发写同一 zone、同一 projectRoot</b>。
+  输家在被 <code>abort</code>（<code>:508-532</code>）前写的文件既不会被回滚、也不会被隔离，
+  赢家的验证可能看到混合产物。</p>
+  <p class="note">这与 <code>batch-guard.ts:331-336</code> 注释断言的「批内不可能并发写同一文件」前提直接冲突 ——
+  该前提对普通批次成立，对赛马不成立。</p>
+</div>
+
+<h3>2.5 能力路由（router.ts，243 行）</h3>
+<p><b>硬拦先于打分</b>：缺 tag → <code>continue</code>（:140）；role 不匹配（:141-142）；
+zone 不在候选 glob 内（:143-144）；<code>circuit === "open"</code>（:147）；
+声明了 <code>maxConcurrency</code> 且满载（:155-158）。</p>
+<p><b>打分权重</b>（:59-68）：<code>roleExact 100 / roleWildcard 60 / zoneScoped 40 / zoneBroad 20 /
+quality 20 / load 10 / circuitHalfOpen 15 / priority 1</code>。</p>
+<p><b>tie-break 顺序</b>（:220-231）：声明能力者优先于 <code>inferredLegacy</code> 泛用者 →
+分高者胜 → <code>preferredAgents</code> 顺序 → 原池顺序。</p>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：满载时如实报「没有 agent」，而不是硬塞</h4>
+  <p><code>router.ts:198-217</code>：能力不匹配时回落 legacy round-robin；
+  但<b>合格候选全部满载时不回落</b>，如实返回 <code>agentId: undefined</code>，
+  交修复轮重派。配合 <code>:205-213</code> 的「<code>loadBlocked &gt; 0</code> 时拒绝 fallback」，
+  避免把任务硬塞回满载者。注释里还留了 2026-09-26 的实弹证据
+  （<code>maxConcurrency=1</code> 的 agent 在 t1 在飞时仍以 180+ 分接下 t2）。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>但软惩罚「扣分」用错了地方</b> —— 同一段有两个不同口径：
+  <code>:157</code> 用 <code>caps.maxConcurrency</code>（已归一，最小 1）做硬拦，
+  <code>:188</code> 的 load 扣分也用 <code>caps.maxConcurrency</code>。</p>
+  <p>而 <code>shared/agent-contract.ts:212</code> 的 <code>normalizeCapabilities</code> 已把
+  <code>maxConcurrency</code> 归一到 <code>Math.max(1, Math.floor(caps.maxConcurrency || 1))</code>，
+  <b>因此除零/NaN 路径不可达</b>。</p>
+  <p class="note">这一条是我<b>实测推翻</b>的：子代理报告称此处会产生 <code>NaN</code> 导致排序不确定，
+  但按 <code>agent-contract.ts:212</code> 的归一化，<code>maxConcurrency</code> 最小为 1，该风险不成立。</p>
+</div>
+
+<h3>2.6 仲裁层（batch-guard.ts，445 行）</h3>
+
+<p>四种冲突处置档，各自行为<b>确实不同</b>（此前 <code>report-only</code> 与 <code>deny-all</code> 曾共用一支）：</p>
+<table>
+  <tr><th>档位</th><th>对 outcomes</th><th>对磁盘</th><th>备份</th><th>remedy</th></tr>
+  <tr><td><code>report-only</code></td><td>不改判</td><td>不动</td><td>commit</td><td><code>pass</code></td></tr>
+  <tr><td><code>deny-all</code></td><td>全部置 <code>ok:false</code></td><td>不动</td><td>commit</td><td><code>fail-batch</code></td></tr>
+  <tr><td><code>revert-batch</code>（默认）</td><td>全部置 <code>ok:false</code></td><td>按 <code>allPaths</code> 回滚</td><td>commit</td><td><code>revert</code></td></tr>
+  <tr><td><code>quarantine</code></td><td>全部置 <code>ok:false</code></td><td>rename 到 <code>.ox-quarantine/</code></td><td>commit</td><td><code>quarantine</code></td></tr>
+</table>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：回滚只删「有 create 正面证据」的文件</h4>
+  <p><code>batch-guard.ts:245</code> 收集 <code>create</code> 记录传给 <code>snapshots.revert</code>；
+  <code>snapshot-store.revertOne</code> 四步判据：</p>
+  <ol>
+    <li>备份里有 → 拷回</li>
+    <li>没备份且当前不存在 → <code>skipped</code>（无需回滚）</li>
+    <li>没备份但存在、且 <code>created</code> 里<b>没有它 → 保留现状不删</b></li>
+    <li>只有有正面证据才 <code>rmSync</code></li>
+  </ol>
+  <p>翻车形态写得很具体：根级 <code>package.json</code> 常在 zone 外，旧逻辑「备份里没有 ⇒ 新建 ⇒ 删掉」
+  会把用户文件删掉，且默认档下每轮重修再删一次。</p>
+  <p><b>不做 git、不做硬链接</b>（<code>snapshot-store.ts:59-83</code> 文件头记录三条硬教训）：
+  硬链接会共享 inode，<code>writeFileSync</code> 原地截断会连备份一起改 —— 作者说实测「回滚恢复出新内容」。</p>
+</div>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：越权删除台账（本次未提交改动正在做的功能）</h4>
+  <p>解决的问题：<code>report-only</code> / <code>deny-all</code> / <code>quarantine</code> 三档都不恢复被删文件，
+  而下一批的基线从磁盘重建 → <b>同一次删除只响一次就消失</b>，被删的源文件可静默一路带到交付。</p>
+  <p>实现：<code>updateDeletionLedger</code>（<code>:103-128</code>）是纯函数，三条规则
+  「销账看盘不看批 / 入账看盘不看报 / 首见批次不漂移」，且<b>每条 settle 出口都结算</b>
+  （含 clean 批，<code>:201-215</code>）—— 因为缺陷形态恰恰是「下一批干干净净，被删文件从此没人再提」。</p>
+</div>
+
+<h2>3. 安全边界分析（重点：我用运行时探针实测过）</h2>
+
+<p>这一节的所有结论都来自<b>实际执行</b> <code>dist-electron</code> 编译产物做的探针，
+而非阅读推断。探针脚本为只读，未改动任何项目文件。</p>
+
+<h3>3.1 沙箱五件套</h3>
+<table>
+  <tr><th>组件</th><th>职责</th><th>实测评价</th></tr>
+  <tr><td><code>PathPolicy</code></td><td>路径判定（realpath 后七级）</td><td class="ok">扎实，realpath 处理 junction 与 8.3 短名</td></tr>
+  <tr><td><code>CommandPolicy</code></td><td>命令白名单 + 黑名单 + 元字符</td><td class="warn">有真实绕过面（见 3.3）</td></tr>
+  <tr><td><code>TimeoutGate</code></td><td>deadline / idle 双超时</td><td class="warn">idle 只对外部适配器开，内置执行器刻意忽略</td></tr>
+  <tr><td><code>CircuitBreaker</code></td><td>连续失败熔断</td><td class="ok">三态闭环，认证失败也计入（避免每任务再烧配额）</td></tr>
+  <tr><td><code>FileJournal</code> + <code>SnapshotStore</code></td><td>变更检测 + 内容备份</td><td class="ok">不用 git、不用硬链接，只备份本批 zone</td></tr>
+</table>
+
+<h4>PathPolicy 实测结果</h4>
+<pre><code>zone="src/"        : package.json=deny  package.json.=deny  .env=deny  .git/config=deny
+zone="."           : package.json=deny  package.json.=ALLOW .env=deny  .git/config=deny
+zone=""            : package.json=deny  package.json.=ALLOW .env=deny  .git/config=deny
+zone=undefined     : package.json=deny  package.json.=ALLOW .env=deny  .git/config=deny
+→ src/a.js=ALLOW(zone)   tests/b.js=deny(zone 越权)</code></pre>
+
+<div class="card green">
+  <p><span class="tag t-green">结论</span><b>子代理报告的「尾随点绕过保护文件」不成立</b>，我实测推翻：</p>
+  <p>它推断 <code>package.json.</code> 会被 Windows 归一化到 <code>package.json</code> 从而覆盖清单文件。
+  实测：在 NTFS 上写入 <code>guard.txt.</code> 后，目录里同时存在 <code>guard.txt</code>（内容未变）
+  与 <code>guard.txt.</code> 两个条目 —— <b>Windows 不再剥离尾随点，两条路径是两个文件</b>。</p>
+  <p>安全性来自另一侧：<code>PathPolicy</code> 在 <code>zoneMode: "legacy"</code>（默认）下，
+  <code>zone = "" / "." / undefined</code> 视为<b>不受限</b>（<code>path-policy.ts:212-224</code>），
+  所以 <code>package.json.</code> 只会在「zone 本身就等于全树」时才被放行 —— 那时
+  <code>package.json</code> 本身被 <code>forbidden</code> 拦住，而 <code>package.json.</code> 是另一个文件、
+  不改原文件。<b>不构成覆盖。</b></p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>但有一个真实且更值得注意的语义：zone 不受限 = 全树可写</b></p>
+  <p>默认 <code>zoneMode: "legacy"</code>（<code>path-policy.ts:150</code>），此时
+  <code>zoneIsUnrestricted</code> 对 <code>""</code> 与 <code>"."</code> 都返回 <code>true</code>（<code>:212-217</code>）。</p>
+  <p>后果是<b>双重失效</b>：写入侧全树放行，而 <code>BatchGuard.detect</code> 的
+  <code>zones.some(z =&gt; isInsideZone(c.path, z))</code>（<code>:339</code>）对全树 zone 恒真
+  → 四档仲裁全部变成 no-op。</p>
+  <p><b>缓解</b>：正常规划路径下 zone 来自 PRD 产物路径，不会退化成 <code>""</code>/<code>"."</code>；
+  且 <code>forbiddenWrite</code>（<code>package.json</code> / <code>.env</code> / <code>.git/**</code> /
+  <code>node_modules/**</code>）是<b>独立于 zone 的硬地板</b>，实测在四种 zone 下全部 deny。
+  所以这是纵深防御的「第二层默认关闭」，不是裸奔。</p>
+</div>
+
+<h3>3.2 CommandPolicy 实测结果</h3>
+<pre><code>ALLOW  node ["x.js"]                     ← 正常
+ALLOW  /tmp/xxx/node.cmd ["x.js"]        ← <b>basename 冒充</b>
+ALLOW  /tmp/xxx/node ["x.js"]            ← 同上
+ALLOW  /usr/local/bin/eslint.bat ["x"]   ← 同上
+ALLOW  vitest.com ["run"]                ← 同上
+ALLOW  npm ["run","build"]
+ALLOW  git ["commit","-m","x"]           ← commit 未禁
+DENY   powershell / curl                 ← 黑名单生效
+DENY   node ["-e","1"]                   ← eval flag 生效
+DENY   python ["-c","1"]                 ← eval flag 生效
+
+元字符集合边界：
+ALLOW  a"b   ALLOW a(b)   ALLOW a=b   ALLOW 100%
+DENY   %PATH%   DENY a!b   ALLOW a'b   ALLOW a,b</code></pre>
+
+<div class="card red">
+  <p><span class="tag t-red">高</span><b>绕过面 1：命令名前缀无关 —— 任意目录下的同名文件都被当作白名单命令</b></p>
+  <p><code>command-policy.ts:173-177</code> 的 <code>baseName</code> 只取路径末段并剥一个扩展名，
+  <b>完全不限制可执行文件的所在路径</b>。实测把文件命名为 <code>node.cmd</code> 放在任意临时目录，
+  <code>check()</code> 即返回 ALLOW。</p>
+  <p>触发条件：智能体在自己 zone 内可写文件（path-policy 允许），把恶意脚本命名为
+  <code>node.cmd</code> / <code>eslint.bat</code>，再以路径形式调用 → 以白名单名义执行任意程序。</p>
+</div>
+
+<div class="card red">
+  <p><span class="tag t-red">高</span><b>绕过面 2：白名单只约束「解释器名」，不约束「解释什么」</b></p>
+  <p><code>EVAL_FLAGS</code>（<code>:147-152</code>）只拦 <code>node -e/-p</code> 与 <code>python -c</code>，
+  而 <code>node</code> / <code>python</code> / <code>make</code> / <code>cargo</code> / <code>gradlew</code> / <code>dotnet</code>
+  都在白名单里。</p>
+  <p>智能体只需在自己 zone 内写一个 <code>x.js</code>，随后 <code>node x.js</code> 即等价于「以用户权限在宿主执行任意代码」。
+  而验证/冒烟命令<b>本身就来自大脑生成的产物</b>（<code>verifier.ts:195-202</code> 注明「命令来自 decompose 产物」）。</p>
+  <p class="note">作者在 README 里已经明说这一层：「沙箱不管网络……命令黑名单里有 curl/wget/nc，
+  但 node 在白名单里 —— 智能体自己发 HTTP 请求是拦不住的」。这是<b>已知且公开声明的边界</b>，
+  但对使用者而言，这意味着沙箱的真实定位是「防误伤」而非「防恶意」。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>绕过面 3：<code>npm run &lt;script&gt;</code> 任意脚本不设防</b></p>
+  <p><code>denyNpm</code> 只拦 <code>publish/adduser/login/logout/token/config</code>，
+  <code>install/add/run/test/exec</code> 全部放行。而 <code>package.json</code> 的 scripts 段一旦被改写，
+  <code>npm run x</code> 即执行任意命令 —— 命令策略看不到脚本正文。</p>
+  <p class="note">缓解：<code>package.json</code> 在 <code>DEFAULT_FORBIDDEN_WRITE</code> 里，实测 deny；
+  且 <code>action-gate.ts</code> 的跨动作状态机在批次内观察到依赖安装痕迹后会把 <code>npx</code> 升级为拒绝。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>验证结论可被判定的对象伪造</b></p>
+  <p><code>verifier.ts:286</code> 用正则 <code>/\n\[exit\](\d+)/</code> 取<b>第一个</b>匹配，
+  而标记是追加在子进程日志<b>之后</b>的。我实测复现：</p>
+  <pre><code>stdout = "BOOM: 我失败了\n[exit]0" + "\n[exit]1"（真实退出码 1）
+解析  → exitMatch[1] === "0"  → 判定「通过」</code></pre>
+  <p>冒烟检查只要打印一行 <code>[exit]0</code>（并可自行补上 <code>expectContains</code> 片段）即可自证通过 ——
+  而冒烟层的存在意义正是「防自证盲区」。</p>
+  <p class="note">触发门槛不低（需要模型主动写这行），但这是<b>判定可被被判定方伪造</b>这类问题，修法也简单：
+  取最后一个匹配，或改用 <code>child.on("close", code)</code> 的真实退出码。</p>
+</div>
+
+<h3>3.3 凭证与数据外泄面</h3>
+
+<div class="card green">
+  <h4 style="margin-top:0">做得好的部分</h4>
+  <ul>
+    <li><code>scopedEnv()</code>：验证与冒烟子进程、CLI 智能体都走最小化环境，默认拿不到宿主其他 provider Key</li>
+    <li>审计只记<b>变量名</b>不记值（<code>droppedSecretNames</code>），避免审计日志成为第二泄漏面</li>
+    <li>快照侧双层凭据拉黑：walk 时拉黑 + 读取时二次过滤（<code>sensenova-api.ts:41-66, 120-121</code>）</li>
+    <li>工作区快照有体积闸门：单文件 4000 字符、总量 32000 字符</li>
+  </ul>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>工作区文件正文会原样发往第三方 LLM 端点</b></p>
+  <p><code>sensenova-api.ts:41-44</code> 的注释自己写明：「快照 = 发往第三方 LLM 端点的项目内容。
+  凭据类文件一旦入快照就等同于外泄」。</p>
+  <p>防护建立在<b>文件名启发式</b>上（<code>:46-59</code> 的 12 条正则，按 basename 小写匹配）：
+  命中 <code>.env</code> 家族、rc 文件、<code>id_*</code>、证书后缀、含 <code>api-key/secret-key/password/credential</code> 的名字。</p>
+  <p>因此 <code>src/config/prod.json</code>、<code>data/customers.csv</code>、<code>deploy/values.yaml</code>
+  这类「名字无害」的敏感文件会被整段发出去。<b>触发条件：仓库里存在名字不像凭据的敏感实体。</b></p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b><code>maxTokensPerRun</code> 是软上限，不具备阻断能力</b></p>
+  <ul>
+    <li><code>headless/protocol.ts:104</code> 字段注释自称<b>软上限</b></li>
+    <li><code>:285-295</code> 解析期只校验「必须是正数」，不与任何运行期计量联动</li>
+    <li>执行器侧 <code>meteredLlm</code> 是<b>调用后累计</b>，且只有自建 client 被包装
+    （<code>sensenova-api.ts:76-84</code> 解释了为什么不能重复包：注入方自己会包一次）</li>
+  </ul>
+  <p>结论：它是「用量上报 + 事后告警」，不是预算闸门。宿主注入自己的 client 时，
+  执行器消耗甚至不进这个 meter。</p>
+  <p class="note"><b>值得肯定</b>：作者没有假装管住了，而是把盲区写进契约注释并在看板上念出来（<code>budgetBlindNote</code>）。
+  工程诚实度高于多数项目。</p>
+</div>
+
+<div class="card blue">
+  <p><span class="tag t-blue">提示</span><b>headless serve 形态：无鉴权、无 TLS</b></p>
+  <p><code>serve.ts:13-22</code> 明确声明刻意不做鉴权、不做任务队列、不内嵌看板；
+  <code>serve-main.ts</code> 无 TLS 配置。README 也警告「本机/内网/SSH 隧道后用」。</p>
+  <p>触发条件：绑到非 loopback 地址 → 任意可达方可读 <code>/state</code>、订阅 <code>/events</code>
+  （含路径、阶段决策、用量）、并 <code>/pause</code> <code>/resume</code> 干预运行。
+  <b>属于已声明的设计取舍，但部署时必须受网络层保护。</b></p>
+</div>
+
+<h3>3.4 安全边界总结</h3>
+<table>
+  <tr><th>防护目标</th><th>实际强度</th><th>依据</th></tr>
+  <tr><td>防误伤（模型写错文件）</td><td class="ok">强</td><td>realpath 后七级判定 + forbidden 硬地板 + 快照回滚 + 四档仲裁</td></tr>
+  <tr><td>防越权写项目根外</td><td class="ok">强</td><td>实测 junction / 8.3 短名 / 绝对路径 / <code>..</code> 全被拦</td></tr>
+  <tr><td>防命令注入（宿主任意代码）</td><td class="warn">弱</td><td>白名单只认 basename；解释器 + 自写脚本即 RCE；README 已声明</td></tr>
+  <tr><td>防凭证外泄</td><td class="warn">中</td><td>子进程 env 最小化；但快照侧靠文件名启发式</td></tr>
+  <tr><td>防恶意模型</td><td class="no">不成立</td><td>沙箱是「能写哪、能跑哪」的判定层，不是安全沙箱（无网络隔离、无进程隔离）</td></tr>
+</table>
+<p class="sub"><b>一句话</b>：这是一套设计精良的「<b>防误伤 + 可回滚 + 可归因</b>」体系，
+不应被当作对抗恶意代码的安全沙箱使用。作者在 README 里对此是诚实的。</p>
+
+<h2>4. 智能体适配层与大脑层</h2>
+
+<h3>4.1 三类适配器</h3>
+<table>
+  <tr><th></th><th>local-llm</th><th>cli</th><th>http-bridge</th></tr>
+  <tr><td>文件</td><td><code>sensenova-api.ts</code></td><td><code>cli-agent.ts</code></td><td><code>http-bridge.ts</code></td></tr>
+  <tr><td>能力</td><td><b>只有 read/edit/create</b>，不跑命令</td><td>声明什么就跑什么</td><td>由宿主实现决定</td></tr>
+  <tr><td>并发</td><td>已配 key 数</td><td>进程数</td><td>4 端点轮询</td></tr>
+  <tr><td>超时</td><td>只认 deadline（idle 必假阳）</td><td>TimeoutGate + killTree</td><td>分层 300s→600s</td></tr>
+  <tr><td>入参</td><td>进程内调用 + 工作区快照</td><td>prompt 文件（不用 argv）</td><td>HTTP body + SSE</td></tr>
+</table>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：统一契约 + 统一事件出口收掉了最容易出竞态的语义</h4>
+  <p><code>shared/agent-contract.ts</code> 定义统一契约（<code>AGENT_PROTOCOL_VERSION = "ox-agent/2"</code>），
+  <code>electron/agents/run-session.ts</code> 的 <code>RunSession</code> 把「并发、取消、终态不丢」收在单一实现里：
+  <code>push()</code> 在 run 结束后只丢 <code>log</code> 而保留终态事件；<code>wake()</code> 是唯一唤醒入口。
+  三类适配器复用它，适配器作者不需要各自处理「幻醒 / 丢事件」。</p>
+</div>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：超时三层分层，并点名反模式</h4>
+  <p><code>sensenova-api.ts:94-101</code> 的注释直接点出反模式：
+  「一次慢请求吃光整轮预算、failover 拿不到第二次机会」，所以：
+  单请求 <code>EXECUTOR_TIMEOUT_MS = 300s</code>、整轮 <code>runDeadlineMs = 600s</code>、
+  大脑层 <code>BRAIN_TIMEOUT_MS = 120s</code>，三者不可混用。</p>
+  <p>更细的一处：该适配器<b>刻意忽略 <code>idleTimeoutMs</code></b>（<code>:85-93</code>），
+  理由是它在单次请求期间零事件，idle watchdog 会在每次「慢但健康」的生成上误杀
+  （一次请求在途最长 300s 期间本来不产生事件）。这个取舍有明确论证，不是遗漏。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">低</span><b>契约字段与实现落差：<code>idleTimeoutMs</code> 被静默忽略且不暴露</b></p>
+  <p>契约（<code>agent-contract.ts</code> 的 <code>DEFAULT_AGENT_LIMITS</code>）提供了该字段，
+  实现只兑现 <code>runDeadlineMs</code>，而 <code>capabilities()</code> 并不把「部分兑现」这件事告诉调度方。
+  宿主设了 <code>idleTimeoutMs</code> 会以为生效。</p>
+</div>
+
+<h3>4.2 LLM 线路池与故障转移</h3>
+
+<h4>线路条数怎么算</h4>
+<pre><code>线路池 = SENSENOVA_MODELS(4) × SENSENOVA_KEY_VARS(3) = 12 条
+       + AMD_API_KEY → amd-radeon（DeepSeek-V4-Flash）= 1 条
+       = 13 条</code></pre>
+<p><code>SENSENOVA_MODELS_EXTRA</code>（kimi-k3）<b>刻意不进默认轮转</b>，有测试守着这一点。</p>
+<p>本机 <code>.env</code> 里实际配了 5 个 key 变量（3 把 SenseNova + AMD + NVIDIA），
+但 NVIDIA 不在默认 provider 表中 —— 因为项目文档记录其实测「280s 无响应」。</p>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：对端异常的资源攻击被全面加上界</h4>
+  <pre><code>RETRY_AFTER_COOLDOWN_CAP_MS = 300_000   // 冷却时长封顶 5 分钟
+RETRY_AFTER_SLEEP_CAP      = 60_000     // 单次休眠封顶 60s（防超大 retry-after 睡死调用方）
+ERROR_BODY_BYTE_CAP        = 64KB       // 错误体有界读取
+RESPONSE_BODY_BYTE_CAP     = 8MB        // 响应体有界读取
+maxStdoutBytes             = 2 MiB</code></pre>
+  <p>即「服务端给再大的 retry-after / 再大的 body 也拖不死、撑不爆平台」。
+  全线路冷却时显式抛 <code>AllRoutesCoolingError</code>，<b>有界失败而非无限等待</b>。</p>
+  <p>429 只冷却命中线路本身，请求立即落到同 key 其他模型 → 其他 key → 其他 provider。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b><code>capabilities().maxConcurrency</code> 口径不一致</b></p>
+  <p>注释（<code>sensenova-api.ts:149-153</code>）称并发上限是「已配 failover key 数（the real ceiling on parallel calls）」，
+  实现缺省回落 <code>SENSENOVA_KEY_VARS.length</code>（=3），而线路池真实条数是 key × 模型 = 12。</p>
+  <p>后果：多条并发请求可能压在同一 key 的同一模型上，直接打入 429 冷却。
+  <b>把「key 数」当「线路数」既低估了线路总数，也无法表达「每 key 限流」。</b></p>
+</div>
+
+<h3>4.3 headless 协议</h3>
+<table>
+  <tr><th>维度</th><th>实现</th></tr>
+  <tr><td>协议版本</td><td><code>ox-headless/1</code>，最低 Node <code>20.19</code></td></tr>
+  <tr><td>输入</td><td>stdin 收全量 JSON → <code>parseSpec</code>（纯函数，问题聚合成 <code>issues</code>）</td></tr>
+  <tr><td>输出</td><td>stdout JSONL，15 种事件：<code>hello / stage / log / agents / prd / tasks / task / run / conflict /
+  verification / escalation / usage / receipt / done / error</code></td></tr>
+  <tr><td>退出码</td><td><b>0</b> = delivered · <b>2</b> = repair rounds exhausted · <b>1</b> = fatal</td></tr>
+  <tr><td>服务形态</td><td>serve：SSE 事件流（后连上的客户端会先补齐历史）+ <code>POST /run</code>（忙时 409）</td></tr>
+</table>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：失败前置，不留半成品</h4>
+  <p><code>run-spec.ts</code> 在 <code>hello</code> 之后立刻检查凭证缺口（<code>missingCredentials</code>），
+  缺失时输出 <code>error</code> 并 <code>return 1</code>，<b>而不是等第一次模型调用才吐内部错误</b>。</p>
+  <p>同样地，<code>runtimeGap()</code> 按<b>特性</b>（<code>AbortSignal.any</code>）判定 Node 版本，
+  缺了先说清「换哪个版本」，不会跑到一半抛 <code>TypeError</code> 堆栈。</p>
+  <p>信号处理：<code>headless-main</code> 装 SIGINT/SIGTERM 处理器（先刷 <code>error</code> 行再退出，
+  第二下才硬退出），回收放到<b>下一次运行启动时</b>（<code>pruneStaleBackups</code>，只认 <code>batch-*</code> 且超过 24h）。</p>
+</div>
+
+<h2>5. 工程质量门禁体系（本项目的核心竞争力）</h2>
+
+<p><code>npm run verify</code> 是唯一验收入口，20 个 <code>npm run</code> 段 <code>&amp;&amp;</code> 串联，只认退出码：</p>
+<pre><code>1  check:residue          变异残留自愈（<b>首段</b>：残留会让测试堆涨到 4.6GB 后 OOM 且不退出）
+2  typecheck              4 套 tsconfig（renderer / electron / headless / vite 配置）
+3  lint                   eslint flat config + react-hooks；shared/** 有分层红线
+4  check:unwired          导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL
+5  check:scripts          工具脚本语法
+6  check:scripts-wired    脚本接线（入口只认 package.json 引用的脚本）
+7  check:packaged-paths   打包路径缺陷判定
+8  check:masker           掩空器自测 24 例
+9  check:tests-collected  盘上有但 vitest 不收集的测试 → FAIL
+10 vitest                 1338 用例（默认跳过真实 API smoke）
+11 mutation:quick         tier 1 目标，每目标 1 个 aggregate 变异（最弱档）
+12 mutation:touched       只对本轮改到的文件做变异
+13 vite build + 14 build:headless
+15 smoke:artifact         产物层离线冒烟（防「源码全绿但产物坏了」）
+16~20 smoke:snapshot-secrets / gateway / coze / import / offline-e2e</code></pre>
+
+<div class="card green">
+  <h4 style="margin-top:0">这是全项目最值得学的部分：把「缺陷类」变成「门禁」</h4>
+  <p>作者反复使用同一个手法 —— 每修一个漏挂，就补一条门禁让同类问题<b>未来自动变红</b>，而不是修一次了事。
+  三个典型例子：</p>
+  <ul>
+    <li><code>test.include</code> 不含 <code>headless/**</code> 而 coverage 含它 → 补 include，
+    并新增 <code>check-tests-collected.mjs</code>；该门禁判据刻意取自 <code>vitest list --filesOnly</code>
+    的<b>真实输出</b>，而不是自己解析 include 再匹配 glob（后者要重实现 picomatch 语义，会与 vitest 真实行为分叉）。</li>
+    <li><code>check-syntax.mjs</code> 不认 <code>.js</code> → 扩到 <code>.js</code>，而不是放宽门禁。</li>
+    <li><code>release.yml</code> 打 tag 直接 build、<b>不先跑 verify</b> → 加 verify job 并让 build <code>needs: verify</code>。</li>
+  </ul>
+</div>
+
+<div class="card green">
+  <h4 style="margin-top:0">变异测试：区分 aggregate 与 site 两个口径</h4>
+  <table>
+    <tr><th>口径</th><th>命令</th><th>含义</th></tr>
+    <tr><td>aggregate</td><td><code>npm run mutation</code></td><td>每算子<b>至少一处</b>被覆盖 —— 会掩盖位点</td></tr>
+    <tr><td><b>site</b></td><td><code>npm run mutation:audit</code></td><td><b>每一处位点</b>单独验证</td></tr>
+  </table>
+  <p>为什么必须区分：aggregate 用 <code>replaceAll</code> 一次改掉某算子的全部位点，「任一处被杀」即报杀死。
+  项目文档记录过一个实例：<code>snapshot-store.ts</code> 的 aggregate 报 2/2 全杀，
+  而源码里有 12 个 <code>continue</code>，拆单点后 <b>5 处存活</b>。</p>
+  <p>这个区分本身就有价值 —— 大多数项目连「变异测试」都不做，更不会质疑自己的口径。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>但 verify 里跑的是最弱档</b></p>
+  <p><code>mutation:quick</code> = <code>--tier=1 --limit=1</code>，每个 tier-1 目标只跑 1 个 aggregate 变异。
+  它过了<b>不等于</b>「每处位点都有断言」。作者在 SKILL.md 的「三条硬事实」里第一条就写明这一点，
+  并把全量 site 审计单独放在 CI 的 <code>mutation-full</code> job（35 min 上限）。</p>
+  <p class="note">这是诚实的自我标注，但如果读者只看「verify 全绿」就以为变异全覆盖，会误判。</p>
+</div>
+
+<h3>5.1 新模块未进变异门禁</h3>
+<div class="card amber">
+  <p><span class="tag t-amber">低</span><b>本次新增的 <code>shared/policy-file.ts</code> 与 <code>electron/sandbox/policy-dir.ts</code>
+  在 <code>mutation-check.mjs</code> 的 <code>TARGETS</code> 里零命中。</b></p>
+  <p>该项目自己的铁律写着：「新变异目标要自己登记，否则新代码不进变异门禁」
+  （<code>.qoder/skills/ox-commander-dev/SKILL.md</code>）。</p>
+  <p class="note">与本次未提交的 <code>policy.d/</code>（策略即代码）功能同时出现 —— 属同一批未完工作的一部分，
+  不单独定性为缺陷。</p>
+</div>
+
+<h2>6. 文档与自洽性</h2>
+
+<p>这个项目的文档量远超同类：README 20KB、CHANGELOG 97KB、<code>docs/</code> 下 10 篇专题报告
+（含 113KB 的全栈评审、82KB 的实施全记录）。更有价值的是它<b>自带一份给 agent 用的开发手册</b>：
+<code>.qoder/skills/ox-commander-dev/</code>（SKILL.md + 两份 references）。</p>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：「别信文档，以代码为准」被写成了手册章节</h4>
+  <p>手册里有一节叫「已知不一致」，逐条列出 README/docs 与代码的口径差异，并在不成立时标注「已修」。
+  这种做法在开源项目里很少见 —— 多数项目选择删掉旧说法，而不是留下审计轨迹。</p>
+  <p>被记录并修正过的实例：
+  README「审计按天轮转」→ 实际按大小 2 MiB；
+  README「回滚/隔离/报告四档」→ 曾实际只有三种行为；
+  <code>docs</code> 与代码的「930 用例」→ 实际 1151 等。</p>
+</div>
+
+<div class="card green">
+  <h4 style="margin-top:0">设计亮点：作者主动推翻自己子代理的结论并留证</h4>
+  <p><code>docs/2026-09-24-consistency-review.md</code> 开头记录：两只只读子代理调研后，主代理逐条回代码复核，
+  <b>当场推翻了两条回报</b> —— 一条是被留档日志污染的用例数，
+  另一条是「<code>scoped-env.ts</code> 注释与代码自相矛盾」被判定为<b>假缺陷</b>
+  （两层都叫 allowlist 是措辞陷阱，代码实际让 <code>grants</code> 优先于 denylist，注释与实现一致）。</p>
+  <p class="sub">这正是我本次分析时采用的同一方法（见第 3 节，我实测推翻了子代理的「尾随点绕过」结论）。
+  说明作者对「AI 报告需要回代码复核」这件事有清醒认识。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">低</span><b>文档与代码的行号锚点会漂移，且手册自己承认</b></p>
+  <p>变异门禁的等价白名单在 <code>scripts/mutation-check.mjs</code> 的 <code>EQUIVALENT_SITES</code> 里
+  以 <code>{file, op, line}</code> 行号锚点登记。在锚点行上方插/删行 → 白名单失配 → site 口径当场红。
+  手册对此的态度是：处置应是「按新行号校回并重新确认那两层防御仍在」，<b>不是删表项</b> —— 这个原则是对的。</p>
+  <p>另一处：<code>src/*.test.ts</code> 里几十个 <code>it("[375] …")</code> 的数字编码的是<b>写下那天</b>的行号，
+  代码一挪就过期（<code>[375]</code> 那段现在在 <code>orchestrator.ts:432</code>）。
+  手册明确提醒「按名字读它，别拿它定位」。</p>
+</div>
+
+<h2>7. 竞品定位（项目自评 + 我的核验）</h2>
+
+<p>项目自带一份 15 个同类项目的竞品调研，方法论上是诚实的（明确标注「README 关键词命中 = 它自己宣称的下界，
+不等于它有没有做」，且指出 OxCommander 那一列是自评、口径不可直接比）。</p>
+
+<table>
+  <tr><th>路线</th><th>采用者（15 个同类中）</th><th>OxCommander 的取舍</th></tr>
+  <tr><td>git worktree 物理隔离</td><td><b>12 个</b></td><td rowspan="3">走少数派：<b>共享工作区 + zone 互斥</b>。优势是两个 agent 能协同改一个跨模块接口；
+  代价是必须自建越权检测与回滚 —— 而这一层确实建起来了（第 3 节）</td></tr>
+  <tr><td>共享工作区 + 互斥</td><td>OxCommander + <code>agor</code></td></tr>
+  <tr><td>组织/治理层（不管代码）</td><td><code>paperclip</code> / <code>brigade</code> / <code>bernstein</code></td></tr>
+</table>
+
+<p><b>三条被项目主张的差异化优势，我的核验结论：</b></p>
+<table>
+  <tr><th>主张</th><th>核验</th></tr>
+  <tr><td>唯一自带 LLM 执行器，不依赖订阅</td><td class="ok">成立。本地实测能构造 SenseNova 池（13 条线路），
+  竞品确实普遍是 BYO 订阅</td></tr>
+  <tr><td>唯一「共享工作区 + zone 互斥」</td><td class="ok">基本成立，但 <code>agor</code> 也提到 zone。
+  真正的差异在「越权检测 + 四档仲裁 + 回滚」这套配套是否完整 —— 这套确实完整</td></tr>
+  <tr><td>唯一有变异测试门禁自证</td><td class="ok">成立。57 个目标模块、site 口径逐位点审计，
+  在这类项目里确实罕见</td></tr>
+</table>
+
+<div class="card amber">
+  <p><span class="tag t-amber">中</span><b>项目自评已诚实的短板</b></p>
+  <ul>
+    <li><b>无移动端 / 无远程</b> —— 长任务（5–15 min）离开工位就断联。这是最真实的短板（Orca 在此维度 5/5）</li>
+    <li><b>CLI 与桌面能力不齐</b> —— CLI 缺 <code>snapshotRoot</code> / <code>manifestDir</code> / <code>escalationPolicy</code>；
+    桌面缺 <code>pause</code> / <code>resume</code></li>
+    <li><b>无人知晓</b> —— star 数 0，而三个头部项目 73k–92k。技术优势不等于被看见</li>
+  </ul>
+</div>
+
+<h2>8. 风险清单汇总</h2>
+
+<h3>8.1 阻断级（当前状态）</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>证据</th><th>修复量级</th></tr>
+  <tr><td>B1</td><td><b>工作区门禁红：<code>BatchGuard.deletions</code> 字段未声明</b></td>
+  <td><code>batch-guard.ts:301,306</code> 使用 <code>this.deletions</code>，类中无声明（<code>:139-157</code>）；
+  运行时 <code>TypeError: prev is not iterable</code> @ <code>:113</code></td>
+  <td>加一行字段声明 + 初始化</td></tr>
+</table>
+<p class="sub">性质：<b>未提交的半成品</b>。本轮改动（越权删除台账）已完成 <code>CarriedDeletion</code> 接口、
+<code>updateDeletionLedger</code> 纯函数、四档分支改造、<code>settleLedger</code> 接线，
+但漏了类字段声明与初始化，导致 18 条测试失败 + 4 段门禁中断。</p>
+
+<h3>8.2 高优先级</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>证据</th><th>影响</th></tr>
+  <tr><td>H1</td><td><b>命令白名单只认 basename，不限制路径</b></td>
+  <td><code>command-policy.ts:173-177</code>；实测任意目录下 <code>node.cmd</code> 被 ALLOW</td>
+  <td>智能体在自己 zone 内放同名可执行文件即可以白名单名义执行任意程序</td></tr>
+  <tr><td>H2</td><td><b>验证/冒烟结论可被伪造</b></td>
+  <td><code>verifier.ts:286</code> 正则取<b>第一个</b> <code>[exit]N</code>；实测复现「真实退出码 1 被判通过」</td>
+  <td>「防自证盲区」这道层可被被判定方绕过</td></tr>
+  <tr><td>H3</td><td><b>解释器 + 自写脚本 = 宿主任意代码执行</b></td>
+  <td><code>EVAL_FLAGS</code> 只拦 <code>node -e</code> / <code>python -c</code>；
+  <code>node x.js</code> 全放行；验证命令来自 LLM 产物</td>
+  <td>沙箱的真实定位是「防误伤」而非「防恶意」，需使用方知情</td></tr>
+</table>
+
+<h3>8.3 中优先级</h3>
+<table>
+  <tr><th>#</th><th>问题</th><th>证据</th></tr>
+  <tr><td>M1</td><td>赛马输家的写入不参与回滚/隔离</td><td><code>scheduler.ts:481-488</code> 对 <code>batch-guard.ts:331-336</code> 的「批内不可能并发写同一文件」前提不成立</td></tr>
+  <tr><td>M2</td><td>no-router 回退路径绕过并发准入</td><td><code>scheduler.ts:328</code>（不过 <code>admitConcurrency</code>）对 <code>:347</code></td></tr>
+  <tr><td>M3</td><td>快照侧凭据防护是文件名启发式</td><td><code>sensenova-api.ts:41-66</code>；<code>config.json</code> / <code>values.yaml</code> 类文件不受保护</td></tr>
+  <tr><td>M4</td><td><code>maxTokensPerRun</code> 无阻断能力</td><td><code>protocol.ts:104,285-295</code>；<code>meteredLlm</code> 是调用后累计</td></tr>
+  <tr><td>M5</td><td><code>maxConcurrency</code> 口径不一致（key 数 vs 线路数）</td><td><code>sensenova-api.ts:149-153</code> 对 <code>:163</code></td></tr>
+  <tr><td>M6</td><td>零验证命令时 <code>every()</code> 恒真而放行</td><td><code>verifier.ts:143,181</code>（判定不改，只有说法加固）</td></tr>
+  <tr><td>M7</td><td>zone 退化为 <code>""</code> / <code>"."</code> 时仲裁四档全成空转</td><td><code>path-policy.ts:212-224</code> 对 <code>batch-guard.ts:339</code>（正常规划路径下不发生）</td></tr>
+  <tr><td>M8</td><td>headless serve 无鉴权、无 TLS</td><td><code>serve.ts:13-22</code>（已声明，需网络层保护）</td></tr>
+</table>
+
+<h3>8.4 低优先级 / 待复核</h3>
+<ul>
+  <li><code>setTimeout</code>/<code>Date.now()</code> 派生 id 的碰撞面（<code>scheduler.ts:293,322</code>）—— 项目只修了项目 id</li>
+  <li><code>file-journal</code> 用 <code>size + mtimeMs</code> 判据，同 size 同 mtime 的改动会漏检（<code>:127</code>，注释已承认）</li>
+  <li><code>shared/glob.ts:54</code> 的 RegExp <code>cache</code> 无上限无淘汰，而 key 来自模型写的 glob</li>
+  <li>新增 <code>policy-file.ts</code> / <code>policy-dir.ts</code> 未登记变异门禁目标</li>
+  <li><code>execToken</code> credential 的 <code>tokenResolver</code> 直接 <code>spawn</code>，不过 <code>CommandPolicy</code>
+  （<code>manifest-loader.ts:135-160</code>）—— 定位是「指挥机自己的取令牌命令」，红线是只加载自己写的 <code>agents.d</code></li>
+</ul>
+
+<h2>9. 改进建议（按优先级）</h2>
+
+<div class="card red">
+  <p><span class="tag t-red">P0</span><b>恢复门禁绿灯</b> —— 在 <code>BatchGuard</code> 类里补字段声明：</p>
+  <pre><code>private deletions: Map&lt;string, string&gt; = new Map();</code></pre>
+  <p>然后按项目自己的档位跑：<code>npm run typecheck &amp;&amp; npm run lint &amp;&amp; npx vitest run src/sandbox-journal.test.ts src/scheduler.test.ts src/headless-protocol.test.ts</code>，
+  最后 <code>npm run verify</code> 取 EXIT 0。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">P1</span><b>修 H2（验证结论可伪造）</b> —— 改动最小、收益明确：</p>
+  <p>把 <code>verifier.ts:286</code> 的正则从「取第一个」改为「取最后一个」，或改用
+  <code>child.on("close", code)</code> 的真实退出码（后者更彻底，但需要改 <code>runOnce</code> 的返回结构）。</p>
+  <p>同时补一条回归用例：子进程打印 <code>[exit]0</code> 但真实退出码为 1 → 必须判失败。</p>
+</div>
+
+<div class="card amber">
+  <p><span class="tag t-amber">P1</span><b>收紧 H1（basename 冒充）</b> —— 两条可选：</p>
+  <ul>
+    <li>命令为路径形式时，要求它落在可信目录（PATH 内的标准安装目录 / 项目 <code>node_modules/.bin</code>）</li>
+    <li>或对路径形式的命令做 realpath + 前缀校验，拒绝「项目根内的可执行文件」被当作白名单命令</li>
+  </ul>
+  <p class="note">注意这会碰 <code>command-policy.ts</code> 的变异门禁目标（含等价白名单行号锚点），
+  改完要按手册规则校回锚点。</p>
+</div>
+
+<div class="card blue">
+  <p><span class="tag t-blue">P2</span><b>把 README 的「安全边界」从文档中部提到显眼位置</b></p>
+  <p>项目自评已指出：「沙箱是全赛道最稀缺的能力……在同类里是头部水平，但对外完全没讲」。
+  当前 README 里安全边界藏在文档中部，而竞品矩阵显示 12 个同类里 4 个在沙箱维度是 <code>0/6</code>。
+  这是「已有优势没变成可展示证据」的典型。</p>
+</div>
+
+<div class="card blue">
+  <p><span class="tag t-blue">P2</span><b>补齐 M4/M5 的两个「名不副实」</b></p>
+  <ul>
+    <li><code>maxTokensPerRun</code>：要么改名（如 <code>tokenBudgetHint</code>）以消除「闸门」的暗示，
+    要么补真正的事前拦截（项目自己也在 CHANGELOG 里把这条列为「留待后续」）</li>
+    <li><code>maxConcurrency</code>：改成按线路数（key × model）计算，或在 <code>capabilities()</code> 里
+    明确暴露「这是 key 级并发」的语义</li>
+  </ul>
+</div>
+
+<h2>10. 总体评价</h2>
+
+<div class="card green">
+  <h3 style="margin-top:0">做得好的地方（值得其他项目学的）</h3>
+  <ol>
+    <li><b>把「缺陷类」变成「门禁」</b> —— 不满足于修一次，而是让同类问题未来自动变红。
+    这是整个项目最有价值的工程实践，也是它 20 段 verify 的由来。</li>
+    <li><b>对判定口径的自我批判能力</b> —— 主动区分 aggregate 与 site 两个变异口径，
+    并公开承认「verify 里跑的是最弱档」。多数项目连变异测试都不做，更不会质疑自己的口径。</li>
+    <li><b>回滚的「正面证据」纪律</b> —— 把「没有备份」定义为<b>未知</b>而非「新建」，
+    并留下具体翻车形态（根级 <code>package.json</code> 每轮重修被删一次）。这是数据安全的正确姿态。</li>
+    <li><b>工程诚实度</b> —— 盲区显式声明而不是假装管住（<code>maxTokensPerRun</code> 软上限、
+    <code>idleTimeoutMs</code> 被忽略、沙箱不管网络、serve 无鉴权）。「注释的价值高于实现本身」这类判断，
+    通常只有踩过坑的人写得出来。</li>
+    <li><b>「别信文档，以代码为准」写进手册</b> —— 并保留「已修 / 未修」的审计轨迹，而不是删掉旧说法。</li>
+    <li><b>对 AI 产出保持复核纪律</b> —— 一致性评审记录里明确写了子代理回报被当场推翻两处，
+    包括一个被误判为缺陷的措辞陷阱。</li>
+    <li><b>分离关注点的实现质量</b> —— <code>serve.ts</code> 把纯路由函数与 socket 部分拆开、
+    <code>protocol.ts</code> 的 <code>parseSpec</code> 是纯函数并聚合 <code>issues</code>，
+    协议可离线单测，无需起服务。</li>
+  </ol>
+</div>
+
+<div class="card amber">
+  <h3 style="margin-top:0">需要正视的部分</h3>
+  <ol>
+    <li><b>当前处于不可交付状态</b> —— 一处字段声明漏写，导致 20 段门禁只有第 1 段通过。
+    这本身不严重（半成品），但说明改动过程中的「快档验证」没有跑到位。</li>
+    <li><b>沙箱容易被误读为安全边界</b> —— 它防误伤、可回滚、可归因，但不防恶意代码。
+    名字叫「沙箱」，README 有说明，但风险在于使用者跳过说明。</li>
+    <li><b>变异门禁的覆盖有真实缺口</b> —— 本次新增的 <code>policy.d/</code> 两个模块零登记；
+    而项目自己的铁律要求新模块必须登记。</li>
+    <li><b>文档体量已接近维护上限</b> —— CHANGELOG 97KB + <code>docs/</code> 累计 300KB+。
+    新增读者（或新 agent）需要先读手册才能安全改动，因为关键约定散落在代码注释里
+    （行号锚点、算子字面量污染、zone 三处判据故意不同）。这是高门禁项目的固有成本。</li>
+  </ol>
+</div>
+
+<hr>
+
+<h3>综合判断</h3>
+<p>这是一个<b>工程素养明显高于平均水准</b>的 43 天个人项目：架构分层清晰、门禁体系罕见地完备、
+对自身缺陷的记录坦诚到近乎苛刻。它的核心竞争力不在功能数量，而在<b>「交付一份过了门禁的结果」
+这一命题上愿意付出的自证成本</b> —— 变异测试逐位点审计、动手前跑基线、按 zone 归因重修、
+回滚只删有正面证据的文件，这些都不是容易做的选择。</p>
+<p>它当前的主要问题只有两类：一是<b>一处未完成的改动让门禁全红</b>（补一行即可）；
+二是<b>几处安全判定可以被绕过</b>（命令白名单的 basename 匹配、冒烟结论的正则可伪造），
+其中沙箱的定位限制作者已在 README 声明，但命令白名单那两条属于实现层面的可加固点。</p>
+<p class="sub">作为对照：这个项目在「沙箱 / 验证闭环 / 变异门禁」三个维度上确实领先于同类的
+12–15 个项目（多数在沙箱维度是 0/6），但在「被看见」和「多端可达」上是空白。
+技术优势尚未转化成产品势能。</p>
+
+<hr>
+<p class="sub">
+<b>分析方法与证据边界</b><br>
+本报告的全部结论基于：① 源码通读（<code>orchestrator.ts</code> / <code>scheduler.ts</code> / <code>router.ts</code> /
+<code>verifier.ts</code> / <code>batch-guard.ts</code> / <code>path-policy.ts</code> / <code>command-policy.ts</code> /
+<code>snapshot-store.ts</code> / <code>headless/**</code> / <code>shared/**</code> 等）；
+② 本机真实执行 <code>npm run verify</code> / <code>npm test</code> / <code>npm run build</code> 取得退出码与失败明细；
+③ 用 <code>dist-electron</code> 编译产物跑只读运行时探针，实测 <code>PathPolicy</code> 与 <code>CommandPolicy</code> 的真实判定。<br><br>
+<b>未覆盖</b>：未运行 <code>mutation:audit</code>（全量 site 审计约 21–28 分钟）、未跑真实 LLM 链路冒烟
+（消耗配额）、未验证 POSIX 侧分支（本机为 win32）。项目自报的覆盖率（92.00% / 86.68%）与变异基线
+（881/881）未复测，仅在报告中标注为「项目自报」。<br><br>
+<b>注</b>：分析过程中我另行验证并<b>推翻</b>了两条来自辅助分析的推断 ——
+「尾随点 <code>package.json.</code> 可覆盖受保护文件」（实测 Windows 不再剥尾随点，且 <code>forbidden</code> 独立于 zone 生效）
+与「router 的 load 扣分会产生 NaN 导致排序不确定」（<code>agent-contract.ts:212</code> 已把 <code>maxConcurrency</code>
+归一到最小 1）。这两条未计入风险清单。
+</p>
+
+</div>
+</body>
+</html>
