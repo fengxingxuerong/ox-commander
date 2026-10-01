@@ -1181,6 +1181,31 @@ describe('executorTimeoutMs 的最后一跳', () => {
     const [b] = createDefaultAdapters(undefined, 1234);
     expect((b as SensenovaApiAdapter).requestTimeoutMs).toBe(1234);
   });
+
+  /**
+   * 路径面（P2-2）：第三个参数是 `forbiddenWrite`，它的**存在性**是承重的。
+   *
+   * `PathPolicy` 的 `forbiddenWrite` 是**替换**语义 —— 传空数组等于"已提供"，
+   * 会把内置地板（`package.json` / `.env` / `.git/**` …）整块清空。
+   * 所以"没配策略"必须表现为**键不存在**，而不是键存在但值为空。
+   *
+   * 位点 `!== undefined` 与条件展开的三元同时被这两条断言钉住：
+   * 改成 `=== undefined` 会让"没配"变成"传空数组"（地板被拆）；
+   * 分支互换则让"配了"变成不传（策略失效）。
+   */
+  it('路径面：不传 forbiddenWrite 时字段不存在（省略 = 内置默认）', () => {
+    const [a] = createDefaultAdapters();
+    expect((a as unknown as { forbiddenWrite?: readonly string[] }).forbiddenWrite).toBeUndefined();
+    // 显式传 undefined 与不传同义（TS 的可选参数）
+    const [b] = createDefaultAdapters(undefined, undefined, undefined);
+    expect((b as unknown as { forbiddenWrite?: readonly string[] }).forbiddenWrite).toBeUndefined();
+  });
+
+  it('路径面：传了 forbiddenWrite 时原样落到适配器（策略真的生效）', () => {
+    const list = ['package.json', 'secrets/**'];
+    const [a] = createDefaultAdapters(undefined, undefined, list);
+    expect((a as unknown as { forbiddenWrite?: readonly string[] }).forbiddenWrite).toEqual(list);
+  });
 });
 
 // createAgentLayer 的两个装配分支此前没有任何用例：声明来源标记与 manifestDir 加载。

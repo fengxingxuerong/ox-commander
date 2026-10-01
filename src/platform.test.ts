@@ -587,6 +587,103 @@ describe("createPlatform · policy.d 接线（策略即代码）", () => {
   });
 
   /**
+   * 路径面（P2-2）：策略的 forbidWrite 必须与内置地板**取并集**后生效。
+   *
+   * 断的是"地板没被拆"：`PathPolicy.forbiddenWrite` 是替换语义，若 platform
+   * 直接透传策略值，内置的 `package.json` 保护就会消失 —— 那是**放宽**，
+   * 正是本模块反复强调要挡住的方向。这里用真实执行器的写入路径来验。
+   */
+  it("路径面：策略追加的禁止项生效，且内置地板没被替换掉", () => {
+    const logs: string[] = [];
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, forbidWrite: ["secrets/**"] }),
+      host: { log: (t) => logs.push(t) },
+    });
+    const joined = logs.join("\n");
+    expect(joined).toContain("禁止写入清单已扩展");
+    // 策略项被念出来
+    expect(joined).toContain("secrets/**");
+
+    // 真正承重的断言在地板：从 layer 的适配器上取它拿到的清单。
+    // 直接断言"并集后仍含内置项" —— 若 platform 透传了策略值，这里会缺 package.json。
+    const adapters = platform.layer.adapters as unknown as Array<{ forbiddenWrite?: readonly string[] }>;
+    const got = adapters[0]?.forbiddenWrite;
+    expect(got).toBeDefined();
+    for (const builtin of ["package.json", ".env", ".git/**", "node_modules/**"]) {
+      expect(got).toContain(builtin);
+    }
+    expect(got).toContain("secrets/**");
+  });
+
+  it("路径面：没配 forbidWrite 时不传该字段（省略 = 内置默认）", () => {
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, denyCommands: ["node"] }),
+      host: { log: () => undefined },
+    });
+    const adapters = platform.layer.adapters as unknown as Array<{ forbiddenWrite?: readonly string[] }>;
+    // 关键：必须是 undefined 而不是空数组 —— 空数组在这个字段上是"已提供"，
+    // 会把 PathPolicy 的地板清空（替换语义）。
+    expect(adapters[0]?.forbiddenWrite).toBeUndefined();
+  });
+
+  /**
+   * 预算面（P2-2）：策略的 maxTokensPerRun 必须真的进闸门。
+   *
+   * 接通前它是一个"被念出来但没有消费者"的字段 —— 日志说"token 上限 N"，
+   * 实际闸门读的是 settings 值。这里断言两者取更小者后**真的落到 meter 上**。
+   */
+  it("预算面：策略上限真的进闸门，且与设置取更小者", () => {
+    const logs: string[] = [];
+    // 策略 100 / 设置 500 ⇒ 生效 100（否则更宽的设置会架空更严的策略）
+    const platform = createPlatform({
+      settings: settings({ maxTokensPerRun: 500 }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, maxTokensPerRun: 100 }),
+      host: { log: (t) => logs.push(t) },
+    });
+    const joined = logs.join("\n");
+    expect(joined).toContain("token 上限");
+    expect(joined).toContain("生效 100");
+    // 两侧都配时两半句都要念（与"只有策略配"那条配对，两个分支才都被钉住）
+    expect(joined).toContain("策略 100");
+    expect(joined).toContain("设置 500");
+    // meter 的快照带 limit —— 这才是"真的有消费者"的证据
+    expect(platform.usage().limit).toBe(100);
+  });
+
+  it("预算面：只有策略配了上限时也生效（不必依赖 settings）", () => {
+    const logs: string[] = [];
+    const platform = createPlatform({
+      settings: settings(), // 没有 maxTokensPerRun
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, maxTokensPerRun: 77 }),
+      host: { log: (t) => logs.push(t) },
+    });
+    expect(platform.usage().limit).toBe(77);
+    // 两侧数字都要如实念出来：只有策略一侧时不该出现「/ 设置 …」那半句
+    // （把 `!== undefined` 改成 `=== undefined` 会让它凭空多出设置侧的值）。
+    // 用「生效」定位那一行 —— 上一条 describePolicy 的日志也含"token 上限"字样。
+    const line = logs.find((l) => l.includes("生效"))!;
+    expect(line).toContain("策略 77");
+    expect(line).not.toContain("/ 设置");
+    expect(line).toContain("生效 77");
+  });
+
+  it("预算面：两侧都没配时闸门不启用（与旧行为一致）", () => {
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, denyCommands: ["node"] }),
+      host: { log: () => undefined },
+    });
+    expect(platform.usage().limit).toBeUndefined();
+  });
+
+  /**
    * 审批门必须交给引擎（`deps.approvalGate`）—— 否则批次边界不会 reset，
    * "本批已批准"的缓存会跨批存活。
    *

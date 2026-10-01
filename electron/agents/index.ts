@@ -27,7 +27,11 @@ import { remoteExecutorNote } from "./remote-endpoint";
  * `executorTimeoutMs` 是它**单次 HTTP 请求**的超时，不是整轮 run 的时限
  * （后者是 `limits.runDeadlineMs`）。不传时适配器用自己的内置默认。
  */
-export function createDefaultAdapters(meter?: UsageMeter, executorTimeoutMs?: number): AgentAdapter[] {
+export function createDefaultAdapters(
+  meter?: UsageMeter,
+  executorTimeoutMs?: number,
+  forbiddenWrite?: readonly string[],
+): AgentAdapter[] {
   return [
     new SensenovaApiAdapter(undefined, {
       // 2026-09-28：原为 `...(meter ? { meter } : {})`。条件展开是冗余的 ——
@@ -36,6 +40,10 @@ export function createDefaultAdapters(meter?: UsageMeter, executorTimeoutMs?: nu
       // 反而不记账」，用量统计会静默消失。本文件里 5 处同类写法一并简化掉。
       meter,
       ...(executorTimeoutMs !== undefined ? { timeoutMs: executorTimeoutMs } : {}),
+      // 路径面（P2-2）：**已算好的并集**（调用方用 pathPolicyOverrides 合成）。
+      // 条件展开在这里不是冗余：`PathPolicy` 的 forbiddenWrite 是**替换**语义，
+      // 传空数组等于清空地板，所以"没配策略"必须表现为"键不存在"。
+      ...(forbiddenWrite !== undefined ? { forbiddenWrite } : {}),
     }),
   ];
 }
@@ -86,6 +94,11 @@ export interface AgentLayerOptions {
    * 适配器 —— 外部声明的 CLI / HTTP 桥接智能体跑在别的进程里，超时由它们自己管。
    */
   executorTimeoutMs?: number;
+  /**
+   * 路径面（P2-2）：追加到内置禁止写入清单的 glob（**已算好并集**）。
+   * 省略 = 内置默认（`DEFAULT_FORBIDDEN_WRITE`）。见 `createDefaultAdapters` 的注释。
+   */
+  forbiddenWrite?: readonly string[];
 }
 
 export interface AgentLayer {
@@ -107,7 +120,7 @@ export interface AgentLayer {
  * original single-adapter, round-robin setup.
  */
 export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
-  const builtin = opts.adapters ?? createDefaultAdapters(opts.meter, opts.executorTimeoutMs);
+  const builtin = opts.adapters ?? createDefaultAdapters(opts.meter, opts.executorTimeoutMs, opts.forbiddenWrite);
   const loaded = opts.manifestDir ? loadManifestDir(opts.manifestDir) : { manifests: [], errors: [] };
   const declared: AgentManifest[] = [
     ...(opts.manifests ?? []).map((m) => (m.source ? m : { ...m, source: "declared" as const })),

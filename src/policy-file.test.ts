@@ -16,9 +16,14 @@ import {
   approvalGateOf,
   commandPolicyOverrides,
   describePolicy,
+  effectiveTokenBudget,
   mergePolicies,
   normalizePolicyFile,
+  pathPolicyOverrides,
 } from "../shared/policy-file";
+
+/** 内置地板的最小替身：只验证"并集"语义，不复制真实清单（那会随源码漂移）。 */
+const DEFAULTS = ["package.json", ".env", ".git/**", "node_modules/**"];
 
 describe("normalizePolicyFile · 非法输入一律整份丢弃", () => {
   it("非对象（null / 数组 / 原始值）⇒ 空策略 + 说明", () => {
@@ -85,11 +90,13 @@ describe("normalizePolicyFile · cleanStrings 的边界", () => {
       denyGitSubcommands: ["push"],
       denyNpmSubcommands: ["publish"],
       approvalCommands: ["deploy"],
+      forbidWrite: ["secrets/**"],
     });
     expect(r.policy.denyCommands).toBeUndefined();
     expect(r.policy.denyGitSubcommands).toEqual(["push"]);
     expect(r.policy.denyNpmSubcommands).toEqual(["publish"]);
     expect(r.policy.approvalCommands).toEqual(["deploy"]);
+    expect(r.policy.forbidWrite).toEqual(["secrets/**"]);
   });
 });
 
@@ -135,6 +142,15 @@ describe("mergePolicies · 并集与取最小", () => {
       { version: 1 },
     ]);
     expect(m.approvalCommands).toEqual(["deploy", "migrate"]);
+  });
+
+  it("禁止写入清单取并集（保护只会越叠越多，不会被另一份「没说」抹掉）", () => {
+    const m = mergePolicies([
+      { version: 1, forbidWrite: ["secrets/**"] },
+      { version: 1, forbidWrite: ["backup/**", "secrets/**"] },
+      { version: 1 },
+    ]);
+    expect(m.forbidWrite).toEqual(["backup/**", "secrets/**"]);
   });
 
   it("预算取**最小**（多份策略并存时以更严的那份为准）", () => {
@@ -197,6 +213,58 @@ describe("approvalGateOf · 空清单不建门", () => {
   });
 });
 
+describe("pathPolicyOverrides · 路径面取并集（绝不能替换地板）", () => {
+  it("没配 forbidWrite ⇒ undefined（调用方不传，保持 PathPolicy 默认）", () => {
+    expect(pathPolicyOverrides({ version: 1 }, DEFAULTS)).toBeUndefined();
+    expect(pathPolicyOverrides({ version: 1, forbidWrite: [] }, DEFAULTS)).toBeUndefined();
+  });
+
+  it("配了 ⇒ 内置地板 + 策略项**取并集**（这是本函数存在的全部理由）", () => {
+    const r = pathPolicyOverrides({ version: 1, forbidWrite: ["secrets/**"] }, DEFAULTS);
+    // 内置四条一个都不能少 —— 直接透传 policy 会只剩 ["secrets/**"]，地板被拆
+    for (const d of DEFAULTS) expect(r!.forbiddenWrite).toContain(d);
+    expect(r!.forbiddenWrite).toContain("secrets/**");
+    expect(r!.forbiddenWrite.length).toBe(DEFAULTS.length + 1);
+  });
+
+  it("策略项与内置重叠时去重（不重复列出）", () => {
+    const r = pathPolicyOverrides({ version: 1, forbidWrite: ["package.json", "secrets/**"] }, DEFAULTS);
+    expect(r!.forbiddenWrite.filter((x) => x === "package.json")).toHaveLength(1);
+    expect(r!.forbiddenWrite.length).toBe(DEFAULTS.length + 1);
+  });
+
+  it("结果排序稳定（同一份策略在任何机器上得出同一张表）", () => {
+    const a = pathPolicyOverrides({ version: 1, forbidWrite: ["z/**", "a/**"] }, DEFAULTS);
+    const b = pathPolicyOverrides({ version: 1, forbidWrite: ["a/**", "z/**"] }, DEFAULTS);
+    expect(a!.forbiddenWrite).toEqual(b!.forbiddenWrite);
+  });
+});
+
+describe("effectiveTokenBudget · 预算面取更小值", () => {
+  it("两侧都没配 ⇒ undefined（不设闸）", () => {
+    expect(effectiveTokenBudget(undefined, undefined)).toBeUndefined();
+  });
+
+  it("只有一侧配了 ⇒ 取那一侧（不因另一侧缺失而失效）", () => {
+    expect(effectiveTokenBudget(100, undefined)).toBe(100);
+    expect(effectiveTokenBudget(undefined, 200)).toBe(200);
+  });
+
+  it("两侧都配 ⇒ 取**更小**者（否则更宽的设置会架空更严的策略）", () => {
+    expect(effectiveTokenBudget(100, 200)).toBe(100);
+    expect(effectiveTokenBudget(500, 200)).toBe(200);
+    expect(effectiveTokenBudget(300, 300)).toBe(300);
+  });
+
+  it("非法值一律视为未配（与 usage-meter 的 validLimit 同口径）", () => {
+    for (const bad of [0, -1, NaN, Infinity] as number[]) {
+      expect(effectiveTokenBudget(bad, 42)).toBe(42);
+      expect(effectiveTokenBudget(42, bad)).toBe(42);
+      expect(effectiveTokenBudget(bad, bad)).toBeUndefined();
+    }
+  });
+});
+
 describe("describePolicy · 各分支都要念出来", () => {
   it("空策略说明「一条不改」，而不是空串", () => {
     expect(describePolicy({ version: 1 })).toContain("空策略");
@@ -209,12 +277,14 @@ describe("describePolicy · 各分支都要念出来", () => {
       denyGitSubcommands: ["push"],
       denyNpmSubcommands: ["publish"],
       approvalCommands: ["deploy"],
+      forbidWrite: ["secrets/**"],
       maxTokensPerRun: 100,
     });
     expect(s).toContain("禁用命令 node");
     expect(s).toContain("禁用 git 子命令 push");
     expect(s).toContain("禁用 npm 子命令 publish");
     expect(s).toContain("需人工确认 deploy");
+    expect(s).toContain("禁止写入 secrets/**");
     expect(s).toContain("token 上限 100");
   });
 

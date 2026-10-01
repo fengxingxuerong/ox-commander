@@ -37,6 +37,15 @@ export interface PolicyFile {
    * 同构，而不是假装问过了。
    */
   approvalCommands?: string[];
+  /**
+   * 追加到内置**禁止写入**清单（路径面，P2-2）。glob 口径，与内置同一套匹配。
+   *
+   * ⚠️ 语义是**扩展**不是替换：内置的 `package.json` / `.env` / `.git/**` 等
+   * 始终生效，这里只能往上叠。`SandboxConfig.forbiddenWrite` 本身是**替换**语义
+   * （"Overrides when provided"）—— 策略层直接透传会**把内置地板拆掉**，
+   * 那是放宽，违反本模块"只加严不放宽"的纪律（见 `pathPolicyOverrides`）。
+   */
+  forbidWrite?: string[];
   /** token 软上限；与 `ProjectSettings.maxTokensPerRun` 冲突时取**更小**的那个。 */
   maxTokensPerRun?: number;
 }
@@ -96,10 +105,12 @@ export function normalizePolicyFile(raw: unknown): NormalizedPolicy {
   const denyGitSubcommands = cleanStrings(obj.denyGitSubcommands, "denyGitSubcommands", issues);
   const denyNpmSubcommands = cleanStrings(obj.denyNpmSubcommands, "denyNpmSubcommands", issues);
   const approvalCommands = cleanStrings(obj.approvalCommands, "approvalCommands", issues);
+  const forbidWrite = cleanStrings(obj.forbidWrite, "forbidWrite", issues);
   if (denyCommands) policy.denyCommands = denyCommands;
   if (denyGitSubcommands) policy.denyGitSubcommands = denyGitSubcommands;
   if (denyNpmSubcommands) policy.denyNpmSubcommands = denyNpmSubcommands;
   if (approvalCommands) policy.approvalCommands = approvalCommands;
+  if (forbidWrite) policy.forbidWrite = forbidWrite;
 
   const budget = obj.maxTokensPerRun;
   if (budget !== undefined) {
@@ -121,6 +132,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   const denyGit = new Set<string>();
   const denyNpm = new Set<string>();
   const approval = new Set<string>();
+  const forbid = new Set<string>();
   let budget: number | undefined;
   for (const f of files) {
     for (const c of f.denyCommands ?? []) deny.add(c);
@@ -128,6 +140,8 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
     for (const c of f.denyNpmSubcommands ?? []) denyNpm.add(c);
     // 审批清单取**并集**：一份策略要求确认，另一份不提，前者不应被后者抵消。
     for (const c of f.approvalCommands ?? []) approval.add(c);
+    // 禁止写入同理取并集 —— 保护清单只会越叠越多，不会被另一份"没说"抹掉。
+    for (const c of f.forbidWrite ?? []) forbid.add(c);
     if (f.maxTokensPerRun !== undefined) {
       budget = budget === undefined ? f.maxTokensPerRun : Math.min(budget, f.maxTokensPerRun);
     }
@@ -136,6 +150,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   if (denyGit.size > 0) out.denyGitSubcommands = [...denyGit].sort();
   if (denyNpm.size > 0) out.denyNpmSubcommands = [...denyNpm].sort();
   if (approval.size > 0) out.approvalCommands = [...approval].sort();
+  if (forbid.size > 0) out.forbidWrite = [...forbid].sort();
   if (budget !== undefined) out.maxTokensPerRun = budget;
   return out;
 }
@@ -173,6 +188,50 @@ export function approvalGateOf(policy: PolicyFile): { commands: string[] } | und
   return policy.approvalCommands?.length ? { commands: policy.approvalCommands } : undefined;
 }
 
+/**
+ * 策略 → 路径沙箱的 `forbiddenWrite`（P2-2 路径面）。
+ *
+ * ⚠️ 这里必须**自己算并集**，不能直接把 `policy.forbidWrite` 交给
+ * `PathPolicy`：`SandboxConfig.forbiddenWrite` 是**替换**语义
+ * （源码注释写着 "Overrides DEFAULT_FORBIDDEN_WRITE when provided"），
+ * 直接透传等于把内置地板（`package.json` / `.env` / `.git/**` / `node_modules/**`）
+ * 整块换掉 —— 那份 JSON 就能拆掉沙箱的地板，正是本模块反复强调的"只加严不放宽"
+ * 要挡住的事。
+ *
+ * 返回 undefined 表示"策略没碰路径面"——调用方应当**不传** `forbiddenWrite`
+ * （保持 PathPolicy 的默认行为），而不是传一个可能为空的数组：
+ * 空数组在 `??` 下是"已提供"，会把地板清空。
+ */
+export function pathPolicyOverrides(
+  policy: PolicyFile,
+  defaults: readonly string[],
+): { forbiddenWrite: string[] } | undefined {
+  if (!policy.forbidWrite?.length) return undefined;
+  // 并集 + 去重 + 排序：内置在前（可读性），策略项在后，整体去重。
+  const merged = [...new Set([...defaults, ...policy.forbidWrite])].sort();
+  return { forbiddenWrite: merged };
+}
+
+/**
+ * 策略 → 预算上限（P2-2 预算面）。
+ *
+ * 取**更小**的那个：策略与设置都是"上限"，两个上限并存时以严的为准 ——
+ * 否则"我在策略里写了 10 万上限"会被一个更大的 settings 值静默架空。
+ * 两侧都可能没配（undefined）；都没配时返回 undefined（= 不设闸）。
+ */
+export function effectiveTokenBudget(
+  policyBudget: number | undefined,
+  settingsBudget: number | undefined,
+): number | undefined {
+  const valid = (n: number | undefined): n is number =>
+    typeof n === "number" && Number.isFinite(n) && n > 0;
+  const a = valid(policyBudget) ? policyBudget : undefined;
+  const b = valid(settingsBudget) ? settingsBudget : undefined;
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return Math.min(a, b);
+}
+
 /** 一行人话，给设置页/日志说"这份策略加了什么"。 */
 export function describePolicy(policy: PolicyFile): string {
   const parts: string[] = [];
@@ -180,6 +239,7 @@ export function describePolicy(policy: PolicyFile): string {
   if (policy.denyGitSubcommands?.length) parts.push(`禁用 git 子命令 ${policy.denyGitSubcommands.join("、")}`);
   if (policy.denyNpmSubcommands?.length) parts.push(`禁用 npm 子命令 ${policy.denyNpmSubcommands.join("、")}`);
   if (policy.approvalCommands?.length) parts.push(`需人工确认 ${policy.approvalCommands.join("、")}`);
+  if (policy.forbidWrite?.length) parts.push(`禁止写入 ${policy.forbidWrite.join("、")}`);
   if (policy.maxTokensPerRun !== undefined) parts.push(`token 上限 ${policy.maxTokensPerRun}`);
   return parts.length > 0 ? parts.join("；") : "（空策略：规则一条不改）";
 }

@@ -26,10 +26,17 @@ import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
-import { commandPolicyOverrides, describePolicy, approvalGateOf } from "../shared/policy-file";
+import {
+  commandPolicyOverrides,
+  describePolicy,
+  approvalGateOf,
+  effectiveTokenBudget,
+  pathPolicyOverrides,
+} from "../shared/policy-file";
 import { loadPolicyDir } from "./sandbox/policy-dir";
 import { CommandPolicy } from "./sandbox/command-policy";
 import { ApprovalGate } from "./sandbox/approval-gate";
+import { DEFAULT_FORBIDDEN_WRITE } from "./sandbox/path-policy";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -184,17 +191,66 @@ export interface Platform {
 export function createPlatform(config: PlatformConfig): Platform {
   const { settings, host } = config;
   const log = host.log;
+
+  /**
+   * 策略即代码（`policy.d/`）。
+   *
+   * 加载一次、合成一份、只往严的方向叠（契约里没有"允许某条命令"这一格 ——
+   * 见 `commandPolicyOverrides`）。坏文件不拦 run，但**每条问题都说出来**：
+   * 静默跳过会让"我以为禁掉了"变成假的，而那正是安全策略最坏的失败方式。
+   *
+   * ⚠️ 位置在 `meter` / `layer` **之前**是承重的：预算面（`maxTokensPerRun`）
+   * 要参与 `UsageMeter` 的构造，而 meter 是所有 LLM 客户端的共用上游。
+   * 策略加载本身不依赖它们（只读磁盘上的 JSON），所以可以安全前置。
+   */
+  const loaded = loadPolicyDir(config.policyDir);
+  const policy = loaded.files > 0 ? loaded.policy : undefined;
+  for (const err of loaded.errors) log(`[policy] ${err.file}：${err.issues.join("；")}`);
+  if (policy) log(`[policy] 已加载 ${loaded.files} 份策略：${describePolicy(policy)}`);
+
+  /**
+   * 预算面：策略与设置取**更小**者。
+   *
+   * 此前 `policy.d` 的 `maxTokensPerRun` 只被解析、合并、并被 `describePolicy`
+   * 念出来，**没有任何消费者** —— 日志说"token 上限 N"，实际闸门读的是
+   * `settings.maxTokensPerRun`，写进策略的预算不生效。这里接上。
+   *
+   * 取更小值的理由：两者都是"上限"，并存时以严的为准；否则一份更宽的设置值
+   * 会静默架空策略里那条更严的规则。
+   */
+  const tokenBudget = effectiveTokenBudget(policy?.maxTokensPerRun, settings.maxTokensPerRun);
+  if (policy?.maxTokensPerRun !== undefined) {
+    log(
+      `[policy] token 上限：策略 ${policy.maxTokensPerRun}` +
+        (settings.maxTokensPerRun !== undefined ? ` / 设置 ${settings.maxTokensPerRun}` : "") +
+        ` ⇒ 生效 ${tokenBudget}`,
+    );
+  }
+
+  /**
+   * 路径面（P2-2）：策略的 `forbidWrite` 与内置地板取**并集**。
+   *
+   * 必须在这里算好再传，不能把 `policy.forbidWrite` 直接交给 `PathPolicy` ——
+   * 后者的 `forbiddenWrite` 是**替换**语义（源码注释 "Overrides ... when provided"），
+   * 直接透传等于让一份 JSON 拆掉沙箱地板（`package.json` / `.env` / `.git/**` …）。
+   * 见 `pathPolicyOverrides` 的注释。
+   */
+  const pathOverrides = policy ? pathPolicyOverrides(policy, DEFAULT_FORBIDDEN_WRITE) : undefined;
+  if (pathOverrides) {
+    log(`[policy] 禁止写入清单已扩展：${policy!.forbidWrite!.join("、")}（与内置地板取并集，共 ${pathOverrides.forbiddenWrite.length} 条）`);
+  }
+
   // 用量汇总：大脑层在 `buildLlm` 里包一层、执行器在 `createAgentLayer` 里包一层
   // （它是 token 大头，且不走大脑层工厂）。两处都指向同一个 meter，所以
   // `usage()` 拿到的是这次平台生命周期的总和。
-  // 预算上限从 settings 流入（headless 协议字段与桌面端设置页都会落到这）；
+  // 预算上限从 settings 与 policy.d 的**更小者**流入；
   // `config.meter` 显式传入时（测试 / 宿主自建）尊重传入值，不再二次包配置。
   const meter =
     config.meter ??
     new UsageMeter(
-      settings.maxTokensPerRun !== undefined
+      tokenBudget !== undefined
         ? {
-            maxTokensPerRun: settings.maxTokensPerRun,
+            maxTokensPerRun: tokenBudget,
             // 第一跳没上报用量就说，而不是等 run 结束才对着一行"总量 0"困惑。
             onBudgetBlind: (info) => log(`[budget] ${budgetBlindNote(info)}`),
           }
@@ -212,6 +268,9 @@ export function createPlatform(config: PlatformConfig): Platform {
       arbitration: config.arbitration ?? settings.arbitration,
       // 内置执行器那一路的超时；注入 `layer` 的调用方不受影响（那种情况由注入方负责）。
       executorTimeoutMs: executorTimeoutMsFor(settings),
+      // 路径面（P2-2）：策略的 forbidWrite 与内置地板取**并集**后交给 PathPolicy。
+      // 省略 = 内置默认（调用方不该传空数组 —— 那是"已提供"，会清空地板）。
+      ...(pathOverrides ? { forbiddenWrite: pathOverrides.forbiddenWrite } : {}),
       meter,
       onRouting: (decision, task) => log(agentRoutingLogLine(decision, task)),
       onEvent: (text) => log(`[sandbox] ${text}`),
@@ -311,17 +370,6 @@ export function createPlatform(config: PlatformConfig): Platform {
   // concurrent projects never share observations.
   const gate = new ActionGate();
 
-  /**
-   * 策略即代码（`policy.d/`）。
-   *
-   * 加载一次、合成一份、只往严的方向叠（契约里没有"允许某条命令"这一格 ——
-   * 见 `commandPolicyOverrides`）。坏文件不拦 run，但**每条问题都说出来**：
-   * 静默跳过会让"我以为禁掉了"变成假的，而那正是安全策略最坏的失败方式。
-   */
-  const loaded = loadPolicyDir(config.policyDir);
-  const policy = loaded.files > 0 ? loaded.policy : undefined;
-  for (const err of loaded.errors) log(`[policy] ${err.file}：${err.issues.join("；")}`);
-  if (policy) log(`[policy] 已加载 ${loaded.files} 份策略：${describePolicy(policy)}`);
   const buildPolicy = (): CommandPolicy =>
     new CommandPolicy({ ...commandPolicyOverrides(policy!) });
 

@@ -83,6 +83,14 @@ export interface SensenovaAdapterOptions {
    */
   meter?: UsageMeter;
   /**
+   * 路径面的策略覆盖（P2-2，可选）：追加到内置**禁止写入**清单。
+   *
+   * **必须是并集、不能是替换**：`PathPolicy` 的 `forbiddenWrite` 是替换语义，
+   * 调用方要用 `pathPolicyOverrides(policy, DEFAULT_FORBIDDEN_WRITE)` 算好并集再传 ——
+   * 直接透传一份 JSON 会把内置地板整块换掉。省略 = 保持内置默认。
+   */
+  forbiddenWrite?: readonly string[];
+  /**
    * Per-run ceilings, same shape the external adapters take.
    *
    * Only `runDeadlineMs` is honoured here: `idleTimeoutMs` means "no event for
@@ -170,6 +178,11 @@ export class SensenovaApiAdapter implements AgentAdapter {
   private readonly maxConcurrentOverride: number | undefined;
   private readonly meter: UsageMeter | undefined;
   /**
+   * 路径面策略（P2-2）：**已算好的并集**，直接交给 `PathPolicy`。
+   * 省略 = 内置默认（`DEFAULT_FORBIDDEN_WRITE`）。
+   */
+  private readonly forbiddenWrite: readonly string[] | undefined;
+  /**
    * 单次请求的超时；省略时走 `EXECUTOR_TIMEOUT_MS`（见 `SensenovaAdapterOptions.timeoutMs`）。
    *
    * **刻意不是 private**：这条链路是 协议 → settings → `createAgentLayer` →
@@ -194,6 +207,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
     this.llm = llm;
     this.maxConcurrentOverride = opts?.maxConcurrent;
     this.meter = opts?.meter;
+    this.forbiddenWrite = opts?.forbiddenWrite;
     // 与大脑层同口径：0/负数没有意义，一律按"用内置默认"处理，不设哨兵值。
     this.requestTimeoutMs = opts?.timeoutMs !== undefined && opts.timeoutMs > 0 ? opts.timeoutMs : EXECUTOR_TIMEOUT_MS;
     this.limits = { ...DEFAULT_AGENT_LIMITS, ...(opts?.limits ?? {}) };
@@ -448,7 +462,12 @@ private writeFiles(
     // shares one implementation. Zone is deliberately left out: this gate uses a
     // strict prefix, so honouring it here would reject `src/duration.js` for zone
     // `src/duration` — a write the arbitration gate owns and must not roll back.
-    const policy = new PathPolicy({ projectRoot });
+    //
+    // `this.forbiddenWrite` 是 policy.d 的**并集**结果（调用方算好的），不是
+    // 替换品 —— 省略时 PathPolicy 用内置默认。
+    const policy = new PathPolicy(
+      this.forbiddenWrite ? { projectRoot, forbiddenWrite: [...this.forbiddenWrite] } : { projectRoot },
+    );
     const refused: string[] = [];
     let written = 0;
     for (const f of files) {

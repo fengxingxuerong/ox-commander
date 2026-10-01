@@ -8,6 +8,33 @@
 
 ### 新增
 
+- **`policy.d` 补齐路径面与预算面（竞品调研 P2-2 收尾）**。此前只落了命令面
+  （`denyCommands` / 子命令 / `approvalCommands`），两类规则仍写在代码常量里。
+  现在补上：
+
+  · **路径面 `forbidWrite`**：追加到内置禁止写入清单（glob 口径）。
+    ⚠️ 这里有个必须自己处理的陷阱：`PathPolicy` 的 `forbiddenWrite` 是**替换**
+    语义（源码注释 "Overrides DEFAULT_FORBIDDEN_WRITE when provided"），
+    策略层直接透传等于让一份 JSON **拆掉沙箱地板**（`package.json` / `.env` /
+    `.git/**` / `node_modules/**`）。所以新增 `pathPolicyOverrides(policy, defaults)`
+    在平台侧算好**并集**再传，且"没配策略"必须表现为**键不存在**而不是空数组 ——
+    空数组在 `??` 下是"已提供"，同样会清空地板。
+    适配器侧新增 `SensenovaAdapterOptions.forbiddenWrite` 承接（注释写明"必须是
+    并集、不能是替换"），`createAgentLayer` → `createDefaultAdapters` 三层透传。
+
+  · **预算面 `maxTokensPerRun`**：接通消费者。此前它只被解析、合并、并被
+    `describePolicy` 念出来，**没有任何消费者** —— 日志说"token 上限 N"，
+    而闸门读的是 `settings.maxTokensPerRun`，写进策略的预算不生效。
+    新增 `effectiveTokenBudget(policy, settings)` 取**更小**者（两者都是上限，
+    并存时以严的为准，否则更宽的设置值会静默架空更严的策略），
+    并把日志改成如实念出两侧来源与生效值。
+    平台内策略加载**前移到 `meter` 之前** —— 预算要参与 `UsageMeter` 构造，
+    而 meter 是所有 LLM 客户端的共用上游（策略加载只读磁盘 JSON，可安全前置）。
+
+  测试：`src/policy-file.test.ts` 35 条（含并集语义、去重、排序稳定、取更小值、
+  非法值同口径）；`src/platform.test.ts` 新增 6 条端到端断言（**地板没被拆**、
+  没配时不传该字段、策略上限真的进闸门、两侧取更小、单侧也生效、都没配则不启用）。
+
 - **审批门（竞品调研 P2-3）**：`policy.d` 的第三种规则 —— 它回答的不是"能不能跑"
   （`CommandPolicy` 的静态地板）也不是"批次内发生过什么"（`ActionGate` 的跨动作
   状态机），而是**"跑之前要不要先问人"**。三者刻意分开，因为失败模式不同：
