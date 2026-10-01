@@ -25,6 +25,18 @@ export interface PolicyFile {
   denyGitSubcommands?: string[];
   /** 追加到 npm 子命令拒绝清单。 */
   denyNpmSubcommands?: string[];
+  /**
+   * 需要**人工确认**才能执行的命令（审批门，P2-3）。按 basename 比对，与白名单同口径。
+   *
+   * 与 `denyCommands` 的区别是"停下来问"而不是"直接拒"：拒是把路封死，
+   * 审批是把决定权交回人手上。适合那些**有时必须做、但每次做都该被看见**的动作
+   * （生产环境迁移、发布、清库…）—— 封死会让流程走不通，放任则会静默出事。
+   *
+   * 没有宿主回调时按**拒绝**处理（`verifier` 的默认行为）：无人可问的场景下
+   * "停下来"的唯一安全实现就是不执行 —— 与 `EscalationPolicy` 的 `exhaust`
+   * 同构，而不是假装问过了。
+   */
+  approvalCommands?: string[];
   /** token 软上限；与 `ProjectSettings.maxTokensPerRun` 冲突时取**更小**的那个。 */
   maxTokensPerRun?: number;
 }
@@ -83,9 +95,11 @@ export function normalizePolicyFile(raw: unknown): NormalizedPolicy {
   const denyCommands = cleanStrings(obj.denyCommands, "denyCommands", issues);
   const denyGitSubcommands = cleanStrings(obj.denyGitSubcommands, "denyGitSubcommands", issues);
   const denyNpmSubcommands = cleanStrings(obj.denyNpmSubcommands, "denyNpmSubcommands", issues);
+  const approvalCommands = cleanStrings(obj.approvalCommands, "approvalCommands", issues);
   if (denyCommands) policy.denyCommands = denyCommands;
   if (denyGitSubcommands) policy.denyGitSubcommands = denyGitSubcommands;
   if (denyNpmSubcommands) policy.denyNpmSubcommands = denyNpmSubcommands;
+  if (approvalCommands) policy.approvalCommands = approvalCommands;
 
   const budget = obj.maxTokensPerRun;
   if (budget !== undefined) {
@@ -106,11 +120,14 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   const deny = new Set<string>();
   const denyGit = new Set<string>();
   const denyNpm = new Set<string>();
+  const approval = new Set<string>();
   let budget: number | undefined;
   for (const f of files) {
     for (const c of f.denyCommands ?? []) deny.add(c);
     for (const c of f.denyGitSubcommands ?? []) denyGit.add(c);
     for (const c of f.denyNpmSubcommands ?? []) denyNpm.add(c);
+    // 审批清单取**并集**：一份策略要求确认，另一份不提，前者不应被后者抵消。
+    for (const c of f.approvalCommands ?? []) approval.add(c);
     if (f.maxTokensPerRun !== undefined) {
       budget = budget === undefined ? f.maxTokensPerRun : Math.min(budget, f.maxTokensPerRun);
     }
@@ -118,6 +135,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   if (deny.size > 0) out.denyCommands = [...deny].sort();
   if (denyGit.size > 0) out.denyGitSubcommands = [...denyGit].sort();
   if (denyNpm.size > 0) out.denyNpmSubcommands = [...denyNpm].sort();
+  if (approval.size > 0) out.approvalCommands = [...approval].sort();
   if (budget !== undefined) out.maxTokensPerRun = budget;
   return out;
 }
@@ -143,12 +161,25 @@ export function commandPolicyOverrides(policy: PolicyFile): {
   };
 }
 
+/**
+ * 策略 → 审批门的入参（P2-3）。
+ *
+ * 刻意与 `commandPolicyOverrides` 分开：审批**不是**命令沙箱的一档。
+ * `CommandPolicy.check` 返回的是终局裁决（allow / deny），而审批是一个
+ * "先别动、去问人"的中间态 —— 把它塞进沙箱会让沙箱多出一种它不认识的语义，
+ * 而沙箱的价值恰恰在于它的判据简单可审。
+ */
+export function approvalGateOf(policy: PolicyFile): { commands: string[] } | undefined {
+  return policy.approvalCommands?.length ? { commands: policy.approvalCommands } : undefined;
+}
+
 /** 一行人话，给设置页/日志说"这份策略加了什么"。 */
 export function describePolicy(policy: PolicyFile): string {
   const parts: string[] = [];
   if (policy.denyCommands?.length) parts.push(`禁用命令 ${policy.denyCommands.join("、")}`);
   if (policy.denyGitSubcommands?.length) parts.push(`禁用 git 子命令 ${policy.denyGitSubcommands.join("、")}`);
   if (policy.denyNpmSubcommands?.length) parts.push(`禁用 npm 子命令 ${policy.denyNpmSubcommands.join("、")}`);
+  if (policy.approvalCommands?.length) parts.push(`需人工确认 ${policy.approvalCommands.join("、")}`);
   if (policy.maxTokensPerRun !== undefined) parts.push(`token 上限 ${policy.maxTokensPerRun}`);
   return parts.length > 0 ? parts.join("；") : "（空策略：规则一条不改）";
 }

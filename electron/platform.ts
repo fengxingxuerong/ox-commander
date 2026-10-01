@@ -26,9 +26,10 @@ import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
-import { commandPolicyOverrides, describePolicy } from "../shared/policy-file";
+import { commandPolicyOverrides, describePolicy, approvalGateOf } from "../shared/policy-file";
 import { loadPolicyDir } from "./sandbox/policy-dir";
 import { CommandPolicy } from "./sandbox/command-policy";
+import { ApprovalGate } from "./sandbox/approval-gate";
 import type { AgentManifest } from "../shared/agent-contract";
 import type {
   ArbitrationMode,
@@ -87,6 +88,16 @@ export interface PlatformHost {
    * 不会有任何线路** —— 那是事实（池里没有线路），不是缺陷。
    */
   onLineHealth?(lines: LineHealth[]): void;
+  /**
+   * 审批回调（P2-3）：`policy.d` 的 `approvalCommands` 里的命令执行前问一次。
+   *
+   * 返回 true 放行、false 拒绝。**缺席时按拒绝处理**（fail-closed）——
+   * 无人可问的场景下"停下来"的唯一安全实现是不执行，与 `EscalationPolicy`
+   * 的 `exhaust` 同构，而不是假装问过了。
+   *
+   * 只有策略里真的配了 `approvalCommands` 才会被调用；没配时这个回调整个不被使用。
+   */
+  requestApproval?(command: string, args: readonly string[]): Promise<boolean>;
   /**
    * Extra engine callbacks the host owns (stage persistence, richer task
    * payloads, verification rendering). Merged last, so a host-supplied callback
@@ -314,6 +325,30 @@ export function createPlatform(config: PlatformConfig): Platform {
   const buildPolicy = (): CommandPolicy =>
     new CommandPolicy({ ...commandPolicyOverrides(policy!) });
 
+  /**
+   * 审批门（P2-3）：只有策略里真的写了 `approvalCommands` 才建实例 ——
+   * 没配时传 undefined，验证链上零影响（默认路径不该多出人工环节）。
+   *
+   * 宿主回调缺席时，门本身按拒绝处理（fail-closed，见 approval-gate.ts 头注释）。
+   */
+  const approvalSpec = policy ? approvalGateOf(policy) : undefined;
+  const buildApprovalGate = (): ApprovalGate | undefined =>
+    approvalSpec
+      ? new ApprovalGate({
+          commands: approvalSpec.commands,
+          ...(host.requestApproval ? { request: host.requestApproval } : {}),
+          onEvent: (text) => log(text),
+        })
+      : undefined;
+  if (approvalSpec) {
+    log(
+      `[policy] 审批门已启用：${approvalSpec.commands.join("、")}` +
+        (host.requestApproval ? "" : "（⚠️ 宿主未接审批回调 ⇒ 这些命令会被拒绝执行）"),
+    );
+  }
+  // 一个平台一个实例：批次边界由引擎 reset（与 ActionGate 同一个生命单位）。
+  const approvalGate = buildApprovalGate();
+
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
@@ -328,12 +363,15 @@ export function createPlatform(config: PlatformConfig): Platform {
             // 策略即代码（`policy.d/`）：内置地板之上再叠加一层本地规则。
             // 验证跑的是**智能体刚写下的脚本**，这里是最该被策略管住的地方。
             ...(policy ? { policy: buildPolicy() } : {}),
+            ...(approvalGate ? { approvalGate } : {}),
           })),
       settings,
       usage: () => meter.snapshot(),
       conflicts: () => verdictConflicts,
       journal: config.journal,
       actionGate: gate,
+      // 审批门与 actionGate 同一生命单位：批次边界一起 reset（"本批次已批准"不该跨批）。
+      ...(approvalGate ? { approvalGate } : {}),
     },
     callbacks,
   );

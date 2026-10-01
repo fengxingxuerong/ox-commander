@@ -130,6 +130,13 @@ const TARGETS = [
   // 2026-09-29：跨动作状态机（竞品调研 §5.1）—— 规则在纯函数里（escalatedVerdict /
   // extractActionFacts），ActionGate 是薄壳；同批接入 CommandPolicy 的 npm 子命令地板。
   { file: "electron/sandbox/action-gate.ts", test: "src/action-gate.test.ts", tier: 1 },
+  // 2026-10-01：审批门（竞品调研 P2-3）—— needsApproval / approvalDeniedReason
+  // 是纯函数，ApprovalGate 是持有"本批已批准"的薄壳（fail-closed：没回调即拒绝）。
+  { file: "electron/sandbox/approval-gate.ts", test: "src/approval-gate.test.ts", tier: 1 },
+  // 2026-10-01 补挂：策略即代码（P2-2）的契约层。落地时漏登记，本次与审批门同批补上 ——
+  // 它承载"只加严不放宽"这条安全语义（归一化 / 合并 / 只产出 denyMore），
+  // 在执行面接线位点之外还该有自己的逐位点保护。
+  { file: "shared/policy-file.ts", tests: ["src/policy-file.test.ts", "src/platform.test.ts"], tier: 2 },
   { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
   { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },

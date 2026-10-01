@@ -60,6 +60,13 @@ export interface OrchestratorDeps {
    * 升级审查）分别由 scheduler 和 verifier 持有同一个实例。
    */
   actionGate?: ActionGateLike;
+  /**
+   * 审批门（P2-3，可选）：与 `actionGate` 同一生命单位 —— 批次边界一起 reset。
+   * "本批次已批准过某命令"不该跨批生效：下一批是新的上下文，该问还得问。
+   *
+   * 这里只用到它的 `reset()`；判定与问人发生在 verifier 里（执行面）。
+   */
+  approvalGate?: { reset(): void };
 }
 
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
@@ -530,6 +537,8 @@ export class OrchestratorEngine {
         // Batch boundary = the cross-action state machine's lifetime unit:
         // facts observed in batch N must not escalate batch N+1's verdicts.
         this.deps.actionGate?.reset();
+        // 审批门同一生命单位：「本批已批准过」不该跨批（下一批是新上下文）。
+        this.deps.approvalGate?.reset();
         const notDone = batch.filter((t) => !allDone.has(t.id) && !skipped.has(t.id));
         // 配额守卫：上游依赖未成功的任务本轮不派发（依赖会在重修轮重试，
         // 成功后下游自动解锁）——避免在注定失败的下游上白烧 API 配额。

@@ -3,6 +3,7 @@ import type { SmokeCheck, VerificationCommand, VerificationReport } from "../../
 import { digest } from "./scheduler";
 import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-policy";
 import type { ActionGateLike } from "../sandbox/action-gate";
+import type { ApprovalGate } from "../sandbox/approval-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
 import { scopedEnv } from "../agents/scoped-env";
@@ -22,6 +23,14 @@ export interface VerifierDeps {
    * agent logs tighten what the verifier will spawn afterwards.
    */
   actionGate?: ActionGateLike;
+  /**
+   * 审批门（P2-3，可选）：静态策略与跨动作升级都放行之后、**spawn 之前**问一次人。
+   *
+   * 位置是刻意的：放在最后一道，因为它问的是"现在真的要跑了吗"—— 前面几层
+   * 拒绝掉的命令根本不该打扰人。配了 `approvalCommands` 才有实例；没配时
+   * 调用方传 undefined，本模块零影响（默认路径不多出人工环节）。
+   */
+  approvalGate?: ApprovalGate;
   /** Per-command ceiling; the process tree is killed when it expires. 300s default. */
   timeoutMs?: number;
   /** Observability sink (rejections, timeouts). */
@@ -168,6 +177,20 @@ export async function verifyProject(
       });
       break;
     }
+    // 审批门（P2-3）放在最后一道：前面几层拒掉的命令不该打扰人。
+    // async —— 这里会阻塞在人的响应上，与上面两个同步判定刻意不同。
+    const approved = await deps.approvalGate?.check(cmd.command, cmd.args);
+    if (approved && !approved.ok) {
+      deps.onEvent?.(`[verifier] 审批拒绝：${approved.reason}`);
+      results.push({
+        kind: cmd.kind,
+        ok: false,
+        exitCode: null,
+        logDigest: `[审批] ${approved.reason}`,
+        durationMs: 0,
+      });
+      break;
+    }
     const r = await runOnce(cmd, deps.cwd(), spawnImpl, timeoutMs, deps.onEvent);
     results.push({
       kind: r.kind,
@@ -188,6 +211,8 @@ export interface SmokeRunnerDeps {
   policy?: CommandPolicy;
   /** 跨动作升级审查（可选），与 verifyProject 同一实例。 */
   actionGate?: ActionGateLike;
+  /** 审批门（P2-3，可选），与 verifyProject 同一实例。 */
+  approvalGate?: ApprovalGate;
   timeoutMs?: number;
   onEvent?: (text: string) => void;
 }
@@ -250,6 +275,18 @@ export async function runSmokeChecks(
         ok: false,
         exitCode: null,
         logDigest: `[沙箱] 冒烟命令升级拒绝：${escalated.reason}\n[${check.title}]`,
+        durationMs: 0,
+      });
+      break;
+    }
+    // 审批门（P2-3）：与 verifyProject 同位置、同实例（批次内批准过就不再问）。
+    const approved = await deps.approvalGate?.check(check.command, check.args);
+    if (approved && !approved.ok) {
+      results.push({
+        kind: "smoke",
+        ok: false,
+        exitCode: null,
+        logDigest: `[审批] ${approved.reason}\n[${check.title}]`,
         durationMs: 0,
       });
       break;

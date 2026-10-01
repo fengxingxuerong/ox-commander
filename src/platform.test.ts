@@ -13,7 +13,7 @@ import { createAgentLayer } from "../electron/agents";
 import { buildLlmPool } from "../shared/build-llm";
 import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import { SENSENOVA_MODELS } from "../shared/providers";
-import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
+import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 
 /**
@@ -469,6 +469,160 @@ describe("createPlatform · policy.d 接线（策略即代码）", () => {
     await expect(platform.engine.execute([], root)).rejects.toThrow(/repair rounds/);
     expect(logs.some((l) => l.includes("已加载") && l.includes("1"))).toBe(true);
     expect(logs.join("\n")).toContain("命令被沙箱禁止");
+  });
+
+  /**
+   * 审批门接线（P2-3）。
+   *
+   * 断的是**行为**而不是"某个字段有值"：配了 `approvalCommands: ["node"]` 后，
+   * 白名单里的 node 不再直接跑，而是走审批 —— 宿主拒绝时该命令必须**没被执行**。
+   * 这条同时也钉住"审批门在 verifier 链上真的被 await 了"（漏 await 会让
+   * 拒绝裁决变成 undefined，命令照跑）。
+   */
+  it("审批门：宿主拒绝时命令不执行，且日志说清是审批而不是沙箱拒绝", async () => {
+    const logs: string[] = [];
+    const root = tempDir();
+    let asked: string[] = [];
+    const platform = createPlatform({
+      settings: settings({
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, approvalCommands: ["node"] }),
+      host: {
+        log: (t) => logs.push(t),
+        requestApproval: async (cmd) => {
+          asked.push(cmd);
+          return false; // 人工拒绝
+        },
+      },
+    });
+
+    await expect(platform.engine.execute([], root)).rejects.toThrow(/repair rounds/);
+    // 问了两次是**正确行为**，不是重复打扰：基线验证与交付闸各跑一轮 verifyProject，
+    // 而"被拒绝"刻意不进已批准缓存（拒绝不该被缓存，否则一次误拒会让该命令在本批
+    // 内永久静默）。批准的缓存只对"通过"生效。
+    expect(asked).toEqual(["node", "node"]);
+    expect(logs.join("\n")).toContain("审批门已启用");
+    expect(logs.join("\n")).toContain("人工拒绝");
+    // 关键区分：这是审批拒绝，不是沙箱地板拒绝 —— 措辞不能混
+    expect(logs.join("\n")).not.toContain("命令被沙箱禁止");
+  });
+
+  /**
+   * 审批拒绝会**连带**让基线验证变红，从而被引擎记成"本次运行前就已失败"。
+   *
+   * 这是一个需要知道的边界：那条日志的本意是"目标项目本来就坏着（不是智能体的账）"，
+   * 而审批拒绝是第三种原因（既不是智能体写坏的，也不是项目本来坏的，是**人按住了**）。
+   * 本用例把当前行为**如实钉住**，避免它被无声改动；同时说明为什么没在这轮顺手改：
+   * 要正确区分三类原因，得让 `VerificationReport` 带上"失败类别"（沙箱拒 / 审批拒 /
+   * 真的跑失败），那是验证器的契约变更，应与 P2-3 的 UI 面（审批队列）同批做。
+   */
+  it("边界：审批拒绝会让基线也报红，日志归因可能读成「项目本来就坏」", async () => {
+    const logs: string[] = [];
+    const platform = createPlatform({
+      settings: settings({
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, approvalCommands: ["node"] }),
+      host: { log: (t) => logs.push(t), requestApproval: async () => false },
+    });
+
+    await expect(platform.engine.execute([], tempDir())).rejects.toThrow(/repair rounds/);
+    const joined = logs.join("\n");
+    // 如实钉住：确实出现了那句归因措辞（本意的"不是智能体的账"）
+    expect(joined).toContain("在本次运行开始前就失败");
+    // 但原因在实践中是可见的：审批日志就在同一串里，且失败摘要带 [审批] 前缀，
+    // 所以不是静默误报 —— 人能看到"是被按住，不是项目坏了"。
+    expect(joined).toContain("审批拒绝");
+    expect(joined).toContain("[审批]");
+  });
+
+  it("审批门：宿主批准时命令照常执行（不把审批变成一律拒绝）", async () => {
+    const logs: string[] = [];
+    const root = tempDir();
+    const platform = createPlatform({
+      settings: settings({
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, approvalCommands: ["node"] }),
+      host: { log: (t) => logs.push(t), requestApproval: async () => true },
+    });
+
+    // node -v 真实执行成功 ⇒ 验证命令全过 ⇒ 走到交付（而不是 repair exhausted）。
+    const report = await platform.engine.execute([], root);
+    expect(report.passed).toBe(true);
+    expect(logs.join("\n")).toContain("已批准");
+  });
+
+  it("没配 approvalCommands 时不建审批门（默认路径零影响）", () => {
+    const logs: string[] = [];
+    createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, denyCommands: ["rm-rf"] }),
+      host: { log: (t) => logs.push(t) },
+    });
+    // 不该出现审批相关日志 —— 没配就是完全静默
+    expect(logs.join("\n")).not.toContain("审批门已启用");
+  });
+
+  it("配了审批但宿主没接回调 ⇒ 日志当场说破这些命令会被拒绝", () => {
+    const logs: string[] = [];
+    createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, approvalCommands: ["deploy"] }),
+      host: { log: (t) => logs.push(t) }, // 故意不给 requestApproval
+    });
+    const joined = logs.join("\n");
+    expect(joined).toContain("审批门已启用");
+    // fail-closed 的事实必须当场说出来，否则用户以为审批在等他，实际命令必被拒
+    expect(joined).toContain("未接审批回调");
+  });
+
+  /**
+   * 审批门必须交给引擎（`deps.approvalGate`）—— 否则批次边界不会 reset，
+   * "本批已批准"的缓存会跨批存活。
+   *
+   * 这是该接线的**唯一可观测后果**：单批次下传不传都一样（没有第二个批次去
+   * 检验缓存是否被清），所以必须用**两个批次**来断。构造：批 1 批准过 node、
+   * 批 2 仍要问 —— 若引擎没拿到门（位点被改坏），批 2 会复用批 1 的批准而不再问。
+   */
+  it("审批门交给引擎：批准缓存不跨批（批次边界真的 reset 了）", async () => {
+    const asked: string[] = [];
+    const t1: Task = { id: "t1", title: "t1", description: "", zone: "src/a", dependencies: [], suggestedRole: "backend-dev" };
+    const t2: Task = { id: "t2", title: "t2", description: "", zone: "src/b", dependencies: [], suggestedRole: "backend-dev" };
+    const platform = createPlatform({
+      settings: settings({
+        // node -v 真实可跑，所以走真实 verifyProject（不注入 verify —— 注入会绕过
+        // 审批门所在的链路，那样这个用例就什么也没断到）。
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDir: policyDirWith("a.json", { version: 1, approvalCommands: ["node"] }),
+      host: {
+        log: () => undefined,
+        requestApproval: async (cmd) => {
+          asked.push(cmd);
+          return true;
+        },
+      },
+    });
+
+    // 两批任务，各自触发一轮 verifyProject ⇒ 批间有 reset 的机会。
+    await platform.engine.execute([[t1], [t2]], tempDir()).catch(() => undefined);
+
+    // 只在**批 2 那一次**独立计数：若引擎没拿到门（该位点被改坏），批 1 的批准
+    // 缓存会存活到批 2，批 2 就不再问 —— 总次数会少一次。
+    // 至少两次 = 批 1 一次 + 批 2 一次（基线+交付闸会让实际次数更多，故用 >=）。
+    expect(asked.filter((c) => c === "node").length).toBeGreaterThanOrEqual(2);
   });
 });
 
