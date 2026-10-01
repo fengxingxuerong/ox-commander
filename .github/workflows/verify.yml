@@ -54,15 +54,20 @@ jobs:
   # 5 处存活。所以 aggregate 只能证明"每个算子至少被碰过"，site 口径才回答
   # "每一处位点是否真有断言"（同一份代码：aggregate 152/152 vs site 486/581）。
   #
-  # 成本：实测 ~21 分钟（581 个位点），故 timeout 给 35 分钟。verify 里跑的仍是
-  # `mutation:quick`（tier 1、每文件 1 个变异、~30s），守住"verify 是快门禁"。
+  # 成本：实测随目标增长（2026-10-01：57 目标 / 1048 位点 / 32.5 分钟）。
+  # 单点吞吐稳定在 ~1.8 秒/位点，所以耗时增长几乎全部来自位点数增长。
+  # timeout 给 35 分钟时余量只剩 2.5 分 —— 而同一天的运行间抖动就有 8 分，
+  # 且被 timeout 掐掉等于**丢掉整份存活清单**（本 job 的唯一产出），
+  # 那时"CI 红了"分不清是代码问题还是太慢。故提到 60 分（≈1.85× 余量，
+  # 可容约 2000 个位点）。verify 里跑的仍是 `mutation:quick`
+  # （tier 1、每文件 1 个变异、~30s），守住"verify 是快门禁"。
   mutation-full:
     name: mutation (site, every site)
     # 只在 Linux 跑：site 审计的存活清单里会混进"平台相关等价变异"
     # （如 `process.platform === "win32"` 在本机恒真），在另一个 OS 上跑一次
     # 才能把它们和真缺口分开。CI 用 Linux，本机是 Windows，两边合起来才是全集。
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
