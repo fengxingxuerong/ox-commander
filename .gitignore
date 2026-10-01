@@ -10,3 +10,8 @@ logs/
 
 *.tsbuildinfo
 scripts/.mutation-pending/
+
+# Box-Agent 运行时目录（会话工作区与临时暂存）：属本机运行时状态，不是项目内容。
+# 从未进过版本库，但 git add -A 会连它一起收 —— 显式忽略，避免误提交。
+.box-agent/
+.box-agent-scratch/
