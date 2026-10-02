@@ -8,6 +8,36 @@
 
 ### 新增
 
+- **反向 MCP server（竞品清单 5.5，学 Vibe Kanban 的双向集成）**。serve 形态
+  的消费者此前只有人（浏览器）和 CI（POST /run）；现在把 serve 的 HTTP 面包装成
+  **MCP stdio server**（`headless/mcp.ts` + `mcp-main.ts`，`npm run mcp:serve --
+  --serve-url=http://127.0.0.1:8787`），Loomy 这类外部 agent 可以编程驱动本平台：
+  `ox_status`（查状态，投递前先看一眼别撞 409）、`ox_receipt`（取最近一份交付凭据
+  全文）、`ox_events`（最近 N 条事件）、`ox_run`（投递 spec，busy 时如实转述 409）、
+  `ox_control`（暂停/继续）。五个工具、五个动作，每个都如实转述 serve 的响应 ——
+  409 就说忙、不可达就说不可达，不把失败包装成成功。
+  协议刻意手写（JSON-RPC 2.0 over stdio，零新依赖）：MCP 的 stdio 传输就是按行
+  分割的 JSON-RPC 对话，SDK 背后没有魔法。纪律与 serve-main 一致：stdout 只出
+  协议（混进一行日志整个会话就坏了），日志全走 stderr；不持状态、不跑 run ——
+  只是 serve HTTP 面的 MCP 译码器，`--serve-url` 指向哪，看板就是哪一个。
+  测试：`src/mcp.test.ts` 14 条（握手/协议错误/五工具 × 成败分支，HTTP 全注入）；
+  产物冒烟加两段（真 stdio 握手 initialize + tools/list 五工具；非法 JSON 行
+  被忽略且优雅退出）。
+
+- **dev server 托管检查（竞品清单 5.4，学 Vibe Kanban）**。前端任务的验收此前
+  止步于 build/typecheck/test —— "页面能不能打开"没人管。`SmokeCheck` 新增
+  `devServer: { url, timeoutMs? }`：存在时该检查是**驻留进程** —— spawn 后不等
+  退出，轮询 HTTP 探活（2xx/3xx 即活），进程树在检查结束时**无论成败都被杀掉**
+  （dev server 是验证道具，不是长驻服务）。三道沙箱门（策略/升级/审批）与普通
+  smoke 完全同一套；判定只看 HTTP 状态码（R1：dev server 无法往 stdout 写字
+  把自己写绿，只能真的把端口服务起来）；404 刻意算死（探活路径配错不该被当成
+  "起来了"）；进程在探活期间崩掉（端口被占、编译 panic）立即判死，不烧满超时
+  预算。探活核心在 `electron/engine/dev-server.ts`（fetch/sleep/时钟全注入，
+  纯逻辑进变异门禁）。刻意不做页面截图/DOM 断言 —— 那是无头浏览器的事，
+  依赖与体积都不该进验证链。
+  测试：`src/dev-server.test.ts` 12 条（判据真值表 / 轮询节奏 / 退出守卫 /
+  runSmokeChecks 集成——真子进程 + 真 HTTP，与靶场同哲学）。
+
 - **LLM 故障转移靶场（`smoke:target-range`，进 verify）**。verify 此前对 LLM 池的
   验证停留在函数层 stub（`failover.test.ts` 注入错误对象）——真实 HTTP 链路层
   （真 fetch、真 TCP、真 AbortSignal 超时、真 Retry-After 响应头、真截断字节流）

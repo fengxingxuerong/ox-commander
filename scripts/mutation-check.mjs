@@ -199,11 +199,17 @@ const TARGETS = [
     tests: ["src/schema.test.ts", "src/prompt-injection.test.ts"],
     tier: 2,
   },
-  // verifier 的断言散在三个文件：runSmokeChecks 在 verifier.test.ts，
-  // verifyProject 在 sandbox-runtime / spawn-plan 两个集成测试里。
+  // verifier 的断言散在四个文件：runSmokeChecks 在 verifier.test.ts，
+  // verifyProject 在 sandbox-runtime / spawn-plan 两个集成测试里，
+  // dev server 托管分支在 dev-server.test.ts（2026-10-02）。
   {
     file: "electron/engine/verifier.ts",
-    tests: ["src/verifier.test.ts", "src/sandbox-runtime.test.ts", "src/spawn-plan.test.ts"],
+    tests: [
+      "src/verifier.test.ts",
+      "src/sandbox-runtime.test.ts",
+      "src/spawn-plan.test.ts",
+      "src/dev-server.test.ts",
+    ],
     tier: 2,
   },
   // run-session 是三个适配器共用的等待-唤醒协议核心（消费者 await 一个
@@ -438,6 +444,15 @@ const TARGETS = [
   // 输入）。它同时是"离开工位也能看"这一格的唯一实现，静默错等于没有。
   // tier 1：整份测试 58ms（端口 0 由系统分配，不撞 smoke 的固定端口）。
   { file: "headless/serve.ts", test: "src/headless-serve.test.ts", tier: 1 },
+  // mcp.ts 的 handleMcpMessage / callTool 是反向 MCP 的全部判定逻辑（协议分流、
+  // 工具分发、响应转述）。判错的形态是静默的：把 409 说成受理、把不可达说成
+  // 正常，agent 就会在忙时反复投递、把失败当成成功 —— 全部走注入 HTTP 的
+  // 纯函数测试，逐位点审得到。
+  { file: "headless/mcp.ts", test: "src/mcp.test.ts", tier: 1 },
+  // dev-server.ts 是 dev server 托管检查的判据核心：probeVerdictOf 的状态码
+  // 边界（2xx/3xx 算活）与轮询超时预算判错，会让"没起来的页面"被判成验收
+  // 通过（或反过来把健康的慢 server 判死）—— 全部可注入，纯函数审计。
+  { file: "electron/engine/dev-server.ts", test: "src/dev-server.test.ts", tier: 1 },
   // remote-endpoint.ts 判定"这个桥接在不在本机"。判错方向不报错，只改一句话的
   // 有无 —— 而那句话正是**唯一**提醒"本地越权检测对远端改动失效"的地方：
   // 把远端判成本机 = 担保变成假的（看板显示零越权，其实是没检测到）；

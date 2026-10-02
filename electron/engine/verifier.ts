@@ -6,6 +6,7 @@ import type { ActionGateLike } from "../sandbox/action-gate";
 import type { ApprovalGate } from "../sandbox/approval-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
+import { killDevServer, pollDevServerProcess } from "./dev-server";
 import { scopedEnv } from "../agents/scoped-env";
 
 export interface VerifierDeps {
@@ -215,6 +216,8 @@ export interface SmokeRunnerDeps {
   approvalGate?: ApprovalGate;
   timeoutMs?: number;
   onEvent?: (text: string) => void;
+  /** dev server 探活用的 fetch（测试注入假件；缺省用全局 fetch 走真 HTTP）。 */
+  devServerFetch?: typeof fetch;
 }
 
 /**
@@ -294,6 +297,66 @@ export async function runSmokeChecks(
 
     const startedAt = Date.now();
     const plan = buildSpawnSpec(check.command, check.args);
+
+    // dev server 托管检查（竞品 5.4）：驻留进程 + HTTP 探活。三道沙箱门与
+    // 普通 smoke 完全同一套 —— dev server 也是智能体写的代码，spawn 前同样
+    // 要过策略/升级/审批。判定只看探活状态码（R1：子进程无法用 stdout 影响
+    // 判定）；无论成败，进程树都会在检查结束时被杀掉（验证道具不留驻）。
+    if (check.devServer) {
+      let server: ReturnType<typeof spawnImpl>;
+      try {
+        server = spawnImpl(plan.file, plan.args, {
+          cwd: deps.cwd,
+          shell: false,
+          env: scopedEnv(),
+          windowsVerbatimArguments: plan.windowsVerbatimArguments,
+        });
+      } catch (err) {
+        results.push({
+          kind: "smoke",
+          ok: false,
+          exitCode: null,
+          logDigest: `[smoke] ${check.title}\n命令：${check.command} ${check.args.join(" ")}\nspawn failed (${plan.note}): ${String(err)}`,
+          durationMs: Date.now() - startedAt,
+        });
+        break;
+      }
+      // dev server 的 stdout 必须被消费：pipe 缓冲写满会阻塞子进程本身。
+      // 收集尾部 4KB 用于失败诊断，其余丢弃。
+      let tail = "";
+      server.stdout?.on("data", (c: Buffer) => {
+        tail = `${tail}${c.toString("utf8")}`.slice(-4096);
+      });
+      server.stderr?.on("data", (c: Buffer) => {
+        tail = `${tail}${c.toString("utf8")}`.slice(-4096);
+      });
+      const verdict = await pollDevServerProcess(
+        check.devServer.url,
+        server,
+        {
+          timeoutMs: check.devServer.timeoutMs ?? 30_000,
+          fetchImpl: deps.devServerFetch,
+        },
+      );
+      killDevServer(server);
+      results.push({
+        kind: "smoke",
+        ok: verdict.ok,
+        exitCode: null,
+        logDigest: digest(
+          [
+            `[smoke] ${check.title}`,
+            `命令：${check.command} ${check.args.join(" ")}`,
+            `[dev-server] ${check.devServer.url} → ${verdict.detail}（探活 ${verdict.attempts} 次，${verdict.elapsedMs}ms）`,
+            verdict.ok ? "进程已按约终止" : `进程已终止；尾部输出：${tail.trim() || "（空）"}`,
+          ].join("\n"),
+        ),
+        durationMs: Date.now() - startedAt,
+      });
+      if (!verdict.ok) break;
+      continue;
+    }
+
     const outcome = await new Promise<SmokeOutcome>((resolve) => {
       let timedOut = false;
       let child: ReturnType<typeof spawnImpl>;

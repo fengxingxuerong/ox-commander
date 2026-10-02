@@ -45,6 +45,19 @@
 4. **agents.d 预设扩容**（竞品清单 5.6 的落地）：aider / goose / qwen-code / gemini-cli
    四个 CLI 预设（标注"未在本机实测，接入前 --help 核对"）。
 
+### 同日补记：清单 5.3 / 5.4 / 5.5 全部收官
+
+- **5.3 赛马**：核实发现已于 2026-09-30 由并行工作完成落库（`e52de2a`，
+  `raceRedundancy` 设置 + 调度器赛马组 + 变异清零）—— 待做清单口径滞后，非本轮工作。
+- **5.4 dev server 托管**：本轮落地（`SmokeCheck.devServer` + `electron/engine/dev-server.ts`，
+  驻留进程 + HTTP 探活 + 树杀收尾 + 退出守卫）。
+- **5.5 反向 MCP**：本轮落地（`headless/mcp.ts` / `mcp-main.js`，手写 JSON-RPC over
+  stdio 零依赖，五工具如实转述 serve HTTP 面；产物冒烟真 stdio 握手）。
+
+至此 2026-09-29 可吸收清单（5.1–5.6）全部有落点：5.1 ActionGate（d6dcb26）、
+5.2 facts/derived（4e7a024+89d08a4）、5.3 赛马（e52de2a）、5.4/5.5（本轮）、
+5.6 agents.d（本轮）。剩余大项：P1-3 上下文回溯尾巴、P2-3 审批 UI 面、5.7 PR/CI 折中版（远期）。
+
 ## 四、参考链接（本轮新增）
 
 - GitHub Agent HQ：https://github.blog/news-insights/company-news/welcome-home-agents/

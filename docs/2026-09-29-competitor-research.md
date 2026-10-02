@@ -119,6 +119,10 @@ meta-harness：把 Claude Code / Codex / Cursor / Pi / YAML 自定义 agent 统�
 的编排模式。验收判据是现成的（build/typecheck/test 硬门禁 + 产物冒烟），比 VK 的
 "人眼看谁好"更硬。token 池的用量可见性天然支持赛后归因。
 **成本**：中低。调度器已有批内并发闸，加"任务级冗余组"一种批次形状即可。
+✅ **已完成（2026-09-30，`e52de2a`）**：`SchedulerOptions.raceRedundancy`（默认 1 =
+关闭，设置页 1–6 档）—— >1 时每任务并行派给 min(N, 可用执行器) 个**不同**执行器，
+首个终态成功者赢、其余立即 abort 且静默（不污染审计/breaker/任务账），全员失败汇总
+进重修；批次后的统一硬门禁照旧把关（产物正确性不靠赛马，赛马是拿 token 换时间）。
 
 ### 5.4 前端 zone 的 dev server 托管 + 探活/预览（学 VK）
 
@@ -126,6 +130,9 @@ meta-harness：把 Claude Code / Codex / Cursor / Pi / YAML 自定义 agent 统�
 HTTP 探活/截图留证"作为前端任务的可选验证段。与现有快照回滚兼容（预览进程要纳入
 超时/清理管理）。
 **成本**：低中。主要是端口托管与进程清理的工程细节。
+✅ **已完成（2026-10-02）**：`SmokeCheck.devServer`（驻留进程 + HTTP 探活，2xx/3xx
+即活；三道沙箱门同套；进程树无论成败都被杀掉；探活期间进程崩掉立即判死）。刻意
+不做截图/DOM 断言（无头浏览器的依赖与体积不进验证链），"能打开"由 HTTP 200 钉住。
 
 ### 5.5 反向 MCP server（学 VK 的双向集成）
 
@@ -133,6 +140,10 @@ HTTP 探活/截图留证"作为前端任务的可选验证段。与现有快照�
 交付物）让 Loomy 等外部 agent 也能编程驱动。AI 交接看板项目的 `kanban_context`
 工具已有成熟先例可抄。
 **成本**：低。协议层都是现成的，是包装问题。
+✅ **已完成（2026-10-02）**：`headless/mcp.ts` + `mcp-main.js`（`npm run mcp:serve`）——
+手写 JSON-RPC 2.0 over stdio（零新依赖），五工具（ox_status / ox_receipt /
+ox_events / ox_run / ox_control）如实转述 serve HTTP 面的响应；stdout 只出协议、
+日志走 stderr；产物冒烟加真 stdio 握手段。
 
 ### 5.6 agents.d 预设库扩容（学 AO 的工厂化接入 + Omnigent 的 YAML）
 
@@ -140,6 +151,9 @@ HTTP 探活/截图留证"作为前端任务的可选验证段。与现有快照�
 Omnigent 的 agent YAML 定义格式**作为导入路径 —— 它 9k+★ 的定义格式有成为事实标准的
 势头，兼容它等于免费接入其生态。
 **成本**：低。manifest 校验器已在，纯数据工作。
+✅ **已完成（2026-10-02）**：补 aider / goose / qwen-code / gemini-cli 四个 CLI
+预设（标注"未在本机实测，接入前 --help 核对"）；Omnigent YAML 兼容导入暂不做
+（YAML 解析引入新依赖，价值未到）。
 
 ### 5.7 远期：PR/CI 生命周期的折中版（学 AO）
 

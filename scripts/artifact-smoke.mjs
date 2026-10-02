@@ -99,6 +99,48 @@ if (fs.existsSync(headless)) {
   );
 }
 
+// 3b. MCP stdio server protocol（反向 MCP，竞品 5.5 的产物层冒烟）
+const mcpMain = path.join(root, "dist-headless", "headless", "mcp-main.js");
+check("dist-headless/headless/mcp-main.js exists", fs.existsSync(mcpMain));
+if (fs.existsSync(mcpMain)) {
+  const runMcp = (stdinText) =>
+    spawnSync(process.execPath, [mcpMain, "--serve-url=http://127.0.0.1:1"], {
+      input: stdinText,
+      encoding: "utf8",
+    });
+  // initialize → tools/list 两连发：握手响应带 protocolVersion，工具表非空。
+  // --serve-url 指向一个必然拒绝的端口：tools/list 不发 HTTP，响应不受影响 ——
+  // 同时证明"stdout 只出协议、stderr 才是日志"的纪律。
+  const lines = [
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }),
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }),
+    "",
+  ].join("\n");
+  const r = runMcp(lines);
+  const outLines = r.stdout.trim().split("\n").filter(Boolean);
+  let init = null;
+  let tools = null;
+  try {
+    init = JSON.parse(outLines[0] ?? "null");
+    tools = JSON.parse(outLines[1] ?? "null");
+  } catch {
+    /* keep null */
+  }
+  check(
+    "mcp: initialize + tools/list over stdio",
+    init?.result?.protocolVersion === "2024-11-05" &&
+      Array.isArray(tools?.result?.tools) &&
+      tools.result.tools.length === 5,
+    `lines=${outLines.length} tools=${tools?.result?.tools?.length ?? "none"}`,
+  );
+  const bad = runMcp("not json\n");
+  check(
+    "mcp: 非法 JSON 行被忽略（不回话、不崩、stdin 关闭后退出 0）",
+    bad.status === 0 && bad.stdout.trim() === "",
+    `exit=${bad.status} stdout=${bad.stdout.trim().slice(0, 40)}`,
+  );
+}
+
 if (failed > 0) {
   console.error(`\nartifact smoke: ${failed} check(s) failed`);
   process.exit(1);

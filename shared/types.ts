@@ -76,6 +76,21 @@ export interface SmokeCheck {
   stdin?: string;
   /** stdout 必须包含的片段（空数组 = 只看退出码）。 */
   expectContains?: string[];
+  /**
+   * dev server 托管检查（竞品清单 5.4，学 Vibe Kanban）：存在时本检查是
+   * **驻留进程** —— spawn 后不等退出，轮询 HTTP 探活，2xx 即通过；无论探活
+   * 结果如何，进程树都会在检查结束时被杀掉（不留给后续批次）。
+   *
+   * 与普通 smoke 互斥：`stdin` / `expectContains` 在本模式下被忽略（判定只看
+   * HTTP 状态码 —— R1：探活判据独立于被判定方，dev server 无法通过往 stdout
+   * 写字让自己的判定变绿；它只能真的把端口服务起来）。
+   */
+  devServer?: {
+    /** 探活完整 URL（如 `http://127.0.0.1:5173/`）。 */
+    url: string;
+    /** 探活超时（默认 30s），从进程 spawn 起算。 */
+    timeoutMs?: number;
+  };
 }
 
 export interface VerificationCommand {

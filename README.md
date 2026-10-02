@@ -39,10 +39,10 @@ Electron 桌面端 + headless CLI 双入口。
 > | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘、headless 发 `receipt` 事件 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
-> | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 |
+> | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀） |
 > | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算） |
-> | 协议 | headless JSONL 协议（外部宿主可编程驱动）|
+> | 协议 | headless JSONL 协议（外部宿主可编程驱动）+ **反向 MCP server**（agent 生态节点：查状态/取凭据/派单/暂停继续） |
 > | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话 |
 
 ```
@@ -85,8 +85,18 @@ node dist-headless/headless/serve-main.js --port=8787
 #   POST /run 投递 spec（一次只跑一个，第二个拿 409）
 ```
 
+**或者把它接进 agent 生态**（反向 MCP，竞品调研 5.5）：
+
+```bash
+node dist-headless/headless/mcp-main.js --serve-url=http://127.0.0.1:8787
+# MCP stdio server：ox_status / ox_receipt / ox_events / ox_run / ox_control
+# Loomy 等 MCP 宿主把它注册成 server，即可编程驱动整个平台
+```
+
 > serve 形态补的是「离开工位也能看」这一格 —— 实测 15 个同类项目里只有我们缺它
-> （Orca 有桌面 + 手机伴生 + SSH worktree）。⚠️ 无鉴权、无 TLS：本机/内网/SSH 隧道后用。
+> （Orca 有桌面 + 手机伴生 + SSH worktree）。MCP server 再补一格：编排层自己
+> 成为 agent 生态的一个节点（Vibe Kanban 的双向集成路线）。⚠️ 两者都无鉴权、
+> 无 TLS：本机/内网/SSH 隧道后用。
 
 ## 获取与安装
 
