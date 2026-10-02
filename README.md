@@ -163,6 +163,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
+→ smoke:target-range（LLM 故障转移靶场：本地故障注入端点矩阵，18 场景走真实 HTTP 验证 failover/冷却/升级/恢复全行为）
 ```
 
 覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-25 复测 92.00% stmts（3843/4177）/
@@ -236,6 +237,16 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 429 只冷却命中线路本身，请求立即落到同 key 其他模型 → 其他 key → 其他 provider；
 跨 provider 时认证失败不做整池 fail-fast。全部可在「设置 → 线路池」勾选配置。
 
+冷却语义（2026-10-02 起对齐竞品弹性库标准）：
+
+- **429/5xx/超时/畸形响应**：冷却该线路（429 带 Retry-After 时按服务端说的等，封顶 5 分钟）
+- **402/404/405/410/413（线路级永久错误）**：余额耗尽、模型退役、路径配错 —— 同样 bench 本线路；
+  400 刻意不冷却（换一个模型可能就对了）
+- **连续失败升级**：冷却到期又失败 → 冷却时长翻倍（上限 10 分钟），成功一次清零 ——
+  持续坏掉的线路不会被每 30s 重撞一次
+- **线路健康可见**：每条线路的冷却剩余、失败/限流账、连续失败轮数都在看板与协议事件里
+- 上述行为由**本地故障注入靶场**逐条验证（`npm run smoke:target-range`，真实 HTTP，18 场景）
+
 ## 安全边界
 
 - 所有智能体副作用强制过沙箱：路径七级判定（穿越/越根/受保护路径，realpath 后再判）、命令白名单 + 元字符拦截、
@@ -270,6 +281,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577→594→590 三轮，含逐目标报告与适用边界）
 - [docs/2026-09-29-competitor-research.md](docs/2026-09-29-competitor-research.md) — 多智能体编排器竞品调研（AO / Vibe Kanban / Omnigent 对位分析与可吸收清单）
 - [docs/2026-09-29-competitive-landscape-and-roadmap.md](docs/2026-09-29-competitive-landscape-and-roadmap.md) — 竞品地形与优化方案（GitHub API 取数 + README 关键词命中口径，含 Orca 深读）
+- [docs/2026-10-02-competitor-refresh.md](docs/2026-10-02-competitor-refresh.md) — 竞品特性刷新与吸收记录（Agent HQ//fleet 动态 + 弹性库标准特性逐条对照与落地）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）

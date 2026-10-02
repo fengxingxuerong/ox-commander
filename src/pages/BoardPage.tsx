@@ -185,6 +185,7 @@ export function BoardPage() {
                   <li key={l.key} className="task-meta">
                     {l.cooling ? `冷却中（约 ${Math.ceil(l.remainingMs / 1000)}s）` : "可用"} ·{" "}
                     {l.key} · 失败 {l.failures} 次（限流 {l.rateLimitHits}）
+                    {l.consecutiveFailures >= 2 ? ` · 连续坏 ${l.consecutiveFailures} 轮` : ""}
                   </li>
                 ))}
               </ul>

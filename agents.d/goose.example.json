@@ -1,0 +1,33 @@
+{
+  "id": "goose",
+  "displayName": "Goose（Block，本机 CLI）",
+  "adapter": "cli",
+  "entry": {
+    "kind": "cli",
+    "command": "goose",
+    "argsTemplate": [
+      "run",
+      "--text",
+      "请严格执行文件 {{promptPath}} 中描述的任务（先读该文件，它是完整任务书）。只修改 zone「{{zone}}」内的文件。完成后直接结束。",
+      "--no-session"
+    ],
+    "probeArgs": ["--version"]
+  },
+  "capabilities": {
+    "protocolVersion": "ox-agent/2",
+    "roles": ["*"],
+    "zoneGlobs": ["src", "src/**"],
+    "supports": ["read", "edit", "create", "run-test"],
+    "artifactKinds": ["files", "logs"],
+    "maxConcurrency": 1,
+    "selfIsolated": false
+  },
+  "credential": { "kind": "none" },
+  "limits": {
+    "runDeadlineMs": 900000,
+    "idleTimeoutMs": 180000,
+    "maxStdoutBytes": 2097152
+  },
+  "priority": 20,
+  "enabled": true
+}

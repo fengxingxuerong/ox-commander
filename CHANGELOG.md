@@ -8,6 +8,40 @@
 
 ### 新增
 
+- **LLM 故障转移靶场（`smoke:target-range`，进 verify）**。verify 此前对 LLM 池的
+  验证停留在函数层 stub（`failover.test.ts` 注入错误对象）——真实 HTTP 链路层
+  （真 fetch、真 TCP、真 AbortSignal 超时、真 Retry-After 响应头、真截断字节流）
+  从未测过。新增 `scripts/llm-target-range-it.mjs`：一个 node:http 服务器按路径
+  扮演多 provider × 多端点故障注入矩阵（`/p<N>/v1/chat/completions`，每端点一份
+  故障剧本：429 带/不带 Retry-After、401/402/404/410、500、挂起超时、慢响应、
+  畸形 HTML、截断 JSON），被测对象是 `dist-headless` 编译产物里的**生产**
+  `FailoverLlmClient`（不是测试替身）。18 个场景 33 项断言，含一条
+  "429→500→402→挂起→成功"五连坏的混沌链。前置 `npm run build:headless`。
+
+- **线路级永久错误 bench（竞品弹性库特性吸收）**。402（余额耗尽）/ 404·410
+  （模型或路径退役，z-ai/glm-5.2 → 410 是实测案例）/ 405 / 413 现在会 bench
+  本线路并轮换，而不是像之前那样走"不冷却"分支 —— 旧行为下每次调用都要重新
+  撞一遍注定失败的慢请求才轮到健康线路。400 刻意保持请求级不冷却：不同模型对
+  temperature / json_mode 的容忍不同，换一条线路可能就对了。与 401/403 的分工
+  不变：认证错误另有 fail-fast 语义（`failFastOnAuth`）。
+
+- **连续失败升级冷却（竞品弹性库标准语义）**。一条线路冷却到期后再次失败，
+  说明它大概率还坏着 —— 冷却时长按 2^(streak-1) 指数升级（30s → 60s → 120s
+  …，上限 `COOLDOWN_ESCALATION_CAP_MS` 10 分钟），成功一次即清零回档。
+  Retry-After 存在时仍是服务端权威（它说等多久就等多久，升级公式不覆盖）。
+  出口：`LineHealth.consecutiveFailures`（看板线路健康卡会显示"连续坏 N 轮"），
+  `onEvent` 在升级发生时如实说"连续失败 N 轮，冷却升级至 Xs"（而不是让用户
+  只看到同样的"冷却 30s"反复出现）。
+
+- **agents.d 预设库扩容（竞品清单 5.6）**：补 aider / goose / qwen-code /
+  gemini-cli 四个 CLI 预设。⚠️ 这批按公开文档的当前主参数写，**未在本机逐字
+  实测**（本仓库没装这四个 CLI），接入前先 `--help` 核对每个参数 —— README
+  警告过的"probe 依然绿但每次派单都因未知参数失败"的坑对它们同样适用。
+
+### 变更
+
+- 看板"线路健康"卡新增"连续坏 N 轮"展示（`consecutiveFailures ≥ 2` 时出现）。
+
 - **`policy.d` 补齐路径面与预算面（竞品调研 P2-2 收尾）**。此前只落了命令面
   （`denyCommands` / 子命令 / `approvalCommands`），两类规则仍写在代码常量里。
   现在补上：

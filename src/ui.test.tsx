@@ -362,14 +362,14 @@ describe("BoardPage", () => {
     seedBoard();
     useApp.setState({
       lineHealth: [
-        { key: "sensenova:SENSENOVA_API_KEY#0", cooling: true, remainingMs: 7_000, failures: 3, rateLimitHits: 2 },
-        { key: "sensenova:SENSENOVA_API_KEY#1", cooling: false, remainingMs: 0, failures: 0, rateLimitHits: 0 },
+        { key: "sensenova:SENSENOVA_API_KEY#0", cooling: true, remainingMs: 7_000, failures: 3, rateLimitHits: 2, consecutiveFailures: 2 },
+        { key: "sensenova:SENSENOVA_API_KEY#1", cooling: false, remainingMs: 0, failures: 0, rateLimitHits: 0, consecutiveFailures: 0 },
       ],
     });
     render(<BoardPage />);
     expect(screen.getByText("线路健康")).toBeTruthy();
     expect(screen.getByText(/冷却中（约 7s）/)).toBeTruthy();
-    expect(screen.getByText(/sensenova:SENSENOVA_API_KEY#0 · 失败 3 次（限流 2）/)).toBeTruthy();
+    expect(screen.getByText(/sensenova:SENSENOVA_API_KEY#0 · 失败 3 次（限流 2） · 连续坏 2 轮/)).toBeTruthy();
     // 可用那条也要在表里：界面要能回答"还剩几条能用"
     expect(screen.getByText(/可用 · sensenova:SENSENOVA_API_KEY#1/)).toBeTruthy();
   });

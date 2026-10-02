@@ -314,10 +314,36 @@ export interface FailoverOptions {
 /** Retry-After-derived cooldowns are capped so a hostile/crazy header cannot shelve a combo for hours. */
 const RETRY_AFTER_COOLDOWN_CAP_MS = 300_000;
 
+/**
+ * 无 Retry-After 时的连续失败冷却升级上限。一条线路反复失败说明它大概率还在坏着，
+ * 每次 30s 冷却到期就再撞一次慢请求是纯浪费 —— 冷却时长按 2^(streak-1) 指数升级，
+ * 最多 bench 十分钟；成功一次即清零回档。
+ */
+export const COOLDOWN_ESCALATION_CAP_MS = 600_000;
+
+/**
+ * 线路级永久错误的 HTTP 状态：这条线路对**任何**请求都会失败，不是某次请求的问题。
+ *
+ * - 402 余额不足（token plan 耗尽，按量额度恢复前整条 key 都打不通）
+ * - 404 / 410 模型或路径不存在 / 已退役（z-ai/glm-5.2 → 410 是 2026-09 实测案例）
+ * - 405 方法不允许（代理路径配错）
+ * - 413 payload 超限（该端点的上下文窗口装不下这个请求）
+ *
+ * 与 400 的区别：400 是**请求级**的 —— 不同模型对 temperature / json_mode 的容忍
+ * 不同，换一条线路可能就对了；上述这些换谁都不行，所以 bench 本线路、继续轮换。
+ * 与 401/403 的区别：认证错误另有 fail-fast 语义（见 `failFastOnAuth`）。
+ */
+export const ROUTE_LEVEL_4XX: ReadonlySet<number> = new Set([402, 404, 405, 410, 413]);
+
 /** 一条线路的累计失败账：`rateLimitHits` 是其中**明确收到 429** 的那部分。 */
 export interface LineStats {
   failures: number;
   rateLimitHits: number;
+  /**
+   * 连续失败轮次（成功一次清零）。冷却到期后再次失败会**继续累积** ——
+   * 这正是升级语义：到期又撞说明线路还坏着，下次 bench 更久。
+   */
+  streak: number;
 }
 
 export interface LineHealth {
@@ -328,6 +354,8 @@ export interface LineHealth {
   remainingMs: number;
   failures: number;
   rateLimitHits: number;
+  /** 连续失败轮次（成功清零）；冷却升级依据，UI 可据此展示"连续坏 N 轮"。 */
+  consecutiveFailures: number;
 }
 
 /**
@@ -353,6 +381,7 @@ export function lineHealthOf(
       remainingMs: cooling ? until - now : 0,
       failures: s?.failures ?? 0,
       rateLimitHits: s?.rateLimitHits ?? 0,
+      consecutiveFailures: s?.streak ?? 0,
     };
   });
 }
@@ -370,6 +399,29 @@ function isTransient(e: unknown): boolean {
   return true; // malformed body, timeout, network-level errors
 }
 
+/** 线路级永久错误（402/404/405/410/413）：见 `ROUTE_LEVEL_4XX`。 */
+function isRouteLevel(e: unknown): boolean {
+  // 所有调用点都在 isTransient(e) 为 false 之后，而非 HttpLlmError 一律
+  // transient（兜底 true），因此这里短路掉的 instanceof 分支不可达 ——
+  // 独立 `return false` 会成为变异审计的假存活位点，并入布尔式消灭。
+  return e instanceof HttpLlmError && ROUTE_LEVEL_4XX.has(e.status);
+}
+
+/**
+ * 冷却消息：首轮失败报普通冷却，连续失败（streak ≥ 2）时如实说出升级事实 ——
+ * 否则用户只看到"冷却 30s"反复出现，看不出这条线路已经被判成持续坏。
+ */
+function escalatedDigest(
+  stats: ReadonlyMap<string, LineStats>,
+  comboKey: string,
+  cd: number,
+): string {
+  const streak = stats.get(comboKey)?.streak ?? 0;
+  const secs = Math.round(cd / 1000);
+  if (streak >= 2) return `连续失败 ${streak} 轮，冷却升级至 ${secs}s`;
+  return `冷却 ${secs}s`;
+}
+
 /**
  * Tries clients group by group (one group per API key); any transient failure
  * (429, 5xx, timeouts, malformed bodies) rotates to the next combo; auth
@@ -377,10 +429,16 @@ function isTransient(e: unknown): boolean {
  *
  * Cooldowns: a transient failure puts its combo on the bench (30s default, or
  * the 429 Retry-After value capped at 5min) so later chat() calls skip it
- * instead of re-hitting a known-bad route. Backoff between combos grows
- * exponentially (500ms * 2^failIndex, capped) and never goes below a
- * Retry-After hint. When every combo is cooling, chat() throws
- * AllRoutesCoolingError immediately instead of sleeping.
+ * instead of re-hitting a known-bad route. A combo that keeps failing after its
+ * cooldown expires escalates: each consecutive failure round doubles the bench
+ * time (capped at 10min) — a route that is still broken keeps getting hit every
+ * 30s otherwise. One success resets the streak. Route-level permanent errors
+ * (402/404/405/410/413 — out of balance, retired model, misconfigured path)
+ * bench their route too, without waiting; genuine request-level errors (400)
+ * do not bench anything since another model may accept the request.
+ * Backoff between combos grows exponentially (500ms * 2^failIndex, capped) and
+ * never goes below a Retry-After hint. When every combo is cooling, chat()
+ * throws AllRoutesCoolingError immediately instead of sleeping.
  */
 export class FailoverLlmClient implements LlmClient {
   private cooldowns = new Map<string, number>();
@@ -463,6 +521,13 @@ export class FailoverLlmClient implements LlmClient {
         const res = await client.chat(req);
         // 成功且此前在冷却 ⇒ 健康状态变了（那条线路回到可服务），推一份。
         if (this.cooldowns.delete(comboKey)) this.onHealth?.(this.health());
+        // 成功一次即清零连续失败账（冷却升级回档）；账目变了同样推一份。
+        const s = this.stats.get(comboKey);
+        if (s !== undefined && s.streak > 0) {
+          s.streak = 0;
+          this.stats.set(comboKey, s);
+          this.onHealth?.(this.health());
+        }
         // 成功才记速度（失败走冷却惩罚，不污染画像）；EWMA 平滑单次抖动。
         const dur = this.now() - t0;
         const prev = this.speeds.get(comboKey);
@@ -503,7 +568,16 @@ export class FailoverLlmClient implements LlmClient {
           this.recordFailure(comboKey, status);
           const cd = this.setCooldown(comboKey, e);
           this.onEvent?.(
-            `${comboKey} 失败（${errorDigest(e)}），冷却 ${Math.round(cd / 1000)}s`,
+            `${comboKey} 失败（${errorDigest(e)}），${escalatedDigest(this.stats, comboKey, cd)}`,
+          );
+        } else if (isRouteLevel(e)) {
+          // 402/404/410 等：这条线路对任何请求都会失败（余额耗尽、模型退役、
+          // 路径配错）。不 bench 的话每次调用都会重新撞一遍慢请求才轮到健康
+          // 线路 —— bench 掉它，本轮继续换下一条。
+          this.recordFailure(comboKey, status);
+          const cd = this.setCooldown(comboKey, e);
+          this.onEvent?.(
+            `${comboKey} 线路级失败（${status}），${escalatedDigest(this.stats, comboKey, cd)}`,
           );
         } else {
           this.onEvent?.(`${comboKey} 失败（${errorDigest(e)}），不冷却`);
@@ -520,8 +594,9 @@ export class FailoverLlmClient implements LlmClient {
 
   /** 记一次失败并推健康快照；只有真的收到 429 才计入限流那一格。 */
   private recordFailure(comboKey: string, status?: number): void {
-    const s = this.stats.get(comboKey) ?? { failures: 0, rateLimitHits: 0 };
+    const s = this.stats.get(comboKey) ?? { failures: 0, rateLimitHits: 0, streak: 0 };
     s.failures += 1;
+    s.streak += 1;
     if (status === 429) s.rateLimitHits += 1;
     this.stats.set(comboKey, s);
     this.onHealth?.(this.health());
@@ -529,10 +604,16 @@ export class FailoverLlmClient implements LlmClient {
 
   private setCooldown(comboKey: string, e: unknown): number {
     const retryAfterMs = e instanceof HttpLlmError ? e.retryAfterMs : undefined;
-    const cd =
-      retryAfterMs !== undefined
-        ? Math.min(retryAfterMs, RETRY_AFTER_COOLDOWN_CAP_MS)
-        : this.cooldownMs;
+    let cd: number;
+    if (retryAfterMs !== undefined) {
+      // 服务端说了等多久就等多久（封顶），升级公式不覆盖它 —— 429 的
+      // Retry-After 是权威的，但连续 429 时它通常恒定，升级无意义。
+      cd = Math.min(retryAfterMs, RETRY_AFTER_COOLDOWN_CAP_MS);
+    } else {
+      // 无 Retry-After：按连续失败轮次指数升级（streak 已在 recordFailure 里 +1）。
+      const streak = this.stats.get(comboKey)?.streak ?? 1;
+      cd = Math.min(this.cooldownMs * 2 ** (streak - 1), COOLDOWN_ESCALATION_CAP_MS);
+    }
     this.cooldowns.set(comboKey, this.now() + cd);
     return cd;
   }

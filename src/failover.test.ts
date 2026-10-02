@@ -584,13 +584,27 @@ describe("线路健康（P1-2）：冷却与限流账要能被界面读到", () 
   // 钉住：判定在纯函数 `lineHealthOf` 里，UI 与协议事件共用同一份口径。
   it("lineHealthOf：冷却中给剩余毫秒，到期即回到可用（过期不是永久判死）", () => {
     const cooldowns = new Map([["g1#0", 10_000]]);
-    const stats = new Map([["g1#0", { failures: 2, rateLimitHits: 1 }]]);
+    const stats = new Map([["g1#0", { failures: 2, rateLimitHits: 1, streak: 2 }]]);
     expect(lineHealthOf(["g1#0"], cooldowns, stats, 4_000)).toEqual([
-      { key: "g1#0", cooling: true, remainingMs: 6_000, failures: 2, rateLimitHits: 1 },
+      {
+        key: "g1#0",
+        cooling: true,
+        remainingMs: 6_000,
+        failures: 2,
+        rateLimitHits: 1,
+        consecutiveFailures: 2,
+      },
     ]);
     // 到期那一刻：cooling 必须为 false、remainingMs 为 0（不是负数也不是哨兵）
     expect(lineHealthOf(["g1#0"], cooldowns, stats, 10_000)).toEqual([
-      { key: "g1#0", cooling: false, remainingMs: 0, failures: 2, rateLimitHits: 1 },
+      {
+        key: "g1#0",
+        cooling: false,
+        remainingMs: 0,
+        failures: 2,
+        rateLimitHits: 1,
+        consecutiveFailures: 2,
+      },
     ]);
   });
 
@@ -632,5 +646,153 @@ describe("线路健康（P1-2）：冷却与限流账要能被界面读到", () 
     await client.chat(REQ);
     expect(seen.length).toBeGreaterThan(1);
     expect(seen.at(-1)![0]!.rateLimitHits).toBe(1);
+  });
+});
+
+describe("线路级永久错误与冷却升级（2026-10-02 竞品弹性库特性吸收）", () => {
+  const PERM = (status: number): (() => Promise<ChatResponse>) =>
+    () => Promise.reject(new HttpLlmError(status, `permanent ${status}`));
+
+  it("402/404/410 冷却该线路并轮换（不 bench 的话每次调用都重撞一遍）", async () => {
+    let clock = 0;
+    const calls: string[] = [];
+    const broke = stub([
+      async () => { calls.push("b1"); return PERM(402)(); },
+      async () => { calls.push("b2"); throw new Error("cooled route must not be re-hit"); },
+    ]);
+    const ok = stub([async () => { calls.push("ok"); return OK("m")(); }]);
+    const client = new FailoverLlmClient([group("g1", [broke, ok])], async () => {}, {
+      now: () => clock,
+    });
+    const res = await client.chat(REQ);
+    expect(res.model).toBe("m");
+    expect(calls).toEqual(["b1", "ok"]);
+    // 冷却期内第二次调用直接跳过坏线路（变异 isRouteLevel→false 时 b 会被再次撞上）
+    clock = 1_000;
+    await client.chat(REQ);
+    expect(calls).toEqual(["b1", "ok", "ok"]);
+  });
+
+  it("404 与 410 同样算线路级（模型退役/路径配错与余额耗尽同性质）", async () => {
+    for (const status of [404, 410, 405, 413]) {
+      let clock = 0;
+      const calls: string[] = [];
+      const broke = stub([async () => { calls.push("b"); return PERM(status)(); }]);
+      const ok = stub([async () => { calls.push("ok"); return OK("m")(); }]);
+      const client = new FailoverLlmClient([group("g1", [broke, ok])], async () => {}, {
+        now: () => clock,
+      });
+      await client.chat(REQ);
+      clock = 1_000;
+      await client.chat(REQ);
+      expect(calls).toEqual(["b", "ok", "ok"]);
+    }
+  });
+
+  it("400 是请求级错误：不冷却（换一条线路可能就对了）", async () => {
+    let clock = 0;
+    const calls: string[] = [];
+    // 4 个槽位 = 期望恰好 4 次内部调用（stub 钳底会让序列断在最后一位）
+    const picky = stub([
+      async () => { calls.push("p1"); return PERM(400)(); },
+      async () => { calls.push("p2"); return OK("m")(); },
+      async () => { calls.push("p1"); return PERM(400)(); },
+      async () => { calls.push("p2"); return OK("m")(); },
+    ]);
+    const client = new FailoverLlmClient([group("g1", [picky])], async () => {}, {
+      now: () => clock,
+    });
+    // 单线路池：400 失败后无线路可换，错误直接抛出（但该线路**没有**进冷却表）
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    clock = 1_000;
+    // 若 400 被误冷却，这条 chat 会抛 AllRoutesCoolingError 而不是重试线路本身
+    await client.chat(REQ);
+    clock = 2_000;
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    clock = 3_000;
+    await client.chat(REQ);
+    // 400 每轮都会被重新尝试（不 bench）；变异 ROUTE_LEVEL_4XX 误收 400 时
+    // 第 2/4 次调用会抛 AllRoutesCoolingError，序列立刻断在 p1。
+    expect(calls).toEqual(["p1", "p2", "p1", "p2"]);
+  });
+
+  it("连续失败冷却指数升级：streak 2 → 60s、streak 3 → 120s（cap 600s）", async () => {
+    let clock = 0;
+    const always: LlmClient = { async chat() { return PERM(500)(); } };
+    const client = new FailoverLlmClient([group("g1", [always])], async () => {}, {
+      now: () => clock,
+      cooldownMs: 30_000,
+    });
+    // 单线路：第一轮失败 → 冷却 30s
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    const h1 = client.health()[0]!;
+    expect(h1.remainingMs).toBe(30_000);
+    expect(h1.consecutiveFailures).toBe(1);
+    // 到期后再撞（streak 2）→ 升级 60s
+    clock += 30_000;
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(client.health()[0]!.remainingMs).toBe(60_000);
+    // 到期后再撞（streak 3）→ 120s
+    clock += 60_000;
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(client.health()[0]!.remainingMs).toBe(120_000);
+    // 连撞到 cap：30→60→120→240→480→600(cap)、之后恒 600
+    for (let i = 0; i < 6; i++) {
+      clock += 600_000; // 越过任何一次冷却
+      await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    }
+    expect(client.health()[0]!.remainingMs).toBe(600_000);
+  });
+
+  it("成功一次清零连续失败账（升级回档）", async () => {
+    let clock = 0;
+    const flaky = stub([
+      async () => PERM(500)(),          // streak 1
+      async () => OK("m")(),            // 成功 → 清零
+      async () => PERM(500)(),          // 再失败 → streak 1（不是 2）
+    ]);
+    const client = new FailoverLlmClient([group("g1", [flaky])], async () => {}, {
+      now: () => clock,
+      cooldownMs: 30_000,
+    });
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    clock += 30_000; // 冷却到期
+    await client.chat(REQ);
+    expect(client.health()[0]!.consecutiveFailures).toBe(0);
+    clock += 1_000; // 不等冷却也行——成功线路不在冷却里，但下一轮失败看 streak
+    clock += 30_000; // 万一进冷却，先跳过
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    // 成功清零后再次失败，streak 从 1 起 → 冷却回到 30s（不是 60s）
+    expect(client.health()[0]!.remainingMs).toBe(30_000);
+  });
+
+  it("Retry-After 优先于升级公式（服务端权威），封顶不变", async () => {
+    let clock = 0;
+    const limited = stub([async () => Promise.reject(new HttpLlmError(429, "limited", 5_000))]);
+    const client = new FailoverLlmClient([group("g1", [limited])], async () => {}, {
+      now: () => clock,
+      cooldownMs: 30_000,
+    });
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(client.health()[0]!.remainingMs).toBe(5_000);
+    clock += 5_000;
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    // streak 2 但 Retry-After 恒定 5s：仍按服务端说的等，不升级
+    expect(client.health()[0]!.remainingMs).toBe(5_000);
+  });
+
+  it("onEvent 如实说出升级事实（连续 N 轮），首轮只报普通冷却", async () => {
+    let clock = 0;
+    const events: string[] = [];
+    const always: LlmClient = { async chat() { return PERM(500)(); } };
+    const client = new FailoverLlmClient([group("g1", [always])], async () => {}, {
+      now: () => clock,
+      onEvent: (t) => events.push(t),
+    });
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(events.some((t) => t.includes("冷却 30s") && !t.includes("升级"))).toBe(true);
+    clock += 30_000;
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(events.some((t) => t.includes("连续失败 2 轮") && t.includes("升级至 60s"))).toBe(true);
   });
 });

@@ -143,7 +143,18 @@ POST {baseUrl}{runsPath}/{id}/abort           → 2xx
 
 - `codex.example.json` — 子进程型（Codex CLI）
 - `claude-code.example.json` — 子进程型（Claude Code，`-p` 非交互）
+- `aider.example.json` — 子进程型（Aider，`--message` + `--yes-always`）
+- `goose.example.json` — 子进程型（Block Goose，`run --text`）
+- `qwen-code.example.json` — 子进程型（Qwen Code，`-p` + `--yolo`）
+- `gemini-cli.example.json` — 子进程型（Gemini CLI，`-p` + `--yolo`）
 - `workbuddy-bridge.example.json` — HTTP 桥接型（WorkBuddy / MCP 网关）
+- `remote-runner.example.json` — HTTP 桥接型（远程执行器，见上节）
+
+> **2026-10-02 扩容的四个预设（aider / goose / qwen-code / gemini-cli）按各自
+> 公开文档的当前主参数写，但**未在本机逐字实测**——本仓库没有安装这四个 CLI。
+> 接入前先 `--help` 核对每个参数（尤其 aider 的 `--no-pretty`、goose 的
+> `--no-session`、qwen/gemini 的 `--yolo` 是否存在于你的版本），否则会踩
+> 下面这个坑。
 
 > **CLI 型的 `argsTemplate` 必须逐字核对目标 CLI 的真实参数。**
 > 2026-09-20 实测踩到：本目录的 Codex 示例曾写 `--prompt-file`，而 `codex exec`
