@@ -100,3 +100,29 @@ export function routeVerificationErrors(
   }
   return { byTask, unattributed: unattributed.map((e) => `[${e.kind}]\n${e.digest}`).join("\n\n") };
 }
+
+const ERROR_CLASS_LABEL: Record<NonNullable<VerificationReport["results"][number]["errorClass"]>, string> = {
+  "sandbox-denied": "命令被沙箱策略拒绝执行",
+  "escalation-denied": "命令被跨动作升级审查拒绝执行",
+  "approval-denied": "命令需要人工审批，无人批准（或未接审批回调，按拒绝处理）",
+};
+
+/**
+ * 环境裁决说明（P2-3 失败类别细分）：把验证报告里因**拒绝执行**而失败的结果
+ * （沙箱/升级/审批三类，`errorClass` 打标）单独摘出来，说明"这不是代码问题"。
+ *
+ * 重修循环读到它，就不会把"审批拒绝"误判成"项目本来就坏"而让 agent 白修一轮；
+ * 也把"改代码改不动结果"这件事显式交还给宿主（调整 policy.d / 批准后重跑）。
+ */
+export function environmentalRulingNote(report: VerificationReport): string {
+  const ruled = report.results.filter((r) => !r.ok && r.errorClass !== undefined);
+  if (ruled.length === 0) return "";
+  const lines = ruled.map(
+    (r) => `[${r.kind}]（${ERROR_CLASS_LABEL[r.errorClass!]}）\n${r.logDigest.split("\n")[0] ?? ""}`,
+  );
+  return (
+    `[环境裁决] 下列失败不是代码造成的 —— 是沙箱/审批拒绝执行，改代码无法改变结局：\n` +
+    lines.join("\n\n") +
+    `\n要推进：调整 policy.d（denyCommands/升级审查/approvalCommands）或人工批准后重跑。`
+  );
+}

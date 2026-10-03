@@ -39,6 +39,7 @@ export const useApp = create<AppState>((set, get) => ({
   logs: [],
   tasks: {},
   escalations: [] as AppState["escalations"],
+  approvals: [] as AppState["approvals"],
   conflicts: [] as AppState["conflicts"],
   planning: false,
   planningError: undefined,
@@ -99,6 +100,7 @@ export const useApp = create<AppState>((set, get) => ({
         logs: [],
         tasks: {},
         escalations: [],
+        approvals: [],
         conflicts: [],
         verification: undefined,
         receipt: undefined,
@@ -241,6 +243,24 @@ export const useApp = create<AppState>((set, get) => ({
     }
   },
 
+  resolveApproval: async (requestId, granted) => {
+    const before = get().approvals.find((a) => a.requestId === requestId);
+    set((s) => ({
+      approvals: s.approvals.map((a) => (a.requestId === requestId ? { ...a, resolved: true } : a)),
+      logs: [...s.logs, `── 审批 ${requestId}：${granted ? "批准" : "拒绝"} ──`],
+    }));
+    try {
+      await api().resolveApproval(requestId, granted);
+    } catch (err) {
+      const message = (err as Error).message;
+      // 与 resolveEscalation 同款乐观回滚：保留按钮，让操作者能重试。
+      set((s) => ({
+        approvals: s.approvals.map((a) => (a.requestId === requestId ? (before ?? a) : a)),
+        logs: [...s.logs, `[错误] 审批回传失败: ${message}`],
+      }));
+    }
+  },
+
   loadRecovery: async () => {
     // Board recovery (facts/derived split): on mount the board asks the main
     // process for the view derived from the audit trail. Before this, a
@@ -337,6 +357,17 @@ export const useApp = create<AppState>((set, get) => ({
             { taskId, summary, resolved: false },
           ],
           logs: [...s.logs, `── ⚠️ 任务 ${taskId} 需要决策（见右侧面板）──`],
+        }));
+        break;
+      }
+      case "approval-request": {
+        const { requestId, command, args } = p as { requestId: string; command: string; args: string[] };
+        set((s) => ({
+          approvals: [
+            ...s.approvals.filter((a) => a.requestId !== requestId),
+            { requestId, command, args: args ?? [], resolved: false },
+          ],
+          logs: [...s.logs, `── ⚠️ 命令需要审批（见右侧面板）：${command} ${(args ?? []).join(" ")} ──`],
         }));
         break;
       }

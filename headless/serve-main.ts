@@ -55,6 +55,10 @@ async function main(): Promise<void> {
         emit,
         // 引擎交给服务：POST /pause / POST /resume 才能真的影响这次 run（P1-5）。
         ...(control ? { onEngine: control } : {}),
+        // 审批（P2-3）：服务广播 approval-request 事件，POST /approve 作答。
+        // 命令命中 approvalCommands 时不再"问不到人就拒绝" —— 有人（状态页/
+        // MCP 客户端）真的能回答了。
+        requestApproval: srv.approvalRequester,
       });
     },
   });

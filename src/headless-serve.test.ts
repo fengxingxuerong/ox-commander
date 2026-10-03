@@ -229,11 +229,71 @@ describe("serve · HTTP", () => {
     const srv = await startServe({ run: async () => 0 });
     open.push(srv);
     const res = await fetch(`http://127.0.0.1:${srv.port}/run`);
-    // 405 而不是 400/202：GET 进到 POST 分支会去解析空 body，报成"body 不是合法
-    // JSON"—— 那个错误和"你用错方法了"是两回事，混起来排查时指向错的地方。
     expect(res.status).toBe(405);
   });
+});
 
+describe("serve · 审批链（P2-3）", () => {
+  it("approvalRequester 广播事件并 park，POST /approve 放行后 resolve true", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    const p = srv.approvalRequester("npm", ["run", "deploy"]);
+    // 事件已广播 + 状态队列可见（字段即承诺：有 pending 才有键）
+    expect(srv.state.pendingApprovals).toHaveLength(1);
+    expect(srv.state.pendingApprovals![0]!.command).toBe("npm");
+    expect(srv.state.events.at(-1)).toMatchObject({ type: "approval-request", command: "npm", args: ["run", "deploy"] });
+    // 还在挂（不会立即 resolve）
+    let settled = false;
+    void p.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(settled).toBe(false);
+    // 批准
+    const requestId = srv.state.pendingApprovals![0]!.requestId;
+    const res = await fetch(`http://127.0.0.1:${srv.port}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ requestId, granted: true }),
+    });
+    expect(res.status).toBe(200);
+    expect(await p).toBe(true);
+    // 队列清空：键消失（不是空数组）
+    expect("pendingApprovals" in srv.state).toBe(false);
+  });
+
+  it("拒绝路径：granted=false → resolve false（上层按拒绝处理）", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    const p = srv.approvalRequester("npm", ["run", "deploy"]);
+    const requestId = srv.state.pendingApprovals![0]!.requestId;
+    const res = await fetch(`http://127.0.0.1:${srv.port}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ requestId, granted: false }),
+    });
+    expect(res.status).toBe(200);
+    expect(await p).toBe(false);
+  });
+
+  it("未知 requestId 回 404，且不改动队列", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    void srv.approvalRequester("npm", ["run", "deploy"]);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ requestId: "nope", granted: true }),
+    });
+    expect(res.status).toBe(404);
+    expect(srv.state.pendingApprovals).toHaveLength(1);
+  });
+
+  it("close 时把挂着的审批按拒绝收尾（fail-closed 最后一环：无人再能回答）", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    const p = srv.approvalRequester("npm", ["run", "deploy"]);
+    await srv.close();
+    expect(await p).toBe(false);
+    expect("pendingApprovals" in srv.state).toBe(false);
+  });
+});
+
+describe("serve · HTTP 控制面与边界", () => {
   it("暂停/继续真的递到引擎，且在状态里看得见（P1-5 的 CLI 对等能力）", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((r) => (release = r));

@@ -121,6 +121,11 @@ export interface RunSpecIo {
    * 在规划**之前**就给出，否则 PRD/任务分解那两段（最烧 token 的部分）无法暂停。
    */
   onEngine?: (engine: OrchestratorEngine) => void;
+  /**
+   * 审批询问器（P2-3）：serve 形态由服务注入（广播 approval-request 事件 +
+   * 等 POST /approve）；缺省 = 无宿主回调，`ApprovalGate` 按 fail-closed 拒绝。
+   */
+  requestApproval?: (command: string, args: readonly string[]) => Promise<boolean>;
 }
 
 /**
@@ -277,6 +282,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
         }
       },
       requestEscalationDecision: callbacks.requestEscalationDecision,
+      // 审批（P2-3）：serve 宿主注入的询问器；CLI 形态缺席 = fail-closed 拒绝。
+      ...(io.requestApproval ? { requestApproval: io.requestApproval } : {}),
     },
   });
 

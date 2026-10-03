@@ -103,6 +103,14 @@ export interface EscalationView {
   resolved: boolean;
 }
 
+/** 一条等待人工审批的命令（P2-3）：command 命中 approvalCommands 时上板。 */
+export interface ApprovalView {
+  requestId: string;
+  command: string;
+  args: string[];
+  resolved: boolean;
+}
+
 /**
  * A zone-conflict verdict surfaced to the board. The engine's BatchGuard knows
  * which files two concurrent tasks fought over and what it did about it; without
@@ -155,6 +163,7 @@ export interface AppState {
   /** ts of the last audit fact, shown next to the recovery banner. */
   lastActivityTs?: string;
   escalations: EscalationView[];
+  approvals: ApprovalView[];
   conflicts: ConflictView[];
   prd?: PrdDocument;
   batches?: Task[][];
@@ -186,6 +195,7 @@ export interface AppState {
   loadSettings(): Promise<void>;
   saveSettings(settings: ProjectSettings): Promise<void>;
   resolveEscalation(taskId: string, action: EscalationAction): Promise<void>;
+  resolveApproval(requestId: string, granted: boolean): Promise<void>;
   /** Rebuilds the board from audit facts on mount (facts/derived split). */
   loadRecovery(): Promise<void>;
   handleEvent(payload: Record<string, unknown>): void;
@@ -211,6 +221,7 @@ declare global {
       pause(): Promise<void>;
       resume(): Promise<void>;
       resolveEscalation(taskId: string, action: EscalationAction): Promise<boolean>;
+      resolveApproval(requestId: string, granted: boolean): Promise<boolean>;
       listAgents(): Promise<AgentListResult>;
       exampleManifest(): Promise<AgentManifest>;
       registerAgent(manifest: unknown): Promise<AgentMutationResult>;

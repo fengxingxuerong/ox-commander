@@ -41,6 +41,8 @@ interface ServeStateShape {
   updatedAt?: string;
   receipt?: unknown;
   events?: Array<Record<string, unknown>>;
+  /** 等待人工审批的请求（P2-3）；无 pending 时键不存在。 */
+  pendingApprovals?: Array<{ requestId: string; command: string; args: string[] }>;
 }
 
 /** 工具描述表：`tools/list` 与测试共用同一份事实。 */
@@ -85,6 +87,22 @@ export function mcpToolDefs(): McpToolDef[] {
         type: "object",
         properties: { action: { type: "string", enum: ["pause", "resume"] } },
         required: ["action"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "ox_approve",
+      description:
+        "答复一条等待人工审批的命令（policy.d 的 approvalCommands 命中，命令执行前停下等人）。" +
+        "requestId 来自 ox_status 的 pendingApprovals 或 approval-request 事件；granted=true 放行。" +
+        "已答复/不存在的 requestId 返回 404。",
+      inputSchema: {
+        type: "object",
+        properties: {
+          requestId: { type: "string", description: "approval-request 事件里的 requestId" },
+          granted: { type: "boolean", description: "true=批准放行，false=拒绝" },
+        },
+        required: ["requestId", "granted"],
         additionalProperties: false,
       },
     },
@@ -157,7 +175,17 @@ async function callTool(
     if (s.paused === true) parts.push("已暂停");
     if (s.exitCode !== undefined) parts.push(`退出码 ${s.exitCode}`);
     parts.push(`事件 ${s.events?.length ?? 0} 条`);
+    const pending = s.pendingApprovals ?? [];
+    if (pending.length > 0) {
+      parts.push(`等待审批 ${pending.length} 条`);
+    }
     if (s.updatedAt) parts.push(`更新于 ${s.updatedAt}`);
+    if (pending.length > 0) {
+      const detail = pending
+        .map((p) => `  · ${p.requestId}: ${p.command} ${p.args.join(" ")}`)
+        .join("\n");
+      return textContent(`${parts.join(" · ")}。${STATE_NOTE}\n等待审批：\n${detail}`);
+    }
     return textContent(`${parts.join(" · ")}。${STATE_NOTE}`);
   }
   if (name === "ox_receipt") {
@@ -200,6 +228,18 @@ async function callTool(
       return textContent(action === "pause" ? "已暂停：当前任务跑完就停，不再派新的（ox_control resume 继续）。" : "已恢复派发。");
     }
     if (res.status === 409) return textContent(`无法${action === "pause" ? "暂停" : "恢复"}：${res.body}`, true);
+    return textContent(`serve 拒绝（HTTP ${res.status}）：${res.body.slice(0, 300)}`, true);
+  }
+  if (name === "ox_approve") {
+    const requestId = argStr(args, "requestId");
+    if (requestId === undefined || requestId === "") {
+      return textContent("requestId 必须是字符串（来自 approval-request 事件）", true);
+    }
+    const res = await http.post("/approve", { requestId, granted: args.granted === true });
+    if (res.status === 200) {
+      return textContent(args.granted === true ? `已批准 ${requestId}（本批次内不再重复询问）。` : `已拒绝 ${requestId}。`);
+    }
+    if (res.status === 404) return textContent(`没有等待中的审批请求：${requestId}（可能已答复/已关闭服务）`, true);
     return textContent(`serve 拒绝（HTTP ${res.status}）：${res.body.slice(0, 300)}`, true);
   }
   return textContent(`未知工具：${name}`, true);

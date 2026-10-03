@@ -34,7 +34,9 @@ export function BoardPage() {
   const usage = useApp((s) => s.usage);
   const lines = useApp((s) => s.lineHealth);
   const escalations = useApp((s) => s.escalations);
+  const approvals = useApp((s) => s.approvals);
   const resolveEscalation = useApp((s) => s.resolveEscalation);
+  const resolveApproval = useApp((s) => s.resolveApproval);
   const interrupted = useApp((s) => s.interrupted);
   const lastActivityTs = useApp((s) => s.lastActivityTs);
   const loadRecovery = useApp((s) => s.loadRecovery);
@@ -271,6 +273,41 @@ export function BoardPage() {
                       </button>
                       <button className="danger" onClick={() => void resolveEscalation(e.taskId, "abort")} title="终止整个项目执行">
                         终止
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </section>
+          )}
+
+          {approvals.length > 0 && (
+            <section className="card escalation">
+              <h3>🛂 命令需要审批</h3>
+              {approvals.map((a) => (
+                <div key={a.requestId} className="escalation-item">
+                  <pre className="escalation-summary">
+                    <code>
+                      {a.command} {a.args.join(" ")}
+                    </code>
+                  </pre>
+                  {a.resolved ? (
+                    <p className="muted">已处理</p>
+                  ) : (
+                    <div className="btn-row">
+                      <button
+                        className="primary"
+                        onClick={() => void resolveApproval(a.requestId, true)}
+                        title="批准放行（本批次内不再重复询问）"
+                      >
+                        批准
+                      </button>
+                      <button
+                        className="danger"
+                        onClick={() => void resolveApproval(a.requestId, false)}
+                        title="拒绝执行；该命令将计入验证失败"
+                      >
+                        拒绝
                       </button>
                     </div>
                   )}

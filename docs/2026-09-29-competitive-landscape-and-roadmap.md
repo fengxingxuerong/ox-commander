@@ -141,7 +141,7 @@
 | --- | --- | --- | --- |
 | P2-1 | GitHub / Linear 原生集成：从 issue 建任务、在 diff 行留批注回传给 agent | Orca、vibe-kanban | 需要 OAuth 与权限模型，先做只读 |
 | P2-2 | **策略即代码**：把 `agents.d/` 的声明式思路扩到 `policy.d/`（路径/命令/预算/审批写成文件，可评审、可版本化） | bernstein 的 policy as code | 与 A2/A3 同源，是我们能做且别人没在编码场景做的。✅ **已完成（2026-10-01）**：四面全覆盖 —— **命令面** `denyCommands` / `denyGitSubcommands` / `denyNpmSubcommands`（`1792325`）、**审批面** `approvalCommands`（P2-3）、**路径面** `forbidWrite`（`pathPolicyOverrides` 算并集，绝不替换地板）、**预算面** `maxTokensPerRun`（`effectiveTokenBudget` 取更小者，接通了此前"只被念出、无消费者"的缺口）。契约只加严不放宽：没有"允许"这一格；未知版本整份丢弃；坏文件不拦 run 但每条问题都说出来 |
-| P2-3 | 审批门（高风险改动停下等人确认） | paperclip 的 approvals、bernstein 的 approval | 与 P2-2 同批做。**命令面已完成（2026-10-01）**：`electron/sandbox/approval-gate.ts` + `policy.d` 的 `approvalCommands` + 宿主回调 `PlatformHost.requestApproval`。三道门的分工是刻意的 —— 静态地板（能不能跑）/ 跨动作状态机（批次内发生过什么）/ 审批（要不要先问人）。fail-closed：问不到人就不执行，与 `escalationPolicy: exhaust` 同构。**未做**：UI 面（审批队列 / 桌面弹窗与 headless 协议事件）、以及失败类别的细分（当前审批拒绝会被基线归因读成"项目本来就坏"，要区分需 `VerificationReport` 带失败类别） |
+| P2-3 | 审批门（高风险改动停下等人确认） | paperclip 的 approvals、bernstein 的 approval | 与 P2-2 同批做。✅ **已全部完成（2026-10-01 命令面 / 10-03 失败类别 + UI 面）**：**命令面** `electron/sandbox/approval-gate.ts` + `policy.d` 的 `approvalCommands` + 宿主回调 `PlatformHost.requestApproval`；**失败类别细分** `VerificationReport.results[].errorClass`（`sandbox-denied`/`escalation-denied`/`approval-denied`，字段即承诺）+ `shared/routing.ts` 的 `environmentalRulingNote`，重修上下文里先说破"这不是代码造成的"并指明出路；**UI 面** 桌面（看板审批区 + `resolveApproval` IPC + cancel 时按拒绝收尾）、serve（`pendingApprovals` + `POST /approve` + 状态页按钮）、MCP（第六工具 `ox_approve`）。三道门的分工是刻意的 —— 静态地板（能不能跑）/ 跨动作状态机（批次内发生过什么）/ 审批（要不要先问人）。fail-closed：问不到人就不执行，与 `escalationPolicy: exhaust` 同构 |
 
 ### 5.1 明确不做（附理由，别被带着跑）
 

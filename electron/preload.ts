@@ -24,6 +24,8 @@ const api = {
   resume: () => ipcRenderer.invoke("orchestration:resume"),
   resolveEscalation: (taskId: string, action: "skip" | "redispatch" | "abort") =>
     ipcRenderer.invoke("orchestration:escalation-decide", taskId, action),
+  resolveApproval: (requestId: string, granted: boolean) =>
+    ipcRenderer.invoke("orchestration:approval-decide", requestId, granted),
   // ── Agent pool (P2) ──
   listAgents: () => ipcRenderer.invoke("agents:list"),
   exampleManifest: () => ipcRenderer.invoke("agents:example-manifest"),

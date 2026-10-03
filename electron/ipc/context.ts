@@ -34,6 +34,9 @@ let currentWindow: BrowserWindow | null = null;
 let runningProjectId: string | null = null;
 /** Pending user decisions for escalated tasks: taskId -> resolver. */
 const pendingEscalations = new Map<string, (action: EscalationAction) => void>();
+/** Pending approval requests (P2-3): requestId -> granted resolver. */
+const pendingApprovals = new Map<string, (granted: boolean) => void>();
+let approvalSeq = 0;
 
 /**
  * The agent pool is a long-lived singleton: agents registered at runtime must
@@ -105,6 +108,24 @@ export function resolveEscalation(taskId: string, action: EscalationAction): boo
 export function abortAllEscalations(): void {
   for (const resolve of pendingEscalations.values()) resolve("abort");
   pendingEscalations.clear();
+}
+
+/** 审批答复（P2-3）：requestId -> granted。不存在时返回 false（IPC 层报错）。 */
+export function resolveApproval(requestId: string, granted: boolean): boolean {
+  const resolve = pendingApprovals.get(requestId);
+  if (!resolve) return false;
+  pendingApprovals.delete(requestId);
+  resolve(granted);
+  return true;
+}
+
+/**
+ * 取消/关窗时把还挂着的审批全部按拒绝收尾（fail-closed 最后一环）：
+ * 无人再能回答的审批不能永远挂住 run。
+ */
+export function abortAllApprovals(): void {
+  for (const resolve of pendingApprovals.values()) resolve(false);
+  pendingApprovals.clear();
 }
 
 export function dynamicAgentMap(): Map<string, { adapter: AgentAdapter; manifest: AgentManifest }> {
@@ -257,6 +278,16 @@ export function buildPlatformLayer(
     host: {
       log: overrides.log,
       callbacks: overrides.callbacks,
+      // 审批（P2-3）：命令命中 approvalCommands 时发事件给渲染进程，park 到
+      // 渲染端回答（orchestration:approval-decide）。渲染端不在（窗口关了）
+      // 时 promise 挂着 —— cancel 会走 abortAllApprovals 按拒绝收尾。
+      requestApproval: (command: string, args: readonly string[]): Promise<boolean> => {
+        const requestId = `a-${(approvalSeq += 1)}-${Date.now().toString(36)}`;
+        send({ type: "approval-request", requestId, command, args });
+        return new Promise<boolean>((resolve) => {
+          pendingApprovals.set(requestId, resolve);
+        });
+      },
       // P5 observability: every run start/end is attributed and persisted, so
       // "which agent did what" survives a reload. The title/projectId extras
       // are board-recovery facts: the derive layer rebuilds the task view from

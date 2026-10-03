@@ -20,6 +20,7 @@ function reset(): void {
     logs: [],
     tasks: {},
     escalations: [],
+    approvals: [],
     conflicts: [],
     verification: undefined,
     receipt: undefined,
@@ -44,6 +45,8 @@ beforeEach(() => {
   g.oxCommander = {
     getSettings: async () => undefined,
     saveSettings: async () => true,
+    resolveEscalation: async () => true,
+    resolveApproval: async () => true,
   };
 });
 
@@ -268,6 +271,42 @@ describe("handleEvent · verification and escalation", () => {
     emit({ type: "escalation", taskId: "t1", summary: "a" });
     emit({ type: "escalation", taskId: "t2", summary: "b" });
     expect(useApp.getState().escalations.map((e) => e.taskId)).toEqual(["t1", "t2"]);
+  });
+});
+
+describe("handleEvent · approval-request（P2-3 审批 UI 面）", () => {
+  it("approval 请求入队并带命令与参数（同 requestId 去重）", () => {
+    emit({ type: "approval-request", requestId: "a-1", command: "npm", args: ["run", "deploy"] });
+    emit({ type: "approval-request", requestId: "a-1", command: "npm", args: ["run", "deploy"] });
+    emit({ type: "approval-request", requestId: "a-2", command: "git", args: ["push"] });
+    const approvals = useApp.getState().approvals;
+    expect(approvals).toHaveLength(2);
+    expect(approvals[0]).toMatchObject({ requestId: "a-1", command: "npm", args: ["run", "deploy"], resolved: false });
+    expect(useApp.getState().logs.at(-1)).toContain("命令需要审批");
+  });
+
+  it("resolveApproval 乐观置已处理，回传失败可回滚（与 escalation 同款）", async () => {
+    emit({ type: "approval-request", requestId: "a-1", command: "npm", args: ["run", "deploy"] });
+    await useApp.getState().resolveApproval("a-1", true);
+    expect(useApp.getState().approvals[0]!.resolved).toBe(true);
+    expect(useApp.getState().logs.at(-1)).toContain("批准");
+  });
+
+  it("回传失败时回滚到可重试状态（乐观置位被撤销）", async () => {
+    // 变异（回滚分支的 === → !== / 三元互换）会让"回滚"变成空操作 ——
+    // resolved 停在 true，按钮消失，操作者永远无法重试。
+    const g = globalThis as { oxCommander?: { resolveApproval?: () => Promise<unknown> } };
+    const real = g.oxCommander;
+    g.oxCommander = { resolveApproval: async () => { throw new Error("ipc down"); } };
+    try {
+      emit({ type: "approval-request", requestId: "a-1", command: "npm", args: ["run", "deploy"] });
+      await useApp.getState().resolveApproval("a-1", true);
+      const approvals = useApp.getState().approvals;
+      expect(approvals[0]!.resolved).toBe(false);
+      expect(useApp.getState().logs.at(-1)).toContain("[错误] 审批回传失败");
+    } finally {
+      g.oxCommander = real;
+    }
   });
 });
 

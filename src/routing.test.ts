@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractErrorFiles, routeVerificationErrors } from "../shared/routing";
+import { environmentalRulingNote, extractErrorFiles, routeVerificationErrors } from "../shared/routing";
 import type { Task, VerificationReport } from "../shared/types";
 
 function task(id: string, zone: string): Task {
@@ -93,5 +93,56 @@ describe("routeVerificationErrors", () => {
     );
     expect(routed.byTask.size).toBe(0);
     expect(routed.unattributed).toBe("");
+  });
+});
+
+describe("environmentalRulingNote（P2-3 失败类别细分）", () => {
+  const r = (over: Partial<Record<string, unknown>>): { kind: "build"; ok: boolean; exitCode: number | null; logDigest: string; durationMs: number } => ({
+    kind: "build",
+    ok: false,
+    exitCode: null,
+    logDigest: "LOG",
+    durationMs: 0,
+    ...over,
+  });
+
+  it("没有 errorClass 失败时返回空串（不干扰普通失败的重修上下文）", () => {
+    const note = environmentalRulingNote({
+      passed: false,
+      results: [r({ logDigest: "tsc error src/a.ts" })],
+    });
+    expect(note).toBe("");
+  });
+
+  it("审批拒绝被摘出并说破『改代码无法改变结局』", () => {
+    const note = environmentalRulingNote({
+      passed: false,
+      results: [r({ errorClass: "approval-denied", logDigest: "[审批] 命令需要人工确认，但当前无审批回调可用，按拒绝处理" })],
+    });
+    expect(note).toContain("[环境裁决]");
+    expect(note).toContain("审批拒绝执行");
+    expect(note).toContain("改代码无法改变结局");
+    expect(note).toContain("approvalCommands");
+  });
+
+  it("三类拒绝各自有对应的说明词", () => {
+    const note = environmentalRulingNote({
+      passed: false,
+      results: [
+        r({ errorClass: "sandbox-denied" }),
+        r({ errorClass: "escalation-denied" }),
+      ],
+    });
+    expect(note).toContain("沙箱策略拒绝执行");
+    expect(note).toContain("跨动作升级审查拒绝执行");
+  });
+
+  it("errorClass 失败与普通失败共存时只摘前者", () => {
+    const note = environmentalRulingNote({
+      passed: false,
+      results: [r({ errorClass: "approval-denied" }), r({ logDigest: "real failure" })],
+    });
+    expect(note).toContain("[环境裁决]");
+    expect(note).not.toContain("real failure");
   });
 });

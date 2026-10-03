@@ -160,6 +160,7 @@ export async function verifyProject(
         exitCode: null,
         logDigest: `[沙箱] 命令被拒绝：${verdict.reason}`,
         durationMs: 0,
+        errorClass: "sandbox-denied",
       });
       break;
     }
@@ -175,6 +176,7 @@ export async function verifyProject(
         exitCode: null,
         logDigest: `[沙箱] 升级拒绝：${escalated.reason}`,
         durationMs: 0,
+        errorClass: "escalation-denied",
       });
       break;
     }
@@ -189,6 +191,7 @@ export async function verifyProject(
         exitCode: null,
         logDigest: `[审批] ${approved.reason}`,
         durationMs: 0,
+        errorClass: "approval-denied",
       });
       break;
     }
@@ -266,6 +269,7 @@ export async function runSmokeChecks(
         exitCode: null,
         logDigest: `[沙箱] 冒烟命令被拒绝：${verdict.reason}\n[${check.title}]`,
         durationMs: 0,
+        errorClass: "sandbox-denied",
       });
       break;
     }
@@ -279,6 +283,7 @@ export async function runSmokeChecks(
         exitCode: null,
         logDigest: `[沙箱] 冒烟命令升级拒绝：${escalated.reason}\n[${check.title}]`,
         durationMs: 0,
+        errorClass: "escalation-denied",
       });
       break;
     }
@@ -291,6 +296,7 @@ export async function runSmokeChecks(
         exitCode: null,
         logDigest: `[审批] ${approved.reason}\n[${check.title}]`,
         durationMs: 0,
+        errorClass: "approval-denied",
       });
       break;
     }

@@ -806,6 +806,30 @@ const EQUIVALENT_SITES = [
  *   等价性论证互为印证。
  */
   { file: "electron/ipc/context.ts", op: "!== → ===", line: 187 },
+  /*
+   * 2026-10-02 P2-3 审批 UI 面轮白名单（三条，各自论证）：
+   * 1. `electron/ipc/context.ts:208` `agentRouter !== false` —— 层签名的
+   *    router 分量（与 187 同文件同型）。取反只改缓存签名的一个比特：签名内容
+   *    决定的是 layer 何时重建（缓存失效粒度），不是行为正确性 —— 双射下
+   *    agentRouter 真假与签名比特的绑定方向不可观察，缓存命中边界恒等。
+   * 2. `electron/ipc/orchestration.ts:230` approval-decide handler 的
+   *    `return true`（`true → false`）。throw 路径（无 pending 的 requestId）
+   *    由 ipc.test.ts 的 ghost 用例钉住；正常路径的返回值渲染端**不消费**
+   *    （store 的 resolveApproval 只 await，不看结果）—— 变异只改 IPC 返回值，
+   *    无可观察差异，与 escalation-decide 同构。
+   * 3. `headless/run-spec.ts:286` `io.requestApproval ? {...} : {}` 三元 ——
+   *    headless 形态未装配 policyDir（approvalCommands 恒空），ApprovalGate
+   *    根本不建，host.requestApproval 有/无不可观察；serve 未来支持 policy.d
+   *    时此位点随装配链一起验收（P2-2 的 headless 侧缺口，非本轮范围）。
+   * 4. `src/store.ts:247` resolveApproval 的 `before` 抓取 `===` —— 回滚总是
+   *    恢复到 resolved:false 的对象（before 是乐观 set 前抓的原始版本，与
+   *    变异后 fallback 的 `a` 同值同形），zustand 浅合并下对象引用不可观察，
+   *    变异无可观察差异。
+   */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 208 },
+  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 230 },
+  { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
+  { file: "src/store.ts", op: "=== → !==", line: 247 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
    * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，

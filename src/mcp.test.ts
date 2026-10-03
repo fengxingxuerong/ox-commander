@@ -58,11 +58,11 @@ describe("MCP 握手与协议层", () => {
     expect(await handleMcpMessage({ id: 1 }, fakeHttp())).toBeUndefined();
   });
 
-  it("tools/list 的工具名与描述表一致，五个工具各带 inputSchema", async () => {
+  it("tools/list 的工具名与描述表一致，六个工具各带 inputSchema", async () => {
     const res = await handleMcpMessage({ jsonrpc: "2.0", id: 4, method: "tools/list" }, fakeHttp());
     const tools = (res!.result as { tools: Array<{ name: string; inputSchema: { type: string } }> }).tools;
     expect(tools.map((t) => t.name)).toEqual(mcpToolDefs().map((t) => t.name));
-    expect(tools).toHaveLength(5);
+    expect(tools).toHaveLength(6);
     for (const t of tools) expect(t.inputSchema.type).toBe("object");
   });
 });
@@ -151,6 +151,45 @@ describe("MCP 工具（ox_run / ox_control）与失败分支", () => {
     const bad = await call("ox_control", { action: "restart" }, http);
     expect(bad.isError).toBe(true);
     expect(bad.text).toContain('action 必须是');
+  });
+
+  it("ox_approve 批准/拒绝/404 如实转述 serve 的答复", async () => {
+    const posted: Array<{ requestId?: unknown; granted?: unknown }> = [];
+    const http = fakeHttp({
+      post: async (_path, body) => {
+        posted.push(body as { requestId?: unknown; granted?: unknown });
+        if ((body as { requestId?: string }).requestId === "gone") {
+          return { status: 404, body: "没有等待中的审批请求：gone" };
+        }
+        return { status: 200, body: JSON.stringify({ settled: true, granted: true }) };
+      },
+    });
+    const ok = await call("ox_approve", { requestId: "a-1", granted: true }, http);
+    expect(ok.isError).toBe(false);
+    expect(ok.text).toContain("已批准 a-1");
+    expect(posted[0]).toEqual({ requestId: "a-1", granted: true });
+    const nok = await call("ox_approve", { requestId: "gone", granted: false }, http);
+    expect(nok.isError).toBe(true);
+    expect(nok.text).toContain("没有等待中的审批请求");
+    // 404 专属尾巴：变异（=== → !==）会落到通用 "serve 拒绝（HTTP 404）" 分支，
+    // 失去"可能已答复/已关闭服务"的提示 —— 断言尾巴钉住 404 分流。
+    expect(nok.text).toContain("可能已答复/已关闭服务");
+    expect(nok.text).not.toContain("serve 拒绝");
+    const bad = await call("ox_approve", { granted: true }, http);
+    expect(bad.isError).toBe(true);
+    expect(bad.text).toContain("requestId 必须是字符串");
+  });
+
+  it("ox_status 在有待审批请求时列出明细（requestId + 命令）", async () => {
+    const pending = [{ requestId: "a-1", command: "npm", args: ["run", "deploy"] }];
+    const { text, isError } = await call("ox_status", {}, fakeHttp({
+      state: { status: "running", events: [], pendingApprovals: pending },
+    }));
+    expect(isError).toBe(false);
+    expect(text).toContain("等待审批 1 条");
+    expect(text).toContain("a-1: npm run deploy");
+    const idle = await call("ox_status", {}, fakeHttp());
+    expect(idle.text).not.toContain("等待审批");
   });
 
   it("serve 不可达（fetch reject）转成工具失败，异常不逃出分发器", async () => {

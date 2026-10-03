@@ -104,6 +104,21 @@ describe("runSmokeChecks", () => {
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.exitCode).toBeNull();
     expect(results[0]!.logDigest).toMatch(/沙箱/);
+    // 失败类别（P2-3）：拒绝执行 ≠ 命令真实失败 —— 重修循环要据此区分
+    expect(results[0]!.errorClass).toBe("sandbox-denied");
+  });
+
+  it("审批拒绝带 approval-denied 失败类别（不是项目本来就坏）", async () => {
+    const results = await runSmokeChecks([check({ command: "node", args: ["run.js"] })], {
+      cwd: ".",
+      approvalGate: {
+        active: true,
+        check: async () => ({ ok: false, reason: "命令需要人工确认，但当前无审批回调可用，按拒绝处理" }),
+      } as never,
+      spawnImpl: fakeSpawnImpl({ out: "x" }) as never,
+    });
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.errorClass).toBe("approval-denied");
   });
 
   it("冒烟子进程拿到的是最小化环境，不含任何凭证形状变量", async () => {

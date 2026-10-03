@@ -149,6 +149,7 @@ describe("registerIpc · channel contract", () => {
       "keys:security",
       "keys:status",
       "llm:test",
+      "orchestration:approval-decide",
       "orchestration:cancel",
       "orchestration:escalation-decide",
       "orchestration:pause",
@@ -170,6 +171,13 @@ describe("registerIpc · channel contract", () => {
     // instead of silently resolving nothing.
     expect(() => ipcMain.invoke("orchestration:escalation-decide", "t-ghost", "skip")).toThrow(
       /没有等待决策的任务/,
+    );
+  });
+
+  it("throws for an approval on a request that is not waiting", () => {
+    // 同款守卫：对不存在的审批请求作答必须响亮失败，而不是静默放行。
+    expect(() => ipcMain.invoke("orchestration:approval-decide", "a-ghost", true)).toThrow(
+      /没有等待审批的请求/,
     );
   });
 });

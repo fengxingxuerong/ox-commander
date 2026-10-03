@@ -8,6 +8,23 @@
 
 ### 新增
 
+- **验证失败的类别细分（竞品清单 P2-3 收尾）**。此前沙箱拒绝 / 升级拒绝 / 审批拒绝
+  在报告里都是一个普通失败，重修循环读到后会把它们当成"项目本来就坏"让 agent 白修一轮——
+  三道门里有两道是**改代码永远改不动结局**的。`VerificationReport.results[].errorClass`
+  现在给这类结果打标（`sandbox-denied` / `escalation-denied` / `approval-denied`），
+  字段即承诺：**没有这个键 = 一次真实的命令失败**。`shared/routing.ts` 的
+  `environmentalRulingNote` 把它们摘成一段环境裁决说明，编排器在重修上下文里先说破
+  "这不是代码造成的"，并指明出路（调 `policy.d` 或人工批准后重跑）。
+  刻意不给 UI 弹窗留后门：报告的消费者是 agent 与日志，先把"要动的是什么"讲清楚。
+
+- **审批 UI 面（P2-3 收口）**。审批门此前只有命令面，宿主只能"问不到人就不执行"，
+  问得到却没出口。现在三条宿主形态都能答：**桌面**（看板审批区 + `resolveApproval` IPC，
+  含 cancel 时把挂起的审批全部按拒绝收尾的 fail-closed 最后一环）、**serve**（状态挂
+  `pendingApprovals` + `POST /approve` + 状态页按钮，无 pending 时**键消失**，字段即承诺）、
+  **MCP**（第六个工具 `ox_approve`，requestId 取自 `approval-request` 事件，
+  已答复/不存在如实报 404）。宿主回调的接线由 `createPlatform` 注入，headless 形态
+  未装配 `policyDir` 时 `approvalCommands` 恒空、审批门根本不建——装配链本身因此可测。
+
 - **反向 MCP server（竞品清单 5.5，学 Vibe Kanban 的双向集成）**。serve 形态
   的消费者此前只有人（浏览器）和 CI（POST /run）；现在把 serve 的 HTTP 面包装成
   **MCP stdio server**（`headless/mcp.ts` + `mcp-main.ts`，`npm run mcp:serve --

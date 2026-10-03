@@ -38,6 +38,12 @@ export interface ServeState {
    * （字段即承诺 —— "没有这个键"就是"没暂停"，不给宿主第三种状态可读）。
    */
   paused?: boolean;
+  /**
+   * 等待人工审批的请求（P2-3）：`approvalCommands` 命中的命令执行前挂在这，
+   * `POST /approve` 作答后出队。无 pending 时**键消失**（字段即承诺）——
+   * 状态页/MCP 客户端据此知道"此刻没有人等审批"。
+   */
+  pendingApprovals?: Array<{ requestId: string; command: string; args: string[] }>;
 }
 
 /** 宿主能递给引擎的控制面；`startServe` 只转发，不解释语义。 */
@@ -69,7 +75,27 @@ export function serveEmit(state: ServeState, evt: HeadlessEvent, now?: () => str
   else if (evt.type === "done") state.status = evt.passed ? "delivered" : "failed";
   else if (evt.type === "error") state.status = "failed";
   else if (evt.type === "receipt") state.receipt = evt.receipt;
+  else if (evt.type === "approval-request") {
+    state.pendingApprovals = [
+      ...(state.pendingApprovals ?? []),
+      { requestId: evt.requestId, command: evt.command, args: evt.args },
+    ];
+  }
   return evt;
+}
+
+/** 审批请求的答复路径（P2-3）：出队并返回被移除的请求；无此请求时返回 undefined。 */
+export function resolvePendingApproval(
+  state: ServeState,
+  requestId: string,
+): { requestId: string; command: string; args: string[] } | undefined {
+  const pending = state.pendingApprovals ?? [];
+  const found = pending.find((p) => p.requestId === requestId);
+  if (!found) return undefined;
+  const rest = pending.filter((p) => p.requestId !== requestId);
+  if (rest.length === 0) delete state.pendingApprovals; // 字段即承诺：清空后键消失
+  else state.pendingApprovals = rest;
+  return found;
 }
 
 /** 记下退出码：退出码是 CLI 契约的一部分，服务形态也得能读到。 */
@@ -151,6 +177,17 @@ export function serveIndexHtml(state: ServeState): string {
   const pauseNote = state.paused
     ? `<p class=muted>已暂停：当前任务跑完就停，不再派新的（POST /resume 继续）。</p>`
     : "";
+  const approvals =
+    state.pendingApprovals && state.pendingApprovals.length > 0
+      ? `<h2>等待人工审批（${state.pendingApprovals.length} 条）</h2><ul>${state.pendingApprovals
+          .map(
+            (p) =>
+              `<li><code>${esc(p.command)} ${esc(p.args.join(" "))}</code>` +
+              ` · <button onclick="settle('${p.requestId}', true)">批准</button>` +
+              ` <button onclick="settle('${p.requestId}', false)">拒绝</button></li>`,
+          )
+          .join("")}</ul>`
+      : "";
   const receipt = state.receipt
     ? `<h2>交付凭据</h2><p>${esc(state.receipt.headline)}</p>
        <pre>${esc(JSON.stringify(state.receipt, null, 2))}</pre>`
@@ -166,6 +203,7 @@ li{white-space:pre-wrap;word-break:break-word}
 </style>
 <h1>OxCommander · ${STATUS_LABEL[state.status]}</h1>
 ${pauseNote}
+${approvals}
 <p class=muted>状态 ${esc(state.status)}${
     state.exitCode !== undefined ? ` · 退出码 ${state.exitCode}` : ""
   }${state.updatedAt ? ` · ${esc(state.updatedAt)}` : ""} · 共 ${state.events.length} 条事件</p>
@@ -185,6 +223,10 @@ es.onmessage = (m) => {
   li.appendChild(document.createTextNode(" " + text));
   ul.appendChild(li);
 };
+async function settle(id, granted) {
+  await fetch("/approve", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: id, granted }) });
+  location.reload();
+}
 </script>
 `;
 }
@@ -193,6 +235,14 @@ export interface ServeServer {
   port: number;
   close(): Promise<void>;
   state: ServeState;
+  /**
+   * 审批询问器（P2-3）：宿主（serve-main）把它交给 runSpec 的
+   * `host.requestApproval` —— 命令命中 `approvalCommands` 时，它广播
+   * `approval-request` 事件并 park；`POST /approve` 作答后 resolve。
+   * 无人作答 = 永不 resolve（fail-closed 的上游：ApprovalGate 在宿主回调
+   * 缺席时按拒绝处理，这里 promise 挂着不算拒绝，关闭服务时按拒绝收尾）。
+   */
+  approvalRequester: (command: string, args: readonly string[]) => Promise<boolean>;
 }
 
 /**
@@ -218,11 +268,32 @@ export function startServe(opts: {
   let busy = false;
   /** 当前 run 的引擎控制面；没有 run 在跑时为 undefined。 */
   let engine: EngineControl | undefined;
+  /** 等待人工审批的 resolver（P2-3）：requestId -> 是否放行。 */
+  const pendingResolvers = new Map<string, (granted: boolean) => void>();
+  let approvalSeq = 0;
 
   const broadcast = (evt: HeadlessEvent): void => {
     serveEmit(state, evt, now);
     const frame = sseFrame(evt, state.events.length - 1);
     for (const res of clients) res.write(frame);
+  };
+
+  const approvalRequester = (command: string, args: readonly string[]): Promise<boolean> => {
+    const requestId = `a-${(approvalSeq += 1)}-${Date.now().toString(36)}`;
+    return new Promise<boolean>((resolve) => {
+      pendingResolvers.set(requestId, resolve);
+      broadcast({ type: "approval-request", requestId, command, args: [...args] });
+    });
+  };
+
+  /** 从 pendingResolvers 里移除并 resolve；不存在时返回 false（调用方报 404）。 */
+  const settleApproval = (requestId: string, granted: boolean): boolean => {
+    const resolve = pendingResolvers.get(requestId);
+    if (!resolve) return false;
+    pendingResolvers.delete(requestId);
+    resolvePendingApproval(state, requestId); // 同步状态队列（键消失即无 pending）
+    resolve(granted);
+    return true;
   };
 
   const server = http.createServer((req, res) => {
@@ -263,6 +334,39 @@ export function startServe(opts: {
             // 跑完了就没有"暂停中"这回事：键必须消失，否则状态页会一直显示暂停。
             delete state.paused;
           });
+      });
+      return;
+    }
+
+    // 审批答复（P2-3）：POST /approve，body { requestId, granted }。
+    if (url === "/approve" && method === "POST") {
+      let raw = "";
+      req.on("data", (c) => {
+        raw += c;
+      });
+      req.on("end", () => {
+        let body: { requestId?: unknown; granted?: unknown };
+        try {
+          body = JSON.parse(raw) as { requestId?: unknown; granted?: unknown };
+        } catch {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("body 不是合法 JSON");
+          return;
+        }
+        const requestId = typeof body.requestId === "string" ? body.requestId : "";
+        const granted = body.granted === true;
+        if (requestId === "") {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("缺少 requestId");
+          return;
+        }
+        if (!settleApproval(requestId, granted)) {
+          res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(`没有等待中的审批请求：${requestId}`);
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ settled: true, granted }));
       });
       return;
     }
@@ -312,8 +416,16 @@ export function startServe(opts: {
       resolve({
         port,
         state,
+        approvalRequester,
         close: () =>
           new Promise<void>((done) => {
+            // 关服 = 不再可能有人回答：把还挂着的审批按拒绝收尾（fail-closed
+            // 的最后一环 —— 不 resolve 的话 run 会永远等下去）。
+            for (const [requestId, resolve] of pendingResolvers) {
+              pendingResolvers.delete(requestId);
+              resolvePendingApproval(state, requestId);
+              resolve(false);
+            }
             for (const res of clients) res.end();
             clients.clear();
             server.close(() => done());

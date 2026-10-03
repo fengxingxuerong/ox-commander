@@ -10,11 +10,13 @@ import path from "node:path";
 import type { OrchestratorCallbacks, OrchestratorEngine, RunSnapshot } from "../engine";
 import { redactSecrets } from "../../shared/redact";
 import {
+  abortAllApprovals,
   abortAllEscalations,
   buildPlatformLayer,
   enginesOf,
   ensureAudit,
   getRunningProjectId,
+  resolveApproval,
   resolveEscalation,
   send,
   setRunningProjectId,
@@ -207,6 +209,9 @@ export function registerOrchestrationHandlers(): void {
     for (const e of enginesOf().values()) e.cancel();
     // Unblock any escalation wait so execute() can observe the cancel.
     abortAllEscalations();
+    // Unblock any approval wait the same way — but fail-closed: nobody is
+    // going to answer now, so the pending command must not run.
+    abortAllApprovals();
   });
   ipcMain.handle("orchestration:pause", () => {
     for (const e of enginesOf().values()) e.pause();
@@ -217,6 +222,11 @@ export function registerOrchestrationHandlers(): void {
 
   ipcMain.handle("orchestration:escalation-decide", (_e, taskId: string, action: EscalationAction) => {
     if (!resolveEscalation(taskId, action)) throw new Error(`没有等待决策的任务：${taskId}`);
+    return true;
+  });
+
+  ipcMain.handle("orchestration:approval-decide", (_e, requestId: string, granted: boolean) => {
+    if (!resolveApproval(requestId, granted)) throw new Error(`没有等待审批的请求：${requestId}`);
     return true;
   });
 }

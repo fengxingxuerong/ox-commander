@@ -144,6 +144,15 @@ export type HeadlessEvent =
     }
   | { type: "escalation"; taskId: string; summary: string }
   /**
+   * 审批请求（P2-3 协议事件）：`policy.d` 的 `approvalCommands` 命中的命令执行
+   * 前发出。宿主回 `POST {serve}/approve`（body `{ requestId, granted }`）作答；
+   * 不回 = 按拒绝处理（fail-closed）—— 无人可问的场景下"停下来"的唯一安全
+   * 实现是不执行，与 escalation 的 exhaust 同构。
+   * `escalation` 与 `approval-request` 的区别：升级决策在任务完成后（问"重派/
+   * 跳过/终止"），审批在命令执行前（问"这条准不准跑"）。
+   */
+  | { type: "approval-request"; requestId: string; command: string; args: string[] }
+  /**
    * 本次运行的 token 用量（进程内：大脑层 + 内置执行器）。在 `done` / `error`
    * **之前**发一次，成功、取消、抛错三条路径都会到。
    * `calls - measuredCalls` 是服务商没在响应里上报用量的次数 ——

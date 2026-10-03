@@ -106,6 +106,7 @@ function makeBridge(): Bridge {
     pause: vi.fn(async () => undefined),
     resume: vi.fn(async () => undefined),
     resolveEscalation: vi.fn(async () => true),
+    resolveApproval: vi.fn(async () => true),
     listAgents: vi.fn(async () => agentList()),
     exampleManifest: vi.fn(async () => ({ id: "example" }) as never),
     registerAgent: vi.fn(async () => ({ ok: true, id: "x" }) as never),
@@ -286,6 +287,7 @@ describe("BoardPage", () => {
       },
       verification: VERIFICATION,
       escalations: [{ taskId: "t9", summary: "预算耗尽", resolved: false }],
+      approvals: [{ requestId: "a-1", command: "npm", args: ["run", "deploy"], resolved: false }],
     });
   }
 
@@ -301,6 +303,16 @@ describe("BoardPage", () => {
     expect(screen.getByText("最近验证：✅ 通过")).toBeTruthy();
     expect(screen.getByText(/test: 通过 · 2\.3s/)).toBeTruthy();
     expect(screen.getByText(/第 1 行日志/)).toBeTruthy();
+  });
+
+  it("renders approval cards and forwards approval decisions to the bridge", () => {
+    seedBoard();
+    render(<BoardPage />);
+    // 审批卡：命令 + 参数可见，批准/拒绝两个动作
+    expect(screen.getByText("🛂 命令需要审批")).toBeTruthy();
+    expect(screen.getByText("npm run deploy")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "批准" }));
+    expect(window.oxCommander.resolveApproval).toHaveBeenCalledWith("a-1", true);
   });
 
   it("forwards control actions to the bridge", () => {

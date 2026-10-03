@@ -130,7 +130,7 @@ if (fs.existsSync(mcpMain)) {
     "mcp: initialize + tools/list over stdio",
     init?.result?.protocolVersion === "2024-11-05" &&
       Array.isArray(tools?.result?.tools) &&
-      tools.result.tools.length === 5,
+      tools.result.tools.length === 6,
     `lines=${outLines.length} tools=${tools?.result?.tools?.length ?? "none"}`,
   );
   const bad = runMcp("not json\n");

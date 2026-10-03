@@ -937,6 +937,37 @@ describe("orchestration handlers", () => {
     await expect(parked).resolves.toBe("skip");
   });
 
+  it("delivers an approval decision to the parked resolver (P2-3)", async () => {
+    // The positive twin of the ghost guard in ipc.test.ts. Without it the
+    // `return true` in resolveApproval is never observed: flipping it to
+    // `false` would still leave every test green because the only other path
+    // throws before reaching it.
+    buildEngine("p-approval");
+    const host = lastPlatformConfig().host;
+    const parked: Promise<boolean> = host.requestApproval("rm", ["-rf", "dist"]);
+
+    // The requestId is minted per call (seq + clock), so read it back off the
+    // event the host actually sent rather than guessing the format.
+    const sent = win.webContents.send.mock.calls.map((c) => c[1] as Record<string, unknown>);
+    const request = sent.find((p) => p.type === "approval-request")!;
+    expect(request).toMatchObject({ command: "rm", args: ["-rf", "dist"] });
+
+    expect(
+      (h.ipcMain as FakeIpcMain).invoke("orchestration:approval-decide", request.requestId, true),
+    ).toBe(true);
+    await expect(parked).resolves.toBe(true);
+  });
+
+  it("aborts every parked approval as denied when the run is cancelled (P2-3)", async () => {
+    // fail-closed 最后一环：无人再能回答的审批按拒绝收尾，不能永远挂住 run。
+    buildEngine("p-approval-cancel");
+    const host = lastPlatformConfig().host;
+    const parked: Promise<boolean> = host.requestApproval("git", ["push", "--force"]);
+
+    (h.ipcMain as FakeIpcMain).invoke("orchestration:cancel");
+    await expect(parked).resolves.toBe(false);
+  });
+
   it("redacts credentials before a task outcome reaches the renderer", () => {
     buildEngine("p-redact");
     const callbacks = lastPlatformConfig().host.callbacks;

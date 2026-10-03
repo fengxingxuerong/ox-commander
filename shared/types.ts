@@ -107,6 +107,13 @@ export interface VerificationReport {
     exitCode: number | null;
     logDigest: string;
     durationMs: number;
+    /**
+     * 环境裁决类别（P2-3 失败类别细分）：失败不是代码造成的，而是沙箱/审批
+     * **拒绝执行**造成的。重修循环读它来区分"验证失败（改代码有用）"与
+     * "环境裁决（改代码无用，要动的是 policy.d 或人的决定）"。
+     * 字段即承诺：没有这个键 = 一次真实的命令失败。
+     */
+    errorClass?: "sandbox-denied" | "escalation-denied" | "approval-denied";
   }>;
 }
 

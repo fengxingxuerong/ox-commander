@@ -300,6 +300,52 @@ describe("OrchestratorEngine.execute", () => {
     expect(repairRound.has("t2")).toBe(false);
   });
 
+  it("环境裁决失败（审批/沙箱拒绝）在重修上下文里被说破，不是「项目本来就坏」（P2-3）", async () => {
+    const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
+    const logs: string[] = [];
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { repairOf?: Map<string, { round: number; errorLogDigest: string }> },
+      ) {
+        if (opts?.repairOf) repairPayloads.push(opts.repairOf);
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => ({
+        passed: false,
+        results: [
+          {
+            kind: "build",
+            ok: false,
+            exitCode: null,
+            logDigest: "[审批] 命令需要人工确认，但当前无审批回调可用，按拒绝处理",
+            durationMs: 0,
+            errorClass: "approval-denied",
+          },
+        ],
+      }),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (t) => logs.push(t),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+    // 环境裁决说明必须进日志与重修上下文：agent 据此知道"改代码没用"
+    expect(logs.some((l) => l.includes("[环境裁决]") && l.includes("审批拒绝执行"))).toBe(true);
+    const ctx = repairPayloads.at(-1)!.get("t1")!.errorLogDigest;
+    expect(ctx).toContain("[环境裁决]");
+    expect(ctx).toContain("approvalCommands");
+  });
+
   it("routes verification errors to the task owning the failing file's zone", async () => {
     const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
     const greenLogs: string[] = [];

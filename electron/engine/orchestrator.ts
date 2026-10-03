@@ -16,7 +16,7 @@ import { runSmokeChecks } from "./verifier";
 import type { ActionGateLike } from "../sandbox/action-gate";
 import type { SmokeCheck } from "../../shared/types";
 import { planBatches, skippedDescendants } from "../../shared/graph";
-import { routeVerificationErrors } from "../../shared/routing";
+import { routeVerificationErrors, environmentalRulingNote } from "../../shared/routing";
 import type { DispatchOutcome } from "./scheduler";
 import type {
   EscalationAction,
@@ -689,6 +689,13 @@ export class OrchestratorEngine {
         lastDigest =
           [...lastFailedLogs.values()].join("\n\n") ||
           "开发任务执行失败（无验证错误，可能是 API 调用失败）";
+      }
+      // 环境裁决（P2-3 失败类别细分）：沙箱/审批拒绝不是代码问题，重修提示里
+      // 必须先说破 —— 否则 agent 会把"审批拒绝"当成"项目本来就坏"白修一轮。
+      const ruling = environmentalRulingNote(report);
+      if (ruling !== "") {
+        this.cb.onLog(ruling);
+        lastDigest = `${lastDigest}\n\n${ruling}`;
       }
 
       const exhausted = round === maxRounds + extraRounds;
