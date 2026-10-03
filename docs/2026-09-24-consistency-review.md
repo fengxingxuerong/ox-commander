@@ -98,6 +98,10 @@
    仍未修的只有前两条（`tsconfig.headless.json` 的 include 与真实依赖脱节；`headless/**` 的分层红线仍无机制）。
 7. **P4 · 确定性**：`Date.now()` 派生 id 的碰撞面仍在（`scheduler.ts:293` 批号即快照目录名、`:322` runId、
    `file-journal.ts:74`、`atomic-file.ts:30` tmp 名无计数器）。已修的只有项目 id（`store.ts:47` 的 `idSeq`，commit `f71ffbc`）。
+   **已修（2026-10-02 核实闭环）**：四个点位全部套上单调序数 —— 批号 `Date.now+pid+dispatchSeq+任务id 列表`
+   （`scheduler.ts:418`）、runId `task.id+Date.now+i+dispatchSeq`（`:465`）、journal id
+   `Date.now+journalSeq`（`file-journal.ts:111`）、tmp 名 `pid+now+tmpSeq`（`atomic-file.ts:38`，注释点明
+   毫秒粒度漏洞与 store/scheduler 同一套做法）。同毫秒连开两批/两个 run/两个 tmp 不会再碰撞。
 8. **P4 · `file-journal` 把构建产物算成越权**：`walkStat` 的 skip 只跳 `node_modules/.git/.ox-quarantine`（`:6`），
    所以 `dist/`、`coverage/` 的变化会进 unauthorized-write 列表。
    **已修，且实测比 P4 重**：用构建产物直接跑一遍真实 `BatchGuard`（默认 `revert-batch` 档）确认了两条后果——
@@ -135,6 +139,11 @@
     为什么本轮没顺手修：试过把越权路径并进 `scope.zones`，但它修不了归因（`routeVerificationErrors`
     用的是任务自己的 zone），而且等于悄悄扩大 zone 集合 —— 正是本文档另一处"写入门比仲裁门严"
     刻意保持的不对称反着来。需要拍板的是一句话：**被失败批次删掉的文件，此后归谁负责**。
+    **已修（2026-10-01，拍板结果：谁删的谁背到销账为止）**：新增纯函数
+    `updateDeletionLedger`（销账看盘 / 入账看盘 / 首见批次不漂移），**每条 settle 出口都结算**
+    （含 clean 批 —— 缺陷形态恰恰是"下一批干干净净，被删文件从此没人再提"）；批次失败后
+    仍缺的文件进 `BatchVerdict.carried`，随事件流与交付凭据一起上报，直到文件被恢复或补写才销账。
+    site 口径 13/13（见 CHANGELOG「越权删除台账」条）。
 
 12. **P3 · 本轮新增的两段 headless 逻辑原本完全在变异门禁之外**（已登记为目标并补齐断言）。
     `headless/run-spec.ts` 不在 `TARGETS` 里 → 凭证闸（`missingCredentials`）与备份回收（`pruneStaleBackups`）
