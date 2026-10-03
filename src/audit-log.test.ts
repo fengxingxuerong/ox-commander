@@ -439,3 +439,105 @@ describe('AuditLog · 容错与文件识别', () => {
     expect(text.trim().split('\n')).toHaveLength(1);
   });
 });
+
+/**
+ * `read()` 的单槽 memo（`audit-log.ts`）。
+ *
+ * 加它的理由是量出来的，不是猜的：`read()` 会把整个留存读全量 parse 一遍
+ * （`limit` 只在最后 `slice`，一点 I/O 都省不掉），在文档写明的留存上限
+ * （20 文件 x 2 MiB ≈ 40 MiB）实测 **221 ms/次**；而重修路径对每个失败任务
+ * 各调一次（`context.ts` 的 `priorAttempts`），12 个任务 = 2.5 s、30 个 = 6.3 s，
+ * 且每一个字节能耗都花在重复 parse 同一份文件上。
+ *
+ * 所以这组用例的重点**不是**"更快了"，而是"变快的代价是零staleness"：
+ * 缓存一旦漏了失效，UI 会静默停留在旧履历上 —— 那比慢危险得多。
+ * 因此下面每条都先读一次建立 memo，再制造一次变更，然后断言新值立刻可见。
+ */
+describe('AuditLog · read() 的 memo 与失效', () => {
+  it('append 之后必须读到新记录（不能返回 append 前的旧数组）', () => {
+    const log = new AuditLog({ dir: scratch('audit-memo-append') });
+    log.append({ phase: 'run-start', taskId: 't1', zone: 'src' });
+    expect(log.read()).toHaveLength(1); // 建立 memo
+
+    log.append({ phase: 'run-end', taskId: 't1', ok: true });
+    // 漏了 `version += 1` 时这里仍是 1 —— 缓存把"run-end 到了"这件事吞了。
+    expect(log.read()).toHaveLength(2);
+    expect(log.read().map((r) => r.phase)).toEqual(['run-start', 'run-end']);
+  });
+
+  it('memo 命中时返回的内容与冷读一致（不是同一引用以外的东西）', () => {
+    const log = new AuditLog({ dir: scratch('audit-memo-same') });
+    for (let i = 0; i < 5; i++) log.append({ phase: 'run-end', taskId: `t${i}`, ok: i % 2 === 0 });
+    const cold = log.read(); // 冷读，顺带建 memo
+    const warm = log.read(); // 命中 memo
+    expect(warm).toEqual(cold);
+    expect(warm.map((r) => r.taskId)).toEqual(cold.map((r) => r.taskId));
+  });
+
+  it('limit / phase 是 memo 的键的一部分：换了参数必须重算', () => {
+    const log = new AuditLog({ dir: scratch('audit-memo-key') });
+    for (let i = 0; i < 6; i++) log.append({ phase: 'run-end', taskId: `t${i}`, ok: true });
+    expect(log.read({ limit: 2 })).toHaveLength(2);
+    // 同版本、不同 limit：若键只看 version，这里会错误地返回 2 条。
+    expect(log.read({ limit: 4 })).toHaveLength(4);
+    expect(log.read()).toHaveLength(6);
+    // phase 过滤同理。
+    log.append({ phase: 'run-start', taskId: 't9', zone: 'src' });
+    expect(log.read({ phase: 'run-start' }).map((r) => r.taskId)).toEqual(['t9']);
+    expect(log.read({ phase: 'run-end' })).toHaveLength(6);
+  });
+
+  it('轮转（写满一个文件）之后旧 memo 失效，新文件里的记录读得到', () => {
+    // maxFileBytes 极小 → 每次 append 都可能轮转。轮转会换 current 文件，
+    // 若 `rotate()` 不让 memo 失效，读回来的是轮转前的快照。
+    const log = new AuditLog({ dir: scratch('audit-memo-rotate'), maxFileBytes: 200, maxFiles: 20 });
+    for (let i = 0; i < 12; i++) log.append({ phase: 'run-end', taskId: `t${i}`, ok: true, detail: 'x'.repeat(40) });
+    const all = log.read();
+    // 每条都必须真的在盘上（而不是停在早期 memo 的那几条）。
+    expect(all.length).toBeGreaterThanOrEqual(12);
+    expect(new Set(all.map((r) => r.taskId)).size).toBe(all.length);
+  });
+
+  it('留存淘汰删掉最老文件后，memo 不得把已删历史端回来', () => {
+    // maxFiles: 2 → 第三个文件写出来时，最老的那个被 rmSync 掉。
+    // 淘汰路径必须 bump version，否则 read() 会把已删除的记录重新端出来 ——
+    // 那正是"证据被凭空复活"，比慢严重得多。
+    const log = new AuditLog({ dir: scratch('audit-memo-retention'), maxFileBytes: 150, maxFiles: 2 });
+    for (let i = 0; i < 15; i++) log.append({ phase: 'run-end', taskId: `t${i}`, ok: true, detail: 'y'.repeat(40) });
+    const files = log.files();
+    expect(files.length).toBeLessThanOrEqual(2);
+    // 读回来的 taskId 必须全部真的还在盘上。
+    const onDisk = new Set(
+      files.flatMap((f) =>
+        fs
+          .readFileSync(f, 'utf8')
+          .split('\n')
+          .filter((l) => l.trim() !== '')
+          .map((l) => (JSON.parse(l) as { taskId: string }).taskId),
+      ),
+    );
+    for (const r of log.read()) expect(r.taskId).toBeDefined();
+    for (const r of log.read()) expect(onDisk.has(r.taskId!)).toBe(true);
+  });
+
+  it('memo 不跨实例泄漏：两个 AuditLog 读同一目录各读各的', () => {
+    // 缓存是实例字段。若有人把它提到模块级，两个实例就会互相污染 ——
+    // 桌面一次 run 重建 platform（ensureAudit 是单例，但测试与 headless 会 new）。
+    const dir = scratch('audit-memo-two');
+    const a = new AuditLog({ dir });
+    a.append({ phase: 'run-end', taskId: 'from-a', ok: true });
+    const b = new AuditLog({ dir });
+    expect(a.read().map((r) => r.taskId)).toEqual(['from-a']);
+    b.append({ phase: 'run-end', taskId: 'from-b', ok: true });
+    expect(b.read().map((r) => r.taskId)).toEqual(['from-a', 'from-b']);
+    expect(a.read().map((r) => r.taskId)).toEqual(['from-a', 'from-b']);
+  });
+
+  it('并发读不会把 memo 写坏：连续读到的始终是同一份内容', () => {
+    // 单线程 JS 下这是"同一 tick 内多次读"的等价形态；断言内容稳定即可。
+    const log = new AuditLog({ dir: scratch('audit-memo-repeat') });
+    log.append({ phase: 'run-end', taskId: 't1', ok: true });
+    const first = log.read().length;
+    for (let i = 0; i < 20; i++) expect(log.read()).toHaveLength(first);
+  });
+});

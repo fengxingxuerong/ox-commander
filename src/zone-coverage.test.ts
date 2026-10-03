@@ -4,6 +4,7 @@ import {
   describeZoneGaps,
   extractDeclaredPaths,
   findOrphanPaths,
+  verificationCommandPaths,
 } from "../shared/zone-coverage";
 import type { PrdDocument, Task } from "../shared/types";
 
@@ -218,5 +219,63 @@ describe("findOrphanPaths · extraDeclared", () => {
     const empty = prd({ goal: "no file paths here", features: [], acceptanceCriteria: [] });
     const gaps = findOrphanPaths(empty, [task("t1", "src")], undefined, ["docs/guide.md"]);
     expect(gaps.map((g) => g.path)).toContain("docs/guide.md");
+  });
+});
+
+/**
+ * 验证命令里引用的产物路径，是 zone 覆盖的第二来源（`source: "verification"`）。
+ *
+ * 为什么单独钉：生产上 `orchestrator.ts:327` 真的调它，但**全仓没有一处测试
+ * import 过它** —— 也就是说这个函数改坏了，门禁一声不响。它又是纯函数，
+ * 钉它的成本几乎为零，没理由留着。
+ *
+ * 它与 `findOrphanPaths` 的接线（declared 为空时 extra 仍生效）已由上面那条
+ * 用例守住；这里守的是**这个函数本身**的行为。
+ */
+describe("verificationCommandPaths", () => {
+  it("从验证命令的 args 里取出嵌套相对路径", () => {
+    // 真实形状：`npm run build --workspace packages/app` 里那个嵌套路径。
+    // 裸文件名（`vitest.config.mts`）按设计被忽略 —— 见下面那条用例。
+    expect(
+      verificationCommandPaths([
+        { args: ["run", "build", "--workspace", "packages/app/tsconfig.json"] },
+        { args: ["--config", "config/vitest.config.mts"] },
+      ]),
+    ).toEqual(["config/vitest.config.mts", "packages/app/tsconfig.json"]);
+  });
+
+  it("忽略裸文件名，判据与 extractDeclaredPaths 同源（共用一个启发式）", () => {
+    // 第 160 行 `for (const arg of c.args ?? [])` 之后复用 `extractDeclaredPaths`，
+    // 于是裸文件名的假阳性守卫是**免费继承**的。
+    // 但"免费"不等于"被验证过"：若将来改成自己实现启发式，这条会红。
+    expect(verificationCommandPaths([{ args: ["run", "build", "package.json"] }])).toEqual([]);
+  });
+
+  it("没有 args 的命令不炸，缺失即无路径", () => {
+    // 第 160 行的 `c.args ?? []`：ProjectSettings 允许一条只有 `command` 的命令
+    // （第 160 行就是这个守卫的全部作用）。去掉 `??` 会 TypeError。
+    expect(verificationCommandPaths([{ args: [] }, {}])).toEqual([]);
+  });
+
+  it("跨命令去重，且输出稳定排序", () => {
+    // Set 去重 + sort：同一路径被两条命令各写一次时只能报一个 gap，
+    // 否则 orchestrator 的错误信息会重复同一个路径。
+    expect(
+      verificationCommandPaths([
+        { args: ["--config", "docs/b.md"] },
+        { args: ["--config", "docs/a.md"] },
+        { args: ["--config", "docs/b.md"] },
+      ]),
+    ).toEqual(["docs/a.md", "docs/b.md"]);
+  });
+
+  it("命令引用了本 zone 已覆盖的路径时，仍然如实上报（过滤交给 findOrphanPaths）", () => {
+    // 这个函数是**事实提取**，不做 zone 匹配 —— 职责单一。
+    // 它的输出会流向 `findOrphanPaths` 的 `extraDeclared`，由后者判 gap。
+    // 这里刻意钉住"不自己过滤"：若有人在这里塞 isPathInZone 判断，
+    // 返回空数组后 orchestrator 就再也不会报越权写入了。
+    expect(verificationCommandPaths([{ args: ["src", "--config", "src/existing.ts"] }])).toEqual([
+      "src/existing.ts",
+    ]);
   });
 });

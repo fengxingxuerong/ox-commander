@@ -97,6 +97,17 @@ export class AuditLog {
   /** Cached size of the current file, so append() does not stat every time. */
   private size = 0;
   private current: string;
+  /**
+   * Single-slot memo for `read()`, keyed on a fingerprint of what is actually
+   * on disk (file list + current file's size/mtime), not on an in-memory
+   * counter. See `readFingerprint()` for why the disk is the source of truth.
+   */
+  private readMemo: {
+    fingerprint: string;
+    limit: number | undefined;
+    phase: AuditPhase | undefined;
+    out: AuditRecord[];
+  } | null = null;
 
   constructor(opts: AuditLogOptions) {
     this.dir = path.resolve(opts.dir);
@@ -149,8 +160,50 @@ export class AuditLog {
     return stamped;
   }
 
+  /**
+   * Cheap identity of the trail's current on-disk state: the file list plus the
+   * active file's size and mtime.
+   *
+   * Why the disk and not an in-memory counter: two `AuditLog` instances can
+   * point at one directory (the desktop singleton plus any second construction
+   * — tests, headless), and an external writer would leave an internal counter
+   * untouched and serve a stale trail. Staleness here is worse than slowness:
+   * the board would keep showing a履历 that no longer exists on disk.
+   *
+   * Cost is one `readdir` + one `stat` (both already on the hot path of
+   * `read()`) versus re-reading and re-parsing up to 40 MiB of JSONL.
+   */
+  private readFingerprint(): string {
+    const files = this.files();
+    let tail = "";
+    try {
+      const st = fs.statSync(this.current);
+      // mtimeMs catches an external append; size catches one with a coarser
+      // timestamp resolution. Either alone would leave a window.
+      tail = `${st.size}:${st.mtimeMs}`;
+    } catch {
+      tail = "missing";
+    }
+    return `${files.length}|${files[files.length - 1] ?? ""}|${tail}`;
+  }
+
   /** Reads records back, newest last. `limit` caps how many are returned. */
   read(opts: { limit?: number; phase?: AuditPhase } = {}): AuditRecord[] {
+    // Why the memo exists: `read()` is O(entire trail) — it reads every
+    // retained file and JSON.parses every line, then discards most of it via
+    // `slice`. At the documented retention ceiling (20 files x 2 MiB) that
+    // measured 221 ms per call, and the repair path called it once per failed
+    // task via `priorAttempts` (2.5 s for 12 tasks, 6.3 s for 30 — all of it
+    // re-parsing identical bytes).
+    //
+    // A returned array is shared with the memo, so callers must treat it as
+    // read-only. Every caller in this repo does (`taskTrail`, `deriveBoardView`,
+    // the IPC read paths) — none of them mutates.
+    const fingerprint = this.readFingerprint();
+    const memo = this.readMemo;
+    if (memo && memo.fingerprint === fingerprint && memo.limit === opts.limit && memo.phase === opts.phase) {
+      return memo.out;
+    }
     const out: AuditRecord[] = [];
     for (const file of this.files()) {
       let content: string;
@@ -170,7 +223,9 @@ export class AuditLog {
         }
       }
     }
-    return opts.limit !== undefined ? out.slice(-opts.limit) : out;
+    const result = opts.limit !== undefined ? out.slice(-opts.limit) : out;
+    this.readMemo = { fingerprint, limit: opts.limit, phase: opts.phase, out: result };
+    return result;
   }
 
   /**

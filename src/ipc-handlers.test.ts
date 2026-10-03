@@ -187,12 +187,15 @@ import type { FakeIpcMain } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, registerIpc } from "../electron/ipc";
 import {
+  abortAllApprovals,
+  abortAllEscalations,
   buildLlm,
   buildPlatformLayer,
   dynamicAgentMap,
   enginesOf,
   ensureAgentLayer,
   getRunningProjectId,
+  resolveApproval,
   resolveEscalation,
   seedKeysFromStore,
   setRunningProjectId,
@@ -1369,5 +1372,108 @@ describe("buildPlatformLayer · 桌面侧三字段（P1-5 补齐）", () => {
     h.createPlatformCalls.length = 0;
     buildPlatformLayer({ ...DEFAULT_SETTINGS, escalationPolicy: "exhaust" }, { log: () => {} });
     expect(lastPlatformConfig().host.requestEscalationDecision).toBeUndefined();
+  });
+});
+
+/**
+ * 取消时"把挂起的人_answer_ 全部收尾"是 fail-closed 的最后一环。
+ *
+ * 为什么这组用例以前不存在：`ipc.test.ts` 只钉了 ghost 路径
+ * （"对不存在的任务作答要抛错"），而挂起**存在**时 cancel 会不会真的把
+ * promise 收掉、收成什么值，一条断言都没有。生产上这条路是
+ * `orchestration:cancel` → `abortAllEscalations`/`abortAllApprovals`
+ * （`electron/ipc/orchestration.ts:211/214`），也就是"窗口被关掉 / 用户按停"
+ * 之后 run 能不能观察到取消 —— 观察不到就是永久挂死。
+ *
+ * 反面后果是不对称的，所以两个方向都要钉：
+ * - escalation 收成 `"abort"`：任务按"人已放弃"收尾，而不是伪装成
+ *   `"redispatch"` 继续烧 token；
+ * - approval 收成 `false`：**命令不许跑**。收成 true 等于无人应答时
+ *   自动放行一条 `rm -rf`。
+ */
+describe("cancel 收尾挂起的人_answer_ 通道（fail-closed）", () => {
+  /** 挂起一个 escalation，返回它的 promise 与宿主回调。 */
+  function parkEscalation(taskId: string): { promise: Promise<string>; host: any } {
+    h.createPlatformCalls.length = 0;
+    // 只有 "ask" 会 park；其余四态在回调里就地 resolve，不进 pendingEscalations。
+    buildPlatformLayer({ ...DEFAULT_SETTINGS, escalationPolicy: "ask" }, { log: () => {} });
+    const host = lastPlatformConfig().host;
+    return { promise: host.requestEscalationDecision(taskId, "验证失败"), host };
+  }
+
+  it("abortAllEscalations 把挂起的决策收成 abort（不是 redispatch）", async () => {
+    const { promise } = parkEscalation("t-cancel");
+    // 先证明它真的挂起了：未被 abort 前不得有结论。
+    let settled = false;
+    void promise.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false);
+
+    abortAllEscalations();
+    // 判据是"值"不只是"结束了"：abort 与 redispatch/skip 的后果完全不同。
+    await expect(promise).resolves.toBe("abort");
+  });
+
+  it("abortAllEscalations 收尾后不留残渣：再答一次必须是 ghost", async () => {
+    parkEscalation("t-clean");
+    abortAllEscalations();
+    // map 被 clear 过 —— 否则这里会 true，说明"收尾"只 resolve 没删除，
+    // 同一个 taskId 之后会被第二次决策误当成还挂着。
+    expect(resolveEscalation("t-clean", "skip")).toBe(false);
+  });
+
+  it("abortAllEscalations 一次收掉多条挂起，不只第一条", async () => {
+    const a = parkEscalation("t-a");
+    const b = parkEscalation("t-b");
+    const c = parkEscalation("t-c");
+    abortAllEscalations();
+    // 逐条 resolve 而非只 resolve 第一条 —— 少一条就意味着那个 run 永久挂死。
+    await expect(a.promise).resolves.toBe("abort");
+    await expect(b.promise).resolves.toBe("abort");
+    await expect(c.promise).resolves.toBe("abort");
+  });
+
+  it("abortAllApprovals 把挂起的审批收成拒绝（fail-closed：命令不许跑）", async () => {
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS }, { log: () => {} });
+    const host = lastPlatformConfig().host;
+    // 真实的审批请求通道，参数取生产上会命中的形状。
+    const promise = host.requestApproval("rm", ["-rf", "dist"]);
+    let settled = false;
+    void promise.then(() => (settled = true));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(settled).toBe(false);
+
+    abortAllApprovals();
+    // 关键判据：必须是 false。true 等于"没人应答就放行破坏性命令"。
+    await expect(promise).resolves.toBe(false);
+  });
+
+  it("abortAllApprovals 收尾后不留残渣：再答一次必须是 ghost", async () => {
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS }, { log: () => {} });
+    const host = lastPlatformConfig().host;
+    void host.requestApproval("npm", ["publish"]);
+    // requestId 是生成式的（`a-<seq>-<ts>`），不能硬编码 —— 从事件里读回来。
+    const sent = (win.webContents.send as Mock).mock.calls
+      .map((c) => c[1] as { type?: string; requestId?: string })
+      .filter((e) => e.type === "approval-request");
+    const requestId = inst(sent).requestId!;
+
+    abortAllApprovals();
+    expect(resolveApproval(requestId, true)).toBe(false);
+  });
+
+  it("cancel 一次把 escalation 与 approval 两条通道都收掉", async () => {
+    // 两条通道是同一个 `orchestration:cancel` 的两份职责，分开测会漏掉
+    // "只收了一条"的回归 —— 那正是挂死最常见的形态。
+    const esc = parkEscalation("t-both");
+    h.createPlatformCalls.length = 0;
+    buildPlatformLayer({ ...DEFAULT_SETTINGS }, { log: () => {} });
+    const approval = lastPlatformConfig().host.requestApproval("git", ["push"]);
+
+    (h.ipcMain as FakeIpcMain).invoke("orchestration:cancel");
+    await expect(esc.promise).resolves.toBe("abort");
+    await expect(approval).resolves.toBe(false);
   });
 });

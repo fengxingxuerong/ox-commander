@@ -223,6 +223,52 @@ describe("killTree · guards", () => {
     });
   });
 
+  /**
+   * 生产上**没有一处**传 `graceMs`：`verifier.ts:96/406`、`dev-server.ts:84`、
+   * `cli-agent.ts:313` 三个调用点全是 `killTree(child)`。
+   *
+   * 也就是说 `?? 2_000`（`kill-tree.ts:14` 与 `:45`）才是真正在跑的那个值 ——
+   * 而既有 18 条用例里每一条都显式传了自己的 graceMs（1/5/10/30/50/500），
+   * 那条不传的（`guards` 里两条）又都在 `pid === undefined` 守卫处提前 return，
+   * **永远走不到默认值**。于是"默认值被改成 20ms"这种改动可以全绿通过。
+   *
+   * 判据用"默认窗口内不升级、窗口后才升级"夹逼，而不是硬等 2 秒 ——
+   * 既钉住了量级（不是 20ms 也不是 20s），又不用让门禁多跑 2 秒。
+   */
+  describe("默认 graceMs（生产真正在用的那个值）", () => {
+    it("POSIX 路径：默认 2000ms 宽限期内只发 SIGTERM，之后才升级 SIGKILL", async () => {
+      await withPlatform("linux", async () => {
+        const child = fakeChild();
+        killTree(child); // 不传 graceMs —— 与生产三个调用点同形
+        expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+
+        // 默认值若被改成 50ms，这里就已经升级过了 → 变异版会红。
+        await sleep(300);
+        expect(child.kill).not.toHaveBeenCalledWith("SIGKILL");
+        expect(child.kill).toHaveBeenCalledTimes(1); // 窗口内绝不重复杀
+
+        // 过了 2s 窗口必须升级，否则"杀干净"这条承诺是空的。
+        await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith("SIGKILL"), { timeout: 4000 });
+      });
+    });
+
+    it("win32 路径：post-grace double-check 同样吃这个默认值", async () => {
+      await withPlatform("win32", async () => {
+        const killer = fakeKiller();
+        h.spawnImpl = () => killer as never;
+        const child = fakeChild();
+        killTree(child); // 不传 graceMs
+        killer.emit("exit", 0); // taskkill 报成功 → 不走 fallback
+
+        // 宽限期内不得补刀：这条断言把"默认 2000ms"和"默认 0ms"分开。
+        await sleep(300);
+        expect(child.kill).not.toHaveBeenCalled();
+
+        await vi.waitFor(() => expect(child.kill).toHaveBeenCalledWith("SIGTERM"), { timeout: 4000 });
+      });
+    });
+  });
+
   it("reports exit state from either exit code or signal", () => {
     expect(hasExited({ exitCode: 0, signalCode: null } as never)).toBe(true);
     expect(hasExited({ exitCode: 1, signalCode: null } as never)).toBe(true);
