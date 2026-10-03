@@ -57,7 +57,15 @@ export function registerSettingsHandlers(): void {
   ipcMain.handle("keys:save", (_e, entries: Array<{ envVar: string; value: string }>) => {
     let savedCount = 0;
     for (const { envVar, value } of entries) {
-      if (keysStore().set(envVar, value)) savedCount++;
+      if (!keysStore().set(envVar, value)) continue;
+      savedCount++;
+      // 账号热切换（P1-5）：保存动作是**最新的意图**，必须立刻反映到进程环境 ——
+      // 否则 `KeysStore.get` 的 env-wins 语义会让 env 里残留的旧 key 一直遮蔽
+      // store 里的新值：换 key 不重启就永远不生效（llm:test 与下一次 run 都
+      // 还在用旧 key）。空值 = 清除，env 同步删掉，让"停用"也真的生效。
+      const trimmed = value.trim();
+      if (trimmed) process.env[envVar] = trimmed;
+      else delete process.env[envVar];
     }
     return savedCount;
   });

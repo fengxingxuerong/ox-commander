@@ -6,6 +6,18 @@
 
 ## [未发布]
 
+### 修复
+
+- **账号热切换的最后一块：换 key 值现在真的会生效（P1-5 收口）**。此前的语义链
+  有个缝：`KeysStore.get` 是 env-wins（shell 注入优先），而 `keys:save` 只写
+  store 不动 env —— 于是**更换已保存的 key** 时，进程 env 里残留的旧值会一直
+  遮蔽 store 里的新值：设置页"测试连接"和下一次 run 都还在用旧 key，除非重启
+  应用。现在 `keys:save` 在写 store 的同时同步更新进程环境（空值清除时同步
+  删除）—— 保存动作就是最新意图，换 key / 停用 key 立即生效，无需重启。
+  shell 注入的优先语义不变：没在设置页保存过时，env 里的 key 依然优先。
+  线路池的停用（`disabledKeyVars`）与顺序（`llmPool`）此前已热切换生效
+  （每次 run 现读 settings 重建池），本轮补的是 key **值**这一维。
+
 ### 新增
 
 - **对外可复现样例：`npm run demo`（verify 第 16 段 `smoke:demo`）** —— 补的是"能跑"

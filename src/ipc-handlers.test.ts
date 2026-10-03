@@ -401,6 +401,31 @@ describe("settings & key handlers", () => {
     expect(keys.set).toHaveBeenCalledWith("BAD_NAME", "b");
   });
 
+  it("账号热切换：保存新 key 立刻覆盖进程 env（换 key 不重启就生效）", () => {
+    // env-wins 语义（KeysStore.get）下，env 里残留的旧值会遮蔽 store 里的新值 ——
+    // 保存动作不同步 env 的话，"换 key"只有重启应用才生效。
+    const prior = process.env["OX_TEST_KEY"];
+    process.env["OX_TEST_KEY"] = "old-key";
+    try {
+      (h.ipcMain as FakeIpcMain).invoke("keys:save", [{ envVar: "OX_TEST_KEY", value: "new-key" }]);
+      expect(process.env["OX_TEST_KEY"]).toBe("new-key");
+    } finally {
+      if (prior === undefined) delete process.env["OX_TEST_KEY"];
+      else process.env["OX_TEST_KEY"] = prior;
+    }
+  });
+
+  it("账号热切换：空值清除 key 时 env 同步删除（停用也真的生效）", () => {
+    const prior = process.env["OX_TEST_KEY"];
+    process.env["OX_TEST_KEY"] = "stale-key";
+    try {
+      (h.ipcMain as FakeIpcMain).invoke("keys:save", [{ envVar: "OX_TEST_KEY", value: "  " }]);
+      expect("OX_TEST_KEY" in process.env).toBe(false);
+    } finally {
+      if (prior !== undefined) process.env["OX_TEST_KEY"] = prior;
+    }
+  });
+
   it("reports key security posture for the settings screen", () => {
     const keys = inst(h.keysInstances);
     (keys.isEncryptedAtRest as Mock).mockReturnValue(false);
