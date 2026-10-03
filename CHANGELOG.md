@@ -30,6 +30,21 @@
   远期）新动态；LiteLLM `retry_policy` / MCP 2026-07-28 规范（sampling 弃用、
   MRTR 与 serve 审批同构但维持现握手）逐条对照结论。
 
+- **headless 三宿主补上 `raceRedundancy` / `disabledKeyVars`（协议面能力差收口）**。
+  这两个开关桌面设置页早就有，headless 的 CLI / serve / MCP 三个宿主一个都没有 ——
+  `KNOWN_FIELDS` 不认它们（宿主传了只会拿到一条"未知字段已忽略"），`HeadlessSpec`
+  也没声明，于是"可编程"这条优势在**账号级停用**与**任务级赛马**两格上是断的。
+  现在两字段进白名单与类型，并按协议层既有规矩校验（与 `maxTokensPerRun` 同风格）：
+  `raceRedundancy` 只认 ≥1（0 与负数在调度器里会被夹成 1，"写错碰巧不出错"的巧合
+  协议层不留），`disabledKeyVars` 去空白、去重。**多说一句而不是静默**：停用表里出现
+  池子里没有的变量名时给 warning —— 那种输错的表现是"什么都没发生"，宿主会以为某个
+  账号已下线，而它仍在消耗同一份配额，这比报错更危险。
+  同批把此前只在 `KNOWN_FIELDS` 里、类型上没声明的 `runWallClockMs` /
+  `brainTimeoutMs` / `executorTimeoutMs` 补进 `HeadlessSpec`（协议文档 §1 字段表同步）。
+  两端接起来的证据不只看 settings：`platform.schedulerOptions().raceRedundancy` 与
+  `platform.lineHealth()` 的线路条数各有一条断言 —— 防的是"协议认了字段、平台没读"
+  这种断链重演。protocol.ts site 口径 **92/92 全杀**。
+
 ### 修复
 
 - **账号热切换的最后一块：换 key 值现在真的会生效（P1-5 收口）**。此前的语义链

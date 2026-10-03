@@ -47,6 +47,8 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `runWallClockMs` | number | | 不限 | run 级墙钟上界；`0` 表示不限 |
 | `brainTimeoutMs` | number > 0 | | `300000` | 大脑层（PRD / 分解）**单次** LLM 调用的超时（毫秒）；省略用内置默认 |
 | `executorTimeoutMs` | number > 0 | | `300000` | 内置执行器（生成代码那一路）**单次** LLM 调用的超时（毫秒）；省略用内置默认 |
+| `raceRedundancy` | number ≥ 1 | | `1` | 任务级冗余赛马：`>1` 时每个任务并行派给 N 个**不同**执行器，先到终态成功者赢、其余中止（拿 token 换时间；产物正确性仍由批次后的硬门禁把关）。`1` = 关闭；实际并行度取它与可用执行器数的较小者 |
+| `disabledKeyVars` | string[] | | `[]` | 停用的密钥环境变量名（账号级开关）。一条线路 = provider × key × model，摘掉一个 key 即摘掉它名下的整组线路；**密钥仍在盘上**，随时能开回来。空数组 = 全部启用。写了池子里没有的名字只给 warning（静默无效比报错更危险） |
 
 参数错误会**一次性列出所有问题**（不半途退出），例如：
 

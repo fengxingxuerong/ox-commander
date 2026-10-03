@@ -5,7 +5,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
 import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
-import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, executorTimeoutMsFor } from "../electron/platform";
+import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, createPlatform, executorTimeoutMsFor } from "../electron/platform";
+import { DEFAULT_SETTINGS } from "../shared/types";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import type { AgentAdapter, Task, TaskPayload, VerificationReport } from "../shared/types";
@@ -438,6 +439,146 @@ describe("parseSpec · executorTimeoutMs", () => {
 
     const bare = parse(JSON.stringify(LEGACY_SPEC));
     expect(executorTimeoutMsFor(bare.settings)).toBe(EXECUTOR_TIMEOUT_MS);
+  });
+});
+
+describe("parseSpec · raceRedundancy（CLI/桌面能力差收口）", () => {
+  it("合法值流进 settings；省略时是内置默认 1（关闭），且都不产生警告", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, raceRedundancy: 3 }));
+    expect(spec.settings.raceRedundancy).toBe(3);
+    expect(spec.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.raceRedundancy).toBe(DEFAULT_SETTINGS.raceRedundancy);
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("0 / 负数 / 非数字都被拒绝 —— 调度器会把它们夹成 1，协议层不留这种巧合", () => {
+    // `Math.max(1, …)` 让 0 与 -2 都落到"关闭"，宿主写的坏值因此碰巧不出错；
+    // 协议层面向宿主程序，宁可当场报错也不静默解释意图。
+    for (const bad of [0, -2, Number.NaN, "two", null]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, raceRedundancy: bad }));
+      expect(r.ok, `raceRedundancy=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("raceRedundancy");
+    }
+  });
+
+  it("小数向下取整（并行份数是整数）", () => {
+    expect(parse(JSON.stringify({ ...LEGACY_SPEC, raceRedundancy: 2.9 })).settings.raceRedundancy).toBe(2);
+  });
+
+  it("1e999 溢出成 Infinity 也被拒（漏过会被当成无限份并行派发）", () => {
+    const r = parseSpec('{"requirement":"x","projectRoot":".","raceRedundancy":1e999}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("raceRedundancy");
+  });
+
+  it("协议与平台两头对得上：值真的进了调度器选项", () => {
+    // 字段进了 settings 还不算数 —— 真正的行为挂在 platform 的 schedulerOptions 上。
+    // 缺这条断言时，"协议认了字段、平台没读"这一种断链跟桌面端当初的写法一模一样，
+    // 而这一格正是 headless 三宿主此前唯一没有的。
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, raceRedundancy: 3 }));
+    const platform = createPlatform({
+      settings: spec.settings,
+      promptDir: scratch("race"),
+      host: { log: () => undefined },
+    });
+    expect(platform.schedulerOptions().raceRedundancy).toBe(3);
+  });
+});
+
+describe("parseSpec · disabledKeyVars（账号级停用开关）", () => {
+  it("合法数组流进 settings；空数组 = 全部启用；省略时不产生警告", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: ["SENSENOVA_API_KEY_2"] }));
+    expect(spec.settings.disabledKeyVars).toEqual(["SENSENOVA_API_KEY_2"]);
+    expect(spec.warnings).toEqual([]);
+
+    const all = parse(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: [] }));
+    expect(all.settings.disabledKeyVars).toEqual([]);
+    expect(all.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("非数组 / 含空串 / 含非字符串都被拒绝", () => {
+    for (const bad of ["SENSENOVA_API_KEY", 42, ["SENSENOVA_API_KEY", ""], ["SENSENOVA_API_KEY", 7], [null]]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: bad }));
+      expect(r.ok, `disabledKeyVars=${JSON.stringify(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("disabledKeyVars");
+    }
+  });
+
+  it("去重并去空白（同一个变量写两遍没有额外语义）", () => {
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        disabledKeyVars: [" SENSENOVA_API_KEY_2 ", "SENSENOVA_API_KEY_2", "AMD_API_KEY"],
+      }),
+    );
+    expect(spec.settings.disabledKeyVars).toEqual(["SENSENOVA_API_KEY_2", "AMD_API_KEY"]);
+    expect(spec.warnings).toEqual([]);
+  });
+
+  it("池里没有的变量名给警告 —— 静默无效比报错更危险", () => {
+    // 写错名字的后果是"什么都没发生"：宿主以为某个账号已下线，它仍在消耗同一份配额。
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: ["NOPE_API_KEY"] }));
+    expect(spec.settings.disabledKeyVars).toEqual(["NOPE_API_KEY"]);
+    expect(spec.warnings).toHaveLength(1);
+    expect(spec.warnings[0]).toContain("未知密钥变量名");
+    expect(spec.warnings[0]).toContain("NOPE_API_KEY");
+  });
+
+  it("认识与否是池的函数：把池收窄后同一个名字就不再认识", () => {
+    const wide = parse(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: ["SENSENOVA_API_KEY", "AMD_API_KEY"] }));
+    expect(wide.warnings).toEqual([]);
+
+    // 默认池里 sensenova 贡献三把 key、amd-radeon 走单把 apiKeyEnvVar；
+    // 池收成 amd-radeon 之后 SENSENOVA_API_KEY 就不在池里了。
+    const narrow = parse(
+      JSON.stringify({ ...LEGACY_SPEC, llmPool: ["amd-radeon"], disabledKeyVars: ["SENSENOVA_API_KEY"] }),
+    );
+    expect(narrow.warnings.some((w) => w.includes("未知密钥变量名"))).toBe(true);
+  });
+
+  it("协议与平台两头对得上：停用真的让线路变少", () => {
+    // 字段进了 settings 只是半程 —— 池是在 platform 的 buildLlm 里按它组装的。
+    // 这里把两端接起来：线路健康列表的长度就是池的实际形状。
+    const saved = { ...process.env };
+    process.env.SENSENOVA_API_KEY = "sk-1";
+    process.env.SENSENOVA_API_KEY_2 = "sk-2";
+    try {
+      const spec = parse(
+        JSON.stringify({
+          ...LEGACY_SPEC,
+          llmPool: ["sensenova"],
+          disabledKeyVars: ["SENSENOVA_API_KEY_2"],
+        }),
+      );
+      const cut = createPlatform({
+        settings: spec.settings,
+        llmPool: spec.llmPool,
+        promptDir: scratch("keys-cut"),
+        host: { log: () => undefined },
+      });
+      cut.buildLlm();
+
+      const full = createPlatform({
+        settings: { ...spec.settings, disabledKeyVars: [] },
+        llmPool: spec.llmPool,
+        promptDir: scratch("keys-full"),
+        host: { log: () => undefined },
+      });
+      full.buildLlm();
+
+      expect(cut.lineHealth().length).toBeGreaterThan(0);
+      expect(cut.lineHealth().length).toBeLessThan(full.lineHealth().length);
+    } finally {
+      for (const k of Object.keys(process.env)) {
+        if (!(k in saved)) delete process.env[k];
+      }
+      for (const [k, v] of Object.entries(saved)) process.env[k] = v as string;
+    }
   });
 });
 

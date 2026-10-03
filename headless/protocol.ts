@@ -15,7 +15,7 @@
  * version still runs unchanged.
  */
 import * as path from "node:path";
-import { getProvider } from "../shared/providers";
+import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import { parseAgentManifestList } from "../electron/agents/manifest-schema";
 import type { AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
@@ -102,6 +102,30 @@ export interface HeadlessSpec {
    * (omit the field to express unlimited).
    */
   maxTokensPerRun?: number;
+  /**
+   * 本次 run 的墙钟上限（毫秒）。只在批 / 轮边界生效，不掐断在途请求 ——
+   * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。省略或 `0` = 不限。
+   */
+  runWallClockMs?: number;
+  /**
+   * 大脑层（PRD / 任务分解）**单次** LLM 调用的超时（毫秒）。
+   * 省略即用内置默认 300000；`0` / 负数按宿主算错处理（直接报错，不静默当默认）。
+   */
+  brainTimeoutMs?: number;
+  /** 内置执行器（生成代码那一路）**单次** LLM 调用的超时（毫秒）；规矩同 `brainTimeoutMs`。 */
+  executorTimeoutMs?: number;
+  /**
+   * 任务级冗余赛马（默认 1 = 关闭）。>1 时每个任务并行派给 N 个**不同**执行器，
+   * 第一个到终态成功者赢、其余中止 —— 拿 token 换时间，产物正确性仍由批次后的
+   * 统一硬门禁把关。上限不必写死：实际并行度取它与可用执行器数的较小者。
+   */
+  raceRedundancy?: number;
+  /**
+   * 停用的密钥变量名（账号级开关）。一条线路 = provider × key × model，所以
+   * **摘掉一个 key 就是摘掉它名下的整组线路** —— 密钥仍在盘上（随时能开回来），
+   * 而池子的形状立刻变小。空数组表示全部启用。
+   */
+  disabledKeyVars?: string[];
 }
 
 export interface ParsedSpec {
@@ -205,6 +229,8 @@ const KNOWN_FIELDS = new Set<string>([
   "runWallClockMs",
   "brainTimeoutMs",
   "executorTimeoutMs",
+  "raceRedundancy",
+  "disabledKeyVars",
 ]);
 
 const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
@@ -215,6 +241,34 @@ const ARBITRATION_MODES: readonly ArbitrationMode[] = ["report-only", "deny-all"
  * 设置里的 `verificationCommands`，不经过这层校验）。能力差不该长在校验表里。
  */
 const VERIFICATION_KINDS: readonly VerificationKind[] = ["build", "typecheck", "test", "smoke"];
+
+/**
+ * 池内 provider 实际会用到的密钥环境变量名。
+ *
+ * 两个来源：`providerKeyEnvVars` 覆盖"多把 key"的 provider（SenseNova 三把），
+ * 其余只有 `apiKeyEnvVar` 一把；无密钥端点（本地 Ollama）贡献为空 —— 它没有
+ * 账号可切，也因此不受停用表影响。
+ *
+ * 拿不到 provider 时跳过而不是抛错：调用点虽在 `issues` 判空之后，但池子可能
+ * 仍带着未知 id（那时已经 push 过 issue），这里不该再补一个异常把解析整体炸掉。
+ */
+function knownKeyVars(pool: readonly string[]): Set<string> {
+  const out = new Set<string>();
+  for (const id of pool) {
+    const extra = providerKeyEnvVars(id);
+    if (extra.length > 0) {
+      for (const v of extra) out.add(v);
+    } else {
+      try {
+        const provider = getProvider(id);
+        if (provider?.apiKeyEnvVar) out.add(provider.apiKeyEnvVar);
+      } catch {
+        // 未知 provider：issue 已在 llmPool 校验处记过，这里不再重复。
+      }
+    }
+  }
+  return out;
+}
 
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
@@ -335,6 +389,28 @@ export function parseSpec(rawText: string): ParseResult {
     }
   }
 
+  // 赛马的"关闭"是 1 而不是 0 —— 调度器里 `Math.max(1, …)` 会把 0 和负数一起
+  // 夹成 1，于是"宿主写了 0 想关掉"碰巧对、"宿主算错写成 -2"也碰巧对。协议层
+  // 不留这种巧合：要关就写 1，写错就报错，免得坏值被静默解释成意图。
+  let raceRedundancy: number | undefined;
+  if (raw.raceRedundancy !== undefined) {
+    if (typeof raw.raceRedundancy !== "number" || !Number.isFinite(raw.raceRedundancy) || raw.raceRedundancy < 1) {
+      issues.push("raceRedundancy 必须是不小于 1 的数字（1 = 关闭赛马，>1 = 同任务并行派 N 个执行器）");
+    } else {
+      raceRedundancy = Math.floor(raw.raceRedundancy);
+    }
+  }
+
+  let disabledKeyVars: string[] | undefined;
+  if (raw.disabledKeyVars !== undefined) {
+    if (!Array.isArray(raw.disabledKeyVars) || raw.disabledKeyVars.some((v) => typeof v !== "string" || v.trim() === "")) {
+      issues.push("disabledKeyVars 必须是非空字符串数组（要停用的密钥环境变量名，空数组 = 全部启用）");
+    } else {
+      // 去重：同一个变量写两遍没有额外语义，留着只会让"停用了几个账号"数不清。
+      disabledKeyVars = [...new Set((raw.disabledKeyVars as string[]).map((v) => v.trim()))];
+    }
+  }
+
   let escalationPolicy: EscalationPolicy | undefined;
   if (raw.escalationPolicy !== undefined) {
     if (typeof raw.escalationPolicy !== "string" || !ESCALATION_POLICIES.includes(raw.escalationPolicy as EscalationPolicy)) {
@@ -413,6 +489,18 @@ export function parseSpec(rawText: string): ParseResult {
 
   if (issues.length > 0) return { ok: false, message: issues.join("；") };
 
+  // 停用表里写了池子不认识的变量名时，行为是"什么都没发生" —— 宿主会以为某个
+  // 账号已经下线，而它仍在消耗同一份配额。这比报错更危险（报错至少会停下来），
+  // 所以明确说出来；放在 issue 判空之后，因为它要用已确认合法的池去比对。
+  if (disabledKeyVars) {
+    const known = knownKeyVars(llmPool ?? [...DEFAULT_SETTINGS.llmPool]);
+    for (const v of disabledKeyVars) {
+      if (!known.has(v)) {
+        warnings.push(`disabledKeyVars 含未知密钥变量名 "${v}"：当前线路池里没有它，停用不会生效`);
+      }
+    }
+  }
+
   // `llmProvider` 必须同时进 `settings` —— 平台在池为空时用 `settings.llmProvider`
   // 建大脑客户端。它以前只被 echo 进 `hello`，于是"指定 provider"这个字段
   // 对实际调用毫无影响（宿主设了 ollama 仍然打 SenseNova）。
@@ -433,6 +521,8 @@ export function parseSpec(rawText: string): ParseResult {
     ...(typeof raw.runWallClockMs === "number" ? { runWallClockMs: raw.runWallClockMs } : {}),
     ...(brainTimeoutMs !== undefined ? { brainTimeoutMs } : {}),
     ...(executorTimeoutMs !== undefined ? { executorTimeoutMs } : {}),
+    ...(raceRedundancy !== undefined ? { raceRedundancy } : {}),
+    ...(disabledKeyVars !== undefined ? { disabledKeyVars } : {}),
   };
 
   return {
