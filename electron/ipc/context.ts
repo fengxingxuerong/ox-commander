@@ -12,6 +12,7 @@ import path from "node:path";
 import { OrchestratorEngine, type OrchestratorCallbacks, type RunSnapshot } from "../engine";
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../agents";
 import { AuditLog } from "../audit-log";
+import { taskTrail, trailBriefForRepair } from "../board-derive";
 import { createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
 import { writeFileAtomic } from "../atomic-file";
 import { ProjectStore, SettingsStore } from "../store";
@@ -275,6 +276,10 @@ export function buildPlatformLayer(
     // leave real runs reading an unseeded `process.env`.
     seedKeys: (envVars) => seedKeysFromStore(settingsValue, envVars),
     journal: overrides.journal,
+    // 前任履历（P1-3 上下文回溯闭环）：审计日志归这里所有，引擎读不到，
+    // 所以由宿主把「履历 → 给下一个执行器看的文本」这一步做掉再喂进去。
+    // 摘要规则在纯函数 `trailBriefForRepair` 里，这里只提供事实。
+    priorAttempts: (taskId) => trailBriefForRepair(taskTrail(auditLog.read({ limit: 5000 }), taskId)),
     host: {
       log: overrides.log,
       callbacks: overrides.callbacks,

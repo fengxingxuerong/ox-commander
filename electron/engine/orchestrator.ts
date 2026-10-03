@@ -67,6 +67,16 @@ export interface OrchestratorDeps {
    * 这里只用到它的 `reset()`；判定与问人发生在 verifier 里（执行面）。
    */
   approvalGate?: { reset(): void };
+  /**
+   * 运行履历提供者（P1-3 上下文回溯闭环，可选）：给一个 taskId，返回给下一个
+   * 执行器看的"前任履历"文本。
+   *
+   * 引擎自己读不到审计日志 —— 它活在一轮 `execute` 里，而日志归长期存活的
+   * audit-log 所有（同 `usage` / `conflicts` 的理由）。所以宿主注入一个查询函数，
+   * 引擎只在**重修轮**取一次。宿主没提供时重修上下文里就没有履历段，
+   * 其余行为一字不变。
+   */
+  priorAttempts?: (taskId: string) => string;
 }
 
 /** 断点续跑快照：足以在全新进程里恢复一轮 execute 的全部进度状态。 */
@@ -591,6 +601,9 @@ export class OrchestratorEngine {
                     // 只报"哪条命令早于本次运行就是红的"，不复制失败摘要：
                     // 摘要本身已经在本轮的错误归属里，抄两遍只会淹没归属线索。
                     preexistingKinds ? `[本次运行前就已失败] ${preexistingKinds}` : "",
+                    // 前任履历（P1-3）：说清"这条路已经走过" —— 只说"现在哪里错了"
+                    // 的话，agent 每次重试都从零开始，会反复踩同一个坑。
+                    this.deps.priorAttempts?.(t.id) ?? "",
                   ]
                     .filter((s) => s !== "")
                     .join("\n\n"),

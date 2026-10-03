@@ -151,6 +151,12 @@ export interface PlatformConfig {
    * checkpoint and the host can resume a killed run instead of starting over.
    */
   journal?: { save(snapshot: RunSnapshot): void };
+  /**
+   * 运行履历查询（P1-3 上下文回溯闭环，可选）。宿主注入，引擎只在重修轮取一次。
+   * 引擎读不到审计日志（日志归长期存活的 audit-log 所有，同 `usage` / `conflicts`），
+   * 所以这里是宿主给的查询口。没提供时重修上下文里没有履历段，其余行为不变。
+   */
+  priorAttempts?: (taskId: string) => string;
   host: PlatformHost;
   /** Test seams. */
   llm?: LlmClient;
@@ -417,6 +423,8 @@ export function createPlatform(config: PlatformConfig): Platform {
       usage: () => meter.snapshot(),
       conflicts: () => verdictConflicts,
       journal: config.journal,
+      // 前任履历（P1-3）：宿主给查询口，引擎只负责在重修轮把它拼进上下文。
+      ...(config.priorAttempts ? { priorAttempts: config.priorAttempts } : {}),
       actionGate: gate,
       // 审批门与 actionGate 同一生命单位：批次边界一起 reset（"本批次已批准"不该跨批）。
       ...(approvalGate ? { approvalGate } : {}),

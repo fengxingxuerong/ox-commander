@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AuditRecord } from "../electron/audit-log";
-import { deriveBoardView, taskTrail } from "../electron/board-derive";
+import { deriveBoardView, taskTrail, trailBriefForRepair } from "../electron/board-derive";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 
 /**
@@ -281,5 +281,110 @@ describe("taskTrail · 一个任务的运行履历（P1-3 上下文回溯）", (
       "t1",
     );
     expect(trail.runs).toHaveLength(1);
+  });
+});
+
+describe("trailBriefForRepair · 履历压成给下一个执行器读的文本（P1-3 闭环）", () => {
+  // 闭环的那一半：履历此前只流到 UI（人看），agent 读不到。重修上下文里只有
+  // "现在哪里错了"，没有"这条路已经走过" —— 于是每次重试都从零开始。
+  const brief = (records: Parameters<typeof taskTrail>[0], taskId = "t1") =>
+    trailBriefForRepair(taskTrail(records, taskId));
+
+  it("成功过的履历不产生任何提示（成功的过去没有接力价值）", () => {
+    expect(brief([start({ ts: "s" }), end({ ts: "e", ok: true })])).toBe("");
+  });
+
+  it("同类失败聚合计数，不逐次罗列（prompt 体积与失败次数解耦）", () => {
+    const text = brief([
+      start({ ts: "s1" }),
+      end({ ts: "e1", ok: false, errorClass: "timeout", detail: "x" }),
+      start({ ts: "s2" }),
+      end({ ts: "e2", ok: false, errorClass: "timeout", detail: "y" }),
+      start({ ts: "s3" }),
+      end({ ts: "e3", ok: false, errorClass: "timeout", detail: "z" }),
+    ]);
+    expect(text).toContain("已失败 3 次");
+    expect(text).toContain("timeout × 3");
+    // 三次失败只出现一次计数，不是三行 —— 摘要不随失败次数膨胀
+    expect(text.match(/timeout/g)).toHaveLength(1);
+  });
+
+  it("不同错误类分开报，agent 能看出换了路没有", () => {
+    const text = brief([
+      start({ ts: "s1" }),
+      end({ ts: "e1", ok: false, errorClass: "timeout" }),
+      start({ ts: "s2" }),
+      end({ ts: "e2", ok: false, errorClass: "protocol" }),
+    ]);
+    expect(text).toContain("timeout × 1");
+    expect(text).toContain("protocol × 1");
+  });
+
+  it("点名上一任执行器（是谁跑失败的比第一个是谁有用）", () => {
+    const text = brief([
+      start({ ts: "s1", agentId: "planned-a" }),
+      end({ ts: "e1", agentId: "actual-a", ok: false, errorClass: "auth" }),
+      start({ ts: "s2", agentId: "planned-b" }),
+      end({ ts: "e2", agentId: "actual-b", ok: false, errorClass: "auth" }),
+    ]);
+    expect(text).toContain("上一任执行器：actual-b");
+    expect(text).not.toContain("planned-b"); // 计划值不是"谁真的跑过"
+  });
+
+  it("腰斩的派发单列，不混进失败计数（原因未知 ≠ 失败）", () => {
+    const text = brief([
+      start({ ts: "s1" }),
+      start({ ts: "s2" }), // 第一次被腰斩，没有 end
+      end({ ts: "e2", ok: false, errorClass: "timeout" }),
+    ]);
+    expect(text).toContain("另有 1 次派发没有收尾");
+    expect(text).toContain("原因未知");
+    expect(text).toContain("已失败 1 次"); // 只有真正跑完的那次算失败
+  });
+
+  it("没有腰斩时就不提那件事（不许出现「另有 0 次」）", () => {
+    // 计数守卫：unfinished=0 时输出「另有 0 次派发没有收尾」是噪声，且会把
+    // "没有这回事"说成"有 0 次这回事"。反向注入把 > 0 改成 >= 0 靠这条抓。
+    const text = brief([
+      start({ ts: "s1", agentId: "a1" }),
+      end({ ts: "e1", agentId: "a1", ok: false, errorClass: "timeout" }),
+    ]);
+    expect(text).toContain("已失败 1 次");
+    expect(text).not.toContain("没有收尾");
+  });
+
+  it("只有腰斩、没有一次失败收尾 ⇒ 说清「没失败过」而不是谎报已失败0 次", () => {
+    // 边界：failed 非空（有一条腰斩）但 byClass 空。上一任也不提（腰斩的执行器
+    // 归属是计划值，不是"谁真的跑过"）。计数必须是 0，且腰斩那行必须在。
+    const text = brief([start({ ts: "s1", agentId: "planned-a" })]);
+    expect(text).toContain("已失败 0 次");
+    expect(text).toContain("另有 1 次派发没有收尾");
+    expect(text).not.toContain("上一任执行器");
+  });
+
+  it("缺 errorClass 的失败归unknown（字段即承诺：不猜原因）", () => {
+    const text = brief([start({ ts: "s" }), end({ ts: "e", ok: false })]);
+    expect(text).toContain("unknown × 1");
+  });
+
+  it("无执行器归属时不提「上一任」（字段即承诺：没有就不编）", () => {
+    const text = brief([end({ ts: "e", ok: false, errorClass: "auth" })]);
+    expect(text).toContain("已失败 1 次");
+    expect(text).not.toContain("上一任执行器");
+  });
+
+  it("带上一任时给出「别再走同一条路」的明确指令", () => {
+    // 断言要点：这段文本的唯一目的是改变下一个 agent 的行为。
+    // 只报数字不喊停的话，agent 会读成「第 3 次尝试」而不是「这条路死了」。
+    const text = brief([
+      start({ ts: "s1", agentId: "a1" }),
+      end({ ts: "e1", agentId: "a1", ok: false, errorClass: "protocol" }),
+    ]);
+    expect(text).toContain("不要再重复同一条路");
+    expect(text).toContain("换思路或换执行器");
+  });
+
+  it("只压给重修轮看：首轮（无任何事实）返回空串让调用方不拼这段", () => {
+    expect(brief([])).toBe("");
   });
 });

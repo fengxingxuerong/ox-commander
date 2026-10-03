@@ -472,6 +472,55 @@ describe("createPlatform · policy.d 接线（策略即代码）", () => {
   });
 
   /**
+   * 前任履历接线（P1-3上下文回溯闭环）。
+   *
+   * 断的是**传递链**而不是"某个字段有值"：`priorAttempts` 要从 config 一路
+   * 活到 engine 的重修上下文里，中间隔着 createPlatform 的展开三元。
+   * 任一分支互换 ⇒ engine 拿到的 deps 里没有这个钩子 ⇒ 重修轮问不到履历。
+   * 观察点是"引擎到底问没问"，不是"platform 上有没有这个属性"。
+   */
+  it("前任履历：config 给的查询口真的活到 engine（重修轮问得到）", async () => {
+    const asked: string[] = [];
+    const t1: Task = { id: "t1", title: "t1", description: "", zone: "src/a", dependencies: [], suggestedRole: "backend-dev" };
+    const platform = createPlatform({
+      settings: settings({ maxRepairRounds: 1 }),
+      promptDir: tempDir(),
+      // 注入 verify（而不是走真 verifyProject）：这条要断的是 config→engine 的
+      // 传递链，不是验证链。verify 恒红 ⇒ 必然进重修轮 ⇒ 钩子必然被问。
+      verify: async () => ({
+        passed: false,
+        results: [{ kind: "build", ok: false, exitCode: 1, logDigest: "red", durationMs: 0 }],
+      }),
+      priorAttempts: (taskId) => {
+        asked.push(taskId);
+        return "[前任履历] 之前被试过：已失败 1 次";
+      },
+      host: { log: () => undefined },
+    });
+
+    await expect(platform.engine.execute([[t1]], tempDir())).rejects.toThrow(/repair rounds/);
+    // 真的问了、且问的是那个任务 —— 展开三元被互换时这里会是 []
+    expect(asked).toEqual(["t1"]);
+  });
+
+  it("前任履历：不给查询口时重修轮照样跑（缺席不等于崩）", async () => {
+    // 字段即承诺的另一面：宿主不提供就不该有任何履历段，但**不能**因此抛错。
+    // 没有它时重修上下文里没有履历段，其余行为一字不变。
+    const t1: Task = { id: "t1", title: "t1", description: "", zone: "src/a", dependencies: [], suggestedRole: "backend-dev" };
+    const platform = createPlatform({
+      settings: settings({ maxRepairRounds: 1 }),
+      promptDir: tempDir(),
+      verify: async () => ({
+        passed: false,
+        results: [{ kind: "build", ok: false, exitCode: 1, logDigest: "red", durationMs: 0 }],
+      }),
+      host: { log: () => undefined },
+    });
+    // 缺席时的行为 = 引擎正常跑完重修轮并如实报"修不动"，不是崩在装配上
+    await expect(platform.engine.execute([[t1]], tempDir())).rejects.toThrow(/repair rounds/);
+  });
+
+  /**
    * 审批门接线（P2-3）。
    *
    * 断的是**行为**而不是"某个字段有值"：配了 `approvalCommands: ["node"]` 后，

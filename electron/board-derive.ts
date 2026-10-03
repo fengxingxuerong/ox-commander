@@ -144,6 +144,59 @@ export function taskTrail(records: AuditRecord[], taskId: string): TaskTrail {
 }
 
 /**
+ * 把运行履历压成一段给**下一个执行器**读的文本（P1-3 上下文回溯闭环）。
+ *
+ * 为什么必须有它：重修轮的 `errorLogDigest` 只说"现在哪里错了"，不说"这条路已经走过"。
+ * 多agent 系统真正难的不是派发或验证，而是**接力** —— 前任换过谁、哪条路已经证伪。
+ * 没有这段，agent 每次重试都从零开始，会反复踩同一个坑（同一个错误类已经失败 3 次，
+ * 它却不知道，只看到第 4 次的报错）。
+ *
+ * 三条纪律：
+ *   1. **只讲失败的事**。成功过的尝试没有接力价值 —— 那是已经完成的过去。
+ *   2. **按错误类聚合计数**，不逐次罗列。同类失败 3 次说"3 次"，比贴三遍日志有用得多，
+ *      也把 prompt 体积与失败次数解耦（连挂 10 次不会撑爆上下文）。
+ *   3. **腰斩的派发要单列**。`endedAt` 缺席 = 这次没跑完，原因未知（进程被杀/被重派），
+ *      把它混进"失败 N 次"是编造因果，所以只如实说"有 N 次没有收尾"。
+ *
+ * 返回空串 = 还没有任何失败履历（首轮，或上一轮成功）—— 调用方直接不拼这段。
+ */
+export function trailBriefForRepair(trail: TaskTrail): string {
+  const failed = trail.runs.filter((r) => r.ok !== true);
+  if (failed.length === 0) return "";
+
+  const byClass = new Map<string, number>();
+  let lastAgent: string | undefined;
+  let unfinished = 0;
+  for (const r of failed) {
+    // 没有 endedAt ⇒ 没跑完，原因不可知，不参与归类。
+    if (r.endedAt === undefined) {
+      unfinished += 1;
+      continue;
+    }
+    const cls = r.errorClass ?? "unknown";
+    byClass.set(cls, (byClass.get(cls) ?? 0) + 1);
+    // 最后一个真正跑完的执行器 = "上一任是谁"，比"第一个是谁"有用。
+    if (r.agentId !== undefined) lastAgent = r.agentId;
+  }
+
+  const lines: string[] = ["[前任履历] 这个任务之前被试过："];
+  if (lastAgent !== undefined) lines.push(`- 上一任执行器：${lastAgent}`);
+  // 这里不再问"byClass 有没有东西"：能走到这行说明 failed 非空，而腰斩的那些
+  // 在上面就 continue 掉了 —— 所以只要有失败收尾，byClass 必然非空。写这个条件
+  // 只会造出一个恒真的死分支（反向注入 `> 0` 改 `!== 0` 测不出差别）。
+  const total = [...byClass.values()].reduce((a, b) => a + b, 0);
+  lines.push(
+    `- 已失败 ${total} 次，按原因分：${[...byClass.entries()].map(([cls, n]) => `${cls} × ${n}`).join("、")}`,
+  );
+  lines.push(`- **不要再重复同一条路**：换思路或换执行器，别把同一类错误再犯一遍。`);
+  // 腰斩单列：没有 endedAt ⇒ 没跑完，原因不可知，混进"失败 N 次"是编造因果。
+  if (unfinished > 0) {
+    lines.push(`- 另有 ${unfinished} 次派发没有收尾（原因未知，可能被中断）—— 不代表它错了。`);
+  }
+  return lines.join("\n");
+}
+
+/**
  * Reduces the audit trail into a board view.
  *
  * Missing-field tolerance is deliberate: older records predate projectId,

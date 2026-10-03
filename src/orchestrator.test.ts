@@ -346,6 +346,95 @@ describe("OrchestratorEngine.execute", () => {
     expect(ctx).toContain("approvalCommands");
   });
 
+  it("前任履历进重修上下文（P1-3 闭环：这条任务之前被谁试过、错在哪）", async () => {
+    // 这是 P1-3 的闭环那一半：履历此前只流到 UI（人看），agent 读不到。
+    // 没有这段，重试的agent 只知道"现在哪里错了"，会反复踩同一个坑。
+    const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
+    const asked: string[] = [];
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { repairOf?: Map<string, { round: number; errorLogDigest: string }> },
+      ) {
+        if (opts?.repairOf) repairPayloads.push(opts.repairOf);
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => ({
+        passed: false,
+        results: [
+          { kind: "test", ok: false, exitCode: 1, logDigest: "still red", durationMs: 0 },
+        ],
+      }),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      priorAttempts: (taskId) => {
+        asked.push(taskId);
+        return "[前任履历] 这个任务之前被试过：\n- 上一任执行器：a-prev\n- 已失败 2 次，按原因分：timeout × 2";
+      },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
+
+    // 只在重修轮问一次，且问的是真正失败的那个任务
+    expect(asked).toEqual(["t1"]);
+    const ctx = repairPayloads.at(-1)!.get("t1")!.errorLogDigest;
+    expect(ctx).toContain("[前任履历]");
+    expect(ctx).toContain("上一任执行器：a-prev");
+    expect(ctx).toContain("timeout × 2");
+    // 履历是补充，不能把归属线索挤掉
+    expect(ctx).toContain("still red");
+  });
+
+  it("首轮不查履历（没有「上一任」可言，查了也是空转）", async () => {
+    // 反向用例：priorAttempts 只在重修轮被调用。首轮调用它既浪费 IO，
+    // 又会让审计读次数与实际需要不符（契约是"重修时才回溯"）。
+    const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
+    let calls = 0;
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { repairOf?: Map<string, { round: number; errorLogDigest: string }> },
+      ) {
+        if (opts?.repairOf) repairPayloads.push(opts.repairOf);
+        // 第一轮直接成功 ⇒ 不进重修轮
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => ({ passed: true, results: [] }),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+        priorAttempts: () => {
+          calls += 1;
+          return "[前任履历] 不该被问到";
+        },
+      },
+      {
+        onStage: () => undefined,
+        onLog: () => undefined,
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    await eng.execute([TASKS], ".");
+    expect(calls).toBe(0);
+    expect(repairPayloads).toHaveLength(0);
+  });
+
   it("routes verification errors to the task owning the failing file's zone", async () => {
     const repairPayloads: Array<Map<string, { round: number; errorLogDigest: string }>> = [];
     const greenLogs: string[] = [];

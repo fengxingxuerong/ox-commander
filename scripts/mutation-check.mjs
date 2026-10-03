@@ -825,8 +825,11 @@ const EQUIVALENT_SITES = [
    *    恢复到 resolved:false 的对象（before 是乐观 set 前抓的原始版本，与
    *    变异后 fallback 的 `a` 同值同形），zustand 浅合并下对象引用不可观察，
    *    变异无可观察差异。
+   * 2026-10-03：P1-3 上下文回溯闭环在 `context.ts` 顶部插入 1 行 import
+   *   （`taskTrail, trailBriefForRepair`）→ 208 → 209。论证不变；行号锚点的
+   *   fail-safe 正常生效（漂移即自动暴露，不静默放过）。
    */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 208 },
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 209 },
   { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 230 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
