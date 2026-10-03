@@ -22,10 +22,19 @@ interface FetchLike {
 
 export class HttpLlmError extends Error {
   public readonly retryAfterMs?: number;
-  constructor(public status: number, body: string, retryAfterMs?: number) {
+  /**
+   * 服务端的请求追踪 id（`x-request-id` / `request-id` / `x-generation-id`）。
+   *
+   * 弹性库生态的标准可观测性做法：带上它，向服务商报障时一句话就能定位到
+   * 那一次请求 —— 不带的话工单要在时间戳和模型名里猜。字段缺席 = 端点没给
+   * （不少 OpenAI 兼容代理不发），不是丢失。
+   */
+  public readonly requestId?: string;
+  constructor(public status: number, body: string, retryAfterMs?: number, requestId?: string) {
     super(`LLM HTTP ${status}: ${body.slice(0, 300)}`);
     this.name = "HttpLlmError";
     if (retryAfterMs !== undefined) this.retryAfterMs = retryAfterMs;
+    if (requestId !== undefined) this.requestId = requestId;
   }
 }
 
@@ -137,8 +146,20 @@ export function parseRetryAfterMs(raw: string | null | undefined): number | unde
   return ms === undefined ? undefined : Math.min(ms, RETRY_AFTER_SLEEP_CAP);
 }
 
-abstract class BaseHttpLlmClient implements LlmClient {
-  constructor(
+/**
+ * 从响应头提取服务端的请求追踪 id。各家名字不一：OpenAI 系 `x-request-id`、
+ * Anthropic 系 `request-id`、OpenRouter `x-generation-id` —— 逐个试，都没有
+ * 就返回 undefined（不少 OpenAI 兼容代理不发）。
+ */
+function requestIdOf(res: FetchLikeResponse): string | undefined {
+  for (const h of ["x-request-id", "request-id", "x-generation-id"]) {
+    const v = res.headers?.get(h);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+abstract class BaseHttpLlmClient implements LlmClient {  constructor(
     protected config: ProviderConfig,
     protected apiKey: string,
     protected fetchImpl: FetchLike = fetch as unknown as FetchLike,
@@ -167,7 +188,7 @@ abstract class BaseHttpLlmClient implements LlmClient {
     });
     if (!res.ok) {
       const text = await readCappedErrorBody(res);
-      throw new HttpLlmError(res.status, text, parseRetryAfterMs(res.headers?.get("retry-after")));
+      throw new HttpLlmError(res.status, text, parseRetryAfterMs(res.headers?.get("retry-after")), requestIdOf(res));
     }
     const raw = (await readBodyWithCap(res, RESPONSE_BODY_BYTE_CAP)).replace(/^\uFEFF/, "");
     try {
@@ -621,7 +642,10 @@ export class FailoverLlmClient implements LlmClient {
 
 function errorDigest(e: unknown): string {
   const msg = e instanceof Error ? e.message : String(e);
-  return msg.replace(/\s+/g, " ").slice(0, 120);
+  const base = msg.replace(/\s+/g, " ").slice(0, 120);
+  // 服务端请求 id 进摘要：报障时一句话定位，不用在时间戳里猜。
+  const rid = e instanceof HttpLlmError ? e.requestId : undefined;
+  return rid ? `${base} [req=${rid}]` : base;
 }
 
 export interface FailoverClientOptions {

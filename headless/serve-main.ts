@@ -59,6 +59,8 @@ async function main(): Promise<void> {
         // 命令命中 approvalCommands 时不再"问不到人就拒绝" —— 有人（状态页/
         // MCP 客户端）真的能回答了。
         requestApproval: srv.approvalRequester,
+        // 活性心跳：每条 agent 事件广播一次 task-activity，UI 可显示"静默 Xs"。
+        onTaskActivity: (taskId, at) => emit({ type: "task-activity", taskId, at }),
       });
     },
   });

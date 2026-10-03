@@ -352,6 +352,8 @@ export function buildPlatformLayer(
       // 线路健康：哪条线路在冷却、被限流了几次。走独立事件而不是日志行 ——
       // 界面要的是字段（不是一行给人看的话），而且要能在重载后重新拉一次。
       onLineHealth: (lines) => send({ type: "line-health", lines }),
+      // 任务活性心跳：看板据此显示"静默 Xs"，长任务与挂死从此可区分。
+      onTaskActivity: (taskId, at) => send({ type: "task-activity", taskId, at }),
       // exhaust 刻意让决策回调整个缺席（字段即承诺）：引擎随后把"重修预算
       // 耗尽"报成结构化错误（与 CLI 的 exit 2 同义），而不是挂在一个永远
       // 不会有人回答的 Promise 上。escalation 事件照发 —— 升级发生过这件事

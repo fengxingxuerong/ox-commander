@@ -58,6 +58,12 @@ export interface TaskView {
   agentId?: string;
   /** Coarse failure class from the last run, for grouping. */
   errorClass?: string;
+  /**
+   * 最后一次任务活性心跳（2026-10-03 竞品吸收，学 Orca 的 agent heartbeats）：
+   * 派发与每条 agent 事件都会刷新它。running 任务超过 ~30s 无心跳 → 看板显示
+   * "静默 Xs"，长任务与挂死从此可区分。字段缺席 = 没有可信的心跳源。
+   */
+  lastActivityTs?: number;
   /** Duration of the last run. */
   durationMs?: number;
 }

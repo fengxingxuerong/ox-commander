@@ -6,6 +6,30 @@
 
 ## [未发布]
 
+### 新增
+
+- **任务活性心跳（2026-10-03 竞品吸收，学 Orca 的 agent state heartbeats）**。
+  修复一个观测盲区：此前"长任务在正常推进"与"可能挂死"在事件流里**长得一模
+  一样** —— 都是 `status=running` 之后一片安静，看板无从区分。现在
+  `SchedulerOptions.onTaskActivity` 在派发起点与每条 agent 事件时各触发一次，
+  三层宿主全部接线（桌面 IPC `task-activity` 事件、headless 协议事件、serve 广播）；
+  `TaskView.lastActivityTs` + 看板 running 任务静默超 30s 显示"⏸ 静默 Xs"
+  （5s tick 走表，纯函数 `SILENCE_LABEL` 打表可测）。重新派发时心跳账本重置，
+  终态任务收到迟到心跳不复活。
+
+- **HTTP 请求追踪 id 透传（弹性库生态标准做法）**。`postJson` 逐个探测响应头
+  `x-request-id` / `request-id` / `x-generation-id`（OpenAI / Anthropic /
+  OpenRouter 三家的名字），失败时带进 `HttpLlmError.requestId`，错误摘要
+  （`errorDigest`）追加 `[req=...]` —— 看板日志里看到失败即可复制 id 向服务商
+  报障，一句话定位那一次请求。字段缺席 = 端点没给（不少 OpenAI 兼容代理不发），
+  不是丢失。
+
+- **竞品调研 2026-10-03 轮落库**（`docs/2026-10-03-competitor-refresh.md`）：
+  Vibe Kanban 确认停摆（默认关审批 + 默认遥测被业界点名 —— 恰好是我们刻意
+  相反的两件事，差异化叙述落档不改代码）；OpenRig / AO（Reaction 回环，留 5.7
+  远期）新动态；LiteLLM `retry_policy` / MCP 2026-07-28 规范（sampling 弃用、
+  MRTR 与 serve 审批同构但维持现握手）逐条对照结论。
+
 ### 修复
 
 - **账号热切换的最后一块：换 key 值现在真的会生效（P1-5 收口）**。此前的语义链

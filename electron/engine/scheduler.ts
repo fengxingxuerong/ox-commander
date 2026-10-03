@@ -96,6 +96,13 @@ export interface SchedulerOptions {
   onRunStart?: (agentId: string, task: Task) => void;
   /** Fired for every terminal outcome, including "no agent available". */
   onRunComplete?: (outcome: DispatchOutcome, task: Task) => void;
+  /**
+   * 任务活性心跳（竞品调研 2026-10-03，学 Orca 的 agent state heartbeats）：
+   * 派发起点与每条 agent 事件各触发一次。UI 据此区分"长任务在正常推进"
+   * 与"静默过久（可能挂死）"—— 这两件事在此前的事件流里**长得一模一样**：
+   * 都是 status=running 之后一片安静。
+   */
+  onTaskActivity?: (taskId: string, at: number) => void;
   /** Sink for routing decisions, e.g. forwarded to the board log. */
   onRouting?: (decision: RoutingDecision, task: Task) => void;
   /**
@@ -599,6 +606,8 @@ export class Scheduler {
       handle = await agent.dispatch(payload);
       if (opts?.handleRef) opts.handleRef.current = handle;
       this.liveRuns.set(handle.runId, handle);
+      // 活性起点：派发成功即"活着"，此后每条 agent 事件续约（见 collectToTerminal）。
+      this.opts.onTaskActivity?.(task.id, startedAt);
       const outcome = await this.collectToTerminal(handle, task.id);
       const withMeta: DispatchOutcome = {
         ...outcome,
@@ -645,6 +654,8 @@ export class Scheduler {
     const logs: string[] = [];
     let terminalOk = false;
     for await (const event of adapter.collect(handle)) {
+      // 每条事件都是一次"活着"的证明（含失败事件——失败了也该显示，而不是静默）。
+      this.opts.onTaskActivity?.(taskId, Date.now());
       if (event.kind === "log") {
         // Observation surface of the cross-action state machine: what the
         // agent did (installs, publishes, pushes) betrays itself in its log.

@@ -331,6 +331,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - [docs/2026-09-29-competitor-research.md](docs/2026-09-29-competitor-research.md) — 多智能体编排器竞品调研（AO / Vibe Kanban / Omnigent 对位分析与可吸收清单）
 - [docs/2026-09-29-competitive-landscape-and-roadmap.md](docs/2026-09-29-competitive-landscape-and-roadmap.md) — 竞品地形与优化方案（GitHub API 取数 + README 关键词命中口径，含 Orca 深读）
 - [docs/2026-10-02-competitor-refresh.md](docs/2026-10-02-competitor-refresh.md) — 竞品特性刷新与吸收记录（Agent HQ//fleet 动态 + 弹性库标准特性逐条对照与落地）
+- [docs/2026-10-03-competitor-refresh.md](docs/2026-10-03-competitor-refresh.md) — 竞品刷新 2026-10-03（Vibe Kanban 停摆与差异化、Orca 心跳/OpenRig/AO 动态、MCP 2026-07-28 评估；request-id 透传与任务活性心跳落地）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）

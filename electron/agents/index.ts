@@ -84,6 +84,8 @@ export interface AgentLayerOptions {
   onVerdict?: (verdict: BatchVerdict) => void;
   /** Routing decision sink (board log). */
   onRouting?: SchedulerOptions["onRouting"];
+  /** 任务活性心跳（2026-10-03 竞品吸收）：宿主转发给看板/协议事件流。 */
+  onTaskActivity?: SchedulerOptions["onTaskActivity"];
   /**
    * Token 用量汇总器，转给**内置**执行器（见 `createDefaultAdapters`）。
    * 注入 `adapters` / `layer` 时不经此处 —— 那种情况下用量由注入方负责。
@@ -155,6 +157,7 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
     });
   }
   if (opts.onRouting) schedulerOptions.onRouting = opts.onRouting;
+  if (opts.onTaskActivity) schedulerOptions.onTaskActivity = opts.onTaskActivity;
   if (opts.snapshotRoot) {
     const mode = opts.arbitration ?? "revert-batch";
     schedulerOptions.guard = new BatchGuard({

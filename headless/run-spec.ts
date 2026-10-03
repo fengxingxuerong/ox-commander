@@ -126,6 +126,8 @@ export interface RunSpecIo {
    * 等 POST /approve）；缺省 = 无宿主回调，`ApprovalGate` 按 fail-closed 拒绝。
    */
   requestApproval?: (command: string, args: readonly string[]) => Promise<boolean>;
+  /** 任务活性心跳（2026-10-03 竞品吸收）：宿主转发给事件流，缺省不发。 */
+  onTaskActivity?: (taskId: string, at: number) => void;
 }
 
 /**
@@ -284,6 +286,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       requestEscalationDecision: callbacks.requestEscalationDecision,
       // 审批（P2-3）：serve 宿主注入的询问器；CLI 形态缺席 = fail-closed 拒绝。
       ...(io.requestApproval ? { requestApproval: io.requestApproval } : {}),
+      // 活性心跳（2026-10-03 竞品吸收）：宿主缺席时不发（无消费者就不产生事件量）。
+      ...(io.onTaskActivity ? { onTaskActivity: io.onTaskActivity } : {}),
     },
   });
 

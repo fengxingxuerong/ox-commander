@@ -96,6 +96,11 @@ export interface PlatformHost {
    */
   onLineHealth?(lines: LineHealth[]): void;
   /**
+   * 任务活性心跳（2026-10-03 竞品吸收）：派发起点与每条 agent 事件各一次。
+   * 宿主转发给看板/协议事件流，UI 据此展示"静默 Xs"—— 长任务与挂死从此可区分。
+   */
+  onTaskActivity?(taskId: string, at: number): void;
+  /**
    * 审批回调（P2-3）：`policy.d` 的 `approvalCommands` 里的命令执行前问一次。
    *
    * 返回 true 放行、false 拒绝。**缺席时按拒绝处理**（fail-closed）——
@@ -279,6 +284,8 @@ export function createPlatform(config: PlatformConfig): Platform {
       ...(pathOverrides ? { forbiddenWrite: pathOverrides.forbiddenWrite } : {}),
       meter,
       onRouting: (decision, task) => log(agentRoutingLogLine(decision, task)),
+      // 任务活性心跳（P1-2 竞品吸收）：宿主缺席时不接 —— 心跳是增强，不是必需。
+      ...(host.onTaskActivity ? { onTaskActivity: host.onTaskActivity } : {}),
       onEvent: (text) => log(`[sandbox] ${text}`),
       breakerOptions: { onEvent: (text) => log(`[breaker] ${text}`) },
     });

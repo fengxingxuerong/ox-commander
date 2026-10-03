@@ -144,6 +144,11 @@ export type HeadlessEvent =
     }
   | { type: "escalation"; taskId: string; summary: string }
   /**
+   * 任务活性心跳（2026-10-03 竞品吸收）：派发起点与每条 agent 事件各发一次。
+   * 宿主据此在 UI 上区分"长任务在推进"与"静默过久（可能挂死）"。
+   */
+  | { type: "task-activity"; taskId: string; at: number }
+  /**
    * 审批请求（P2-3 协议事件）：`policy.d` 的 `approvalCommands` 命中的命令执行
    * 前发出。宿主回 `POST {serve}/approve`（body `{ requestId, granted }`）作答；
    * 不回 = 按拒绝处理（fail-closed）—— 无人可问的场景下"停下来"的唯一安全

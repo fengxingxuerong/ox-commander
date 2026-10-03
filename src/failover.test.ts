@@ -795,4 +795,20 @@ describe("线路级永久错误与冷却升级（2026-10-02 竞品弹性库特�
     await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
     expect(events.some((t) => t.includes("连续失败 2 轮") && t.includes("升级至 60s"))).toBe(true);
   });
+
+  it("错误摘要带服务端请求 id：报障一句话定位（竞品弹性库标准做法）", async () => {
+    const events: string[] = [];
+    const rid: LlmClient = {
+      async chat() {
+        const e = new HttpLlmError(500, "boom");
+        (e as { requestId?: string }).requestId = "req-abc-123";
+        throw e;
+      },
+    };
+    const client = new FailoverLlmClient([group("g1", [rid])], async () => {}, {
+      onEvent: (t) => events.push(t),
+    });
+    await expect(client.chat(REQ)).rejects.toBeInstanceOf(HttpLlmError);
+    expect(events.some((t) => t.includes("[req=req-abc-123]"))).toBe(true);
+  });
 });

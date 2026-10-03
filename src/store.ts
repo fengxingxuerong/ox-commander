@@ -297,6 +297,16 @@ export const useApp = create<AppState>((set, get) => ({
       case "log":
         set((s) => ({ logs: [...s.logs.slice(-500), String(p.text)] }));
         break;
+      case "task-activity": {
+        const { taskId, at } = p as { taskId: string; at: number };
+        set((s) => {
+          const prev = s.tasks[taskId];
+          // 心跳只对在跑的任务有意义：终态任务收到迟到的心跳不应复活它。
+          if (!prev || prev.status !== "running") return {};
+          return { tasks: { ...s.tasks, [taskId]: { ...prev, lastActivityTs: at } } };
+        });
+        break;
+      }
       case "taskStatus": {
         const { taskId, status, attempts, title, zone } = p as {
           taskId: string;
@@ -320,6 +330,8 @@ export const useApp = create<AppState>((set, get) => ({
                 title: title ?? prev?.title ?? taskId,
                 zone: zone ?? prev?.zone ?? "",
                 status,
+                // 重新派发 = 心跳账本重置：上一轮的静默记录不能算到这一轮头上。
+                ...(status === "running" ? { lastActivityTs: Date.now() } : { lastActivityTs: undefined }),
                 attempts,
               },
             },

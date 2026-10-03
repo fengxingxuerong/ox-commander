@@ -274,6 +274,29 @@ describe("handleEvent · verification and escalation", () => {
   });
 });
 
+describe("handleEvent · task-activity（静默心跳，2026-10-03 竞品吸收）", () => {
+  it("running 任务收到心跳更新 lastActivityTs；终态任务收到迟到心跳不复活", () => {
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 1, title: "x", zone: "src" });
+    const t0 = useApp.getState().tasks["t1"]!.lastActivityTs;
+    expect(t0).toBeGreaterThan(0); // 派发即起点
+    emit({ type: "task-activity", taskId: "t1", at: t0! + 5_000 });
+    expect(useApp.getState().tasks["t1"]!.lastActivityTs).toBe(t0! + 5_000);
+    emit({ type: "taskStatus", taskId: "t1", status: "done", attempts: 1 });
+    emit({ type: "task-activity", taskId: "t1", at: t0! + 99_000 });
+    expect(useApp.getState().tasks["t1"]!.status).toBe("done");
+    expect(useApp.getState().tasks["t1"]!.lastActivityTs).not.toBe(t0! + 99_000);
+  });
+
+  it("重新派发（running 再次出现）时心跳账本重置", () => {
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 1 });
+    emit({ type: "task-activity", taskId: "t1", at: 111 });
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 2 });
+    const t = useApp.getState().tasks["t1"]!;
+    expect(t.lastActivityTs).not.toBe(111);
+    expect(t.lastActivityTs).toBeGreaterThan(0);
+  });
+});
+
 describe("handleEvent · approval-request（P2-3 审批 UI 面）", () => {
   it("approval 请求入队并带命令与参数（同 requestId 去重）", () => {
     emit({ type: "approval-request", requestId: "a-1", command: "npm", args: ["run", "deploy"] });

@@ -25,6 +25,19 @@ const ERROR_LABELS: Record<string, string> = {
   unknown: "未知",
 };
 
+/** 静默超过这个秒数才点名 —— 短静默是常态（执行器在跑长命令）。 */
+const SILENCE_THRESHOLD_S = 30;
+
+/**
+ * 静默提示文案（纯函数，测试直接打表）：静默不足阈值返回 undefined（不显示），
+ * 超过则给"⏸ 静默 Xs"。"可能挂死"这句话刻意不带 —— 点名是提醒不是断言。
+ */
+export function SILENCE_LABEL(lastActivityTs: number, now: number): string | undefined {
+  const silentS = Math.floor((now - lastActivityTs) / 1000);
+  if (silentS < SILENCE_THRESHOLD_S) return undefined;
+  return `⏸ 静默 ${silentS}s`;
+}
+
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
@@ -38,6 +51,13 @@ export function BoardPage() {
   const resolveEscalation = useApp((s) => s.resolveEscalation);
   const resolveApproval = useApp((s) => s.resolveApproval);
   const interrupted = useApp((s) => s.interrupted);
+  // 静默显示的时钟：心跳只在事件到达时更新，"已经静默多久"需要一个周期性 tick
+  // 才能自己走表 —— 5s 一跳，足够了（静默阈值是 30s）。
+  const [tickNow, setTickNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setTickNow(Date.now()), 5_000);
+    return () => clearInterval(timer);
+  }, []);
   const lastActivityTs = useApp((s) => s.lastActivityTs);
   const loadRecovery = useApp((s) => s.loadRecovery);
   const start = useApp((s) => s.confirmAndExecute);
@@ -124,6 +144,11 @@ export function BoardPage() {
                   {t.zone} · 第 {t.attempts} 次
                   {t.agentId ? ` · ${t.agentId}` : ""}
                   {t.durationMs !== undefined ? ` · ${(t.durationMs / 1000).toFixed(1)}s` : ""}
+                  {/* 静默心跳（竞品吸收）：running 且 >30s 无任何 agent 事件时点名
+                      —— "长任务在推进"与"可能挂死"从此在板子上长得不一样。 */}
+                  {t.status === "running" && t.lastActivityTs !== undefined && (
+                    <span className="heartbeat">{SILENCE_LABEL(t.lastActivityTs, tickNow)}</span>
+                  )}
                 </span>
                 {t.status === "failed" && t.errorClass && (
                   <span className="task-meta error-class">错误类型：{ERROR_LABELS[t.errorClass] ?? t.errorClass}</span>

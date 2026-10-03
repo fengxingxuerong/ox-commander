@@ -833,6 +833,19 @@ const EQUIVALENT_SITES = [
   { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 230 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
+  /*
+   * 2026-10-03 竞品吸收轮白名单（三条，同一论证）：
+   * `electron/platform.ts:288` / `headless/run-spec.ts:288,290` 的
+   * `...(host/io.X ? { X } : {})` 装配三元 —— 取反（有 X 时不接、无 X 时接
+   * `{ X: undefined }`）只改变对象里**是否存在**这个键，而消费方
+   * （platform → layer.schedulerOptions → Scheduler.opts、ApprovalGate 构造、
+   * host 转发）全部只看值：`undefined` 与缺席在 `?.` / 展开 / 构造里的行为
+   * 恒等。与上方 context.ts 签名位点同一论证：布尔分量取反 → 装配键有无 →
+   * 双射不可观察。
+   */
+  { file: "electron/platform.ts", op: "三元分支互换", line: 288 },
+  { file: "headless/run-spec.ts", op: "三元分支互换", line: 288 },
+  { file: "headless/run-spec.ts", op: "三元分支互换", line: 290 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
    * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，

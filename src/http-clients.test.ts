@@ -59,7 +59,7 @@ describe("OpenAiCompatibleClient", () => {
       json: async () => ({}),
       headers: { get: (n: string) => (n === "retry-after" ? "30" : null) },
     })) as never);
-    const err = await client.chat(req).catch((e: unknown) => e as HttpLlmError);
+    const err = (await client.chat(req).catch((e: unknown) => e as HttpLlmError)) as HttpLlmError;
     expect(err).toBeInstanceOf(HttpLlmError);
     expect((err as HttpLlmError).retryAfterMs).toBe(30_000);
   });
@@ -76,7 +76,7 @@ describe("OpenAiCompatibleClient", () => {
         json: async () => ({}),
         headers: { get: (n: string) => (n === "retry-after" ? future : null) },
       })) as never);
-      const err = await client.chat(req).catch((e: unknown) => e as HttpLlmError);
+      const err = (await client.chat(req).catch((e: unknown) => e as HttpLlmError)) as HttpLlmError;
       expect(err).toBeInstanceOf(HttpLlmError);
       expect((err as HttpLlmError).retryAfterMs).toBe(expected);
     } finally {
@@ -93,10 +93,42 @@ describe("OpenAiCompatibleClient", () => {
         json: async () => ({}),
         headers: { get: (n: string) => (n === "retry-after" ? value : null) },
       })) as never);
-      const err = await client.chat(req).catch((e: unknown) => e as HttpLlmError);
+      const err = (await client.chat(req).catch((e: unknown) => e as HttpLlmError)) as HttpLlmError;
       expect(err).toBeInstanceOf(HttpLlmError);
       expect((err as HttpLlmError).retryAfterMs).toBeUndefined();
     }
+  });
+
+  it("extracts the server request id from any of the three known headers", async () => {
+    for (const [header, id] of [
+      ["x-request-id", "req-openai-1"],
+      ["request-id", "req-anthropic-2"],
+      ["x-generation-id", "gen-openrouter-3"],
+    ] as const) {
+      const client = new OpenAiCompatibleClient(getProvider("glm"), "k", (async () => ({
+        ok: false,
+        status: 500,
+        text: async () => "boom",
+        json: async () => ({}),
+        headers: { get: (n: string) => (n === header ? id : null) },
+      })) as never);
+      const err = (await client.chat(req).catch((e: unknown) => e as HttpLlmError)) as HttpLlmError;
+      expect(err).toBeInstanceOf(HttpLlmError);
+      expect(err.requestId).toBe(id);
+    }
+  });
+
+  it("requestId stays undefined when the endpoint sends none (absent ≠ lost)", async () => {
+    const client = new OpenAiCompatibleClient(getProvider("glm"), "k", (async () => ({
+      ok: false,
+      status: 500,
+      text: async () => "boom",
+      json: async () => ({}),
+      headers: { get: () => null },
+    })) as never);
+    const err = (await client.chat(req).catch((e: unknown) => e as HttpLlmError)) as HttpLlmError;
+    expect(err).toBeInstanceOf(HttpLlmError);
+    expect(err.requestId).toBeUndefined();
   });
 });
 

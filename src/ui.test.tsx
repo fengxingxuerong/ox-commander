@@ -315,6 +315,15 @@ describe("BoardPage", () => {
     expect(window.oxCommander.resolveApproval).toHaveBeenCalledWith("a-1", true);
   });
 
+  it("SILENCE_LABEL 打表：不足阈值不显示，超过点名（长任务与挂死可区分）", async () => {
+    const { SILENCE_LABEL } = await import("./pages/BoardPage");
+    const now = 1_000_000;
+    expect(SILENCE_LABEL(now - 5_000, now)).toBeUndefined(); // 5s：正常
+    expect(SILENCE_LABEL(now - 29_000, now)).toBeUndefined(); // 29s：阈值内
+    expect(SILENCE_LABEL(now - 30_000, now)).toBe("⏸ 静默 30s");
+    expect(SILENCE_LABEL(now - 125_000, now)).toBe("⏸ 静默 125s");
+  });
+
   it("forwards control actions to the bridge", () => {
     seedBoard();
     render(<BoardPage />);

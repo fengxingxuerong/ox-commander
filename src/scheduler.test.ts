@@ -215,6 +215,24 @@ describe("Scheduler.runBatch", () => {
     expect(outcomes.map((o) => o.ok)).toEqual([true, true]);
   });
 
+  it("任务活性心跳：派发起点一次，之后每条事件续约（静默检测的数据源）", async () => {
+    const beats: Array<{ taskId: string; at: number }> = [];
+    const sched = new Scheduler([adapterWith("a1", true)], [], {
+      onTaskActivity: (taskId, at) => beats.push({ taskId, at }),
+    });
+    await sched.runBatch([task("t1", "z")], ".");
+    // 起点 1 + log 1 + completed 1：起点先于事件（UI 的静默时钟从派发起算）
+    expect(beats).toHaveLength(3);
+    expect(beats.every((b) => b.taskId === "t1")).toBe(true);
+    expect(beats[1]!.at >= beats[0]!.at).toBe(true);
+  });
+
+  it("心跳回调缺席时零行为变化（不发也照常收集结果）", async () => {
+    const sched = new Scheduler([adapterWith("a1", true)]);
+    const outcomes = await sched.runBatch([task("t1", "z")], ".");
+    expect(outcomes[0]!.ok).toBe(true);
+  });
+
   it("throws on zone conflict inside one batch", async () => {
     const sched = new Scheduler([adapterWith("a1", true)]);
     await expect(
