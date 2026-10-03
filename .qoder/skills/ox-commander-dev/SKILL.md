@@ -44,8 +44,12 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 - **平台分支**：`electron/` 与沙箱判据大量区分 win32 / POSIX，而 `verify` 在 CI 是 **ubuntu + windows 矩阵**。
   Windows 本地全绿不代表 Linux 绿（POSIX 上"不可达分支""pid 复用误杀"两类缺陷都真出现过）。
   平台条件用例本仓库的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`。
-- **碰 `verify` 链（加/删步骤）必须同步 `README.md` 的门禁索引节 + `CHANGELOG.md`**。
-- **构建产物门禁**：`smoke:artifact` 与 4 个 `smoke:*` IT 读 `dist*/`，**单独跑它们之前必须先 `npm run build`**。
+- **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`、
+  `.qoder/skills/ox-commander-dev/SKILL.md`（本节）、`references/gates.md` 的逐段表与段数。
+  **原始口令只说"两处"，就是它导致 `smoke:target-range` 进了串却在 gates.md 里没有行**（2026-10-03 才发现）。
+  只改一处等于没改：下一个人照旧会漏。
+- **构建产物门禁**：`smoke:artifact` 与读 `dist*/` 的各条 smoke（`smoke:receipt-verify` / `snapshot-secrets` /
+  `gateway` / `coze` / `import`）**单独跑它们之前必须先 `npm run build && npm run build:headless`**。
   两个 IT 用固定端口（8941 / 8933 / 8934）+ 固定 sleep，**别并发跑、别在别的流水线占端口时跑**。
 
 ## 命令档位
@@ -54,7 +58,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | --- | --- | --- |
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
 | 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
-| **验收** | `npm run verify` | ~3min（2026-09-28 本机实测 20 段） |
+| **验收** | `npm run verify` | 22 段（2026-10-03 本机实测 6m55s；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
 

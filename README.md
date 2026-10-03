@@ -98,6 +98,20 @@ node dist-headless/headless/mcp-main.js --serve-url=http://127.0.0.1:8787
 > 成为 agent 生态的一个节点（Vibe Kanban 的双向集成路线）。⚠️ 两者都无鉴权、
 > 无 TLS：本机/内网/SSH 隧道后用。
 
+**再进一步：拿到凭据的人可以自己复核它**（不依赖我们，也不依赖这个仓库）：
+
+```bash
+node dist-headless/headless/receipt-verify-main.js receipt.json
+#   只验内容指纹 + 列出凭据记下的可复跑命令（默认不执行任何东西）
+#   注意 not-replayed（退出码 5）不等于验证通过 —— 指纹一致只说明"没被改过"
+node dist-headless/headless/receipt-verify-main.js receipt.json --replay --cwd=<项目目录>
+#   在本地重跑那些命令并逐条比对：0=复现 / 2=矛盾 / 3=被改过 / 4=没盖章
+```
+
+> 别的编排器说"过了门禁"，你只能选择相信；这里凭据自带**跑过的命令**与**内容指纹**，
+> 复核工具据此在**你的**环境里重跑。这是 `checks[].command` + `fingerprint` 存在的
+> 全部理由（详见 `docs/headless-protocol.md` 第 9 节）。
+
 ## 获取与安装
 
 **方式一：下载安装包**（推荐，不用装 Node）
@@ -152,7 +166,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-09-28 本机实测 EXIT 0，20 段）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-03 本机实测 EXIT 0，**22 段**，6m55s）：
 
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
@@ -167,11 +181,14 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（2026-09-29 实测 1247 通过 + 9 跳过；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（2026-10-03 实测 1523 通过 + 9 跳过（1532，59 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
+→ smoke:receipt-verify（交付凭据复核工具 `receipt-verify-main.js` 的端到端冒烟：
+   8 例覆盖五档裁决与五个退出码，含"复跑的命令真的执行了"与
+   "指纹不符时即使给了 --replay 也不复跑"两条非空转证据）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
 → smoke:target-range（LLM 故障转移靶场：本地故障注入端点矩阵，18 场景走真实 HTTP 验证 failover/冷却/升级/恢复全行为）
 ```

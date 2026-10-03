@@ -1,8 +1,10 @@
-# `npm run verify` 的逐段机制（20 段）
+# `npm run verify` 的逐段机制（22 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、20 段、1151 用例（1142 passed + 9 skipped，2026-09-28）。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、22 段、1532 用例（1523 passed + 9 skipped，59 文件，2026-10-03，6m55s）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见第 8 步）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
 README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
+**2026-10-03 又漂过一次**：`smoke:target-range` 早已进串，但本表漏了它这一行（表止于 #19），
+本次加 `smoke:receipt-verify` 时一并补上 —— 教训是**加段时只改一处就会漏**，四处清单必须同批改。
 
 | # | 步骤 | 实际执行 | 失败语义 |
 | --- | --- | --- | --- |
@@ -26,10 +28,12 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 12 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
 | 13 | `build:headless` | `tsc -b tsconfig.headless.json` | |
 | 14 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 12/13 的产物 |
-| 15-18 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 19 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
+| 15 | `smoke:receipt-verify` | `scripts/receipt-verify-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-verify-main.js`（真 argv / 真退出码），8 例覆盖五档裁决：verified / contradicted / tampered / unsigned / not-replayed + 用法错与读不到 | 任一例的退出码或断言不符 ⇒ 红。两条**非空转证据**：复跑类用例断言命令留下的标记文件存在（证明真执行）；`tampered + --replay` 用例断言标记**不存在**（证明指纹不符时确实没复跑）。只对退出码断言是可以被"什么都不做、只返回预期码"的实现骗过的 |
+| 16-19 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
+| 20 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
+| 21 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 
-**`smoke:artifact` 与四个 `smoke:*` IT 都读 `dist*/`**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
+**`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
 > **本表的 `#` 是脚本序号，不等于 `verify` 串里的位置**：残留自愈记作 `#0`（它跑在最前），所以
 > `#1` 及其后的每一项在串里的位置都比表号大 1。引用某一段时**优先用 npm script 名**，别用序号 ——
@@ -183,6 +187,13 @@ async 门面（`text()` / `json()` / `chat()`）。
 
 > `mutation-check` 会**临时改写源文件**再还原；中途被打断或崩溃可能留脏 → 跑完 `git status` 必查。
 >
+> **`sort` 比较器里的第三支常常是死的**（2026-10-03 实测）：`(a < b ? -1 : a > b ? 1 : 0)`
+> 用在**对象键**排序上时，`a === b` 永不发生（JS 对象键天然唯一），而"三元分支互换"后的
+> `(a < b ? -1 : a > b ? 0 : 1)` 仍满足"`< 0` 当且仅当 a < b"，实测 400 组 × n∈[2,1000]
+> 随机键的输出**全部一致** —— 构造不出输入。此时按优先级应当**简化源码**
+> （改成 `a < b ? -1 : 1`：死分支消失，残留的三元互换即得降序，字面量用例当场杀掉），
+> 而不是加白名单。判别口诀：**"这支什么时候会走到？"答不上来就是死分支**。
+>
 > ⚠️ **改动引擎控制流（多跑一次 `deps.verify` 之类）之后，必须复跑 site 口径**：
 > `mutation-check` 的 `verify` 桩是按**调用次序**脚本化的，多一次调用会让某些用例
 > 悄悄不再触达它要钉的属性 —— 用例照样全绿，位点却从此存活。2026-09-24 加基线验证时
@@ -191,10 +202,13 @@ async 门面（`text()` / `json()` / `chat()`）。
 > 另一个同类陷阱：往重修上下文里**复制失败摘要**会冲掉"这条线索归谁"的断言依据，
 > 所以基线注记只报命令名与退出码，原因留在给操作者的日志里。
 
-## 14-19. 产物与集成 IT
+## 14-21. 产物与集成 IT
 
 - `artifact-smoke.mjs`：累计 `failed` 不早退；查 `dist/index.html` 存在、`dist-electron/**/*.js` 全量 `node --check`、
   headless 两次 stdin 协议退出码
+- `receipt-verify-smoke.mjs`（P0-②，2026-10-03 新增）：子进程跑 `receipt-verify-main.js`，五档裁决 × 五个退出码。
+  它验的是"外部可验证"这条产品主张本身 —— 单测覆盖 `shared/delivery-receipt.ts` 的纯逻辑，
+  而退出码（下游唯一消费的东西）错位、`--replay` 漏传 cwd、tampered 还去复跑，单测一律看不见
 - `e2e-snapshot-secrets.cjs`：直接 `require` 构建产物 `dist-electron/electron/agents/sensenova-api.js`，
   mock fetch 断言外发 prompt 不含密钥（6 项）
 - `admission-gateway-it.mjs`：spawn 真网关子进程，**硬编码端口 8941 + 固定 1500ms sleep**
@@ -212,7 +226,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 `check:residue` 之后的**第 12 段，共 20 段**；
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 `check:residue` 之后的**第 12 段，共 22 段**；
   CHANGELOG 里"第 19 步"说的是"新加的那一段"，不是位置）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：

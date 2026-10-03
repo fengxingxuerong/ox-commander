@@ -114,6 +114,18 @@ export interface VerificationReport {
      * 字段即承诺：没有这个键 = 一次真实的命令失败。
      */
     errorClass?: "sandbox-denied" | "escalation-denied" | "approval-denied";
+    /**
+     * 这一条检查**实际要跑的命令**（外部可验证的基石）。
+     *
+     * 为什么必须有：交付凭据此前只说"typecheck 通过"，不说 typecheck 是**哪条命令**——
+     * 于是拿到凭据的人只能选择相信我们，无法自己在自己的环境里复跑一遍看结论对不对。
+     * 记下命令之后，"这份交付过了门禁"从一句自述变成**可复现的观察**。
+     *
+     * 沙箱拒绝时也带上：知道"本来想跑什么"才知道该去调哪条策略。
+     * 缺席 = 这条检查不经过命令（纯逻辑判定），不是"我们懒得记"。
+     */
+    command?: string;
+    args?: string[];
   }>;
 }
 

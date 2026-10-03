@@ -99,7 +99,8 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
     "unverifiedReason": "…",             // verified 为 false 时的原因；没有时**键不出现**
     "rounds": 1,                         // 实际跑过的重修轮数
     "checks": [                          // 逐条验证命令
-      { "kind": "test", "ok": true, "exitCode": 0, "preexisting": false, "headline": "" }
+      { "kind": "test", "ok": true, "exitCode": 0, "preexisting": false, "headline": "",
+        "command": "npm", "args": ["run", "test"] }   // 实际跑过的命令（缺席 = 纯逻辑判定）
     ],
     "tasks": [                           // 逐任务账
       { "id": "t1", "title": "…", "zone": "src", "status": "done", "attempts": 1,
@@ -111,12 +112,13 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
     "usage": { "totalTokens": 120, "calls": 4, "measuredCalls": 3 },
     "counts": { "total": 3, "done": 2, "failed": 0, "skipped": 1, "pending": 0,
                 "conflicts": 1, "checksFailed": 0, "preexisting": 0 },
-    "headline": "已交付：2/3 个任务完成（跳过 1 个），重修 1 轮；2 条验证命令通过"
+    "headline": "已交付：2/3 个任务完成（跳过 1 个），重修 1 轮；2 条验证命令通过",
+    "fingerprint": "3f2a…"                 // 内容指纹（宿主注入哈希；未注入时键不出现）
   }
 }
 ```
 
-四条必须知道的语义：
+五条必须知道的语义：
 
 1. **`outcome` 与 `verified` 是两件事**。`verificationCommands: []` 是合法配置，而空集在
    `verifyProject` 里恒为通过 —— 于是"全部验证通过"其实什么都没验。那种情况 `outcome` 仍是
@@ -127,6 +129,9 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
    （它也被算进"已完成"集合，但那是"不需要再做"，不是"做出来了"）；有成功结果却还没落地的
    记 `pending` 而不是 `failed`（全员重跑会清掉完成记录）。
 4. **取消与崩溃不发 receipt**。那种现场不完整，发出去会被当成"这次就这些结果"，而事实是它没跑完。
+5. **`fingerprint` 不是签名**。它是"这份凭据有没有被改过"的答案（`canonicalReceiptPayload` 的哈希，
+   规范序列化与键序无关），**不是**"这份凭据由谁签发"的答案 —— 能改凭据的人同样能重算指纹。
+   要真正防伪造需要密钥分发，那是另一件事，本字段刻意不假装解决它。复核方式见第 9 节。
 
 桌面端同一份对象走 `ox:event` 的 `receipt` 事件进看板，并落进项目记录（`receiptJson`），
 所以重载窗口后仍然看得到上次交付的结论。
@@ -286,3 +291,41 @@ node dist-headless/headless/serve-main.js --port=8787
    的事（批次与并发闸），这里再叠一层队列只会让"到底哪个在跑"变成猜谜。
 3. **后连上的客户端能拿到完整历史**：断线重连靠 `id:` 序号，不是"只推新的"。
 4. **无鉴权、无 TLS**：这是本机 / 内网 / SSH 隧道后的观察面。要放到公网前面，自己挂一层。
+
+## 9. 交付凭据的独立复核（2026-10-03 新增）
+
+`receipt` 是**我们**说的结论。第 9 节回答的是另一个问题：**拿到凭据的人凭什么信它。**
+为此凭据多了两样东西 —— `checks[].command`（实际跑过的命令）与 `fingerprint`（内容指纹），
+以及一个独立工具：
+
+```bash
+# 只验完整性 + 列出可复跑的命令（默认，不执行任何东西）
+node dist-headless/headless/receipt-verify-main.js receipt.json
+
+# 额外在本地重跑凭据记录的命令并逐条比对（会真的执行命令）
+node dist-headless/headless/receipt-verify-main.js receipt.json --replay --cwd=/path/to/project
+```
+
+裁决五档，**刻意不并档**（每档该做什么完全不同），退出码一一对应：
+
+| 裁决 | 退出码 | 含义与处置 |
+| --- | --- | --- |
+| `verified` | 0 | 指纹一致 **且**复跑全部复现。**唯一能说"凭据可信"的档** |
+| `contradicted` | 2 | 指纹一致但复跑与凭据矛盾 → 去查差异来源（环境？缓存？凭据被旧数据污染？） |
+| `tampered` | 3 | 指纹不符 → 内容被改过，其中的结论一律不采信 |
+| `unsigned` | 4 | 没有指纹 → 无从判断完整性（"没盖章"不等于"被篡改"，不许诬告） |
+| `not-replayed` | 5 | 指纹一致但一条都没复跑 → 加 `--replay` 才能得到结论 |
+| — | 1 | 用不了：没给文件 / 读不到 / 解析不了 |
+
+三条纪律：
+
+1. **`not-replayed` 不返回 0**。默认模式只查完整性，**不等于**结论为真；若把它报成 0，
+   任何只看退出码的下游流水线都会读成"已核"—— 那就成了给自述背书的橡皮图章。
+2. **指纹不符时早退，不复跑**。拿一份被改过的凭据去和环境比对，比出来的"矛盾"是伪证的产物，
+   不是环境的错。先判内容真伪，再判结论真伪。
+3. **`unrunnable` 不算失败**。某条检查没有命令可跑（纯逻辑判定）时，只说明这条复核不了，
+   **不构成对凭据的否定** —— 复核工具的假阳性比假阴性更伤信任。
+
+⚠️ `--replay` 会执行凭据里记下的命令。它们走与生产验证同一套 `CommandPolicy` 沙箱
+（破坏性程序、shell 元字符照样拒绝），但那道地板是用来防"智能体写坏脚本"的，
+不是用来防"有人递给你一份恶意凭据"的 —— **只对你自己信任的凭据用 `--replay`**。

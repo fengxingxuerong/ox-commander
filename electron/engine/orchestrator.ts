@@ -1,10 +1,11 @@
+import { createHash } from "node:crypto";
 import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
-import { buildReceipt, receiptTaskStatus } from "../../shared/delivery-receipt";
+import { buildReceipt, receiptTaskStatus, sealReceipt } from "../../shared/delivery-receipt";
 import type {
   DeliveryReceipt,
   ReceiptCheck,
@@ -433,20 +434,28 @@ export class OrchestratorEngine {
       exitCode: r.exitCode,
       preexisting: args.preexistingKinds.includes(r.kind),
       headline: r.ok ? "" : firstLine(r.logDigest),
+      // 命令透传到凭据（外部可验证的基石）：拿到凭据的人能自己复跑同一条命令，
+      // 而不是只能相信我们。缺席照传缺席 —— 条件展开与直传在可选字段上等价。
+      command: r.command,
+      args: r.args,
     }));
     sink(
-      buildReceipt({
-        outcome: args.outcome,
-        // 交付但没验过是合法状态（纯文档任务不需要构建），所以这两档独立：
-        // `verified` 说"有没有真验过"，`unverifiedReason` 说"为什么没有"。
-        verified: args.verified,
-        ...(args.unverifiedReason !== undefined ? { unverifiedReason: args.unverifiedReason } : {}),
-        rounds: args.round,
-        checks,
-        tasks,
-        conflicts: this.deps.conflicts?.() ?? [],
-        ...(this.deps.usage ? { usage: this.deps.usage() } : {}),
-      }),
+      sealReceipt(
+        buildReceipt({
+          outcome: args.outcome,
+          // 交付但没验过是合法状态（纯文档任务不需要构建），所以这两档独立：
+          // `verified` 说"有没有真验过"，`unverifiedReason` 说"为什么没有"。
+          verified: args.verified,
+          ...(args.unverifiedReason !== undefined ? { unverifiedReason: args.unverifiedReason } : {}),
+          rounds: args.round,
+          checks,
+          tasks,
+          conflicts: this.deps.conflicts?.() ?? [],
+          ...(this.deps.usage ? { usage: this.deps.usage() } : {}),
+        }),
+        // 盖章用的哈希：宿主层的决定。引擎只负责在凭据产出时贴一次指纹。
+        (s) => createHash("sha256").update(s).digest("hex"),
+      ),
     );
   }
 

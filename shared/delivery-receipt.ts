@@ -36,6 +36,15 @@ export interface ReceiptCheck {
   preexisting: boolean;
   /** 失败原因首行（已截断），给 UI 直接展示；通过的检查为空串。 */
   headline: string;
+  /**
+   * **实际跑过的命令**（外部可验证的基石）。
+   *
+   * 没有它时，"这份交付过了门禁"只是一句自述 —— 拿到凭据的人只能选择相信我们。
+   * 有了它，任何人在自己的环境里跑同一条命令就能得到自己的观察。
+   * 缺席 = 这条检查不经过命令（纯逻辑判定），不是"我们懒得记"。
+   */
+  command?: string;
+  args?: string[];
 }
 
 /** 一次越权判定及其处置。 */
@@ -112,6 +121,77 @@ export interface DeliveryReceipt {
   counts: ReceiptCounts;
   /** 一行人类可读结论，供看板日志与审计直接落。 */
   headline: string;
+  /**
+   * 内容指纹：`canonicalReceiptPayload` 的哈希（外部可复核的第二半）。
+   *
+   * **它保证什么**：凭据内容与指纹一致 —— 任何对凭据的改动（哪怕是补一个字段）
+   * 都会让指纹对不上，复核工具当场说破。它是"这份凭据有没有被改过"的答案。
+   *
+   * **它不保证什么**（说清热绒在验收时不会被误导）：它不是**签名**。
+   * 能改凭据的人同样能重算指纹。要真正防伪造，需要一个复核方信任的密钥 ——
+   * 那是密钥分发问题，不是哈希能解决的，本字段刻意不假装解决它。
+   * 缺席 = 构建时没给哈希函数（字段即承诺，不给就一条都不编）。
+   */
+  fingerprint?: string;
+}
+
+/**
+ * 凭据的**规范序列化**：确定性、与键序无关、排除指纹本身。
+ *
+ * 为什么必须是纯逻辑且确定的：指纹只有在"同一份内容永远得到同一个字节串"时
+ * 才有意义。依赖 JS 对象键序是不够的 —— 一次 JSON 往返、一个不同版本的序列化器
+ * 就可能改变键序，于是同一份凭据算出两个指纹，"被改过"变成噪声。
+ * 所以这里显式排序键，并递归处理数组与嵌套对象。
+ *
+ * 排除 `fingerprint` 是定义上的必需：指纹是对**其余内容**的承诺，
+ * 把自己算进去就成了自指（先有鸡还是先有蛋）。
+ */
+export function canonicalReceiptPayload(receipt: DeliveryReceipt): string {
+  const { fingerprint: _ignored, ...rest } = receipt;
+  return stableStringify(rest);
+}
+
+/** 排序键的确定性序列化。数组保持原序：命令顺序与任务顺序本身是语义。 */
+function stableStringify(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  const entries = Object.entries(value as Record<string, unknown>)
+    // 缺席的键不进序列化：`{a: undefined}` 与 `{}` 必须得到同一个指纹，
+    // 否则"给可选字段显式赋 undefined"会凭空改变指纹。
+    .filter(([, v]) => v !== undefined)
+    // 比较器刻意只有两支：对象键**天然唯一**，`a === b` 永不发生，
+    // 所以 `a > b ? 1 : 0` 是死分支 —— 原来那支还让"三元分支互换"变异
+    // 无法构造输入（互换后仍满足"`< 0` 当且仅当 a < b"，实测 400×9 组
+    // 随机键、n 从 2 到 1000 顺序全部一致）。删掉后只剩一个可被杀的三元。
+    .sort(([a], [b]) => (a < b ? -1 : 1));
+  return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stableStringify(v)}`).join(",")}}`;
+}
+
+/**
+ * 给凭据盖章：算出指纹并贴上去。
+ *
+ * 哈希函数由调用方注入 —— `shared/` 是纯逻辑层，不能 import `node:crypto`，
+ * 而"用什么哈希"又恰恰是宿主的决定（桌面用 sha256，测试可注入确定性替身）。
+ */
+export function sealReceipt(receipt: DeliveryReceipt, hash: (s: string) => string): DeliveryReceipt {
+  return { ...receipt, fingerprint: hash(canonicalReceiptPayload(receipt)) };
+}
+
+/**
+ * 复核一份凭据：内容与指纹是否一致。
+ *
+ * 返回结构化结论而不是布尔 —— "指纹对不上"与"压根没有指纹"是两件事：
+ * 前者是被改过，后者只是这份凭据没盖章。把它们并成 false 会让复核工具
+ * 把"没盖章"报成"被篡改"，那是诬告。
+ */
+export function verifyReceiptFingerprint(
+  receipt: DeliveryReceipt,
+  hash: (s: string) => string,
+): { ok: boolean; reason: "match" | "mismatch" | "unsigned"; expected?: string; actual?: string } {
+  if (receipt.fingerprint === undefined) return { ok: false, reason: "unsigned" };
+  const expected = hash(canonicalReceiptPayload(receipt));
+  if (expected === receipt.fingerprint) return { ok: true, reason: "match" };
+  return { ok: false, reason: "mismatch", expected, actual: receipt.fingerprint };
 }
 
 /**
@@ -256,4 +336,183 @@ export function formatReceiptLine(r: DeliveryReceipt): string {
     if (blind > 0) parts.push(`${blind} 次调用未上报用量`);
   }
   return `[receipt] ${parts.join(" · ")}`;
+}
+
+/**
+ * 复跑一条检查得到的观察（由复核工具采集，与凭据比对）。
+ *
+ * `exitCode` 用 `null` 表示"没拿到退出码"（进程起不来 / 超时被杀），
+ * 与"退出码是 0"是两种事实 —— 混起来会让"命令根本没跑成"被读成"跑通了"。
+ */
+export interface CheckObservation {
+  kind: VerificationKind;
+  ok: boolean;
+  exitCode: number | null;
+}
+
+export type CheckVerdict = "reproduced" | "contradicted" | "unrunnable";
+
+export interface CheckComparison {
+  kind: VerificationKind;
+  /** 凭据声称的结论。 */
+  claimed: boolean;
+  /** 复跑的实际观察；`unrunnable` 时缺席（没跑成，就没有观察可言）。 */
+  observed?: boolean;
+  verdict: CheckVerdict;
+  /**
+   * 两边都失败但退出码不同 —— 记为 `reproduced` 但值得写出来。
+   * （同一条命令在不同机器上退出码可能不同，而"都失败"这个结论是一致的。）
+   */
+  note?: string;
+}
+
+/**
+ * 比对"凭据声称的检查结论"与"复跑得到的观察"（外部可验证的核心判定）。
+ *
+ * 三类结论，刻意分开：
+ *   · `reproduced`  —— 复跑得到了同样的 ok（**这才是"验证通过"被复核的证据**）；
+ *   · `contradicted` —— 凭据说 ok、复跑说 not ok（或反之）。**凭据不可信**；
+ *   · `unrunnable` —— 这条检查没有命令可跑（纯逻辑判定 / 工具跑不动），
+ *     **不构成对凭据的否定**，只是"这条复核不了"。
+ *
+ * 为什么 `unrunnable` 必须与 `contradicted` 分开：把"我跑不动"报成"你骗人"
+ * 是诬告 —— 复核工具的假阳性比假阴性更伤信任（一次误报之后，真报也没人信了）。
+ *
+ * 配对规则：按 `kind` 在观察集里找同名的。同 kind 多条时取**第一条尚未被认领的**
+ * （顺序消费，与凭据里的检查顺序一致）—— 同名检查（例如两条 test）不该都对着
+ * 第一条观察比。
+ */
+export function compareChecks(
+  claimed: ReceiptCheck[],
+  observed: CheckObservation[],
+): CheckComparison[] {
+  const pool = observed.map((o) => ({ ...o, taken: false }));
+  return claimed.map((c) => {
+    const hit = pool.find((o) => !o.taken && o.kind === c.kind);
+    if (!hit) {
+      return { kind: c.kind, claimed: c.ok, verdict: "unrunnable" as const };
+    }
+    hit.taken = true;
+    if (hit.ok === c.ok) {
+      // 都失败时把退出码差异写出来（结论一致，但现场不同，值得知道）
+      if (!c.ok && c.exitCode !== null && hit.exitCode !== null && c.exitCode !== hit.exitCode) {
+        return {
+          kind: c.kind,
+          claimed: c.ok,
+          observed: hit.ok,
+          verdict: "reproduced" as const,
+          note: `两边都失败，但退出码不同（凭据 ${c.exitCode} / 复跑 ${hit.exitCode}）`,
+        };
+      }
+      return { kind: c.kind, claimed: c.ok, observed: hit.ok, verdict: "reproduced" as const };
+    }
+    return { kind: c.kind, claimed: c.ok, observed: hit.ok, verdict: "contradicted" as const };
+  });
+}
+
+/**
+ * 从凭据取出**可复跑的命令清单**（复核工具据此在对方环境里重放）。
+ *
+ * 只挑带 `command` 的检查：没有命令的（纯逻辑判定）复跑不了，
+ * 硬编一条命令去跑等于伪造观察 —— 那正是这个工具存在的反面。
+ */
+export function replayableCommands(r: DeliveryReceipt): Array<{ kind: VerificationKind; command: string; args: string[] }> {
+  return r.checks
+    .filter((c): c is ReceiptCheck & { command: string } => typeof c.command === "string" && c.command !== "")
+    .map((c) => ({ kind: c.kind, command: c.command, args: c.args ?? [] }));
+}
+
+/** 一份凭据的复核总裁决。五档，刻意不并档 —— 每档该做什么完全不同。 */
+export type ReceiptVerdict =
+  /** 指纹一致 + 复跑全部复现。**这是唯一能说"凭据可信"的档**。 */
+  | "verified"
+  /** 指纹一致，但没有复跑（只查了完整性，没查结论真伪）。 */
+  | "not-replayed"
+  /** 指纹对不上 —— 内容被改过。此时**任何**复跑比对都无意义（比的是假凭据）。 */
+  | "tampered"
+  /** 这份凭据压根没盖章，无从判断完整性。 */
+  | "unsigned"
+  /** 指纹一致但复跑对不上 —— 凭据自己声称的结论与环境观察矛盾。 */
+  | "contradicted";
+
+export interface ReceiptAudit {
+  verdict: ReceiptVerdict;
+  fingerprint: { ok: boolean; reason: "match" | "mismatch" | "unsigned"; expected?: string; actual?: string };
+  /** 凭据里带命令、因此**可以被独立复跑**的检查条数。 */
+  replayable: number;
+  /** 逐条比对（按 kind 同名配对）。没复跑时为空数组。 */
+  comparisons: CheckComparison[];
+  /** 一行人类可读结论，复核工具直接打印。 */
+  summary: string;
+}
+
+/**
+ * 把"指纹结果 + 复跑比对"合成一份复核裁决（外部可验证的落点）。
+ *
+ * 判定顺序是承重的：
+ *   1. **指纹不符直接判 `tampered`，不看复跑结果** —— 内容都被改过了，拿一个假凭据
+ *      去和环境比对，比出来的"矛盾"是伪证的产物，不是环境的错。早退避免诬告。
+ *   2. 没盖章判 `unsigned`：不是"被篡改"，只是"没提供完整性凭据"。
+ *   3. 有比对且全部复现才叫 `verified`；只要有一条被推翻就是 `contradicted`。
+ *   4. 一条都没复跑（`comparisons` 为空）时只能到 `not-replayed` ——
+ *      **指纹一致不等于结论为真**，它只说明"没被改过"。把这两件事混为一谈，
+ *      复核工具就成了给自述背书的橡皮图章。
+ */
+export function auditReceipt(
+  receipt: DeliveryReceipt,
+  fingerprint: { ok: boolean; reason: "match" | "mismatch" | "unsigned"; expected?: string; actual?: string },
+  comparisons: CheckComparison[] = [],
+): ReceiptAudit {
+  const replayable = replayableCommands(receipt).length;
+
+  if (fingerprint.reason === "mismatch") {
+    return {
+      verdict: "tampered",
+      fingerprint,
+      replayable,
+      comparisons: [],
+      summary: "凭据内容与指纹不符 —— 这份凭据被改过，其中的结论不予采信。",
+    };
+  }
+  if (fingerprint.reason === "unsigned") {
+    return {
+      verdict: "unsigned",
+      fingerprint,
+      replayable,
+      comparisons: [],
+      summary: "凭据没有指纹，无法判断内容是否被改过。",
+    };
+  }
+
+  const contradicted = comparisons.filter((c) => c.verdict === "contradicted");
+  if (contradicted.length > 0) {
+    return {
+      verdict: "contradicted",
+      fingerprint,
+      replayable,
+      comparisons,
+      summary:
+        `复跑与凭据矛盾 ${contradicted.length} 条（${contradicted
+          .map((c) => `${c.kind}: 凭据说${c.claimed ? "通过" : "失败"}、复跑说${c.observed ? "通过" : "失败"}`)
+          .join("；")}）—— 凭据的结论与本地观察不一致，需查明差异来源。`,
+    };
+  }
+  if (comparisons.length === 0) {
+    return {
+      verdict: "not-replayed",
+      fingerprint,
+      replayable,
+      comparisons: [],
+      summary: `指纹一致（内容未被改动），但未复跑 —— ${replayable} 条命令可用 --replay 独立验证。`,
+    };
+  }
+  const unrunnable = comparisons.filter((c) => c.verdict === "unrunnable").length;
+  const tail = unrunnable > 0 ? `；另有 ${unrunnable} 条无命令可比（不构成对凭据的否定）` : "";
+  return {
+    verdict: "verified",
+    fingerprint,
+    replayable,
+    comparisons,
+    summary: `复跑复现全部 ${comparisons.length} 条结论${tail}。指纹一致。`,
+  };
 }

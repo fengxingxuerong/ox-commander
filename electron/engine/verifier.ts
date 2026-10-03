@@ -161,6 +161,9 @@ export async function verifyProject(
         logDigest: `[沙箱] 命令被拒绝：${verdict.reason}`,
         durationMs: 0,
         errorClass: "sandbox-denied",
+        // 被拒也要记下"本来想跑什么"：外部才知道该去调哪条策略（外部可验证的基石）
+        command: cmd.command,
+        args: cmd.args,
       });
       break;
     }
@@ -177,6 +180,8 @@ export async function verifyProject(
         logDigest: `[沙箱] 升级拒绝：${escalated.reason}`,
         durationMs: 0,
         errorClass: "escalation-denied",
+        command: cmd.command,
+        args: cmd.args,
       });
       break;
     }
@@ -192,6 +197,8 @@ export async function verifyProject(
         logDigest: `[审批] ${approved.reason}`,
         durationMs: 0,
         errorClass: "approval-denied",
+        command: cmd.command,
+        args: cmd.args,
       });
       break;
     }
@@ -202,6 +209,9 @@ export async function verifyProject(
       exitCode: r.exitCode,
       logDigest: digest(r.log),
       durationMs: r.durationMs,
+      // 真实跑过的命令写进报告：凭据据此把"过了门禁"从自述变成可复现的观察
+      command: cmd.command,
+      args: cmd.args,
     });
     if (!r.ok) break;
   }
@@ -270,6 +280,8 @@ export async function runSmokeChecks(
         logDigest: `[沙箱] 冒烟命令被拒绝：${verdict.reason}\n[${check.title}]`,
         durationMs: 0,
         errorClass: "sandbox-denied",
+        command: check.command,
+        args: check.args,
       });
       break;
     }
@@ -284,6 +296,8 @@ export async function runSmokeChecks(
         logDigest: `[沙箱] 冒烟命令升级拒绝：${escalated.reason}\n[${check.title}]`,
         durationMs: 0,
         errorClass: "escalation-denied",
+        command: check.command,
+        args: check.args,
       });
       break;
     }
@@ -297,6 +311,8 @@ export async function runSmokeChecks(
         logDigest: `[审批] ${approved.reason}\n[${check.title}]`,
         durationMs: 0,
         errorClass: "approval-denied",
+        command: check.command,
+        args: check.args,
       });
       break;
     }
@@ -324,6 +340,8 @@ export async function runSmokeChecks(
           exitCode: null,
           logDigest: `[smoke] ${check.title}\n命令：${check.command} ${check.args.join(" ")}\nspawn failed (${plan.note}): ${String(err)}`,
           durationMs: Date.now() - startedAt,
+          command: check.command,
+          args: check.args,
         });
         break;
       }
@@ -358,6 +376,10 @@ export async function runSmokeChecks(
           ].join("\n"),
         ),
         durationMs: Date.now() - startedAt,
+        // dev server 也是 spawn 真实命令起进程的，命令照记 —— 判定标准不同
+        // （看 HTTP 状态码而不是退出码），但"跑的是什么"对外部同样必需。
+        command: check.command,
+        args: check.args,
       });
       if (!verdict.ok) break;
       continue;
@@ -442,6 +464,8 @@ export async function runSmokeChecks(
       exitCode: outcome.exitCode,
       logDigest: digest(digestParts.join("\n")),
       durationMs: Date.now() - startedAt,
+      command: check.command,
+      args: check.args,
     });
     if (!ok) break;
   }
