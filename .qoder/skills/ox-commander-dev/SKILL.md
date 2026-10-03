@@ -58,7 +58,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | --- | --- | --- |
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
 | 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
-| **验收** | `npm run verify` | 22 段（2026-10-03 本机实测 6m55s；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
+| **验收** | `npm run verify` | 23 段（2026-10-03 本机实测；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
 
@@ -106,5 +106,5 @@ README/docs 与代码有几处口径不一致，动相关文件前先读
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 逐段机制（20 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 逐段机制（23 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致

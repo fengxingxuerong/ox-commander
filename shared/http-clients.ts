@@ -639,7 +639,9 @@ export function createFailoverClient(
   models: readonly string[],
   opts: FailoverClientOptions = {},
 ): LlmClient {
-  const base = typeof provider === "string" ? getProvider(provider) : provider;
+  // `opts.env` 显式转给解析点：省略时 `getProvider` 的默认参数才回落到 process.env。
+  // 不传就是"调用方注入的 env 在这一跳被丢掉"—— 覆盖变量在池外路径上静默失灵。
+  const base = typeof provider === "string" ? getProvider(provider, opts.env) : provider;
   const env = opts.env ?? process.env;
   const groups: FailoverGroup[] = [];
   for (const keyVar of keyVars) {
@@ -696,7 +698,9 @@ export function createMultiProviderFailover(
   const env = opts.env ?? process.env;
   const groups: FailoverGroup[] = [];
   for (const route of routes) {
-    const base = getProvider(route.providerId);
+    // 同 `createFailoverClient`：池路径也必须吃调用方的 env，否则
+    // `buildLlmPool({ env })` 会声明一套 env、却在端点这一跳偷偷读 process.env。
+    const base = getProvider(route.providerId, env);
     for (const keyVar of route.keyVars) {
       const apiKey = keyVar === "" ? "" : (env[keyVar] ?? "");
       // Keyless providers (a local Ollama, say) still get their routes.

@@ -5,6 +5,7 @@ import {
   SENSENOVA_KEY_VARS,
   SENSENOVA_MODELS,
   SENSENOVA_MODELS_EXTRA,
+  baseUrlEnvVar,
   getProvider,
   providerKeyEnvVars,
 } from "../shared/providers";
@@ -455,5 +456,111 @@ describe('buildPoolRoutes · 池里到底有什么', () => {
     const routes = buildPoolRoutes({ providers: ['amd-radeon'] });
     expect(routes).toHaveLength(1);
     expect([...routes[0]!.models]).toEqual(['DeepSeek-V4-Flash']);
+  });
+});
+
+/** 线路里那个 client 指向哪个端点（`config` 是 protected，运行时就在实例上）。 */
+function clientBaseUrl(c: LlmClient): string {
+  return (c as unknown as { config: { baseUrl: string } }).config.baseUrl;
+}
+
+/**
+ * 端点覆盖（`OX_LLM_BASE_URL_<ID>`）。
+ *
+ * 为什么需要它：目录里 ollama 的 baseUrl 写死 `http://localhost:11434/v1`，
+ * 于是"本地模型"只剩这一个端口能当大脑 —— 别的端口上的 LM Studio / vLLM、
+ * 公司内网的网关，以及离线演示与回归用的假端点，**全都接不进来**。
+ * 覆盖必须落在**唯一**的解析点（`getProvider`），否则散在各构造路径里判断，
+ * 必然漏掉某一条，而漏掉的那条表现为"覆盖时灵时不灵"——最难查的一类。
+ *
+ * 下面几条刻意用显式的 `env` 注入而不是改 `process.env`：改全局环境会跨用例泄漏，
+ * 而"能注入 env"正是 `getProvider` 把 env 做成参数（而非直接读 process.env）的理由。
+ */
+describe("provider 端点覆盖（OX_LLM_BASE_URL_<ID>）", () => {
+  it("没有覆盖变量时取目录里的 baseUrl；变量名是 ID 大写、连字符换下划线", () => {
+    expect(getProvider("ollama", {}).baseUrl).toBe("http://localhost:11434/v1");
+    expect(baseUrlEnvVar("ollama")).toBe("OX_LLM_BASE_URL_OLLAMA");
+    expect(baseUrlEnvVar("amd-radeon")).toBe("OX_LLM_BASE_URL_AMD_RADEON");
+  });
+
+  it("给了覆盖变量就换端点，provider 其余字段一个不动", () => {
+    const p = getProvider("ollama", { OX_LLM_BASE_URL_OLLAMA: "http://127.0.0.1:19110/v1" });
+    expect(p.baseUrl).toBe("http://127.0.0.1:19110/v1");
+    // 只有端点被换。id / 模型 / 协议 / 密钥变量名仍是目录里那份 ——
+    // 否则"换个端口"会顺手把这个 provider 变成另一个东西（模型名发给错的端点这类事故）。
+    expect(p.id).toBe("ollama");
+    expect(p.defaultModel).toBe("qwen2.5:14b");
+    expect(p.protocol).toBe("openai-compatible");
+    expect(p.apiKeyEnvVar).toBe("");
+  });
+
+  it("覆盖不串台：只认自己那一家的变量", () => {
+    const env = { OX_LLM_BASE_URL_OLLAMA: "http://127.0.0.1:19110/v1" };
+    expect(getProvider("deepseek", env).baseUrl).toBe("https://api.deepseek.com/v1");
+  });
+
+  it("空串不算覆盖（空 baseUrl 是配置错误，不是端点）", () => {
+    expect(getProvider("ollama", { OX_LLM_BASE_URL_OLLAMA: "" }).baseUrl).toBe(
+      "http://localhost:11434/v1",
+    );
+  });
+
+  it("未知 provider 照旧抛错（覆盖不该把这道检查绕过去）", () => {
+    expect(() => getProvider("nope", { OX_LLM_BASE_URL_NOPE: "http://x/v1" })).toThrow(
+      /unknown llm provider/,
+    );
+  });
+
+  it("池路径吃覆盖：buildLlmPool 的线路指向被改过的端点", () => {
+    const client = buildLlmPool({
+      providers: ["ollama"],
+      env: { OX_LLM_BASE_URL_OLLAMA: "http://127.0.0.1:19110/v1" },
+    });
+    expect(clientBaseUrl(groupsOf(client)[0]!.clients[0]!)).toBe("http://127.0.0.1:19110/v1");
+  });
+
+  it("同一份 env 里两家各自解析，不互相顶掉", () => {
+    const client = createMultiProviderFailover(
+      [poolRoute("ollama", [""], ["m1"]), poolRoute("amd-radeon", ["AMD_API_KEY"], ["m2"])],
+      { env: { OX_LLM_BASE_URL_OLLAMA: "http://127.0.0.1:19110/v1", AMD_API_KEY: "k" } },
+    );
+    const byLabel = new Map(groupsOf(client).map((g) => [g.label, g]));
+    expect(clientBaseUrl(byLabel.get("ollama:nokey")!.clients[0]!)).toBe(
+      "http://127.0.0.1:19110/v1",
+    );
+    expect(clientBaseUrl(byLabel.get("amd-radeon:AMD_API_KEY")!.clients[0]!)).toBe(
+      "https://developer.amd.com.cn/radeon/api/v1",
+    );
+  });
+
+  it("字符串入口（createFailoverClient）同样吃覆盖", () => {
+    // 这里用有密钥的 provider，不用 ollama：`createFailoverClient` 的循环是
+    // `if (!apiKey) continue`，无密钥 provider 传 `[""]` 会被直接跳过（0 组），
+    // 而池变体 `createMultiProviderFailover` 专门给 `keyVar === ""` 留了 nokey 一格。
+    // 两条入口对"无密钥 provider"的处理并不一致 —— 见下方「已知不对称」一段。
+    const client = createFailoverClient("deepseek", ["DEEPSEEK_API_KEY"], ["m1"], {
+      env: { DEEPSEEK_API_KEY: "k", OX_LLM_BASE_URL_DEEPSEEK: "http://127.0.0.1:19110/v1" },
+    });
+    expect(clientBaseUrl(groupsOf(client)[0]!.clients[0]!)).toBe("http://127.0.0.1:19110/v1");
+  });
+
+  it("传 ProviderConfig 的那条入口直接用传入者，不再二次解析（config 优先）", () => {
+    const client = createFailoverClient(
+      getProvider("deepseek", { OX_LLM_BASE_URL_DEEPSEEK: "http://a.example/v1" }),
+      ["DEEPSEEK_API_KEY"],
+      ["m1"],
+      { env: { DEEPSEEK_API_KEY: "k", OX_LLM_BASE_URL_DEEPSEEK: "http://b.example/v1" } },
+    );
+    expect(clientBaseUrl(groupsOf(client)[0]!.clients[0]!)).toBe("http://a.example/v1");
+  });
+
+  it("已知不对称：createFailoverClient 跳过无密钥 provider，池变体给它 nokey 一格", () => {
+    // 不是断言"这样对"，而是把这个事实钉住：谁哪天要拿 createFailoverClient 接
+    // 本地无鉴权端点，会得到 0 条线路（chat 抛 "failover client has no groups"）。
+    // 生产上该入口只喂 sensenova（有密钥），所以这是一处潜在限制而非现行缺陷。
+    expect(groupsOf(createFailoverClient("ollama", [""], ["m1"], { env: {} }))).toHaveLength(0);
+    expect(
+      groupsOf(createMultiProviderFailover([poolRoute("ollama", [""], ["m1"])], { env: {} })),
+    ).toHaveLength(1);
   });
 });

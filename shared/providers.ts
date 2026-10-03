@@ -133,9 +133,36 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
   },
 ];
 
-export function getProvider(id: string): ProviderConfig {
+/**
+ * 某个 provider 端点的**覆盖变量名**：`OX_LLM_BASE_URL_<ID>`（大写、连字符换下划线）。
+ *
+ * 为什么端点必须可覆盖：目录里 ollama 的 baseUrl 是写死的
+ * `http://localhost:11434/v1`，于是"本地模型"只剩这一个端口能当大脑 ——
+ * 跑在别的端口上的 LM Studio / vLLM、公司内网的网关，或者一个用来做离线演示
+ * 与回归的假端点，都接不进来。这不是"灵活性"问题，是**本地部署接不进来**。
+ */
+export function baseUrlEnvVar(providerId: string): string {
+  return `OX_LLM_BASE_URL_${providerId.toUpperCase().replace(/-/g, "_")}`;
+}
+
+/**
+ * 解析 provider 配置。
+ *
+ * `env` 是**参数**而不是直接读 `process.env` —— 与 `build-llm` / `http-clients`
+ * 同一条既有约定：环境由调用方注入，测试才构造得出"端点被改过"的情形。
+ *
+ * 覆盖放在**唯一**的解析点生效，所以单客户端、跨 provider 池、桌面与 headless
+ * 四条构造路径一并受益；散在各处判断必然漏掉其中一条，而漏掉的那条会表现成
+ * "覆盖在某些形态下不生效"——最难查的一类。
+ *
+ * 空串不算覆盖：`baseUrl: ""` 不是端点，是配置错误，让它静默生效只会得到一个
+ * 更难定位的连接失败。
+ */
+export function getProvider(id: string, env: NodeJS.ProcessEnv = process.env): ProviderConfig {
   const p = PROVIDER_CATALOG.find((x) => x.id === id);
   if (!p) throw new Error(`unknown llm provider: ${id}`);
+  const override = env[baseUrlEnvVar(id)];
+  if (override) return { ...p, baseUrl: override };
   return p;
 }
 

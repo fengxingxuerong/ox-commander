@@ -34,7 +34,7 @@ function withMeter(client: LlmClient, meter: UsageMeter | undefined): LlmClient 
  */
 export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): LlmClient {
   const env = opts.env ?? process.env;
-  const provider = getProvider(providerId);
+  const provider = getProvider(providerId, env);
   const timeoutMs = opts.timeoutMs ?? BRAIN_TIMEOUT_MS;
   if (provider.id === "sensenova") {
     return withMeter(
@@ -82,7 +82,7 @@ export function buildPoolRoutes(opts: BuildPoolOptions = {}): PoolRoute[] {
   const off = new Set(opts.disabledKeyVars ?? []);
   const routes: PoolRoute[] = [];
   for (const id of providers) {
-    const provider = getProvider(id);
+    const provider = getProvider(id, opts.env);
     const extraKeys = providerKeyEnvVars(id);
     const all =
       extraKeys.length > 0 ? extraKeys : provider.apiKeyEnvVar ? [provider.apiKeyEnvVar] : [""];

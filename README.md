@@ -60,6 +60,25 @@ npm run dev:electron  # 桌面端开发模式
 npm start             # 运行已构建的桌面端
 ```
 
+### 先跑一遍看看（零凭据、零网络）
+
+```bash
+npm run build:headless
+npm run demo
+```
+
+它会现场造一个小目标项目（一个 CSV 统计工具），用**本进程起的假大脑与假执行器**
+（都开在随机端口上）驱动真的 headless 引擎跑完一次交付，再把产出的**交付凭据**
+交给独立复核工具核一遍：
+
+```
+规划 → 派单 → 落盘 → 门禁（node --test） → 交付凭据 → 外部复核
+```
+
+一条命令全过，不需要任何 API key，也不需要联网。命令、事件流与断言都是可读的 ——
+不必先读完四个 IT 脚本才能明白这套东西到底在做什么。`--keep` 保留现场（临时项目、
+事件流、凭据），`--quiet` 只看结论。
+
 > 需要 **Node >= 20.19**（`package.json` 的 `engines`）。运行时这一侧真正的依赖是
 > `AbortSignal.any` —— 没有它就没法把取消/超时下传给在途 LLM 请求。headless 入口按**特性**判，
 > 缺了会先发一条 `error` 事件再说清"换哪个版本"，不会跑到一半抛 `TypeError` 堆栈。
@@ -166,7 +185,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-03 本机实测 EXIT 0，**22 段**，6m55s）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-03 本机实测 EXIT 0，**23 段**，5m20s）：
 
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
@@ -181,7 +200,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（2026-10-03 实测 1523 通过 + 9 跳过（1532，59 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（2026-10-03 实测 1533 通过 + 9 跳过（1542，59 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -189,6 +208,9 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:receipt-verify（交付凭据复核工具 `receipt-verify-main.js` 的端到端冒烟：
    8 例覆盖五档裁决与五个退出码，含"复跑的命令真的执行了"与
    "指纹不符时即使给了 --replay 也不复跑"两条非空转证据）
+→ smoke:demo（对外可复现样例 `demo-deliver.mjs`：零凭据零网络的**一次完整交付**，
+   顺带把凭据闭环走通 —— 产出凭据 → 独立复核默认模式判 not-replayed（指纹一致
+   ≠ 结论为真）→ `--replay` 复跑判 verified。它同时是 README 的演示与回归基线）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
 → smoke:target-range（LLM 故障转移靶场：本地故障注入端点矩阵，18 场景走真实 HTTP 验证 failover/冷却/升级/恢复全行为）
 ```
