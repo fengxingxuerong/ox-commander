@@ -36,7 +36,7 @@ Electron 桌面端 + headless CLI 双入口。
 >
 > | 特征 | OxCommander |
 > | --- | --- |
-> | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘、headless 发 `receipt` 事件 |
+> | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
 > | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀） |

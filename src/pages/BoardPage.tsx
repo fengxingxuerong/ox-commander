@@ -38,6 +38,14 @@ export function SILENCE_LABEL(lastActivityTs: number, now: number): string | und
   return `⏸ 静默 ${silentS}s`;
 }
 
+/** 凭据任务账的状态图标（与看板任务状态同色系，但这里是**结论**不是进度）。 */
+const RECEIPT_TASK_ICON: Record<string, string> = {
+  done: "✅",
+  failed: "❌",
+  skipped: "⏭",
+  pending: "⏸",
+};
+
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
@@ -236,9 +244,41 @@ export function BoardPage() {
                     {c.ok ? "" : `（exit=${c.exitCode ?? "null"}）`}
                     {c.preexisting ? " · 本次运行前就已失败" : ""}
                     {c.headline ? ` · ${c.headline}` : ""}
+                    {/* 外部可验证性的第一半：**把跑过的命令原样摆出来**。
+                        没有它，"这份交付过了门禁"只是一句自述 —— 拿到凭据的人
+                        只能选择相信我们；有了它，任何人在自己的环境里跑同一条
+                        命令就能得到自己的观察。缺席 = 这条检查不经过命令。 */}
+                    {c.command ? (
+                      <span className="receipt-command">
+                        <br />
+                        <code>{[c.command, ...(c.args ?? [])].join(" ")}</code>
+                      </span>
+                    ) : null}
                   </li>
                 ))}
               </ul>
+              {/* 第二半：内容指纹。整串可见可选 —— 复核工具要拿它比对，
+                  截短显示等于"看得到但用不了"。它保证内容与指纹一致，
+                  不保证签名（能改凭据的人同样能重算指纹），这句话在类型注释里。 */}
+              {receipt.fingerprint ? (
+                <details className="failure-details">
+                  <summary>内容指纹（点开取完整串，交给复核工具比对）</summary>
+                  <pre>{receipt.fingerprint}</pre>
+                </details>
+              ) : null}
+              {receipt.tasks.length > 0 && (
+                <details className="failure-details">
+                  <summary>任务账 {receipt.tasks.length} 条</summary>
+                  {receipt.tasks.map((t) => (
+                    <p key={t.id} className="task-meta">
+                      {RECEIPT_TASK_ICON[t.status] ?? t.status} {t.title} · {t.zone} · {t.attempts} 次
+                      {t.agentId ? ` · ${t.agentId}` : ""}
+                      {t.durationMs !== undefined ? ` · ${(t.durationMs / 1000).toFixed(1)}s` : ""}
+                      {t.errorClass ? ` · ${t.errorClass}` : ""}
+                    </p>
+                  ))}
+                </details>
+              )}
               {receipt.conflicts.length > 0 && (
                 <details className="failure-details">
                   <summary>越权 {receipt.conflicts.length} 次（已处置）</summary>

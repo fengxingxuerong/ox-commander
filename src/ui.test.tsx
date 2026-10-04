@@ -401,6 +401,58 @@ describe("BoardPage", () => {
     expect(screen.queryByText("线路健康")).toBeNull();
   });
 
+  it("交付凭据把外部可验证性的两半都摆出来：跑过的命令 + 内容指纹", () => {
+    // 这两样在 serve 状态页是整份渲染的，桌面此前一个都没有 —— "过了门禁"在那里
+    // 是可复核的结论，在这里只是一句自述。任务账同样此前在桌面无出口。
+    seedBoard();
+    useApp.setState({
+      receipt: {
+        outcome: "delivered",
+        verified: true,
+        rounds: 1,
+        headline: "交付完成：1 个任务全过",
+        counts: { total: 1, done: 1, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 1, preexisting: 0 },
+        checks: [
+          { kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "", command: "npm", args: ["run", "build"] },
+          { kind: "test", ok: false, exitCode: 1, preexisting: false, headline: "2 failed", command: "npm", args: ["run", "test"] },
+        ],
+        tasks: [
+          { id: "t1", title: "实现任务列表", zone: "src/todo", status: "done", attempts: 2, agentId: "sensenova-api", durationMs: 15_200 },
+        ],
+        conflicts: [],
+        fingerprint: "fp-9f8e7d6c5b4a",
+      },
+    });
+    render(<BoardPage />);
+    // 第一半：命令原样可见（command + args 拼成一条能直接粘走执行的串）
+    expect(screen.getByText("npm run build")).toBeTruthy();
+    expect(screen.getByText("npm run test")).toBeTruthy();
+    // 第二半：指纹整串可见可选 —— 截短显示等于"看得到但用不了"
+    expect(screen.getByText("fp-9f8e7d6c5b4a")).toBeTruthy();
+    expect(screen.getByText(/实现任务列表 · src\/todo · 2 次 · sensenova-api · 15\.2s/)).toBeTruthy();
+  });
+
+  it("命令 / 指纹 / 任务账缺席时一个空壳都不摆（字段即承诺）", () => {
+    seedBoard();
+    useApp.setState({
+      receipt: {
+        outcome: "blocked",
+        verified: false,
+        unverifiedReason: "没有配置验证命令",
+        rounds: 0,
+        headline: "未交付",
+        counts: { total: 0, done: 0, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 0, preexisting: 0 },
+        // 没有 command 的检查是合法的（纯逻辑判定），不能摆出一个空行
+        checks: [{ kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "" }],
+        tasks: [],
+        conflicts: [],
+      },
+    });
+    render(<BoardPage />);
+    expect(screen.queryByText(/内容指纹/)).toBeNull();
+    expect(screen.queryByText(/任务账/)).toBeNull();
+  });
+
   it("看板页挂审计日志：落盘的历史跟着实时流同栏可见（改前应挂的基线用例）", () => {
     seedBoard();
     render(<BoardPage />);
