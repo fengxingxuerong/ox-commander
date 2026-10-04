@@ -33,16 +33,16 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 15 | `smoke:receipt-verify` | `scripts/receipt-verify-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-verify-main.js`（真 argv / 真退出码），8 例覆盖五档裁决：verified / contradicted / tampered / unsigned / not-replayed + 用法错与读不到 | 任一例的退出码或断言不符 ⇒ 红。两条**非空转证据**：复跑类用例断言命令留下的标记文件存在（证明真执行）；`tampered + --replay` 用例断言标记**不存在**（证明指纹不符时确实没复跑）。只对退出码断言是可以被"什么都不做、只返回预期码"的实现骗过的 |
 | 16 | `smoke:demo` | `scripts/demo-deliver.mjs`：**对外可复现样例**。临时目标项目 + 本进程起的假大脑（**随机端口**，经 `OX_LLM_BASE_URL_OLLAMA` 接入）+ 假 http-bridge 执行器 + 真 `dist-headless` 子进程 + 真 `node --test` 验证，然后把产出的交付凭据交给 `receipt-verify-main.js` 复核（默认模式 + `--replay`） | 零凭据、零网络、零固定端口。17 条断言任一不符 ⇒ 红。**非空转证据**：断言 `brainCalls >= 1`（大脑请求真打到了覆盖后的端点——若端点覆盖失效，`brainCalls=0` 且 PLANNING 阶段就 exit 1）；断言复核默认模式退出码为 **5**（not-replayed，即"指纹一致 ≠ 结论为真"）而 `--replay` 为 0。反向注入实测：去掉 env 里的端点覆盖后 14 条断言变红 |
 | 17-20 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 21 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（占 **11434**，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null` |
+| 21 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
 | 22 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
 > `smoke:demo` 与 `smoke:offline-e2e` 走的是**同一条进程链路**，但盯的是不同的东西：IT 盯反常路径
 > （越权回滚 / 基线红 / 被杀后续跑），demo 盯**正常路径 + 凭据闭环**（把交付凭据拿去独立复核）。
-> 后者在 IT 里没有 —— 它的假大脑还得占死 11434，而 demo 因为端点可覆盖，开在随机端口上。
-> **可选的后续**：`offline-e2e-it.mjs` 也改用 `OX_LLM_BASE_URL_OLLAMA` → 随机端口，
-> 就能删掉"本机真跑着 Ollama 就硬失败"那个坑（2026-10-03 记下，未做）。
+> 后者在 IT 里没有 —— 两者的假大脑现在都开在随机端口上（IT 自 2026-10-04 起同样用
+> `OX_LLM_BASE_URL_OLLAMA` 覆盖，"本机真跑着 Ollama 就硬失败"那个坑已删）。
+> 盯的东西不同就够了，别再拿端口当区分点。
 
 > **本表的 `#` 是脚本序号，不等于 `verify` 串里的位置**：残留自愈记作 `#0`（它跑在最前），所以
 > `#1` 及其后的每一项在串里的位置都比表号大 1。引用某一段时**优先用 npm script 名**，别用序号 ——

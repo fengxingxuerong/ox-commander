@@ -20,8 +20,11 @@
  *   interrupt —— 第一次派单刚落地就把进程杀掉 → journal 可续跑、遗留备份保留、到期才回收。
  *
  * 大脑层冒充方式：`ollama` 是 providers 表里唯一 `apiKeyEnvVar: ""` 的条目，
- * baseUrl 写死 `http://localhost:11434/v1`，所以本脚本必须占住 11434。
- * **端口被占时直接失败并说明原因**，不静默跳过 —— 跳过的门禁比没有门禁更误导。
+ * baseUrl 写死 `http://localhost:11434/v1`。本脚本**不再去占 11434**（本机真跑着
+ * Ollama 时那条路会直接把门禁砸红，而那与被测代码毫无关系），改为：假大脑起在
+ * **随机端口**，再用 `OX_LLM_BASE_URL_OLLAMA` 把端点指过去 —— 端点覆盖能力是
+ * `shared/providers.ts` 里既有的一格（`baseUrlEnvVar`），demo 样例已经在用。
+ * 于是这条门禁与"本机有没有装 Ollama"彻底解耦。
  *
  * 用法：node scripts/offline-e2e-it.mjs
  *   前置：npm run build && npm run build:headless
@@ -37,7 +40,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const RUNNER = path.join(ROOT, "dist-headless", "headless", "headless-main.js");
-const BRAIN_PORT = 11434; // 与 shared/providers.ts 里 ollama 的写死地址一致
+const BRAIN_PORT = 0; // 随机端口 + OX_LLM_BASE_URL_OLLAMA 覆盖；不再与本机 Ollama 抢 11434
 
 if (!fs.existsSync(RUNNER)) {
   console.error("FAIL: 找不到 dist-headless/headless/headless-main.js —— 先跑 npm run build:headless");
@@ -186,6 +189,7 @@ async function runOnce({ mode, reuse = null, interrupt = false }) {
   await listen(brain, BRAIN_PORT);
   await listen(bridge, 0);
   const bridgePort = bridge.address().port;
+  const brainPort = brain.address().port;
   try {
     const spec = {
       requirement: "给 src/add.js 补 sub 并加测试",
@@ -240,7 +244,12 @@ async function runOnce({ mode, reuse = null, interrupt = false }) {
 
     // 赋给外层那个 `child`：桥端的回调闭包看到的是外层变量，这里若写成 `const`
     // 就会遮蔽掉它，`stopChild()` 永远拿到 null（= 杀不掉，中断用例静默退化成正常跑完）。
-    child = spawn(process.execPath, [RUNNER], { stdio: ["pipe", "pipe", "pipe"] });
+    // 端点覆盖是子进程唯一需要额外知道的事：它拿到的 `ollama` 必须指向本次的
+    // 随机端口，否则会去打 providers 表里写死的 11434（打空 = 大脑层全挂）。
+    child = spawn(process.execPath, [RUNNER], {
+      stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, OX_LLM_BASE_URL_OLLAMA: `http://127.0.0.1:${brainPort}/v1` },
+    });
     let out = "";
     let err = "";
     child.stdout.on("data", (c) => (out += c));
@@ -300,20 +309,6 @@ async function runOnce({ mode, reuse = null, interrupt = false }) {
 const STAGES = ["PLANNING", "DEVELOPMENT", "VERIFICATION", "DELIVERY", "DONE"];
 
 async function main() {
-  // 先单独占一次端口：占用与"跑不起来"要能区分开，别让人以为测试过了。
-  const probe = http.createServer();
-  try {
-    await listen(probe, BRAIN_PORT);
-  } catch (e) {
-    console.error(
-      `FAIL: 端口 ${BRAIN_PORT} 已被占用（本机在跑真的 Ollama？）。本用例必须占住它来冒充大脑层，` +
-        `因为 ollama 的 baseUrl 写死在 shared/providers.ts 里。\n` +
-        `      停掉占用进程再跑（Windows：netstat -ano | findstr ${BRAIN_PORT}）。原始错误：${e.code ?? e.message}`,
-    );
-    process.exit(1);
-  }
-  probe.close();
-
   console.log("=== 场景 A：两个任务都守在自己的 zone 内 → 应交付 ===");
   const clean = await runOnce({ mode: "clean" });
   const types = clean.events.map((e) => e.type);

@@ -30,6 +30,16 @@
   远期）新动态；LiteLLM `retry_policy` / MCP 2026-07-28 规范（sampling 弃用、
   MRTR 与 serve 审批同构但维持现握手）逐条对照结论。
 
+- **离线全链路 e2e 不再与本机 Ollama 抢 11434（勘查欠账第 4 条，2026-10-03 记下）**。
+  `offline-e2e-it.mjs` 此前**必须占住 11434** 才能冒充大脑层（ollama 的 baseUrl 在
+  `shared/providers.ts` 里写死），于是本机真跑着 Ollama 时这条门禁**当场硬失败** ——
+  而那与被测代码毫无关系。现在假大脑开在**随机端口**，用既有的
+  `OX_LLM_BASE_URL_OLLAMA` 把端点指过去（`shared/providers.ts` 的 `baseUrlEnvVar`，
+  demo 样例已在用），并删掉那段"端口被占就失败"的探测与排查提示。
+  反向验证两条：**占住 11434 再跑 → 全 PASS**（改前会 exit 1）；
+  **去掉覆盖变量 → 不通过**（证明这层覆盖真的在承重）。
+  `references/gates.md` 第 21 段同步。
+
 - **接线门禁的判据改严（勘查欠账第 4 项）：脚本名不再被"别家名字的后缀"洗白**。
   `check-script-wiring.mjs` 此前用纯 `s.text.includes(t)` 判引用边，方向是**漏报**：
   一个真孤儿只要名字是某个可达脚本名的子串，就被打成"已接入" —— 实测造一个

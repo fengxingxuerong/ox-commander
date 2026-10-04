@@ -185,7 +185,8 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-03 本机实测 EXIT 0，**23 段**，5m20s）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-04 本机实测 EXIT 0，**23 段**，
+3–11 min —— 时长几乎全挂在 `mutation:touched` 上，改动面越大越久）：
 
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
@@ -200,7 +201,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（2026-10-03 实测 1533 通过 + 9 跳过（1542，59 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ vitest（2026-10-04 实测 1574 通过 + 9 跳过（1583，59 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
