@@ -30,6 +30,15 @@
   远期）新动态；LiteLLM `retry_policy` / MCP 2026-07-28 规范（sampling 弃用、
   MRTR 与 serve 审批同构但维持现握手）逐条对照结论。
 
+- **接线门禁的判据改严（勘查欠账第 4 项）：脚本名不再被"别家名字的后缀"洗白**。
+  `check-script-wiring.mjs` 此前用纯 `s.text.includes(t)` 判引用边，方向是**漏报**：
+  一个真孤儿只要名字是某个可达脚本名的子串，就被打成"已接入" —— 实测造一个
+  `heck.mjs`（"mutation-check.mjs" 的后缀）当场被洗成已接入，门禁一声不响地绿。
+  误报会当场红、漏报不会，所以这种方向的错更该修。改成**边界匹配**（命中位置的前后
+  都不能是 `[\w.-]`），并给判据本身配了 8 例自测（`--selftest`，挂在
+  `check:scripts-wired` 里）—— 门禁的判据也要有判据。改严后既有 21 个接入脚本
+  判定不变（没把既有绿变红），探针孤儿当场红。
+
 - **headless 三宿主补上 `raceRedundancy` / `disabledKeyVars`（协议面能力差收口）**。
   这两个开关桌面设置页早就有，headless 的 CLI / serve / MCP 三个宿主一个都没有 ——
   `KNOWN_FIELDS` 不认它们（宿主传了只会拿到一条"未知字段已忽略"），`HeadlessSpec`

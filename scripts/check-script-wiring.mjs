@@ -94,12 +94,61 @@ const sources = scripts
   .filter((p) => path.basename(p) !== SELF) // 见文件头「⚠️」：本文件必须排除
   .map((p) => ({ name: path.basename(p), text: fs.readFileSync(p, "utf8") }));
 
+/**
+ * `text` 里是否**作为一个完整脚本名**提到 `name`。
+ *
+ * 原来是纯 `includes`，方向是**漏报**：`heck.mjs` 是孤儿，但 "mutation-check.mjs"
+ * 里含 "heck.mjs" 这一段，于是它被打成"已接入" —— 名字是别家名字后缀的脚本
+ * 全都洗白。门禁绿着、孤儿一直没人管，比误报更隐蔽（误报会当场红，漏报不会）。
+ * 所以按边界判：命中位置的前后都不能是名字里会出现的字符（字母数字 _ - .）。
+ */
+const NAME_CHAR = /[\w.-]/;
+function mentions(text, name) {
+  let from = 0;
+  for (;;) {
+    const at = text.indexOf(name, from);
+    if (at < 0) return false;
+    const before = text.slice(at - 1, at);
+    const after = text.slice(at + name.length, at + name.length + 1);
+    if (!NAME_CHAR.test(before) && !NAME_CHAR.test(after)) return true;
+    from = at + 1;
+  }
+}
+
+// 判据自身的自测（门禁的判据也要有判据）：改严那次就是靠这几条钉住"边界"的
+// 语义 —— 纯子串版本会漏掉"名字是别家名字后缀"的孤儿，而那种漏报不会当场红。
+if (process.argv.includes("--selftest")) {
+  const cases = [
+    ["node scripts/mutation-check.mjs --audit", "mutation-check.mjs", true],
+    ["mutation-check.mjs", "heck.mjs", false], // 后缀命中：漏报的原型
+    ["foo-check.mjs", "check.mjs", false], // 前面是 -（别家名字的一部分）
+    ["check.mjs", "check.mjs", true], // 整串就是它
+    ["check.mjs.bak", "check.mjs", false], // 后面是 .（.bak 不是脚本名）
+    ["mycheck.mjs", "check.mjs", false], // 前面是字母
+    ["`check.mjs`", "check.mjs", true], // 反引号是边界
+    ["scripts/check.mjs\nscripts/other.mjs", "other.mjs", true],
+  ];
+  let bad = 0;
+  for (const [text, name, want] of cases) {
+    const got = mentions(text, name);
+    if (got !== want) {
+      bad += 1;
+      console.error(`  ✗ mentions(${JSON.stringify(text)}, ${name}) = ${got}，期望 ${want}`);
+    }
+  }
+  if (bad > 0) {
+    console.error(`FAIL: 边界匹配自测 ${bad}/${cases.length} 例不符`);
+    process.exit(1);
+  }
+  console.log(`PASS: 边界匹配自测 ${cases.length} 例（名字不再被别家名字的后缀洗白）`);
+}
+
 /** name → 它引用的其他脚本名 */
 const edges = new Map();
 for (const s of sources) {
   edges.set(
     s.name,
-    [...names].filter((t) => t !== s.name && s.text.includes(t)),
+    [...names].filter((t) => t !== s.name && mentions(s.text, t)),
   );
 }
 

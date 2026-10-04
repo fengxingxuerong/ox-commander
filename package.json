@@ -32,7 +32,7 @@
     "zone:cost": "node scripts/zone-cost-report.mjs",
     "check:residue": "node scripts/mutation-check.mjs --recover-only",
     "check:scripts": "node scripts/check-syntax.mjs",
-    "check:scripts-wired": "node scripts/check-script-wiring.mjs",
+    "check:scripts-wired": "node scripts/check-script-wiring.mjs --selftest",
     "check:masker": "node scripts/masker-selftest.mjs",
     "check:tests-collected": "node scripts/check-tests-collected.mjs",
     "check:packaged-paths": "node scripts/check-packaged-paths.mjs",

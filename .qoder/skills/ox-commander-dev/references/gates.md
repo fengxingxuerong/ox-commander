@@ -20,7 +20,7 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
 | 4 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
-| 5 | `check:scripts-wired` | `scripts/check-script-wiring.mjs` | 不可达脚本 → 红；失效 `ACCEPTED` → 红 |
+| 5 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 8 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
 | 6 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
 | 7 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
 | 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
