@@ -1,6 +1,9 @@
 /**
  * 判据体检：把 `check-doc-claims.mjs` 的每种失败模式**真的造出来**，确认它会红。
  *
+ * 当前 9 条注入 + 1 条正向对照（条数由脚本自己打印，别在别处再抄一份 ——
+ * 本脚本自己的锚点就漂过一次，见下面 SEGMENTS 那段注释）。
+ *
  * 为什么留成脚本而不是"跑过一次就写进文档"：门禁的 PASS 本身需要证据，而
  * 「我手改了一下看到红了」这种记录不可复跑 —— 下一个人改判据时没有任何东西告诉他
  * 判据是不是被写瞎了。与本仓 `--selftest`（判据的判据）同一纪律，只是这里要动真文件，
@@ -34,13 +37,74 @@ function runGate() {
   return { code: r.status, out: `${r.stdout ?? ""}${r.stderr ?? ""}` };
 }
 
+/**
+ * 注入点里的段数**从 package.json 现算**，不是写死在这儿的字面量。
+ *
+ * 这不是洁癖：本脚本自己就漂过一次 —— 链从 27 段加到 28 段之后，三条用例的锚点
+ * 全部 0 命中，报的是"构造没成立"而不是"判据失效"，差别只在有没有人去读那三行。
+ * 写死的数字在这里会变成**第二个会过期的副本**，与被这道门禁管着的文档一模一样。
+ */
+const SEGMENTS = String(
+  JSON.parse(read("package.json")).scripts.verify,
+).split("&&").length;
+const STALE_SEGMENTS = SEGMENTS - 5; // 故意写成一个不等旧值（用它自己的历史数字）
+/** 汉字写法：用来造「措辞漂到读不到」那种失效，判据必须红而不是放过。 */
+const CN_DIGITS = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+const SEGMENTS_CN = String(SEGMENTS)
+  .split("")
+  .map((d) => CN_DIGITS[Number(d)])
+  .join("");
+
+/** 用例数与变异规模的锚点同样从实物派生（同一理由：写死就会跟着漂）。 */
+const README_NOW = read("README.md");
+const PASSED = Number((/(\d+)\s*通过\s*\+\s*(\d+)\s*跳过/.exec(README_NOW) || [])[1] || 0);
+const TOTAL = Number((/合计\s*(\d+)\s*条/.exec(README_NOW) || [])[1] || 0);
+const SCALE = JSON.parse(
+  spawnSync(process.execPath, ["scripts/site-baseline.mjs", "--json"], {
+    cwd: ROOT,
+    encoding: "utf8",
+  }).stdout.trim(),
+);
+if (!PASSED || !TOTAL || !SCALE.targets || !SCALE.baselineSites) {
+  console.error(
+    `FAIL: 锚点派生失败（通过数 ${PASSED} / 合计 ${TOTAL} / 规模 ${JSON.stringify(SCALE)}）—— ` +
+      "文档里那几个形状不在了，先确认是判据变了还是措辞变了，别把构造没成立当成通过。",
+  );
+  process.exit(1);
+}
+
 /** 每条都是「一种真实会发生的漂移」，不是随机破坏：注入点与期望命中的判据一一对应。 */
 const CASES = [
-  { n: "段数漂（README 把段数写少 1）", f: "README.md", from: "**27 段**", to: "**26 段**", want: "【段数】" },
-  { n: "用例数漂（README 少写 94 条）", f: "README.md", from: "1694 通过", to: "1600 通过", want: "【不一致】" },
-  { n: "算术漂（合计与两半不自洽）", f: "README.md", from: "合计 1703 条", to: "合计 1700 条", want: "【算术】" },
   {
-    n: "清单漏行（新段进了串但 README 没这行）",
+    n: `段数漂（README 把段数写少 1）`,
+    f: "README.md",
+    from: `**${SEGMENTS} 段**`,
+    to: `**${SEGMENTS - 1} 段**`,
+    want: "【段数】",
+  },
+  {
+    n: "历史数字紧贴「段」字（叙述里写旧段数）",
+    f: GATES,
+    from: `（${SEGMENTS} 段）`,
+    to: `（${SEGMENTS} 段）与旧数 ${STALE_SEGMENTS} 段的对比`,
+    want: "【段数】",
+  },
+  {
+    n: "用例数漂（README 少写 94 条）",
+    f: "README.md",
+    from: `${PASSED} 通过`,
+    to: `${PASSED - 94} 通过`,
+    want: "【不一致】",
+  },
+  {
+    n: "算术漂（合计与两半不自洽）",
+    f: "README.md",
+    from: `合计 ${TOTAL} 条`,
+    to: `合计 ${TOTAL - 3} 条`,
+    want: "【算术】",
+  },
+  {
+    n: "清单漏行（README 里 field-orphans 那行改名）",
     f: "README.md",
     from: "→ check:field-orphans（",
     to: "→ 新来的那道门（",
@@ -49,16 +113,9 @@ const CASES = [
   {
     n: "措辞漂到判据读不到（数字改成汉字）",
     f: "README.md",
-    from: "**27 段**",
-    to: "**二十七段**",
+    from: `**${SEGMENTS} 段**`,
+    to: `**${SEGMENTS_CN}段**`,
     want: "解析不到任何段数声明",
-  },
-  {
-    n: "历史数字紧贴「段」字（叙述里写旧段数）",
-    f: GATES,
-    from: "（27 段）",
-    to: "（27 段）与旧数 23 段的对比",
-    want: "【段数】",
   },
   {
     n: "verify 串里出现重复段",
@@ -66,6 +123,20 @@ const CASES = [
     from: "npm run lint",
     to: "npm run lint && npm run lint",
     want: "重复段",
+  },
+  {
+    n: "在册目标数漂（README 写回旧规模）",
+    f: "README.md",
+    from: `当前在册 **${SCALE.targets} 个目标**`,
+    to: `当前在册 **${STALE_SEGMENTS} 个目标**`,
+    want: "【目标数】",
+  },
+  {
+    n: "基线位点数漂（README 写回旧规模）",
+    f: "README.md",
+    from: `基线 **${SCALE.baselineSites} 处位点**`,
+    to: `基线 **${SCALE.baselineSites - 449} 处位点**`,
+    want: "【位点数】",
   },
 ];
 

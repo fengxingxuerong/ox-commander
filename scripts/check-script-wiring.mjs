@@ -52,7 +52,7 @@ const ACCEPTED_ENTRIES = [
   ["smoke-repair.mjs", "重修循环冒烟，同上"],
   [
     "doc-claims-injection.mjs",
-    "check:doc-claims 的判据体检（反向注入 7 条 + 正向对照）：它会**临时改写** README / gates.md / " +
+    "check:doc-claims 的判据体检（注入若干条 + 正向对照，条数由脚本自己打印）：它会**临时改写** README / gates.md / " +
       "package.json 再在 finally 里还原 —— 接进 verify 就等于让门禁链自己制造脏文档现场，" +
       "被强杀时下一段读到的就是注入后的内容。改完那条判据手动跑一次；中断后的现场由它自己的" +
       "正向对照抓（不注入必须绿，否则先报错再停手）",

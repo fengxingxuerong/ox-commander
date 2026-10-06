@@ -196,7 +196,24 @@ for (const file of Object.keys(SITE_BASELINE)) {
   if (!counts.has(file)) drifted.push({ file, prev: SITE_BASELINE[file], now: "已删除" });
 }
 
-if (write) {
+const json = process.argv.includes("--json");
+
+if (json) {
+  // 机器可读的那一面：给 check:doc-claims 用，让它能把 README 里那句
+  // 「N 个目标 / N 处位点」对**实物**核，而不是对上一版文档核。
+  // 有漂移时照样 exit 1 —— 打印的不是诊断报告，判据不能因为换了输出格式就松。
+  const baselineSites = Object.values(SITE_BASELINE).reduce((a, b) => a + b, 0);
+  const currentSites = [...counts.values()].reduce((a, b) => a + b, 0);
+  console.log(
+    JSON.stringify({
+      targets: counts.size,
+      baselineSites,
+      currentSites,
+      drifted: drifted.length,
+    }),
+  );
+  if (drifted.length > 0) process.exit(1);
+} else if (write) {
   const entries = [...counts.entries()]
     .sort((a, b) => (a[0] < b[0] ? -1 : 1))
     .map(([f, n]) => `  ${JSON.stringify(f)}: ${n},`)
