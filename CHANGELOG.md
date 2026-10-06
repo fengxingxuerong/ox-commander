@@ -103,6 +103,39 @@
   它**不管**的：`CHANGELOG.md` 与 `docs/*.md` 里的历史数字（那是 dated 记录，改它等于伪造历史）；
   某一段的判据好不好；「门禁节里有一行」这种版式约束（版式是最常改的东西，绑上去会让判据天天误报）。
 
+### 实测（真链路复证，不进门禁）
+
+- **2026-10-06 真跑：真实 SenseNova 执行器全链路通过，独立边界验收 11/11**（上一次记录在案的真实交付是 2026-09-19）。
+
+  三条实测，都是当场命令输出，不是文档抄文档：
+
+  ```
+  OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts  → 6 passed，11.0s
+      deepseek-v4-flash / sensenova-6.8-flash-lite / glm-5.2 连通性、
+      chatJson → parsePrd 的真 JSON、整池 failover 各一次真请求
+  node scripts/smoke-fullchain.mjs                        → EXIT 0，约 2 分钟
+      两个任务都「第 1 次」就 done（本轮没有触发重修轮），
+      基线验证明说「1 条命令在本次运行开始前就失败（不是智能体造成的）：test(exit=1)」，
+      终态 build=true typecheck=true test=true，产物落在真实临时目录并被独立复跑
+  独立边界验收（我自己按契约造的输入，不是智能体自写的那份测试）→ 11/11
+      capitalize("") / capitalize("  spaced") / capitalize("éTÉ") / capitalize("1abc") /
+      words("") / words("   ") / words("\tA\nB\r\nC") / words(" x ") …
+  ```
+
+  **为什么还要单独做那 11 条**：09-19 那次真跑出的缺陷正是「写代码的智能体自写测试自证」
+  —— 交付实现把 `columnStats` 的行列口径做反，而它自带的 13 项测试全绿。这次特意用
+  真实边界输入交叉验了一遍：**这一类没有复现**（`words` 那边它主动加了 `.filter(Boolean)`，
+  空串与纯空白都回到 `[]`，是契约要的形状）。
+
+  **仍然没证的那半，也是更要紧的那半**：`smoke-fullchain.mjs` 的任务计划是**硬编码**的
+  （脚本自己注释着 "mirroring what decompose would produce"），所以真实 LLM 做
+  **PRD → 任务 → 批次**这一段的拆解质量，记录在案的依然只有 2026-09-19 那一次
+  （且那一轮 sensenova 侧预算耗尽、`cli.js` 由独立验收方手工补完）。要证它得跑
+  `run-multiagent-e2e.mjs --real`：长跑、真实凭据、还需要外部桥真在跑。
+
+  一次通过不等于稳定，所以这条**不是门禁也不该变成门禁**（要花钱，且账号级 429 窗口
+  由不得 CI）。它证的是「管线 + 真实执行器 + 真验证」到今天仍然成立，不是「拆解可靠」。
+
 ### 工具事故（不是缺陷，但差点丢两轮工作）
 
 - **`git checkout --` 抹掉了第十五、十六两轮的源码修复**（2026-10-05）。
