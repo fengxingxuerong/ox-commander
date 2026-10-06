@@ -1,6 +1,6 @@
 ---
 name: ox-commander-dev
-description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（28 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
+description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（29 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
 ---
 
 # OxCommander 开发
@@ -13,8 +13,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 
 三条最容易踩的硬事实：
 
-1. **唯一验收入口是 `npm run verify`，只认退出码**（28 段串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 28 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-10-06 实测 1694 通过 + 9 跳过。
+1. **唯一验收入口是 `npm run verify`，只认退出码**（29 段串联，首段失败即中断）。
+   本机实测基线：EXIT 0 / 29 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-10-06 实测 1723 通过 + 9 跳过。
    2026-09-25 同日曾报 1020/1033 —— 那是"测试文件互相 import"把一份夹具的用例注册了两次，`check:tests-collected` 现在会拦它）。
    **第 1 段是 `check:residue`**（强杀自愈）：工作区留着活体变异体时，它还原并 exit 2 —— 别跳过它，
    残留不会让门禁红在相关处，而是把 `npm test` 砸成 4.6GB 堆 OOM 后挂住。
@@ -62,7 +62,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
 | 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
 | 改文档数字/动 verify 链 | `npm run check:doc-claims` | +5s（会 spawn 一次 `vitest list`，收集不执行用例） |
-| **验收** | `npm run verify` | 28 段（2026-10-06 逐段实测；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
+| **验收** | `npm run verify` | 29 段（2026-10-06 逐段实测；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
 
@@ -112,5 +112,5 @@ README/docs 与代码有几处口径不一致，动相关文件前先读
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 逐段机制（28 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 逐段机制（29 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致

@@ -1,6 +1,6 @@
-# `npm run verify` 的逐段机制（28 段）
+# `npm run verify` 的逐段机制（29 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、28 段、
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
 1723 通过 + 9 跳过，合计 1732 条，分布在 59 个有可执行用例的文件（2026-10-06 逐段实测：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
@@ -30,6 +30,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
 | 4 | `check:field-orphans` | `scripts/check-field-orphans.mjs`：找「只有生产者、没有消费者」的接口字段 | 报候选清单；`shared/` 内的真孤儿 → 红（2026-10-05 首跑 23 项，逐条查证后 6 项为真） |
+| 4b | `check:exhaustive` | `scripts/check-exhaustive-maps.mjs --selftest`：以联合类型为键的映射表（`Record<Union, …>`）与穷尽 `switch` 是否**逐档登记** | 未登记（含被 `default` 吞掉的）→ 红。tsc 只兜得住前者缺键，`switch + default` 是它的盲区（2026-10-06 首跑：2 处命中，`batch-guard.ts` 的 `deny-all` 与 `App.tsx` 的 `projects` 都在靠 default 兜）。命令串带 `--selftest`：4 例 fixture 先证明判据自己有效。**它管的是登记不是行为** —— 把 case 写出来与掉进 default 运行时等价，任何单测都不会红，只有本段会红 |
 | 5 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
 | 6 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 13 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
 | 7 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
@@ -286,7 +287,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 28 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 29 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 

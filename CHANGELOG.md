@@ -43,6 +43,44 @@
   `SITE_BASELINE` 现值 **64 目标 / 1342 处位点**（`mutation:baseline` 无漂移）；
   `npm test` **1714 通过 + 9 跳过**（1723，61 文件收集）。
 
+### 新增（门禁）
+
+- **新增 `check:exhaustive`：映射表与穷尽 switch 必须逐档登记**（2026-10-06，审计「第二十轮」第一项）。
+
+  起因写在 `docs/2026-10-05-full-audit.md` §7：那张"分类点全表"是**手抄的**，人会漏。
+  第一步是把其中一类点变成可枚举的判据 —— **凡是以联合类型为键的映射，键/分支数必须等于联合成员数**。
+
+  为什么 tsc 不够：`ERROR_CLASS_LABEL` 那类声明成 `Record<Union, string>` 的表，缺键**编译错**，
+  tsc 已经兜住；但 `remedyFor(mode: ArbitrationMode)` 是 **switch + default** ——
+  新增第 5 档仲裁模式会**静默落到 default**，tsc 不报错、变异门禁看不出来（那条分支活着）、
+  单测也不红。`default` 恰恰是掩盖点：**"没覆盖"被写成了"覆盖其余一切"。**
+
+  判据（`scripts/check-exhaustive-maps.mjs`，用 TypeScript 编译器 API 取真联合成员，不靠正则猜）：
+
+  - 映射表：`const X: Record<Union, …> = {…}` 的键集合 ≠ 成员集合 ⇒ 红（**键多了也算**：
+    表里留着一个类型里已经没有的成员）；
+  - 穷尽 switch：`case` 字面量没盖住全部成员 ⇒ 红；有 `default` 额外标一行「被 default 吞掉」；
+  - 联合**含非字符串字面量成员** ⇒ 整体跳过并在 `--list` 里列出，不做"部分判定"；
+  - 同一文件被多个 tsconfig 包含（`electron/` 就进了两份）按 `文件:行` 去重；
+  - 命令串**带 `--selftest`**（同 `check:scripts-wired` 的做法）：4 例 fixture 先证明判据自己有效
+    （漏一档 ⇒ 红 / 补齐 ⇒ 绿 / 表漏一键 ⇒ 红 / 对齐 ⇒ 绿），通过后接着跑全仓。
+
+  **首跑命中 2 处，都修成了显式登记（行为零变化）**：
+
+  - `electron/engine/batch-guard.ts:421` `remedyFor` —— 四档仲裁里**只有 `deny-all` 没写 case**，
+    靠 default 拿到 `"fail-batch"`。动作恰好是对的（deny-all 的承诺就是"保留文件、整批判失败、
+    不回滚"），所以**它不是缺陷，是巧合**：将来新增第 5 档会同样静默拿到 fail-batch，而那一档
+    未必该是这个动作。
+  - `src/App.tsx:27` —— `projects` 是默认页，只写在 `default` 里 ⇒ 将来新增 page 会静默渲染成项目页。
+
+  ⚠️ **它管的是登记，不是行为**：把 `case` 写出来与让它掉进 default **运行时完全等价**，
+  所以任何单测都不会变红 —— 证明它有效的只有两条：`--selftest` 的 4 例 fixture，
+  和**删掉 `case "deny-all"` ⇒ 本段红并精确点名**（实测 exit 1）。
+
+  **实测**：全仓修完后 0 命中、跳过 20 处（诚实标注：那 20 处的联合含非字面量成员，本判据不判）；
+  链从 28 段 → **29 段**，四份文档（README / CHANGELOG / SKILL.md / `references/gates.md`）同批同步。
+  顺手修掉 `SKILL.md` 里一个过期用例数（1694 → **1723**）。
+
 ### 修复
 
 - **一次网络抖动会让 bridge 报出「成功、失败原因是资源、而且值得重试」三句互相矛盾的话**（2026-10-05 并档全表审计）。

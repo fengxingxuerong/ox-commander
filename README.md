@@ -187,7 +187,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**28 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**29 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 14 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
@@ -201,6 +201,9 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   `shared/**` 另有分层红线：禁 node API、禁依赖宿主层与上层）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
 → check:field-orphans（接口字段只有生产者、没有消费者 → 报候选；`shared/` 内的真孤儿 FAIL）
+→ check:exhaustive（以联合类型为键的映射表 / 穷尽 switch 少登记一档 → FAIL。
+  tsc 只兜得住 `Record<Union, …>` 缺键，**兜不住 `switch + default`**
+  —— 那一家的"没覆盖"被写成了"覆盖其余一切"；命令串带 `--selftest`，判据自己先过 4 例）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；

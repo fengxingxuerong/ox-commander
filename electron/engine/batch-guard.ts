@@ -427,6 +427,13 @@ function remedyFor(mode: ArbitrationMode): Remedy["action"] {
     case "report-only":
       // 什么都不做，所以裁决里也不假装做了什么。
       return "pass";
+    case "deny-all":
+      // 动作与下面的 default 相同（保留文件、整批判失败，**不**回滚）。
+      // 写出来不是为了改行为，是为了**不再靠 default 兜**：
+      // 靠 default 时，将来新增第 5 档仲裁模式会静默拿到 "fail-batch" ——
+      // "没覆盖"被写成了"覆盖其余一切"。显式列出后由
+      // `scripts/check-exhaustive-maps.mjs` 守着：新增档位必须在这里登记。
+      return "fail-batch";
     default:
       return "fail-batch";
   }
