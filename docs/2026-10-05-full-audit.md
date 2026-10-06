@@ -467,4 +467,14 @@ handle 有、preload 没暴露（渲染端用不到）: 无
   PRD → 任务 → 批次这段拆解的质量，至今只有 2026-09-19 一次记录**（那一轮 sensenova
   侧预算耗尽、`cli.js` 由人工补完）。补它要跑 `run-multiagent-e2e.mjs --real`：长跑 +
   真实凭据 + 需要外部桥在跑，所以它既不进门禁、也不能靠一次绿就变成结论。
+- **§9.1 当天补跑的那半，结果是负的**：真拆解那一格今天跑了 `run-multiagent-e2e.mjs --real`
+  （6 任务 / 2 批次 / 两个智能体 / 30 分钟墙钟）——编排机制**全部按设计工作**
+  （满载让路、429 冷却换线、执行器 600s deadline 真掐、两次越权 revert、基线归因、三轮重派），
+  但**这单没交付**：测试套 t6 因上游未结算而三轮"依赖未就绪"，`tests/` 始终为空 ⇒ `test` 三轮全红，
+  最后被墙钟硬杀、没有凭据。独立验收又抓到一条引擎自身验证看不见的真缺陷：契约点名
+  `src/core/csv.js`，智能体交的是 `src/core/csv/index.js`（zone 合法、契约非法），
+  项目自己的 build/typecheck **过**，而 `node src/cli.js <csv>` 直接
+  `Cannot find module './core/csv.js'`。逐条事件原文与两个修法取向见
+  [2026-10-06-real-decomposition-e2e.md](2026-10-06-real-decomposition-e2e.md)。
+  ⇒ 上面"仍开着的另一半"从"没有记录"变成"**有一次记录，且那次没交付**"。
 - §8 其余三条（模糊测试 / `npm audit` / 多平台 / React 渲染进程行为审查）**原样未闭合**。

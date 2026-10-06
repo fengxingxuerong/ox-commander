@@ -339,6 +339,12 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
   （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
 - [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
   以及逐条带证据的**未修**缺陷清单
+- [docs/2026-09-19-real-task-e2e.md](docs/2026-09-19-real-task-e2e.md) — 真实任务交付验收记录（csvstat 第一次真跑，
+  抓到"智能体自写测试自洽地实现错口径"那一类盲区）
+- [docs/2026-10-06-real-decomposition-e2e.md](docs/2026-10-06-real-decomposition-e2e.md) — 真实拆解端到端第二跑（**负结果**）：
+  编排机制全部按设计工作（满载让路 / 429 换线 / 600s deadline 真掐 / 两次越权 revert / 三轮重派），
+  但这单被 30 分钟墙钟截断没交付；独立验收抓到**契约点名的字面路径没人检查**——
+  智能体交 `src/core/csv/index.js`，语法检查过，`node src/cli.js` 直接 `Cannot find module`
 - [docs/2026-09-19-multi-agent-orchestration-plan.md](docs/2026-09-19-multi-agent-orchestration-plan.md) — 多智能体平台 P0–P6 设计与实施全记录
 - [docs/2026-09-20-fullstack-review.md](docs/2026-09-20-fullstack-review.md) — 全栈评审：架构 / 风险诊断 / 优化记录（§十七 为最近一轮复核）
 - [docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md) — 变异门禁 site 口径基线（577→594→590 三轮，含逐目标报告与适用边界）
