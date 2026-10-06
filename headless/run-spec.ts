@@ -113,6 +113,11 @@ export interface RunSpecIo {
   layer?: AgentLayer;
   /** Override verification (tests). */
   verify?: (cwd: string) => Promise<VerificationReport>;
+  /**
+   * Override the contract-path probe (tests). Default really hits the filesystem —
+   * headless must not silently skip the check that the desktop host wires up.
+   */
+  fileExists?: (root: string, rel: string) => boolean;
   /** Override root validation (tests). */
   isDirectory?: (absPath: string) => boolean;
   /**
@@ -256,6 +261,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     layer: io.layer,
     llm: io.llm,
     verify: io.verify,
+    fileExists: io.fileExists ?? ((root, rel) => fs.existsSync(path.join(root, rel))),
     host: {
       log: (text) => io.emit({ type: "log", text }),
       callbacks,
