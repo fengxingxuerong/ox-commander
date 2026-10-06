@@ -49,6 +49,43 @@ const APP_PATH = /\bgetAppPath\s*\(/;
 /** asar 之外的可写落点。命中任一即认为作者已经考虑过打包形态。 */
 const OUTSIDE_ASAR = /getPath\s*\(\s*["'](userData|exe)["']/;
 
+/**
+ * 单个文件是否命中「只从 getAppPath 读配置」的形态。
+ *
+ * 抽成函数是为了让它能被下面的**自检**直接调用 —— 判据与使用它的是同一份代码，
+ * 不会出现"自检测的是另一套正则"这种假证据。
+ */
+function isSuspect(src) {
+  if (!APP_PATH.test(src)) return false;
+  if (!READ_ACTIONS.test(src)) return false;
+  return !OUTSIDE_ASAR.test(src);
+}
+
+/**
+ * 自检：这道门禁现在**恒绿**（唯一那处真实缺陷已在 2026-09-24 修掉）。
+ *
+ * 恒绿的门禁与没有的门禁，区别只在它会让人以为"这件事有人看着"。
+ * 所以每次执行都先用构造样例验证一遍判据仍然成立 —— 正则写坏、口径被人
+ * "顺手放宽"时，这道门禁必须自己先红，而不是继续打印 PASS。
+ */
+function selftest() {
+  const read = 'fs.readFileSync(path.join(app.getAppPath(), ".env"), "utf8");';
+  const cases = [
+    { name: "只读 getAppPath → 必须判可疑", src: read, suspect: true },
+    { name: "另有 userData 落点 → 必须豁免", src: `${read}\nconst alt = app.getPath("userData");`, suspect: false },
+    { name: "另有 exe 落点 → 必须豁免", src: `${read}\nconst alt = app.getPath("exe");`, suspect: false },
+    { name: "有 getAppPath 但不读文件 → 必须豁免", src: "const p = app.getAppPath();", suspect: false },
+  ];
+  const broken = cases.filter((c) => isSuspect(c.src) !== c.suspect).map((c) => c.name);
+  if (broken.length > 0) {
+    console.error("FAIL: check-packaged-paths 判据自检失败 —— 以下样例的判定与预期相反：");
+    for (const b of broken) console.error(`      ${b}`);
+    console.error("\n门禁自身的判据坏了却仍在打印 PASS，比没有这道门禁更危险。\n");
+    process.exit(1);
+  }
+  console.log("  判据自检：4/4（可疑样例判可疑、豁免样例判豁免）");
+}
+
 function walk(dir, out = []) {
   const abs = path.join(ROOT, dir);
   if (!fs.existsSync(abs)) return out;
@@ -63,14 +100,14 @@ function walk(dir, out = []) {
   return out;
 }
 
+selftest();
+
 const offenders = [];
 for (const dir of SCAN_DIRS) {
   for (const rel of walk(dir)) {
     if (ACCEPTED.has(rel)) continue;
     const src = fs.readFileSync(path.join(ROOT, rel), "utf-8");
-    if (!APP_PATH.test(src)) continue;
-    if (!READ_ACTIONS.test(src)) continue;
-    if (OUTSIDE_ASAR.test(src)) continue;
+    if (!isSuspect(src)) continue;
 
     const line = src.split(/\r?\n/).findIndex((l) => APP_PATH.test(l)) + 1;
     offenders.push(`${rel}:${line}`);

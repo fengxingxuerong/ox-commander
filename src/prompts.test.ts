@@ -64,8 +64,8 @@ describe("平台契约模板（STANDARD_CONTRACT_RULES）", () => {
 describe("buildEscalationSummary", () => {
   const base = {
     taskTitle: "CSV 解析模块",
-    attemptsSoFar: 3,
-    maxRepairRounds: 2,
+    attemptsSoFar: 7,
+    maxRepairRounds: 4,
     lastErrorDigest: "AssertionError: expected 1 to be 2",
   };
 
@@ -73,8 +73,16 @@ describe("buildEscalationSummary", () => {
     const s = buildEscalationSummary(base);
     for (const verb of ["跳过", "重派", "终止"]) expect(s).toContain(verb);
     expect(s).toContain("CSV 解析模块");
-    expect(s).toContain("3");
-    expect(s).toContain("2");
+    // 必须钉住「哪个数字是哪个」，不能分开断言 s 含 "7" 与 "4"：
+    // 那样即使渲染时把两个字段互换（重修 4 轮 / 上限 7）也依然全绿，
+    // 而人正是照这两个数决定"还能不能再试一次"。
+    expect(s).toContain("重修 7 轮后仍未通过验证（上限 4）");
+  });
+
+  it("两个数字来自各自的字段，不是同一处渲染两次", () => {
+    // 只改其中一个，另一个不许跟着变 —— 互换字段的回归由此拦住。
+    const s = buildEscalationSummary({ ...base, attemptsSoFar: 9 });
+    expect(s).toContain("重修 9 轮后仍未通过验证（上限 4）");
   });
 
   it("把最近一次错误原文带上 —— 那是归属线索，不能被摘要吃掉", () => {

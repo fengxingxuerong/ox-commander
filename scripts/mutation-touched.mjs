@@ -36,7 +36,12 @@ function targetsTable() {
   const byFile = new Map();
   for (const m of head.matchAll(/\{\s*file:\s*"([^"]+)"[\s\S]*?\}/g)) {
     const file = m[1];
-    const tests = [...m[0].matchAll(/"(src\/[^"]+\.test\.tsx?)"/g)].map((x) => x[1]);
+    // 四个宿主目录都要认：以前只收 `src/`，于是挂在 `electron/*.test.ts`、
+    // `shared/*.test.ts` 下的目标全被打印成「← (没挂测试文件)」，读的人会以为
+    // 那里没有断言、从而不去补 —— 而断言其实一直在跑。
+    const tests = [...m[0].matchAll(/"((?:src|electron|shared|headless)\/[^"]+\.test\.tsx?)"/g)].map(
+      (x) => x[1],
+    );
     byFile.set(file.replace(new RegExp(BS + BS, "g"), "/"), tests);
   }
   return byFile;
