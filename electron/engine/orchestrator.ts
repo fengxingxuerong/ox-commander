@@ -3,7 +3,7 @@ import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
-import { findOrphanPaths, describeZoneGaps, verificationCommandPaths } from "../../shared/zone-coverage";
+import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
 import { buildReceipt, receiptTaskStatus, sealReceipt } from "../../shared/delivery-receipt";
 import type {
@@ -55,6 +55,20 @@ export interface OrchestratorDeps {
    * 没有它时凭据里的 `conflicts` 是空数组（不代表"没有越权"，只代表没人喂）。
    */
   conflicts?: () => ReceiptConflict[];
+  /**
+   * 契约路径合规的存在性探针（可选）。宿主按 `root` 判 `rel` 在不在盘上。
+   *
+   * 为什么做成注入而不是引擎自己 `existsSync`：引擎层至今零文件系统依赖
+   * （`verify`/`journal`/`conflicts`/`usage` 全是宿主喂的），断言才能被单测
+   * 用一个 Set 直接驱动。
+   *
+   * ⚠️ `rel` 由引擎先过 `isProbeableRel`（不含 `..`、不是绝对路径、不带盘符）
+   * 才交给宿主 —— 路径来自模型写的散文，宿主可以假定拿到的就是相对干净路径。
+   *
+   * ⚠️ **没喂就是没检查，不是检查通过** —— 那种情况下日志会明说这一轮没核，
+   * 与 `conflicts` 空数组"不代表没有越权"同一口径。
+   */
+  fileExists?: (root: string, rel: string) => boolean;
   /**
    * 跨动作状态机（竞品调研 §5.1，可选）：批次边界上由引擎 reset —— 批次是
    * "已发生过什么"的生命周期单位。观察面（agent 日志）与执行面（验证命令
@@ -702,6 +716,64 @@ export class OrchestratorEngine {
         }
         this.cb.onLog(`批次 ${bi + 1}/${batches.length} 完成：${batchOutcomes.filter((o) => o.ok).length}/${batchOutcomes.length} 成功`);
         save();
+      }
+
+      /*
+       * Stage 3.5：契约路径合规 —— 在 VERIFICATION **之前**。
+       *
+       * 顺序就是这条判据的全部内容：缺文件是"**这个任务没做完**"，不是"验证命令红"。
+       * 放在验证之后，它会表现成一条谁都不归属的测试红，重修轮拿到的上下文里
+       * 只有一句 exit=1；放在这里，它变成那个任务自己的失败原因，下一轮派发时
+       * 执行者看到的是"你交成了 src/core/csv/index.js，契约点的是 src/core/csv.js"。
+       */
+      if (this.deps.fileExists) {
+        const probe = this.deps.fileExists;
+        const contract = checkContractPaths(batches.flat(), (p) => probe(projectRoot, p));
+        const flipped: string[] = [];
+        for (const g of contract.gaps) {
+          const o = outcomes.find((x) => x.taskId === g.taskId);
+          // 本来就失败的任务已经在重修队列里，别重复判、也别覆盖它自己的根因。
+          if (!o || !o.ok) continue;
+          o.ok = false;
+          o.errorClass = "contract";
+          o.logDigest = [
+            `契约点名的文件不存在：${g.path}`,
+            g.indexLayout
+              ? `交付里是等价布局 ${g.indexLayout} —— 目录 + index **不等于**契约点名的文件。` +
+                `zone 判定两种形状都放行（` +
+                "`isPathInZone` 把 `x/y.js` 算进 zone `x/y`），所以这不是权限问题，是路径问题：" +
+                `内容要落在 ${g.path}。`
+              : "请把该文件按契约路径创建出来（zone 允许写它）。",
+          ]
+            .filter(Boolean)
+            .join("\n");
+          lastFailedLogs.set(g.taskId, o.logDigest);
+          allDone.delete(g.taskId); // 否则下一轮的 depsReady/allDone 会把它当已完成跳过
+          this.cb.onTaskStatus(g.taskId, "failed", attempts.get(g.taskId) ?? 1);
+          flipped.push(`${g.taskId} 缺 ${g.path}${g.indexLayout ? `（交成了 ${g.indexLayout}）` : ""}`);
+        }
+        if (flipped.length > 0) {
+          this.cb.onLog(
+            `契约路径合规：${flipped.length} 个任务点名的文件不在盘上 ⇒ 判为未完成，进重修：${flipped.join("；")}`,
+          );
+        }
+        if (contract.checked === 0) {
+          // 空转检测：这一层什么都没核时必须说出来，而不是安静地"通过"。
+          this.cb.onLog(
+            "⚠️ 契约路径合规：任务描述里没有可核的点名路径，这一层本轮**什么都没检查**" +
+              "（提取器刻意忽略裸文件名与归属不唯一的路径，宁漏不误判）。",
+          );
+        } else {
+          this.cb.onLog(
+            `契约路径合规：核了 ${contract.checked} 条点名路径，缺 ${contract.gaps.length} 条` +
+              (contract.ambiguous.length > 0 ? `；${contract.ambiguous.length} 条因归属不唯一未判` : ""),
+          );
+        }
+        save();
+      } else {
+        this.cb.onLog(
+          "⚠️ 宿主没有接 fileExists 探针 ⇒ 契约路径合规这一轮**没有执行**。",
+        );
       }
 
       // Stage 4: hard verification gates delivery.

@@ -2616,3 +2616,201 @@ describe("OrchestratorEngine · 交付凭据", () => {
     expect(seen).toEqual([]);
   });
 });
+
+/**
+ * 契约路径合规（2026-10-06 真跑的负结果逼出来的那一层）。
+ *
+ * 现场形状：规划官把 zone 划成目录 `src/core/csv`，契约点名的却是文件
+ * `src/core/csv.js`，于是执行者交 `src/core/csv/index.js` —— zone 合法、等价布局、
+ * 契约非法，而 build/typecheck（只做语法检查）与 `node --test`（那时 tests/ 为空）
+ * 都看不见它。这组用例钉的是：**点名的文件不在盘上就必须以任务失败的形式回到重修队列，
+ * 而这一层没检查的时候要说出来**。
+ */
+describe("契约路径合规（Stage 3.5）", () => {
+  const DRIFT_TASK: Task = {
+    id: "t1",
+    title: "CSV parser module (src/core/csv.js)",
+    description: "Create src/core/csv.js — CommonJS exporting parseCsv(text).",
+    zone: "src/core/csv",
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  };
+
+  function driftEngine(opts: {
+    exists: (root: string, rel: string) => boolean;
+    events: string[];
+    status: string[];
+  }): OrchestratorEngine {
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: fakeScheduler(false),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      fileExists: opts.exists,
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: (s) => opts.events.push(`stage:${s}`),
+      onLog: (l) => opts.events.push(`log:${l}`),
+      onTaskStatus: (id, st) => opts.status.push(`${id}:${st}`),
+      onVerification: () => opts.events.push("verify"),
+      onEscalation: () => opts.events.push("escalation"),
+    });
+  }
+
+  it("点名的文件缺失 ⇒ 任务从 done 翻成 failed，且不带病交付", async () => {
+    const events: string[] = [];
+    const status: string[] = [];
+    // 交付的是目录 + index（漂移），点名的 src/core/csv.js 不存在。
+    const eng = driftEngine({
+      exists: (_root, rel) => rel === "src/core/csv/index.js",
+      events,
+      status,
+    });
+    await expect(eng.execute([[DRIFT_TASK]], ".")).rejects.toThrow(/repair rounds/);
+    // 翻转发生在状态回调上：先 done（派发回来了）再 failed（合规判的）。
+    expect(status).toContain("t1:done");
+    expect(status).toContain("t1:failed");
+    // 缺文件 ⇒ 不许进 DELIVERY（这条判据的意义就在"不带病交付"）。
+    expect(events).not.toContain("stage:DELIVERY");
+    expect(events).not.toContain("stage:DONE");
+    const gap = events.find((e) => e.startsWith("log:契约路径合规：1 个任务点名的文件不在盘上"));
+    expect(gap).toBeTruthy();
+    // 等价布局必须被点名 —— 只说"文件不存在"会把执行者带去改内容。
+    expect(String(gap)).toContain("交成了 src/core/csv/index.js");
+  });
+
+  it("正向对照：点名的文件真在盘上 ⇒ 正常交付，不翻案", async () => {
+    const events: string[] = [];
+    const status: string[] = [];
+    const eng = driftEngine({
+      exists: (_root, rel) => rel === "src/core/csv.js",
+      events,
+      status,
+    });
+    const report = await eng.execute([[DRIFT_TASK]], ".");
+    expect(report.passed).toBe(true);
+    expect(events).toContain("stage:DONE");
+    expect(status).not.toContain("t1:failed");
+    expect(events.some((e) => e.startsWith("log:契约路径合规：核了 1 条点名路径，缺 0 条"))).toBe(true);
+  });
+
+  it("宿主没接探针 ⇒ 当场说出来，而不是安静地给个绿", async () => {
+    const events: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: fakeScheduler(false),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      // 刻意不接 fileExists
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: (s) => events.push(`stage:${s}`),
+      onLog: (l) => events.push(`log:${l}`),
+      onTaskStatus: () => undefined,
+      onVerification: () => events.push("verify"),
+      onEscalation: () => events.push("escalation"),
+    });
+    await eng.execute([[DRIFT_TASK]], ".");
+    expect(events.some((e) => e.includes("fileExists 探针 ⇒ 契约路径合规这一轮**没有执行**"))).toBe(true);
+  });
+
+  it("没有可核路径 ⇒ 明说这一层什么都没检查（空转不许当通过）", async () => {
+    const events: string[] = [];
+    const status: string[] = [];
+    const bare: Task = { ...DRIFT_TASK, description: "实现解析器，导出 parseCsv。", zone: "src/core" };
+    const eng = driftEngine({ exists: () => false, events, status });
+    await eng.execute([[bare]], ".");
+    expect(events.some((e) => e.includes("本轮**什么都没检查**"))).toBe(true);
+    // 而"什么都没检查"绝不能伪装成"检查过了"：不许出现"核了 N 条"那行。
+    expect(events.some((e) => e.startsWith("log:契约路径合规：核了"))).toBe(false);
+    expect(status).not.toContain("t1:failed");
+  });
+
+  it("本来就失败的任务不被重复判 —— 它自己的根因不能被合规文案顶掉", async () => {
+    const events: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "真根因：429 限流", events: [] }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      fileExists: () => false,
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: (s) => events.push(`stage:${s}`),
+      onLog: (l) => events.push(`log:${l}`),
+      onTaskStatus: () => undefined,
+      onVerification: () => events.push("verify"),
+      onEscalation: (_id, s) => events.push(`escalation:${s}`),
+    });
+    await expect(eng.execute([[DRIFT_TASK]], ".")).rejects.toThrow(/repair rounds/);
+    // 合规层不该再打一条"点名的文件不在盘上"的翻转日志（任务本来就没成功）。
+    expect(events.some((e) => e.startsWith("log:契约路径合规：1 个任务点名的文件不在盘上"))).toBe(false);
+    // 升级摘要里给用户的必须是真根因，不是合规文案。
+    expect(events.some((e) => e.includes("真根因：429 限流"))).toBe(true);
+    expect(events.some((e) => e.includes("契约点名的文件不存在"))).toBe(false);
+  });
+});
+
+/**
+ * 变异门禁当场指出的盲区：原用例每轮只喂得进**一条** gap，于是合规循环里
+ * `if (!o || !o.ok) continue` 被换成 break 也没人发现 —— 表现是"第一个本来就失败的任务
+ * 把后面该翻的任务一起跳过了"，而那恰好是最需要翻转的场景。
+ */
+describe("契约路径合规 —— 多 gap 时不跳过后续任务", () => {
+  const t1: Task = {
+    id: "t1",
+    title: "core",
+    description: "Create src/core/csv.js exporting parseCsv.",
+    zone: "src/core/csv",
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  };
+  const t2: Task = {
+    id: "t2",
+    title: "report",
+    description: "Create src/report/report.js exporting renderReport.",
+    zone: "src/report",
+    dependencies: [],
+    suggestedRole: "fullstack-dev",
+  };
+
+  it("第一个任务本就失败 ⇒ 第二个成功但缺文件的任务仍然被翻", async () => {
+    const events: string[] = [];
+    const status: string[] = [];
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: {
+        async runBatch(tasks: Task[]) {
+          return tasks.map((t: Task) => ({
+            taskId: t.id,
+            // t1 自己失败了（真根因），t2 报告成功但文件不在盘上。
+            ok: t.id !== "t1",
+            logDigest: t.id === "t1" ? "真根因：线路超时" : "done",
+            events: [],
+          }));
+        },
+      } as unknown as Scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+      fileExists: () => false,
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: (s) => events.push(`stage:${s}`),
+      onLog: (l) => events.push(`log:${l}`),
+      onTaskStatus: (id, st) => status.push(`${id}:${st}`),
+      onVerification: () => events.push("verify"),
+      onEscalation: (id, s) => events.push(`escalation:${id}:${s}`),
+    });
+    await expect(eng.execute([[t1, t2]], ".")).rejects.toThrow(/repair rounds/);
+    const flip = events.find((e) => e.startsWith("log:契约路径合规：1 个任务点名的文件不在盘上"));
+    expect(flip).toBeTruthy();
+    // 被翻的是 t2，不是 t1 —— t1 的根因是自己的失败，不该被合规文案顶掉。
+    expect(String(flip)).toContain("t2 缺 src/report/report.js");
+    expect(String(flip)).not.toContain("t1 缺");
+    expect(status).toContain("t2:failed");
+  });
+});

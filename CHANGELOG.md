@@ -4,6 +4,45 @@
 版本号遵循语义化版本。**未发布前的版本只记"对用户/对维护者可见的变化"**，
 纯内部重构若改变了行为仍会记入。
 
+### 新增（引擎能力）
+
+- **契约路径合规（Stage 3.5）：任务点名的文件必须真的在盘上**（2026-10-06）。
+
+  起因是今天的 `run-multiagent-e2e.mjs --real` 负结果（逐条见
+  [docs/2026-10-06-real-decomposition-e2e.md](docs/2026-10-06-real-decomposition-e2e.md)）：
+  规划官把 `t1` 的 zone 划成**目录** `src/core/csv`，而契约要求的是**文件** `src/core/csv.js`。
+  `isPathInZone` **刻意**把后者算作前者之内（`src/duration` vs `src/duration.js` 的既有取舍，
+  见 `shared/glob.ts`），于是执行者交上 `src/core/csv/index.js` —— **zone 合法、等价布局、契约非法**，
+  而四道现存的关口都看不见它：派发前的 zone 覆盖只问"有没有 zone 认领"（有）、靶项目的
+  build/typecheck 只做语法检查（过）、`node --test` 那时因 `tests/` 为空而红（理由还不是这个）、
+  交付凭据照抄前两者。最后是独立验收 `node src/cli.js` 一句 `Cannot find module` 才现形。
+
+  判据 `checkContractPaths(tasks, exists)`（`shared/zone-coverage.ts`，纯函数、零 IO）：
+
+  - 义务**只认任务自己的 description** —— 执行者拿到的是那段文字，PRD 或别人的描述里点名不算它的活儿；
+  - 复用 `extractDeclaredPaths` 那套假阳防护（裸文件名如 `package.json`、`require/module.exports`
+    这类代码概念、穿越与绝对形状都不算义务），**不另起第二个散文解析器**；
+  - **归属不唯一就不判**（两个 zone 都认领 ⇒ 记 ambiguous）—— 误判的代价是一整轮修预算白烧；
+  - 只判**存在性**，不判内容（内容对不对是 smoke / 验证那两层的职责，这里连文件都不读）；
+  - 缺失 ⇒ 任务从 ok 翻成 `failed`（`errorClass=contract`），`logDigest` 直接点名
+    "交付里是等价布局 `src/core/csv/index.js` —— 目录 + index **不等于**契约点名的文件"，
+    下一轮执行者看到的根因就是这个；同时从 `allDone` 摘掉，否则重修轮会把它当已完成跳过。
+
+  位置在 VERIFICATION **之前**：缺文件是"这个任务没做完"，不是"验证命令红" —— 放在之后就会表现成
+  一条不归属任何 zone 的测试红。宿主两端都接了探针（`platform.ts` 默认 `existsSync`，
+  headless 可注入假探针）；**没接探针时日志明说"这一轮没有执行"**，一条可核路径都没有时
+  明说"什么都没检查" —— 不许静默给绿。
+
+  判据侧的额外收获：变异门禁先判出一条**按构造不可达**的 `isProbeableRel` 守卫分支存活
+  （提取器永远不会喂它可疑形状），按本仓口诀"答不上这支什么时候会走到就是死分支"
+  **简化源码**而不是加白名单；那条保证改为钉在提取器上（新增性质用例）。
+  另外门禁还指出原用例集每轮只喂得进**一条**路径，于是 `continue` 被换成 `break` 无人发现 ——
+  补了三条多元素用例（先 out-of-zone 再 in-zone、先 ambiguous 再 unique、两条 gap 的排序稳定性）。
+
+  实测：`zone-coverage.ts` 位点 21 → **29/29 全杀**、`orchestrator.ts` 51 → **55/55 全杀**，
+  `SITE_BASELINE` 现值 **64 目标 / 1342 处位点**（`mutation:baseline` 无漂移）；
+  `npm test` **1714 通过 + 9 跳过**（1723，61 文件收集）。
+
 ### 修复
 
 - **serve 状态页把"跑完了但门禁没过"和"中途崩了"印成同一句话 `未交付 / 出错`**（2026-10-05 状态标签审计）。

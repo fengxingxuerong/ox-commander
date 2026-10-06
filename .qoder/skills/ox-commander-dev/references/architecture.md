@@ -14,6 +14,16 @@
 
 **阶段**：6 个 Stage 定义在 `shared/types.ts:1-16`；PRD→PLANNING 由 `generatePrd` / `decompose` 各自 `onStage`
 （`electron/engine/orchestrator.ts:169,192`），DEVELOPMENT→VERIFICATION→DELIVERY→DONE 在 `runPipeline`（`:308,400,419-422`）。
+
+> **DEVELOPMENT 与 VERIFICATION 之间还有一步（Stage 3.5，2026-10-06）**：
+> `checkContractPaths`（`shared/zone-coverage.ts`）拿任务**自己 description** 里点名的路径逐个查存在性，
+> 缺就把该任务从 ok 翻成 failed（`errorClass=contract`）并从 `allDone` 摘掉，让重修轮拿到"路径不符"这条根因。
+> 顺序是承重的：放在 VERIFICATION 之后，它就表现成一条不归属任何 zone 的测试红。
+> 探针经 `OrchestratorDeps.fileExists` 注入（`platform.ts` 默认 `existsSync`，headless 可换假的）；
+> **没注入 = 没检查**，日志会明说，不会静默给绿。
+> 为什么需要它：`isPathInZone` 刻意让 `x/y.js` 算进 zone `x/y`，所以"目录 + `index.js`"这种
+> **zone 合法、契约非法**的布局漂移不会被沙箱拦，也不会被语法级验证看到（真实事故见
+> `docs/2026-10-06-real-decomposition-e2e.md`）。
 repair 循环 `while (round <= maxRounds + extraRounds)`（`:357`），默认 3 轮（`shared/types.ts:182`）。
 循环**之前**先跑一次基线验证（只在全新 run 上，断点续跑不跑）：目标项目本来就红的命令会随
 每一份重修上下文附上 `[本次运行前就已失败]`，避免智能体去修与自己无关的历史失败。代价是每次

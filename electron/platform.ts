@@ -167,6 +167,12 @@ export interface PlatformConfig {
   llm?: LlmClient;
   layer?: AgentLayer;
   verify?: (cwd: string) => Promise<VerificationReport>;
+  /**
+   * 契约路径合规的存在性探针（2026-10-06）。缺省 = 平台自带的真 `existsSync`，
+   * 宿主（headless 测试）可以注入一个 Set 驱动的假探针。
+   * 引擎只在拿到它时才判；拿不到时日志会明说"这一轮没执行"，不会静默给绿。
+   */
+  fileExists?: (root: string, rel: string) => boolean;
   /** 自带用量汇总器（测试观察点，或宿主想复用同一个计数器）。 */
   meter?: UsageMeter;
 }
@@ -433,6 +439,9 @@ export function createPlatform(config: PlatformConfig): Platform {
       // 前任履历（P1-3）：宿主给查询口，引擎只负责在重修轮把它拼进上下文。
       ...(config.priorAttempts ? { priorAttempts: config.priorAttempts } : {}),
       actionGate: gate,
+      // 契约路径合规的探针。引擎已把路径过成"干净相对路径"（`isProbeableRel`），
+      // 所以这里只做 join + existsSync，不在两处重复判定。
+      fileExists: config.fileExists ?? ((root, rel) => fs.existsSync(path.join(root, rel))),
       // 审批门与 actionGate 同一生命单位：批次边界一起 reset（"本批次已批准"不该跨批）。
       ...(approvalGate ? { approvalGate } : {}),
     },

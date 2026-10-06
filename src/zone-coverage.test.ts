@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  checkContractPaths,
   declaredArtifactPaths,
   describeZoneGaps,
   extractDeclaredPaths,
@@ -277,5 +278,163 @@ describe("verificationCommandPaths", () => {
     expect(verificationCommandPaths([{ args: ["src", "--config", "src/existing.ts"] }])).toEqual([
       "src/existing.ts",
     ]);
+  });
+});
+
+/**
+ * 契约路径合规（2026-10-06 --real 真跑的负结果逼出来的一层）。
+ * 这里只测**纯判据**；引擎侧的翻转与日志由 src/orchestrator.test.ts 钉。
+ */
+describe("checkContractPaths —— 点名的文件必须真的在盘上", () => {
+  const task = (id: string, zone: string, description: string): Task => ({
+    id,
+    title: id,
+    description,
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  const T1 = task("t1", "src/core/csv", "Create src/core/csv.js — CommonJS exporting parseCsv(text).");
+
+  it("点名的文件缺失 ⇒ 报 gap，并点名等价布局", () => {
+    const r = checkContractPaths([T1], (p) => p === "src/core/csv/index.js");
+    expect(r.checked).toBe(1);
+    expect(r.gaps).toEqual([{ taskId: "t1", path: "src/core/csv.js", indexLayout: "src/core/csv/index.js" }]);
+  });
+
+  it("文件在 ⇒ 不报（正向对照：判据不是「永远红」）", () => {
+    const r = checkContractPaths([T1], () => true);
+    expect(r.gaps).toEqual([]);
+    expect(r.checked).toBe(1);
+  });
+
+  it("缺失且没有 index 布局可指 ⇒ indexLayout 为 null，不编造", () => {
+    const r = checkContractPaths([T1], () => false);
+    expect(r.gaps[0]?.indexLayout).toBeNull();
+  });
+
+  it("义务只认任务自己的 description：PRD 或别人的描述里点名，不算它的活儿", () => {
+    const other = task("t2", "src/report", "renderReport(rows)；它 require src/core/csv.js 里的 parseCsv");
+    // t2 的 zone 不含 src/core/csv.js ⇒ isPathInZone 挡掉，不判 t2；t1 仍然只被自己的描述牵上
+    const r = checkContractPaths([other], () => false);
+    expect(r.checked).toBe(0);
+    expect(r.gaps).toEqual([]);
+  });
+
+  it("归属不唯一 ⇒ 不判（误判的代价是一整轮修预算白烧）", () => {
+    const broad = task("t9", "src", "也涉及 src/core/csv.js 的解析");
+    const r = checkContractPaths([T1, broad], () => false);
+    expect(r.checked).toBe(0);
+    expect(r.gaps).toEqual([]);
+    expect(r.ambiguous.join(" ")).toContain("src/core/csv.js");
+    expect(r.ambiguous.join(" ")).toContain("被 t1、t9 认领");
+  });
+
+  it("裸文件名不是义务（沿用提取器的假阳防护）", () => {
+    const t = task("t3", "src", "禁止修改 package.json，产物见 README.md 之外无");
+    const r = checkContractPaths([t], () => false);
+    expect(r.checked).toBe(0);
+  });
+
+  it("穿越形状**连探针都到不了**（提取器挡在前面，守卫是第二道）", () => {
+    const calls: string[] = [];
+    const t = task("t4", "src", "读取 ../outside/leak.js 与 src/a/b.js");
+    const r = checkContractPaths([t], (p) => {
+      calls.push(p);
+      return true;
+    });
+    // `../outside/leak.js` 被提取器的起始字符守卫丢掉（前一个字符是 `/`），
+    // 所以探针一次都没收到它 —— 这条断言钉的是"IO 只打在干净相对路径上"这件事，
+    // 而不是 isProbeableRel 本身（它单独测）。
+    expect(calls).toEqual(["src/a/b.js"]);
+    expect(r.ambiguous).toEqual([]);
+  });
+
+  it("同一任务描述里点名多个文件 ⇒ 逐条核，缺哪条报哪条", () => {
+    const t = task("t5", "tests", "Write tests/csv.test.js and tests/stats.test.js using node:test.");
+    const r = checkContractPaths([t], (p) => p === "tests/csv.test.js");
+    expect(r.checked).toBe(2);
+    expect(r.gaps).toEqual([{ taskId: "t5", path: "tests/stats.test.js", indexLayout: null }]);
+  });
+});
+
+describe("提取器的形状保证 —— 契约探针只可能收到干净相对路径", () => {
+  // 这条性质用例替掉了一个 isProbeableRel 守卫分支：那条分支按构造不可达 ——
+  // 提取器的首字符正则要求词字符、含两个点的整条丢弃、前一个字符是点或斜杠时不认路径起点。
+  // 于是变异门禁判它存活（continue → break 无法被任何输入区分）。处置按本仓自己的口诀走：
+  // 答不上"这支什么时候会走到"就**简化源码**，而不是加白名单。
+  // 但那条保证本身仍要有判据 —— 判据钉在提取器上：它一旦放宽，这条用例先红。
+  const prose = [
+    "Create src/core/csv.js — CommonJS exporting parseCsv(text).",
+    "禁止修改 package.json 与 ox-scripts 目录，产物见 README.md 之外无",
+    "读取 ../outside/leak.js 与 反斜杠形状 C:absy.js 以及 /etc/passwd.js",
+    "Write tests/csv.test.js with require of node:test, then src/report/report.js",
+    "C:/x/y.js 这类绝对形状不该被认成路径",
+  ].join("\n");
+  const paths = extractDeclaredPaths(prose);
+
+  it("正向对照：确实提取到了路径（否则下面全是空转）", () => {
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths).toContain("src/core/csv.js");
+    expect(paths).toContain("tests/csv.test.js");
+  });
+
+  it("每一条都是可安全 join 的相对路径", () => {
+    for (const p of paths) {
+      expect(p.includes("..")).toBe(false);
+      expect(p.startsWith("/")).toBe(false);
+      expect(p.startsWith(String.fromCharCode(92))).toBe(false);
+      expect(/^[A-Za-z]:/.test(p)).toBe(false);
+      expect(/^[A-Za-z0-9_]/.test(p)).toBe(true);
+    }
+  });
+
+  it("穿越、绝对、裸文件名三种形状都没进来", () => {
+    expect(paths.filter((p) => p.includes("outside") || p.includes("passwd"))).toEqual([]);
+    expect(paths.filter((p) => p === "package.json" || p === "README.md")).toEqual([]);
+    expect(paths.filter((p) => /[A-Za-z]:/.test(p))).toEqual([]);
+  });
+});
+
+/**
+ * 三条"多元素"用例：变异门禁当场指出原来的用例集每轮只喂得进**一条**路径，
+ * 于是 `continue` 被换成 `break` 也没人发现 —— 那正是"第一个之后全丢"的形状。
+ */
+describe("checkContractPaths —— 多元素时的 continue 语义", () => {
+  const task = (id: string, zone: string, description: string): Task => ({
+    id,
+    title: id,
+    description,
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  it("同一任务里先出现不归本 zone 的路径，再出现归本 zone 的 ⇒ 后者仍被核", () => {
+    // 摘掉 `if (!isPathInZone(...)) continue` 的 continue 语义（改成 break）
+    // 会让第一个不匹配的路径把整条描述的后半截丢掉。
+    const t = task("t1", "src/report", "它先读 src/other/nope.js，然后写 src/report/report.js");
+    const r = checkContractPaths([t], () => false);
+    expect(r.checked).toBe(1);
+    expect(r.gaps.map((g) => g.path)).toEqual(["src/report/report.js"]);
+  });
+
+  it("先有一条归属不唯一、后有一条归属唯一 ⇒ 后者仍被判定", () => {
+    const a = task("ta", "src", "src/core/csv.js 由 src 下的任务也认领");
+    const b = task("tb", "src/core/csv", "Create src/core/csv.js");
+    const c = task("tc", "src/report", "Create src/report/report.js");
+    const r = checkContractPaths([a, b, c], () => false);
+    // src/core/csv.js 被两个 zone 认领 ⇒ ambiguous；src/report/report.js 唯一 ⇒ 必须进 gaps。
+    expect(r.ambiguous.join(" ")).toContain("src/core/csv.js");
+    expect(r.gaps.map((g) => g.path)).toEqual(["src/report/report.js"]);
+    expect(r.checked).toBe(1);
+  });
+
+  it("输出按路径排序（两条 gap 谁先谁后是稳定的，日志与测试都靠它）", () => {
+    const t = task("t9", "tests", "Write tests/stats.test.js first and tests/csv.test.js second");
+    const r = checkContractPaths([t], () => false);
+    expect(r.gaps.map((g) => g.path)).toEqual(["tests/csv.test.js", "tests/stats.test.js"]);
+    expect(r.checked).toBe(2);
   });
 });
