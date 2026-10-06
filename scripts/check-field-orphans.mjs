@@ -52,7 +52,18 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const SCAN_DIRS = ["shared"];
+// 默认只扫 `shared/`（公共契约层）。`--scan=shared,electron,headless` 可扩大范围
+// 做**量化**：电子/headless 两侧的 interface 没有 shared/ 那样的契约地位，
+// 直接进门禁会把"内部结构体的字段"也判成孤儿（假红）。先量，再决定口径。
+const scanArg = process.argv.find((a) => a.startsWith("--scan="));
+// 2026-10-07 扩面：electron / headless / src 一并纳入。
+// **先量再改**：三处逐一量化后都是 0 命中（electron 80 个 export interface、
+// headless 11、src 13），且反向注入证明判据在这些目录**仍然咬得住**
+// （往 `SaveManifestResult` 里塞一个没人读的可选字段 ⇒ 当场报出来）。
+// 所以扩面不会新增假红，只是把覆盖面从"公共契约层"扩到"全仓导出接口"。
+const SCAN_DIRS = scanArg
+  ? scanArg.slice("--scan=".length).split(",").filter(Boolean)
+  : ["shared", "electron", "headless", "src"];
 const EXT = new Set([".ts", ".tsx", ".mts"]);
 const SKIP_DIR =
   /(^|[\\/])(node_modules|dist|dist-electron|dist-headless|coverage|\.git|__fakes__)([\\/]|$)/;
@@ -238,10 +249,43 @@ for (const file of defFiles) {
   }
 }
 
+// ── 白名单失效检测（与 check-unwired 的「豁免表项失效也红」同一条纪律）──
+//
+// ACCEPTED 里每条都写着"谁会读它"。若哪天**真的接上了消费者**，或字段被改名/删掉，
+// 那条理由就过期了 —— 留着它只会让白名单永久膨胀，并让下一个人以为那格仍然没人管。
+// 一个只增不减的白名单，最后会变成"门禁绿得毫无信息"。
+const defined = new Set();
+for (const file of defFiles) {
+  const text = maskNonCode(fs.readFileSync(file, "utf8"));
+  for (const { iface, field } of interfaceFields(text)) {
+    defined.add(`${rel(file)}::${iface}.${field}`);
+  }
+}
+const stale = [];
+for (const [key] of ACCEPTED) {
+  if (!defined.has(key)) {
+    stale.push({ key, why: "字段已不在该文件里（被改名或删除）—— 条目指向了一个不存在的位置" });
+    continue;
+  }
+  const field = key.slice(key.lastIndexOf(".") + 1);
+  if (consumersOf(field).length > 0) {
+    stale.push({ key, why: "现在有仓内消费者了，ACCEPTED 的理由已过期" });
+  }
+}
+
 if (process.argv.includes("--list")) {
   console.log(`接口字段孤儿（无仓内消费者）：${orphans.length}`);
   for (const o of orphans) console.log(`  ${o.key}`);
+  console.log(`ACCEPTED 失效项：${stale.length}`);
+  for (const s of stale) console.log(`  ${s.key} —— ${s.why}`);
   process.exit(0);
+}
+
+if (stale.length > 0) {
+  console.error(`\n❌ ACCEPTED 里有 ${stale.length} 条已经失效：\n`);
+  for (const s of stale) console.error(`   ${s.key}\n     ${s.why}`);
+  console.error(`\n处置：把该条从 ACCEPTED 里删掉（若字段真的已接上消费者，那是好事，\n` + `白名单该减不该增）。\n`);
+  process.exit(1);
 }
 
 if (orphans.length > 0) {

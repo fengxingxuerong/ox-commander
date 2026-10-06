@@ -29,7 +29,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 > `build` / `build:headless` 仍用 `tsc -b`，因为它们要产出 `dist-electron`/`dist-headless`。
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
-| 4 | `check:field-orphans` | `scripts/check-field-orphans.mjs`：找「只有生产者、没有消费者」的接口字段 | 报候选清单；`shared/` 内的真孤儿 → 红（2026-10-05 首跑 23 项，逐条查证后 6 项为真） |
+| 4 | `check:field-orphans` | `scripts/check-field-orphans.mjs`：找「只有生产者、没有消费者」的接口字段 | 报候选清单；真孤儿 → 红（2026-10-05 首跑 23 项，逐条查证后 6 项为真）。**2026-10-06 扩面到 `shared` + `electron` + `headless` + `src`**（逐目录量化后三处均 0 命中 + 反向注入证明判据仍咬得住）；同批加**白名单失效也红**（ACCEPTED 项指向的字段已被消费或已消失 ⇒ 红）—— 只增不减的白名单最后会变成"绿得毫无信息" |
 | 4b | `check:exhaustive` | `scripts/check-exhaustive-maps.mjs --selftest`：以联合类型为键的映射表（`Record<Union, …>`）与穷尽 `switch` 是否**逐档登记** | 未登记（含被 `default` 吞掉的）→ 红。tsc 只兜得住前者缺键，`switch + default` 是它的盲区（2026-10-06 首跑：2 处命中，`batch-guard.ts` 的 `deny-all` 与 `App.tsx` 的 `projects` 都在靠 default 兜）。命令串带 `--selftest`：4 例 fixture 先证明判据自己有效。**它管的是登记不是行为** —— 把 case 写出来与掉进 default 运行时等价，任何单测都不会红，只有本段会红 |
 | 5 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
 | 6 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 13 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
