@@ -225,6 +225,42 @@ async function main() {
     (res) => [has(res.stderr, "读不了凭据", "说明了读不到")],
   );
 
+  // ⑨ 带 BOM 的凭据必须与无 BOM 的**同结论**（2026-10-05 D2 修复）。
+  //
+  // 凭据是给人看、给人转递的文件：用记事本 / PowerShell `Set-Content -Encoding
+  // UTF8` / Excel 打开再存回都会加 BOM，而 `JSON.parse` 不认 U+FEFF。修复前
+  // 这会让工具 exit 1（"读不了凭据"），于是"任何持有者都能独立复核"这个卖点
+  // 恰恰在最常见的流转方式下失效。
+  {
+    const body = JSON.stringify(makeReceipt(), null, 2);
+    const bomFile = path.join(tmp, "receipt-bom.json");
+    const plainFile = path.join(tmp, "receipt-plain.json");
+    fs.writeFileSync(bomFile, `\uFEFF${body}`, "utf8");
+    fs.writeFileSync(plainFile, body, "utf8");
+
+    await expect("T9 带 BOM 的凭据照样能读，且给出与无 BOM 相同的裁决", [bomFile], 4, (res) => [
+      has(res.stdout, '"verdict": "unsigned"', "给出了与无 BOM 相同的 verdict"),
+      { ok: !res.stderr.includes("读不了凭据"), what: "没有被 BOM 挡在门外" },
+    ]);
+    // 对照组：同一份内容、不带 BOM，裁决必须一致（否则 T9 只是碰巧过）
+    await expect("T9b 对照组：无 BOM 的同一份凭据裁决相同", [plainFile], 4, (res) => [
+      has(res.stdout, '"verdict": "unsigned"', "对照组给出 unsigned"),
+    ]);
+  }
+
+  // ⑩ 盖章凭据带 BOM 时，指纹校验必须照常工作（不是只放行解析）。
+  {
+    const sealed = sealReceipt(makeReceipt({ checks: [commandCheck("test", "noop.js")] }), sha256);
+    const body = JSON.stringify(sealed, null, 2);
+    const bomFile = path.join(tmp, "sealed-bom.json");
+    fs.writeFileSync(bomFile, `\uFEFF${body}`, "utf8");
+    fs.writeFileSync(path.join(tmp, "noop.js"), "// noop\n", "utf8");
+    // 盖章过 ⇒ 指纹一致 ⇒ not-replayed（5），而不是 unsigned（4）或 tampered（3）
+    await expect("T10 盖章凭据带 BOM：指纹一致，仍是 not-replayed（5）", [bomFile], 5, (res) => [
+      has(res.stdout, '"verdict": "not-replayed"', "指纹校验通过，给出 not-replayed"),
+    ]);
+  }
+
   // 收尾：只删本脚本自己造的有限几个文件
   for (const n of fs.readdirSync(tmp)) {
     try {

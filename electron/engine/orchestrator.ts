@@ -163,15 +163,29 @@ function firstLine(digest: string): string {
 }
 
 /**
- * Repair rounds ran out while verification still failed.
+ * Repair rounds ran out while the run still could not be delivered.
  *
  * A dedicated class (rather than a bare `Error`) so hosts can tell
  * "spent the budget" apart from "something broke" — the headless protocol maps
- * this to exit code 2 instead of 1. The message keeps the historic wording.
+ * this to exit code 2 instead of 1.
+ *
+ * ⚠️ `message` 必须区分**验证红着**与**验证全绿但任务没做出来**（2026-10-05）。
+ * 旧文案只有一种说法，而 `no-agent` 那种死因下验证必然全绿 —— 于是这条错误
+ * 会与同一份凭据里 `ok: true` 的 `checks` 互相打脸，宿主日志里读起来像是
+ * 验证命令挂了。**这个 class 的名字与 exit code 都不改**（它们是协议的一部分），
+ * 只把话说准。
  */
 export class VerificationExhaustedError extends Error {
-  constructor(public readonly maxRounds: number) {
-    super(`verification still failing after ${maxRounds} repair rounds`);
+  constructor(
+    public readonly maxRounds: number,
+    /** 验证命令是否真的红着；false 表示"全绿但任务没做出来"。 */
+    public readonly verificationFailed: boolean = true,
+  ) {
+    super(
+      verificationFailed
+        ? `verification still failing after ${maxRounds} repair rounds`
+        : `${maxRounds} repair rounds spent; verification passed but tasks did not complete`,
+    );
     this.name = "VerificationExhaustedError";
   }
 }
@@ -391,6 +405,35 @@ export class OrchestratorEngine {
     };
   }
 
+  /**
+   * 修完轮次耗尽后，凭据里那句"为什么没交付"。
+   *
+   * ⚠️ 提取成纯函数是因为**它必须能被单独测**：原文案把"开发任务挂了但验证全绿"
+   * 说成"验证仍未通过"，而同一份凭据的 `checks` 里躺着 `ok: true`。
+   * 这类矛盾写在 `emitReceipt` 的参数里没法测 —— 只能对着一份跑出来的凭据看，
+   * 而那需要一整条链路。
+   *
+   * @param report    最终一次验证的报告（`passed` 才是"验证这一步"的结论）
+   * @param maxRounds 重修轮次上限
+   * @param outcomes  每个任务的执行结果（`!ok` = 没做出来，与验证无关）
+   */
+  private stallReasonFor(
+    report: { passed: boolean },
+    maxRounds: number,
+    outcomes: Array<{ ok: boolean }>,
+  ): string {
+    const failed = outcomes.filter((o) => !o.ok).length;
+    if (report.passed) {
+      // 验证全绿却没交付 —— 必须**明说**是开发任务没做出来，否则读凭据的人
+      // 会以为验证命令红着，回头去查一个根本没红的日志。
+      return (
+        `重修 ${maxRounds} 轮后仍有 ${failed} 个任务未能完成（验证命令全部通过，` +
+        "但产物并未做出来）"
+      );
+    }
+    return `重修 ${maxRounds} 轮后验证仍未通过`;
+  }
+
   private emitReceipt(args: {
     outcome: ReceiptOutcome;
     batches: Task[][];
@@ -417,9 +460,22 @@ export class OrchestratorEngine {
           skipped: args.skipped.has(t.id),
           done: args.allDone.has(t.id),
           // 没有派发结果时不给 `outcomeOk`：那与"派发过且成功"是两种事实。
-          ...(outcome ? { outcomeOk: outcome.ok } : {}),
+          outcomeOk: outcome?.ok,
         }),
         attempts: args.attempts.get(t.id) ?? 0,
+        // ⚠️ **必须写在返回对象上，不能只喂给 `receiptTaskStatus`**
+        // （2026-10-05 分流审计）。旧写法把这个展开放在了上面的**入参**里：
+        //
+        //   status: receiptTaskStatus({ …, ...(outcome ? { outcomeOk: outcome.ok } : {}) }),
+        //
+        // 它只参与了 status 的计算，**从没进过 tasks[]**。于是
+        // `status: "failed"` 与 `tasks[].outcomeOk` 缺席同时出现 ——
+        // 而 `ReceiptTask` 里连字段都没有，所以 TS 也不报错，
+        // `grep outcomeOk` 全仓零消费侧 ⇒ 这个错配从没有任何一侧能被发现。
+        //
+        // `status` 是四态归并的结果，**丢掉了来路**：只有 `outcomeOk` 能区分
+        // "这次跑成了"与"上一轮跑成的、这次只是恢复"—— 而两者排查路径完全不同。
+        ...(outcome ? { outcomeOk: outcome.ok } : {}),
         ...(outcome?.agentId ? { agentId: outcome.agentId } : {}),
         ...(outcome?.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
         // 2026-09-29：原为 `...(outcome?.errorClass ? { … } : {})`。消费侧是可选
@@ -741,9 +797,17 @@ export class OrchestratorEngine {
           }
           const summary = buildEscalationSummary({
             taskTitle: t.title,
+            // ⚠️ 兜底值必须是**派发次数**口径（2026-10-05）：`round + 1` 里那个
+            // `+1` 正是"首次派发"，与 `attempts` 同一量纲。而旧注释说这是
+            // "重修轮次"，若哪天有人照那个注释改成 `round`，弹窗就会印出
+            // "已尝试 N 次（重修 N-1 轮）" 这种自相矛盾的话。
+            // 走到这里的任务都在 `failedTasks` 里，正常都有 attempts；兜底只为类型。
             attemptsSoFar: attempts.get(t.id) ?? round + 1,
             maxRepairRounds: maxRounds,
             lastErrorDigest: routed.byTask.get(t.id) ?? lastDigest,
+            // 措辞必须跟着验证结论走：死因是 no-agent 时验证必然全绿，
+            // 弹窗却说"仍未通过验证"，用户会照着错误诊断去选"重派"，再烧一轮。
+            verificationPassed: report.passed,
           });
           this.cb.onEscalation(t.id, summary);
 
@@ -824,9 +888,23 @@ export class OrchestratorEngine {
           // 卡住的一律记成"没验过"：验证命令跑了但红着，与"根本没跑"在凭据里
           // 是同一种结论（这次运行没有可对外担保的东西），差别写在 reason 里。
           verified: false,
-          unverifiedReason: `重修 ${maxRounds} 轮后验证仍未通过`,
+          // ⚠️ **reason 必须说清到底卡在哪一步**（2026-10-05 运行时观察发现的
+          // 自相矛盾之一）。这一段的真实处境有两种，之前的措辞只覆盖了其中一种：
+          //
+          //   · 验证命令真的红着            → report.passed === false；
+          //   · 验证命令全绿、但开发任务失败 → report.passed === true（!!）
+          //
+          // 第二种极其常见：任务死因是 no-agent（调度器没匹配到执行者）时，
+          // 项目文件压根没人动，基线又本来就是绿的，于是验证**必然**全绿。
+          // 而 `checks[0].ok === true` 与 `unverifiedReason` 里那句"验证仍未通过"
+          // 摆在同一份凭据里 —— 拿到凭据的人只能二选一地相信。这不是措辞瑕疵，
+          // 是同一份文件里的两句话互相打脸。
+          //
+          // 引擎在 :701 自己就清楚这件事（"存在失败的开发任务，即使构建通过也不允许交付"），
+          // 说明它**知道**两者不同，却没把这份知识带进凭据。
+          unverifiedReason: this.stallReasonFor(report, maxRounds, outcomes),
         });
-        throw new VerificationExhaustedError(maxRounds);
+        throw new VerificationExhaustedError(maxRounds, !report.passed);
       }
       round += 1;
       save();

@@ -63,8 +63,39 @@ export interface ReceiptTask {
   zone: string;
   status: ReceiptTaskStatus;
   attempts: number;
+  /**
+   * 这次派发**本身**成功了吗（`DispatchOutcome.ok`）。
+   *
+   * ⚠️ 与 `status` 是两件事，缺一个都不成（2026-10-05 分流审计）。
+   *
+   * 它此前**只被当作 `receiptTaskStatus` 的入参**用（`orchestrator.ts` 里
+   * `...(outcome ? { outcomeOk: outcome.ok } : {})` 展开进了那个**入参对象**），
+   * 而 `ReceiptTask` 里**根本没有这个字段** —— 于是那份展开被 TypeScript
+   * **静默丢弃**，真实凭据里从来就没有过 `outcomeOk`。
+   * 写它的那行注释说"没有派发结果时不给 outcomeOk"，听起来是承诺，
+   * 实际是一个**从没兑现过的承诺**；而 `grep outcomeOk` 零消费侧，
+   * 所以这个丢失从未被发现。
+   *
+   * 为什么必须留着它：`status` 是**四态**的归并结果，丢掉了来路。
+   *   - `done`    可能来自"这次派发成功"，也可能来自**恢复的 allDone**；
+   *   - `skipped` 是人的决定，与派发结果无关；
+   *   - `failed`  才一定意味着 `outcomeOk === false`。
+   * 没有它，拿到凭据的人无法把"这次跑成了"与"上一轮跑成的、这次只是恢复"
+   * 区分开 —— 而**这两者的排查路径完全不同**。
+   *
+   * 缺席 = 从未派发过（与"派发过且成功"是两种事实，不许合并）。
+   */
+  outcomeOk?: boolean;
   agentId?: string;
   durationMs?: number;
+  /**
+   * 失败大类。
+   *
+   * 缺席 = 没有可归类的失败原因（**不是** `"unknown"`）—— ��看板上
+   * `store.ts` 会把缺省填成 `"unknown"`，那是**另一个面**的口径。
+   * 两者不必强行统一（看板要渲染，机器判读的原样更诚实），
+   * 但**差异必须留着可见**，不能各说各话还以为是同一个数。
+   */
   errorClass?: string;
 }
 
@@ -265,17 +296,53 @@ export function receiptHeadlineFor(input: {
   const taskPart = `${c.done}/${c.total} 个任务完成`;
   const skipPart = c.skipped > 0 ? `（跳过 ${c.skipped} 个）` : "";
   const roundPart = input.rounds > 0 ? `，重修 ${input.rounds} 轮` : "";
+  // 越权在**每一条出口**上都要说（2026-10-05 conflict 账审计）。
+  //
+  // 旧写法只挂在 delivered 那条尾巴上，于是 blocked 时一次
+  // `unauthorized-write`（改了 zone 外的 `package.json`）**整条 headline 里
+  // 一个字都不提**。实测真实 run：越权已被引擎检出并按仲裁处置，
+  // `conflicts[]` 与 `counts.conflicts` 都对，可 headline 长这样：
+  //
+  //   未交付：0/2 个任务完成，1 个失败、1 个未启动。改动已留在工作区，未通过门禁
+  //
+  // 读者据此会以为是普通失败，然后去看测试日志 —— 而真正发生的是
+  // "智能体试图改 zone 外的文件"。这是**安全事件**，不是交付瑕疵，
+  // 不该只在成功那条路上顺带提一句。
+  const conflictPart = c.conflicts > 0 ? `；发生 ${c.conflicts} 次越权并已处置` : "";
   if (input.outcome === "blocked") {
-    const why = [c.failed > 0 ? `${c.failed} 个失败` : "", c.pending > 0 ? `${c.pending} 个未启动` : ""]
+    // ⚠️ **"为什么没交付"必须也看验证这一侧**（2026-10-05 凭据自洽性审计）。
+    //
+    // 旧写法只从任务账里找原因（failed / pending），于是当
+    // **任务全做出来了、只有验证命令红着**时，两个数都是 0，兜底话术
+    // "仍有任务未完成" 就顶了上来。而同一句话的前半截是
+    // "2/2 个任务完成" —— 于是凭据自己打自己的脸：
+    //
+    //   未交付：2/2 个任务完成，仍有任务未完成，重修 1 轮。
+    //
+    // 这不是罕见的边角：`counts.checksFailed > 0 && failed == 0 && pending == 0`
+    // 是**最普通的一种红**（代码写完了，构建/测试没过）。实测真实 run 就是这个形状，
+    // 而这个分支此前没有任何断言盯着（grep「仍有任务未完成」零命中）。
+    //
+    // 结论优先按验证说，因为那是"东西做了但门禁没过"—— 与"东西没做出来"
+    // 是两回事，读者要据此决定下一步（改代码 vs 改配置）。
+    const why = [
+      c.checksFailed > 0 ? `${c.checksFailed} 条验证命令未通过` : "",
+      c.failed > 0 ? `${c.failed} 个失败` : "",
+      c.pending > 0 ? `${c.pending} 个未启动` : "",
+    ]
       .filter((s) => s !== "")
       .join("、");
-    return `未交付：${taskPart}${skipPart}，${why || "仍有任务未完成"}${roundPart}。改动已留在工作区，未通过门禁`;
+    // 三处都为 0 时才算真的说不出原因（例如凭据被外部改写），那才留兜底话术 ——
+    // 但此时它说的是"任务账上什么都没记"，与前面 2/2 完成并不矛盾。
+    const tail = why || "凭据里没有记录任何失败项";
+    return `未交付：${taskPart}${skipPart}，${tail}${conflictPart}${roundPart}。改动已留在工作区，未通过门禁`;
   }
   if (!input.verified) {
-    return `已交付但**未经构建/测试验证**：${input.unverifiedReason ?? "没有验证命令实际运行过"}（${taskPart}${skipPart}）`;
+    // 这条出口此前同样漏了越权（第十五轮补 blocked、这轮补它）——
+    // 同一处疏漏的两个面。已交付但没验证时，越权照样发生过，照样要说。
+    return `已交付但**未经构建/测试验证**：${input.unverifiedReason ?? "没有验证命令实际运行过"}（${taskPart}${skipPart}）${conflictPart}`;
   }
   const checkPart = `${input.checks} 条验证命令通过`;
-  const conflictPart = c.conflicts > 0 ? `；发生 ${c.conflicts} 次越权并已处置` : "";
   const prePart = c.preexisting > 0 ? `（其中 ${c.preexisting} 条本次运行前就是红的）` : "";
   return `已交付：${taskPart}${skipPart}${roundPart}；${checkPart}${prePart}${conflictPart}`;
 }

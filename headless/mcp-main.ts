@@ -15,9 +15,51 @@
 import * as readline from "node:readline";
 import { handleMcpMessage, type ServeHttp } from "./mcp";
 
-function serveArgv(): string {
-  const arg = process.argv.find((a) => a.startsWith("--serve-url="));
-  return arg ? arg.slice("--serve-url=".length) : "http://127.0.0.1:8787";
+/**
+ * 解析 `--serve-url=`。
+ *
+ * ⚠️ **拼错不能静默回落**（2026-10-05，D11 同构修复）：原实现只 `find` 到就
+ * 用、找不到就用默认 `http://127.0.0.1:8787`，于是
+ *
+ *   --serve=http://x   （本仓库第四轮我自己踩过的那一个：文档写 --serve-url=）
+ *   --serve_url=http://x
+ *   --serve-url        （有 flag 无值）
+ *
+ * 全部回落到默认端口，**stderr 还照常打印 `serve-url=http://127.0.0.1:8787`** ——
+ * 那行看起来像"我听懂了"，实际是默认值，于是每次工具调用都失败，而我把
+ * 矛头指向了 MCP 服务本身。实测就是那么查了半天才发现是自己的 flag 写错。
+ *
+ * 与 `serve-main` 的 `--port` 同一处置：拿不准就 exit 1 并说清实际收到的值。
+ * **不给** `--serve-url` 仍然是合法默认（本机 8787 就是常规用法）。
+ */
+export function serveArgv(argv: string[]): { base?: string; error?: string } {
+  for (const a of argv) {
+    if (a === "--serve-url") {
+      return { error: "--serve-url 需要一个值（正确写法：--serve-url=http://127.0.0.1:8787）" };
+    }
+    if (a.startsWith("--serve-url=")) {
+      const raw = a.slice("--serve-url=".length).trim();
+      if (raw === "") return { error: "--serve-url= 后面是空的（正确写法：--serve-url=http://127.0.0.1:8787）" };
+      let u: URL;
+      try {
+        u = new URL(raw);
+      } catch {
+        return { error: `--serve-url 不是合法 URL：${JSON.stringify(raw)}` };
+      }
+      if (u.protocol !== "http:" && u.protocol !== "https:") {
+        return { error: `--serve-url 只支持 http/https，实际收到：${u.protocol}` };
+      }
+      return { base: raw };
+    }
+  }
+  // 拼错的近似 flag 也要报错：--serve / --serve_url / --serveurl 都曾经
+  // 静默回落（本仓库第四轮真踩过 --serve=）。宁可多问一句。
+  for (const a of argv) {
+    if (/^-{1,2}serve[-_]?url/i.test(a) || a.startsWith("--serve=")) {
+      return { error: `无法识别的参数：${JSON.stringify(a)}（正确写法：--serve-url=<http(s)://host:port>）` };
+    }
+  }
+  return {};
 }
 
 function makeServeHttp(base: string): ServeHttp {
@@ -39,7 +81,12 @@ function makeServeHttp(base: string): ServeHttp {
 }
 
 async function main(): Promise<void> {
-  const base = serveArgv();
+  const parsedArgv = serveArgv(process.argv.slice(2));
+  if (parsedArgv.error) {
+    process.stderr.write(`[ox-mcp] ${parsedArgv.error}\n`);
+    process.exit(1);
+  }
+  const base = parsedArgv.base ?? "http://127.0.0.1:8787";
   const http = makeServeHttp(base);
   process.stderr.write(`[ox-mcp] serve-url=${base}（stdout 是协议通道，本行在 stderr）\n`);
 

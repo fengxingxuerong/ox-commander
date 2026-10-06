@@ -212,4 +212,49 @@ if (importsTestFile.length > 0) {
   console.error("\n处置：把共享夹具挪进 `src/__fakes__/`（check-unwired 已跳过该目录），两边都从那里 import。\n");
   process.exit(1);
 }
+
+/**
+ * ④ `*.smoke.test.ts`：必须**仍然**被一个真实条件 `skipIf` 门控。
+ *
+ * 为什么盯这个（2026-10-05 核实登记项 2）：
+ * `npm test` 的头条是 `Tests 1598 passed | 9 skipped`，那 9 个 skip 是 SenseNova
+ * 与沙箱内真实 LLM 调用 —— 它们需要 `OX_SMOKE=1` **和**一把真 key，**该**跳过，
+ * 这一点不是问题。问题在**没人能证明它还在门控**：把
+ * `describe.skipIf(!enabled)` 改成 `describe` 不会让任何门禁变红，只会让
+ * `npm test` 变成"跑真 API"，然后在某台有网的机器上开始烧钱或 429 ——
+ * 一个"以为在跑、其实没跑"的同族反向缺陷。
+ *
+ * 判定：文件里有 `skipIf(`，且条件**引用了至少一个进程环境变量**。
+ * 只有 `skipIf(true)` 这种写法会被判红 —— 它把"该跑的不跑"伪装成"门控"。
+ */
+const smokeFiles = onDisk.filter((f) => /\.smoke\.test\.[cm]?[jt]sx?$/.test(f));
+const ungated = [];
+for (const f of smokeFiles) {
+  const src = fs.readFileSync(path.join(ROOT, f), "utf8");
+  const conditions = [...src.matchAll(/skipIf\(\s*([^)]*)\)/g)].map((m) => m[1]);
+  if (conditions.length === 0) {
+    ungated.push([f, "没有 skipIf —— 该文件会无条件执行真实外部调用"]);
+    continue;
+  }
+  // 条件里必须出现 process.env（允许 `!enabled` 这种间接变量：那行定义处会带 env）
+  const mentionsEnv =
+    conditions.some((c) => /process\.env/.test(c)) || /process\.env/.test(src);
+  if (!mentionsEnv) {
+    ungated.push([f, "skipIf 的条件与进程环境无关 —— 门控形同虚设"]);
+  }
+}
+if (ungated.length > 0) {
+  console.error(`\nFAIL: ${ungated.length} 个 smoke 测试文件没有真实的 skip 门控：`);
+  for (const [f, why] of ungated) console.error(`  ${f}  ${why}`);
+  console.error(
+    "\n这些文件打真实外部 API（SenseNova / LLM 端点）。门控失效不会让任何门禁变红，\n" +
+      "只会让 `npm test` 在有网的机器上开始消耗真实额度或被 429。\n" +
+      "处置：用 `describe.skipIf(!enabled)` 门控，且 `enabled` 必须由 `process.env.OX_SMOKE`\n" +
+      "      与 key 是否存在共同决定。\n",
+  );
+  process.exit(1);
+}
+console.log(
+  `PASS: ${smokeFiles.length} 个 smoke 测试文件均受 process.env 门控（默认 npm test 不出网）`,
+);
 console.log("  跨测试文件 import：0 处（夹具没让用例重复注册）");

@@ -7,6 +7,7 @@ import {
   CancelledError,
   isCancelled,
   OrchestratorEngine,
+  VerificationExhaustedError,
   type OrchestratorDeps,
   type RunSnapshot,
 } from "../electron/engine/orchestrator";
@@ -1057,6 +1058,33 @@ describe("OrchestratorEngine · 断点续跑 journal", () => {
     expect(last.attempts).toEqual({ A: 1, B: 1 });
   });
 
+  /**
+   * 反过来也钉一下：**计划快照不该预写 attempts**。
+   *
+   * `save()` 在循环外先跑一次（:539），那时一个任务都还没派发。若有人为了
+   * "保险"把 attempts 提前写进去，恢复后会得到"从没发生过"的轮次 ——
+   * 比少记更糟：它会让上限判断偏松，用户以为自己还有预算。
+   */
+  it("计划快照里 attempts 是空的（不能预写没发生过的派发）", () => {
+    // 只验形状，不起引擎：这条关心的是"第一份快照长什么样"。
+    // 真正的反面风险是**少记**（见上面取消那条），这条管住"多记"。
+    const saved: RunSnapshot[] = [];
+    const engine = silentEngine({
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(new Set(["A", "B"]), []),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      journal: { save: (s) => saved.push(s) },
+    });
+    return engine.execute(twoBatchTasks(), ".").then(() => {
+      expect(saved.length).toBeGreaterThan(0);
+      // 计划快照：一个都还没派发
+      expect(saved[0]!.attempts).toEqual({});
+      // 收尾快照：两次派发都记着
+      expect(saved.at(-1)!.attempts).toEqual({ A: 1, B: 1 });
+    });
+  });
+
   it("resume 恢复快照：已完成任务不再派发，直接续接后续批次", async () => {
     const dispatched: string[] = [];
     const deps: OrchestratorDeps = {
@@ -1666,9 +1694,14 @@ describe("OrchestratorEngine · 独立样本冒烟（防自证盲区）", () => 
     const events: string[] = [];
     // A/B 永远失败（okIds 空）→ 重修预算耗尽抛出，冒烟全程未运行
     // 预期 ["A","A"]：B 依赖 A，A 永不成功 → 依赖门每轮阻断 B（依赖跳过层的正确行为）
+    //
+    // ⚠️ 这里断言的是 **class** 而不是 message（2026-10-05）：本用例关心的是
+    // "冒烟有没有被运行"，而错误文案后来被拆成两种（验证红着 / 验证全绿但任务
+    // 没做出来）—— 这条引擎正是后者。钉死文案会让这条与被测点无关的断言
+    // 承担一份它并不理解的语义。
     await expect(
       smokeEngine(new Set(), dispatched, events).execute(twoBatchTasks(), root, { smoke }),
-    ).rejects.toThrow(/verification still failing/);
+    ).rejects.toBeInstanceOf(VerificationExhaustedError);
     expect(dispatched).toEqual(["A", "A"]);
     expect(events.some((l) => l.includes("独立样本冒烟"))).toBe(false);
   });
@@ -1747,6 +1780,59 @@ describe("OrchestratorEngine · 取消时给在飞任务补终态", () => {
     await expect(eng.execute([TASKS], ".")).rejects.toBeInstanceOf(CancelledError);
     expect(statuses).toContain("t1:running");
     expect(statuses.at(-1)).toBe("t1:cancelled");
+  });
+
+  /**
+   * **取消时在飞任务的派发次数仍要写进 journal**（2026-10-05 断点续跑审计）。
+   *
+   * 这条钉的是一个**差点被改坏**的行为。静态读代码看：`attempts.set()` 在派发前
+   * （`orchestrator.ts:635`），而 `save()` 只在**批次跑完之后**（:691）——
+   * 看着像"派发没落盘"，恢复后 `attempts` 从头算，烧掉的预算没人记得。
+   * 第一版我正是这么判的，还准备去加 save()。
+   *
+   * 真跑一次才发现**不是**：`cancel()` 调 `abortInFlight()`，它让在跑的批次
+   * **以 cancelled 收场而不是悬着**，于是控制流照常走到 :691，attempts 落盘了。
+   * 实测（真 serve run + 读 journal 文件）：派发 1 次 → 取消 → 恢复后凭据
+   * `attempts=2`，与真实派发数一致。
+   *
+   * 所以那条 save 是**承重的**：哪天有人把 `abortInFlight` 换成"直接抛、
+   * 不等批次收场"（就像上面那个用 `throw` 的用例），真实运行就会丢掉计数。
+   *
+   * ⚠️ 本用例必须让 `runBatch` **正常返回**（生产里的形状），而不是像上一条那样
+   * 直接抛 —— 抛的那条走不到 :691，而那正是它没断言 journal 的原因。
+   */
+  it("取消后批次收场时，journal 里的 attempts 记着这次派发", async () => {
+    const snapshots: RunSnapshot[] = [];
+    let eng!: OrchestratorEngine;
+    const scheduler = {
+      async runBatch(ts: readonly { id: string }[]) {
+        eng.cancel(); // 用户在批次途中点了取消
+        // 生产形状：abortInFlight 让批次以"失败/取消"收场并正常返回
+        return ts.map((t) => ({ taskId: t.id, ok: false, logDigest: "cancelled" }));
+      },
+      abortInFlight: async () => 1,
+    } as unknown as Scheduler;
+    eng = new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler,
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+        journal: { save: (s) => snapshots.push(s) },
+      },
+      {
+        onStage: () => undefined,
+        onLog: () => undefined,
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    await eng.execute([TASKS], ".").catch(() => undefined);
+
+    // 派发过就必须在快照里看得见 —— 恢复后才知道"这次已经烧过一轮"
+    const last = snapshots[snapshots.length - 1];
+    expect(last?.attempts).toEqual({ t1: 1 });
   });
 
   /**
@@ -2150,6 +2236,58 @@ describe("OrchestratorEngine · 交付凭据", () => {
     ]);
   });
 
+  /**
+   * `outcomeOk` 必须真的出现在凭据里（2026-10-05 分流审计）。
+   *
+   * 缺陷：`ReceiptTask` 原本**没有** `outcomeOk` 字段，而 `orchestrator.ts:463`
+   * 把它展开进任务对象 —— TypeScript **静默丢弃**，于是真实凭据里
+   * 从来没有过这个键。写那行的注释说"没有派发结果时不给 outcomeOk"，
+   * 实际是**从没兑现过的承诺**。
+   *
+   * 为什么单测没抓到：已有的凭据用例都只 `toMatchObject([...])` 断言
+   * `status`/`agentId`，**没断言过任何"不该出现/该出现的键"**，
+   * 而 `grep outcomeOk` 全仓零消费侧 ⇒ 没有任何一侧会因此变红。
+   *
+   * 这就是**端到端断言**存在的理由：它不看某几个字段对不对，
+   * 而看"这份凭据讲的故事完不完整"。
+   */
+  it("成功派发的任务带着 outcomeOk=true（缺了这个键，status 就没了来路）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({ scheduler: attributed, onReceipt: (r) => seen.push(r) });
+    await eng.execute([TASKS], ".");
+
+    const t = seen[0]!.tasks[0]!;
+    expect(t.status).toBe("done");
+    expect(t.outcomeOk).toBe(true); // ← 这一行在修之前是 undefined
+    // `attempts` 与 `outcomeOk` 是**同源**的两份事实（都来自这一次派发）。
+    // 顺带钉住它：反注入把 attempts 写死 0 时，只有这里能咬住 ——
+    // journal 那几条断言管的是 RunSnapshot，管不到凭据。
+    expect(t.attempts).toBe(1);
+  });
+
+  it("失败派发的任务带着 outcomeOk=false（不许只靠 status 传达）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const failing = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({
+          taskId: t.id, ok: false, logDigest: "boom", events: [], errorClass: "timeout",
+        }));
+      },
+    } as unknown as Scheduler;
+    const eng = buildReceiptEngine({
+      scheduler: failing, onReceipt: (r) => seen.push(r), verify: async () => makeReport(true),
+    });
+    await eng.execute([TASKS], ".").catch(() => undefined);
+
+    const t = seen.at(-1)!.tasks[0]!;
+    expect(t.status).toBe("failed");
+    expect(t.outcomeOk).toBe(false);
+    expect(t.errorClass).toBe("timeout");
+    // 失败那次也是**真派发过**的 —— 计数与 outcomeOk 必须一起涨，
+    // 否则"派发过却像没派发"会让重修预算算错。
+    expect(t.attempts).toBeGreaterThanOrEqual(1);
+  });
+
   it("零验证命令的交付要自己说破未经构建/测试验证", async () => {
     const seen: DeliveryReceipt[] = [];
     const eng = buildReceiptEngine({
@@ -2168,7 +2306,16 @@ describe("OrchestratorEngine · 交付凭据", () => {
 
   it("重修预算耗尽发 blocked 凭据，并写明卡在哪", async () => {
     const seen: DeliveryReceipt[] = [];
-    const eng = buildReceiptEngine({ scheduler: alwaysFail, maxRounds: 0, onReceipt: (r) => seen.push(r) });
+    // 验证红着（verify 默认 makeReport(true) 是通过的，这里显式改成红）
+    const eng = buildReceiptEngine({
+      scheduler: alwaysFail,
+      maxRounds: 0,
+      verify: async () => ({
+        passed: false,
+        results: [{ kind: "build", ok: false, exitCode: 1, logDigest: "err", durationMs: 10 }],
+      }),
+      onReceipt: (r) => seen.push(r),
+    });
 
     await expect(eng.execute([TASKS], ".")).rejects.toThrow(/repair rounds/);
 
@@ -2177,6 +2324,127 @@ describe("OrchestratorEngine · 交付凭据", () => {
     expect(seen[0]!.verified).toBe(false);
     expect(seen[0]!.unverifiedReason).toContain("验证仍未通过");
     expect(seen[0]!.tasks[0]).toMatchObject({ id: "t1", status: "failed" });
+  });
+
+  /**
+   * **凭据不得自相矛盾**（2026-10-05 运行时观察发现）。
+   *
+   * 真实 run（`.tmp-runtime.mjs` 观测到的那一次）里同时出现：
+   *   checks[0].ok = true      验证命令确实是过的
+   *   unverifiedReason = "重修 1 轮后验证仍未通过"
+   * 而任务真实死因是 `no-agent` —— 调度器没匹配到执行者，项目文件压根没人动，
+   * 基线本来就绿，于是验证**必然**全绿。拿到凭据的人只能二选一地相信。
+   *
+   * 注意 `alwaysFail` + `makeReport(true)`（验证通过）正是这个形状：
+   * 第一版的断言 `toContain("验证仍未通过")` 在这里也是绿的 —— 它**测错了东西**。
+   */
+  it("验证全绿但任务没做出来：凭据说「任务未完成」，且不得说「验证未通过」", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({ scheduler: alwaysFail, maxRounds: 0, onReceipt: (r) => seen.push(r) });
+
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow();
+
+    const r = seen[0]!;
+    expect(r.verified).toBe(false);
+    // 不许说"验证仍未通过" —— 那是这份文件里另一段话（checks）直接否掉的
+    expect(r.unverifiedReason).not.toContain("验证仍未通过");
+    expect(r.unverifiedReason).toContain("任务未能完成");
+    // 并且必须点明验证是过的，否则读凭据的人会以为要去查一个根本没红的日志
+    expect(r.unverifiedReason).toContain("验证命令全部通过");
+  });
+
+  it("凭据的每一句话都要与 checks 一致（不变量：全绿时不得说验证未通过）", async () => {
+    // 直接把不变量写成断言，而不是再抄一遍某句文案。
+    for (const passed of [true, false]) {
+      const seen: DeliveryReceipt[] = [];
+      const eng = buildReceiptEngine({
+        scheduler: alwaysFail,
+        maxRounds: 0,
+        verify: async () => ({
+          passed,
+          results: [{ kind: "build", ok: passed, exitCode: passed ? 0 : 1, logDigest: "err", durationMs: 10 }],
+        }),
+        onReceipt: (x) => seen.push(x),
+      });
+      await expect(eng.execute([TASKS], ".")).rejects.toThrow();
+      const r = seen[0]!;
+      const checksAllGreen = r.checks.every((c) => c.ok);
+      const saysVerificationFailed = (r.unverifiedReason ?? "").includes("验证仍未通过");
+      // 前提是 checks 非空（否则"全绿"是空集的真，不构成证据）
+      expect(r.checks.length, "用例前提：checks 非空").toBeGreaterThan(0);
+      expect(checksAllGreen && saysVerificationFailed, `passed=${passed}`).toBe(false);
+    }
+  });
+
+  it("抛出的错也分得清：验证红着 vs 验证全绿但任务没做出来", async () => {
+    // 这条错误会进宿主日志和 SSE 的 error 事件。旧文案只有一种说法，于是
+    // "verification still failing" 会与同一份凭据里 ok:true 的 checks 打脸。
+    // class 名与 exit code 都不动（它们是协议的一部分），只把话说准。
+    const build = (passed: boolean) =>
+      buildReceiptEngine({
+        scheduler: alwaysFail,
+        maxRounds: 0,
+        verify: async () => ({
+          passed,
+          results: [{ kind: "build", ok: passed, exitCode: passed ? 0 : 1, logDigest: "err", durationMs: 10 }],
+        }),
+        onReceipt: () => undefined,
+      });
+
+    // 验证红着：老措辞保留（宿主可能有依赖它的匹配）
+    await expect(build(false).execute([TASKS], ".")).rejects.toThrow(/verification still failing/);
+    // 验证全绿：不得说 verification failing
+    let err: Error | undefined;
+    await build(true)
+      .execute([TASKS], ".")
+      .catch((e: Error) => (err = e));
+    expect(err!.message).not.toMatch(/verification still failing/);
+    expect(err!.message).toMatch(/verification passed but tasks did not complete/);
+    // 两种情形都还是同一个 class —— 退出码语义不变
+    expect(err).toBeInstanceOf(VerificationExhaustedError);
+    // 且标志位必须如实携带，供宿主分辨
+    expect((err as unknown as { verificationFailed: boolean }).verificationFailed).toBe(false);
+  });
+
+  /**
+   * 引擎**真的**把验证结论递给了 escalation（2026-10-05 反向注入⑤）。
+   *
+   * `prompts.test.ts` 里那几条是直接调 `buildEscalationSummary` 并自己传
+   * `verificationPassed` 的 —— 它们管得住措辞，**管不住连线**：
+   * 把 `orchestrator.ts` 里那行 `verificationPassed: report.passed` 改成
+   * `false`，上面全部照绿，而真实 run 的弹窗又变回自相矛盾。
+   * 这类"参数写了但没人传"的漏洞只有端到端断言抓得到。
+   */
+  it("escalation 的措辞跟着真实验证结论走（连线，不是参数）", async () => {
+    const seen: string[] = [];
+    const run = async (passed: boolean) => {
+      const eng = buildReceiptEngine({
+        scheduler: alwaysFail,
+        maxRounds: 0,
+        verify: async () => ({
+          passed,
+          results: [{ kind: "build", ok: passed, exitCode: passed ? 0 : 1, logDigest: "err", durationMs: 10 }],
+        }),
+        onReceipt: () => undefined,
+        requestEscalationDecision: async (_id, summary) => {
+          seen.push(summary);
+          return "skip";
+        },
+      });
+      await eng.execute([TASKS], ".").catch(() => undefined);
+    };
+
+    await run(true);
+    await run(false);
+
+    expect(seen.length).toBeGreaterThanOrEqual(2);
+    const [whenGreen, whenRed] = [seen[0]!, seen[seen.length - 1]!];
+    // 验证全绿：不得说"仍未通过验证"
+    expect(whenGreen).not.toContain("仍未通过验证");
+    expect(whenGreen).toContain("仍未完成");
+    // 验证红着：老措辞
+    expect(whenRed).toContain("仍未通过验证");
+    expect(whenRed).not.toContain("仍未完成");
   });
 
   it("用户跳过的任务在凭据里记成跳过，而不是完成", async () => {

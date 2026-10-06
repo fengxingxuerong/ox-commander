@@ -252,6 +252,160 @@ describe("FileJournal", () => {
     expect(journal.unauthorized(changes, ["src", "rogue"])).toEqual([]);
   });
 
+  /**
+   * 同 tick 越权写入：mtime 分辨率约 1ms，而 `begin()` 与智能体写入之间可能
+   * 落在同一个 tick —— 此时 size 与 mtime 双同，廉价信号判"没变"。
+   *
+   * 这不是假设：2026-10-05 实测（win32）立即写入的等长改写**漏检率约 75%**，
+   * 而漏检的后果是 zone 外的文件既不回滚、批次还照常判 ok。
+   *
+   * 用 `settleWindowMs: 0` 显式关掉等待窗，逼出**纯靠内容摘要**的那一半防线 ——
+   * 这样两条措施任一被删掉，本用例都会变红。
+   */
+  it("同 tick 的等长越权改写仍被检出（不依赖等待窗，靠内容摘要）", () => {
+    const root = scratch("journal-same-tick");
+    write(root, "src/a.js", "a");
+    // 59 字节，与下面的改写**等长** —— size 判不出差异。
+    write(root, "package.json", '{"name":"user-project","scripts":{"build":"node b.js"}}');
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src"]);
+    write(root, "package.json", '{"name":"user-project","dependencies":{"left-pad":"1.0.0"}}');
+
+    expect(journal.unauthorized(journal.changed(token), ["src"])).toEqual(["package.json"]);
+  });
+
+  /**
+ * 摘要只在**廉价信号判不出**时才说话，且它必须判"没变"——
+ * 否则会把"内容相同、只是 mtime 动了"的无害改写升级成一次无谓回滚。
+ *
+ * 这里刻意让 mtime **真的**动一下（先写、等一个 tick、再写同样内容）：
+ * 廉价信号已经判了 modify，于是不读内容 —— 正是 file-journal 写明的取舍
+ * （容忍 false positive，省掉整树哈希）。
+ */
+it("内容相同但 mtime 变化时仍按 modify 记（容忍 false positive，不读内容）", () => {
+    const root = scratch("journal-same-content");
+    const body = "x".repeat(64);
+    write(root, "package.json", body);
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src"]);
+    // 确保 mtime 真的走了一个 tick —— 否则两个廉价信号都相同，走摘要分支。
+    const start = Date.now();
+    while (Date.now() - start < 3) {
+      /* spin */
+    }
+    write(root, "package.json", body);
+
+    expect(journal.changed(token)).toEqual([{ path: "package.json", op: "modify", bytes: 64 }]);
+    expect(journal.stats().contentRead).toBe(0);
+  });
+
+  /**
+   * 摘要分支的反例：廉价信号全部相同**且**内容确实不同 ⇒ 必须判 modify。
+   * 2026-10-05 的 D1 缺陷就栽在这里（当时直接 `continue`，越权写入被漏掉）。
+   */
+  it("廉价信号全同但内容变了 → 摘要分支判 modify", () => {
+    const root = scratch("journal-digest-branch");
+    write(root, "package.json", "a".repeat(64));
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src"]);
+
+    // ⚠️ 刻意**不**靠 `utimesSync` 把 mtime 掰回基线：NTFS 的 mtime 带亚毫秒
+    // 小数（实测 `1791194821233.9204`），而 utimesSync 只能写到毫秒，掰不回去 ——
+    // 那样用例断言的是平台精度而不是被测逻辑，换台机器就未必成立。
+    //
+    // 改为把**基线**对齐到盘上的真实值：于是"两个廉价信号相同"这个条件由
+    // 基线提供，同一条件的另一个入口，且跨平台确定。
+    const abs = path.join(root, "package.json");
+    const entry = token.baseline.get("package.json")!;
+    fs.writeFileSync(abs, "b".repeat(64), "utf8");
+    const now = fs.statSync(abs);
+    entry.size = now.size;
+    entry.mtimeMs = now.mtimeMs;
+
+    expect(journal.changed(token)).toEqual([{ path: "package.json", op: "modify", bytes: 64 }]);
+    expect(journal.stats().contentRead).toBe(1);
+  });
+
+  /** zone **内**的文件留在廉价 stat 路径上：内容读取只花在 zone 外。 */
+  it("zone 内文件不触发内容读取（只有 zone 外才为摘要付费）", () => {
+    const root = scratch("journal-contentread-scope");
+    write(root, "src/a.js", "a");
+    write(root, "package.json", "p");
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src", "."]);
+    write(root, "src/a.js", "b");
+    journal.changed(token);
+    expect(journal.stats().contentRead).toBe(0);
+  });
+
+  /**
+   * `begin()` 的摘要循环必须在**每一个** zone 外文件上继续走，不能停在第一个。
+   * （变异门禁实测：把这里的 `continue` 改成 `break`，若无断言就静默存活 ——
+   * 那样只有"第一个 zone 外文件"有摘要，其余全裸奔，而越权恰恰常落在后面的文件上。）
+   */
+  it("zone 外的文件逐个取摘要，不是遇到第一个就停（continue 不是 break）", () => {
+    const root = scratch("journal-digest-all");
+    write(root, "src/a.js", "a");
+    // 排序上靠前的在 zone 内，后面两个在 zone 外
+    write(root, "package.json", "p1");
+    write(root, "tsconfig.json", "t1");
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src"]);
+
+    expect(token.baseline.get("package.json")!.digest).toBeTruthy();
+    // 排在最后面的那个也必须有摘要 —— break 会在中途停下
+    expect(token.baseline.get("tsconfig.json")!.digest).toBeTruthy();
+    // zone 内的不取（否则每批都要为它付一次内容读）
+    expect(token.baseline.get("src/a.js")!.digest).toBeUndefined();
+  });
+
+  /**
+   * `changed()` 里"取不到当前摘要 ⇒ 跳过该文件"分支：`continue` 而不是 `break`。
+   * 少一个文件的内容读不出来，不该让**后面**的文件都不再被检查 ——
+   * 那个 continue 改成 break 时，越权文件会被整段跳过（又一次静默漏检）。
+   */
+  it("某个 zone 外文件走不到摘要分支时，其余文件仍照常判定（continue 不是 break）", () => {
+    const root = scratch("journal-unreadable-continue");
+    write(root, "src/a.js", "a");
+    write(root, "package.json", "p1");
+    write(root, "zz-last.json", "z1");
+    const journal = new FileJournal({ settleWindowMs: 0 });
+    const token = journal.begin(root, ["src"]);
+
+    // package.json：基线摘要**保留**，并让基线的 size/mtime 与盘上完全一致 ——
+    // 于是它走不进"size/mtime 变了"的廉价分支，带着基线摘要进入摘要比对，
+    // 然后在"取当前摘要"那一步读不出来 → 落到 @234 那条 continue。
+    // （若把基线摘要抹掉，走的会是 @231 那条 continue，是另一条分支。）
+    const pkg = path.join(root, "package.json");
+    const pkgEntry = token.baseline.get("package.json")!;
+    fs.writeFileSync(pkg, "p2", "utf8");
+    const now = fs.statSync(pkg);
+    pkgEntry.size = now.size;
+    pkgEntry.mtimeMs = now.mtimeMs;
+    expect(pkgEntry.digest).toBeTruthy();
+
+    // 排在它后面的文件：用不同长度改写，走正常的廉价分支
+    write(root, "zz-last.json", "z2-longer");
+
+    // 让 package.json 在**取当前摘要**那一刻读不出来：mock 的是 `readFileSync`
+    // 而不是 `statSync` —— 后者被 `walkStat` 用来判文件是否还在，一旦失败，
+    // 该文件会被当成"已删除"，走不到摘要分支（而是 delete 分支）。
+    // 这正是"取不到当前摘要即跳过"那条 continue 唯一的触发条件。
+    const realReadFileSync = fs.readFileSync;
+    vi.spyOn(fs, "readFileSync").mockImplementation(((p: fs.PathLike, ...rest: unknown[]) => {
+      if (String(p) === pkg) throw new Error("EACCES: read denied");
+      return (realReadFileSync as unknown as (...a: unknown[]) => Buffer | string)(p, ...rest);
+    }) as typeof fs.readFileSync);
+    try {
+      const paths = journal.changed(token).map((c) => c.path);
+      expect(paths).not.toContain("package.json");
+      // break 会让它被整段跳过，排在后面的就再也检不出
+      expect(paths).toContain("zz-last.json");
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
   it("skips shared infra directories", () => {
     const root = scratch("journal-skip");
     write(root, "node_modules/pkg/i.js", "x");

@@ -94,14 +94,58 @@ ${JSON.stringify(prd, null, 2)}`;
 
 export interface RepairDecisionInput {
   taskTitle: string;
+  /**
+   * 本任务**总共**被派发过几次（含首次）。
+   *
+   * ⚠️ 它与 `maxRepairRounds` **不是同一个量纲**（2026-10-05 多轮审计）：
+   * 首次派发不算"重修"，所以 `attempts` 天然是 `maxRepairRounds + 1`。
+   * 拿它去渲染"重修 N 轮（上限 M）"会印出 `重修 3 轮（上限 2）`
+   * —— 一个不可能成立的句子，而用户正是照着这两个数判断
+   * "还剩没有机会再来一次"。实测真实 run 里就是这么出来的。
+   *
+   * 这里只做**如实改名**：`attemptsSoFar` 的语义由调用方保证是"派发总次数"。
+   */
   attemptsSoFar: number;
   maxRepairRounds: number;
   lastErrorDigest: string;
+  /**
+   * 本轮**验证步骤**的结论（`VerificationReport.passed`）。
+   *
+   * 缺席/未定义时按 `true`（旧行为：当作"验证红着"）——`=== true` 才切到
+   * 新措辞，所以不传就仍是旧文案，不会因为新增字段让别处静默改口。
+   * 传它的是 orchestrator（`orchestrator.ts:785`）。
+   */
+  verificationPassed?: boolean;
 }
 
 export function buildEscalationSummary(input: RepairDecisionInput): string {
+  // ⚠️ **不能一律说"仍未通过验证"**（2026-10-05 运行时观察）。
+  // `errorClass` 说的是"这个任务**为什么**没做出来"，而它常常与验证命令无关：
+  // 死因是 `no-agent`（没匹配到执行者）时，项目文件压根没人动，验证命令必然全绿。
+  // 那种情况下弹出的对话框写着"仍未通过验证"，紧跟着下面一行却是
+  // "no agent available" —— 两行自相矛盾，而**用户正是要照着这三选一做决定**：
+  // 他会以为是代码写坏了去选"重派"，于是又烧一轮。
+  //
+  // 判据用 `verificationPassed`（引擎给的**验证步骤结论**），不是任务状态。
+  //
+  // ⚠️ **两个数必须是同一个量纲**（2026-10-05 多轮审计）：
+  // `attemptsSoFar` 是**派发总次数**（含首次），`maxRepairRounds` 是**重修轮数**
+  // （不含首次）。直接并排印会得到 `重修 3 轮（上限 2）` —— 一句不可能成立的话，
+  // 而用户正是照这两个数判断"还剩没有机会再试一次"。所以两边都换成同一口径。
+  const dispatched = input.attemptsSoFar;
+  const repairRounds = Math.max(0, dispatched - 1);
+  const budgetNote =
+    repairRounds >= input.maxRepairRounds
+      ? `（已达重修上限 ${input.maxRepairRounds}）`
+      : `（还能再重修 ${input.maxRepairRounds - repairRounds} 轮）`;
+  const counts =
+    `已尝试 ${dispatched} 次（首次 + 重修 ${repairRounds} 轮）${budgetNote}`;
+  const framing =
+    input.verificationPassed === true
+      ? `任务「${input.taskTitle}」${counts}，仍未完成。验证命令是通过的 —— 卡住的是任务本身没做出来。`
+      : `任务「${input.taskTitle}」${counts}，仍未通过验证。`;
   return [
-    `任务「${input.taskTitle}」重修 ${input.attemptsSoFar} 轮后仍未通过验证（上限 ${input.maxRepairRounds}）。`,
+    framing,
     "最近一次错误摘要：",
     input.lastErrorDigest || "(空)",
     "请选择处理方式：跳过该任务 / 更换智能体重派 / 终止项目。",

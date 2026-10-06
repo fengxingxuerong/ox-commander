@@ -83,6 +83,39 @@ describe("receiptTaskStatus", () => {
   it("reports a task that never ran as pending, not failed", () => {
     expect(receiptTaskStatus({ skipped: false, done: false })).toBe("pending");
   });
+
+  /**
+   * `status` 与 `outcomeOk` 必须讲同一个故事（2026-10-05 分流审计）。
+   *
+   * 缺陷：`ReceiptTask` 里**原本没有 `outcomeOk` 字段**，
+   * 而 `orchestrator.ts:463` 把 `...(outcome ? { outcomeOk: outcome.ok } : {})`
+   * 展开进那个对象 —— TypeScript **静默丢弃**了它。于是真实凭据里
+   * `outcomeOk` **从来就不存在**：
+   *
+   *   tasks[0] = {"id":"A","status":"done","attempts":2,"agentId":"c-bridge",…}
+   *                                     ↑ 没有 outcomeOk
+   *
+   * `grep outcomeOk` 全仓只有 6 处命中、**零消费侧**，所以这个丢失从未被���现。
+   * 写它那行的注释说"没有派发结果时不给 outcomeOk"，听上去是承诺 ——
+   * 实际是**从没兑现过的承诺**。
+   */
+  it("status 与 outcomeOk 不许互相打脸（failed 必有 outcomeOk=false）", () => {
+    // 这条钉的是**归并规则**本身：任何一个能算出 failed 的形状，
+    // 都必须同时给出"这次派发失败了"这个事实。
+    const cases: Array<[string, Parameters<typeof receiptTaskStatus>[0], boolean | undefined]> = [
+      ["派发失败", { skipped: false, done: false, outcomeOk: false }, false],
+      ["从未派发", { skipped: false, done: false }, undefined],
+      ["派发成功但未落地", { skipped: false, done: false, outcomeOk: true }, true],
+      ["跳过", { skipped: true, done: true, outcomeOk: false }, false],
+      ["完成", { skipped: false, done: true, outcomeOk: true }, true],
+    ];
+    for (const [name, input, expectedOk] of cases) {
+      const status = receiptTaskStatus(input);
+      // failed 蕴含"这次派发失败"，其余状态不许这么断言
+      if (status === "failed") expect(input.outcomeOk, name).toBe(false);
+      if (expectedOk !== undefined) expect(input.outcomeOk, name).toBe(expectedOk);
+    }
+  });
 });
 
 describe("buildReceipt", () => {
@@ -149,6 +182,113 @@ describe("buildReceipt", () => {
     expect(r.counts.checksFailed).toBe(1);
   });
 
+  /**
+   * 任务全做出来、只有验证红着时，凭据必须说清是**验证**没过（2026-10-05）。
+   *
+   * 缺陷：blocked 的"为什么"只从任务账里找（failed / pending），于是这个形状下
+   * 两个数都是 0，兜底话术顶上来，而同一句的前半截是"2/2 个任务完成"：
+   *
+   *   未交付：2/2 个任务完成，仍有任务未完成，重修 1 轮。   ← 自相矛盾
+   *
+   * 这不是边角：`checksFailed>0 && failed==0 && pending==0` 是**最普通的一种红**
+   * （代码写完了，构建/测试没过）。实测真实 run 就是这个形状，而那条分支此前
+   * **一条断言都没有**（grep「仍有任务未完成」零命中）。
+   */
+  it("任务全做完但验证红着：说的是「验证命令未通过」，不是「仍有任务未完成」", () => {
+    const r = buildReceipt({
+      outcome: "blocked",
+      verified: false,
+      rounds: 1,
+      checks: [{ kind: "test", ok: false, exitCode: 1, preexisting: false, headline: "2 failed" }],
+      tasks: [task("t1", "done"), task("t2", "done")],
+      conflicts: [],
+    });
+    // 前半截与后半截不许打架
+    expect(r.headline).toContain("2/2 个任务完成");
+    expect(r.headline).not.toContain("仍有任务未完成");
+    expect(r.headline).toContain("1 条验证命令未通过");
+  });
+
+  it("blocked 的兜底话术不该在真实形状里出现（把两类失败都穷举）", () => {
+    // 穷举 failed / pending / checksFailed 八个组合：只要有任何一项 >0，
+    // 凭据就必须说出是哪一项，不许退回兜底。
+    for (let mask = 0; mask < 8; mask++) {
+      const failed = mask & 1 ? 1 : 0;
+      const pending = mask & 2 ? 1 : 0;
+      const checksFailed = mask & 4 ? 1 : 0;
+      const tasks = [
+        ...(failed ? [task("t1", "failed")] : []),
+        ...(pending ? [task("t2", "pending")] : []),
+        ...(failed || pending ? [] : [task("t1", "done")]),
+      ];
+      const r = buildReceipt({
+        outcome: "blocked",
+        verified: false,
+        rounds: 0,
+        checks: checksFailed
+          ? [{ kind: "test", ok: false, exitCode: 1, preexisting: false, headline: "boom" }]
+          : [],
+        tasks,
+        conflicts: [],
+      });
+      expect(r.headline, `mask=${mask}`).not.toContain("仍有任务未完成");
+      if (checksFailed) expect(r.headline, `mask=${mask}`).toContain("验证命令未通过");
+      if (failed) expect(r.headline, `mask=${mask}`).toContain("1 个失败");
+      if (pending) expect(r.headline, `mask=${mask}`).toContain("1 个未启动");
+    }
+  });
+
+    /**
+   * 「条验证命令通过」这个说法本身要成立。
+   *
+   * 这一句在 `delivered && verified` 分支上，而引擎只在验证通过时才交付 ——
+   * 所以按设计 `checks` 全绿，`checks.length` 恰好等于"通过的条数"。
+   * **但那只是调用方的自觉，凭据自己并不校验。** 任何一处 bug 让红项混进
+   * 一份 delivered 凭据，这句话就会变成"3 条验证命令通过"而实际只有 2 条绿 ——
+   * 又是一次自相矛盾，只是方向相反。
+   *
+   * 这里先把"全绿时两数相等"钉住（真实不变量），反注入把 `checks.length`
+   * 换成 `filter(ok).length` 时必须仍然是绿的 —— 若它红了，说明我把一个
+   * 等价重写当成了缺陷，那比漏抓更糟。
+   */
+  it("全绿时「共 N 条」与「N 条通过」是同一个数", () => {
+    const r = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [
+        { kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "" },
+        { kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "" },
+      ],
+      tasks: [task("t1", "done")],
+      conflicts: [],
+    });
+    expect(r.headline).toContain("2 条验证命令通过");
+    expect(r.headline).toContain("1/1 个任务完成");
+    expect(r.checks.filter((c) => c.ok).length).toBe(r.checks.length);
+  });
+
+  it("headline 里的每个数字都必须能在 counts 里找到（凭据不自相矛盾）", () => {
+    // 这条是上面两条要守的不变量本身：headline 是给人读的那一句，
+    // 它引用的每个数字都必须来自这份凭据自己的字段。
+    const shapes: Array<Parameters<typeof buildReceipt>[0]> = [
+      { outcome: "blocked", verified: false, rounds: 2, checks: [{ kind: "test", ok: false, exitCode: 1, preexisting: false, headline: "x" }], tasks: [task("t1", "done"), task("t2", "pending")], conflicts: [] },
+      { outcome: "blocked", verified: false, rounds: 0, checks: [], tasks: [task("t1", "failed")], conflicts: [] },
+      { outcome: "delivered", verified: true, rounds: 1, checks: [{ kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "" }], tasks: [task("t1", "done"), task("t2", "skipped")], conflicts: [] },
+    ];
+    for (const shape of shapes) {
+      const r = buildReceipt(shape);
+      const m = r.headline.match(/(\d+)\/(\d+) 个任务完成/);
+      expect(m, r.headline).not.toBeNull();
+      expect(Number(m![1])).toBe(r.counts.done);
+      expect(Number(m![2])).toBe(r.counts.total);
+      const skip = r.headline.match(/跳过 (\d+) 个/);
+      if (skip) expect(Number(skip[1])).toBe(r.counts.skipped);
+      const round = r.headline.match(/重修 (\d+) 轮/);
+      if (round) expect(Number(round[1])).toBe(r.rounds);
+    }
+  });
+
   it("counts checks that were already failing before this run", () => {
     const r = buildReceipt({
       outcome: "delivered",
@@ -212,6 +352,88 @@ describe("buildReceipt", () => {
       conflicts: [],
     });
     expect("usage" in none).toBe(false);
+  });
+});
+
+/**
+ * 越权（`unauthorized-write`）在**每一条出口**上都必须出现在 headline 里
+ * （2026-10-05 conflict 账审计）。
+ *
+ * 缺陷：`conflictPart` 旧来只挂在 delivered 那条尾巴上。于是 blocked 时
+ * 一次越权**整句里一个字都不提** —— 实测真实 run：
+ *
+ *   未交付：0/2 个任务完成，1 个失败、1 个未启动。改动已留在工作区，未通过门禁
+ *
+ * 而同一份凭据的 `conflicts[]` 里明明写着 `unauthorized-write` + `package.json`，
+ * `counts.conflicts` 也是 1（**两条账都对，只有 headline 漏了**）。
+ * 读者据此会当普通失败去看测试日志，而真正发生的是"智能体试图改 zone 外的文件"
+ * —— 这是**安全事件**，不该只在成功路径顺带提一句。
+ */
+describe("越权在每一条出口上都要说", () => {
+  const conflict = {
+    kind: "unauthorized-write" as const,
+    paths: ["package.json"],
+    remedy: "revert" as const,
+  };
+  const greenCheck = { kind: "test" as const, ok: true, exitCode: 0, preexisting: false, headline: "" };
+
+  it("blocked 且发生过越权：headline 必须提到", () => {
+    const r = buildReceipt({
+      outcome: "blocked", verified: false, rounds: 0, checks: [],
+      tasks: [task("t1", "failed"), task("t2", "pending")], conflicts: [conflict],
+    });
+    expect(r.counts.conflicts).toBe(1);
+    expect(r.headline).toContain("1 次越权");
+  });
+
+  it("delivered 且发生过越权：仍然提到（原有行为不许回退）", () => {
+    const r = buildReceipt({
+      outcome: "delivered", verified: true, rounds: 0,
+      checks: [greenCheck], tasks: [task("t1", "done")], conflicts: [conflict],
+    });
+    expect(r.headline).toContain("1 次越权");
+  });
+
+  it("未验证交付那条出口也不许吞掉越权", () => {
+    // 第三条出口：已交付但没验证。它此前同样没有 conflictPart ——
+    // 与 blocked 是同一个疏漏的两个面，一次修齐。
+    const r = buildReceipt({
+      outcome: "delivered", verified: false, rounds: 0, checks: [],
+      tasks: [task("t1", "done")], conflicts: [conflict],
+    });
+    expect(r.headline).toContain("1 次越权");
+  });
+
+  it("没有越权时不许凭空造一句（每条出口都不提）", () => {
+    const blocked = buildReceipt({
+      outcome: "blocked", verified: false, rounds: 0, checks: [],
+      tasks: [task("t1", "failed")], conflicts: [],
+    });
+    expect(blocked.headline).not.toContain("越权");
+
+    const unverified = buildReceipt({
+      outcome: "delivered", verified: false, rounds: 0, checks: [],
+      tasks: [task("t1", "done")], conflicts: [],
+    });
+    expect(unverified.headline).not.toContain("越权");
+
+    const delivered = buildReceipt({
+      outcome: "delivered", verified: true, rounds: 0,
+      checks: [greenCheck], tasks: [task("t1", "done")], conflicts: [],
+    });
+    expect(delivered.headline).not.toContain("越权");
+  });
+
+  it("越权次数必须等于 conflicts[].length（headline 的数字都能数出来）", () => {
+    for (const n of [1, 2, 3]) {
+      const r = buildReceipt({
+        outcome: "blocked", verified: false, rounds: 0, checks: [],
+        tasks: [task("t1", "failed")],
+        conflicts: Array.from({ length: n }, () => conflict),
+      });
+      expect(r.counts.conflicts).toBe(n);
+      expect(r.headline).toContain(`${n} 次越权`);
+    }
   });
 });
 

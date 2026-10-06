@@ -44,12 +44,28 @@ export interface ServeState {
    * 状态页/MCP 客户端据此知道"此刻没有人等审批"。
    */
   pendingApprovals?: Array<{ requestId: string; command: string; args: string[] }>;
+  /**
+   * 当前 run 已被要求中止（2026-10-05 横向比对补齐）。
+   *
+   * 与 `paused` 同样"键消失即承诺"：run 收尾后键被删掉，所以这个字段只表示
+   * "中止已被受理"，**不表示引擎已经停了** —— 中止同样只在引擎的下一个检查点
+   * 生效（正在跑的那一批任务不会被掐断）。状态页因此只说"已请求中止"。
+   */
+  cancelled?: boolean;
 }
 
-/** 宿主能递给引擎的控制面；`startServe` 只转发，不解释语义。 */
+/**
+ * 宿主能递给引擎的控制面；`startServe` 只转发，不解释语义。
+ *
+ * `cancel` 是可选的：桌面形态的 run 会递一个带 cancel 的引擎，而只测引擎逻辑的
+ * 宿主可能只给 pause/resume。缺 cancel 时 `/cancel` 返回 501 而不是假装成功 ——
+ * 见 `ServeState.cancellable`。
+ */
 export interface EngineControl {
   pause(): void;
   resume(): void;
+  /** 缺失 = 这个引擎不支持中止（`OrchestratorEngine` 有，但注入的替身可能没有）。 */
+  cancel?: () => void;
 }
 
 export interface ServeOptions {
@@ -117,7 +133,7 @@ export interface Routed {
   /** SSE 流需要拿走 socket，不能走普通响应 —— 由调用方单独处理。 */
   stream?: "events";
   /** 控制面指令：由调用方转给引擎（纯路由不做副作用）。 */
-  control?: "pause" | "resume";
+  control?: "pause" | "resume" | "cancel";
 }
 
 /**
@@ -138,20 +154,55 @@ export function routeRequest(state: ServeState, method: string, path: string): R
     return { status: 200, headers: { "Content-Type": "text/event-stream" }, body: "", stream: "events" };
   }
   if (path === "/run") return { status: 405, headers: {}, body: "POST a spec to /run" };
-  // 控制面（P1-5）：暂停/继续只能 POST，GET 要拿到 405 而不是被当成状态查询。
-  if (path === "/pause" || path === "/resume") {
+  // 控制面（P1-5）：暂停/继续/中止只能 POST，GET 要拿到 405 而不是被当成状态查询。
+  //
+  // ⚠️ `/cancel` 与桌面形态的 `orchestration:cancel` 对齐（2026-10-05 横向比对发现）：
+  // 桌面有中止而 serve 没有，于是**一个卡在等审批上的 run 在 serve 形态下无法脱困**
+  // —— pause/resume 都答"没有 run 在跑"（引擎还没跑起来），后续 /run 又被 busy 挡住。
+  if (path === "/pause" || path === "/resume" || path === "/cancel") {
     if (method !== "POST") return { status: 405, headers: {}, body: `use POST ${path}` };
-    return { status: 200, headers: {}, body: "", control: path === "/pause" ? "pause" : "resume" };
+    const control = path === "/pause" ? "pause" : path === "/resume" ? "resume" : "cancel";
+    return { status: 200, headers: {}, body: "", control };
   }
   return { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" }, body: "not found" };
 }
 
-const STATUS_LABEL: Record<ServeStatus, string> = {
+/**
+ * 状态标签。
+ *
+ * ⚠️ **`failed` 必须再分一层**（2026-10-05 状态标签审计）。
+ *
+ * 旧写法把两种完全不同的结局印成同一句 `未交付 / 出错`：
+ *   · `done(passed=false)` —— **跑完了**，代码也在，只是门禁没过（最普通的一种红）；
+ *   · `error` —— **崩了**，可能连凭据都没产出。
+ *
+ * 实测真实 run 的第一种形状：
+ *
+ *   status=failed  outcome=blocked  rounds=1
+ *   tasks 1/1 完成，仅验证命令未通过
+ *   页面顶上印的是：「未交付 / 出错」
+ *
+ * 读者据此会去找**崩溃日志**，而实际上一切正常跑完了、该看的是验证输出。
+ * 更糟的是它把"引擎崩了"这件事**藏了起来** —— 真崩时同样只印这句，
+ * 两边都看不出差别。
+ *
+ * 有凭据 = 引擎走完了正常的收尾流程（`receipt` 事件先于终态到达）；
+ * 无凭据 = 崩在中途，只能看 `error` 事件。凭据本身就是判据。
+ */
+function statusLabel(state: ServeState): string {
+  if (state.status !== "failed") return STATUS_LABEL[state.status];
+  return state.receipt ? STATUS_LABEL.failed_ran : STATUS_LABEL.failed_crashed;
+}
+
+const STATUS_LABEL = {
   idle: "空闲",
   running: "运行中",
   delivered: "已交付",
-  failed: "未交付 / 出错",
-};
+  /** 跑完了但没通过门禁 —— 该去看验证输出，不是去找崩溃日志。 */
+  failed_ran: "未交付（已跑完，门禁未过）",
+  /** 中途崩了 —— 该去看 error 事件。 */
+  failed_crashed: "出错（中途异常终止）",
+} as const;
 
 /**
  * 一页自包含 HTML（无外链、无构建）：状态 + 凭据 + 尾部事件。
@@ -177,9 +228,16 @@ export function serveIndexHtml(state: ServeState): string {
   const pauseNote = state.paused
     ? `<p class=muted>已暂停：当前任务跑完就停，不再派新的（POST /resume 继续）。</p>`
     : "";
+  // 中止与暂停**不是一回事**，措辞必须区分开：
+  //  · 暂停 = 可恢复，正在跑的那一批照常跑完；
+  //  · 中止 = 不可恢复，正在跑的那一批**不会**被掐断，它只在自己的检查点退出。
+  // 所以这里写"已请求中止"而不是"已中止"——后者是引擎真正停下来才配得上的一句话。
+  const cancelNote = state.cancelled
+    ? `<p class=muted>已请求中止：正在跑的任务不会被掐断，它跑完后引擎在下一个检查点退出。</p>`
+    : "";
   const approvals =
     state.pendingApprovals && state.pendingApprovals.length > 0
-      ? `<h2>等待人工审批（${state.pendingApprovals.length} 条）</h2><ul>${state.pendingApprovals
+      ? `<h2>等待人工审批（${state.pendingApprovals.length} 条）</h2><ul class=approvals>${state.pendingApprovals
           .map(
             (p) =>
               `<li><code>${esc(p.command)} ${esc(p.args.join(" "))}</code>` +
@@ -201,19 +259,25 @@ h1{margin:0 0 4px}.muted{color:#888}
 pre{background:#f6f8fa;padding:12px;overflow:auto}
 li{white-space:pre-wrap;word-break:break-word}
 </style>
-<h1>OxCommander · ${STATUS_LABEL[state.status]}</h1>
+<h1>OxCommander · ${statusLabel(state)}</h1>
 ${pauseNote}
+      ${cancelNote}
 ${approvals}
 <p class=muted>状态 ${esc(state.status)}${
     state.exitCode !== undefined ? ` · 退出码 ${state.exitCode}` : ""
   }${state.updatedAt ? ` · ${esc(state.updatedAt)}` : ""} · 共 ${state.events.length} 条事件</p>
 ${receipt}
 <h2>最近事件</h2>
-<ul>${rows}</ul>
+<ul class=events>${rows}</ul>
 <script>
 // 只在页面活着时追加新事件：整页刷新会重新拉一份完整状态，不需要两套逻辑。
 const es = new EventSource("/events");
-const ul = document.querySelector("ul");
+// **按 class 选，不按标签选**（2026-10-05 修）：页面上有两个 ul ——
+// 审批列表（有审批时才渲染）与事件列表。querySelector("ul") 取的是**第一个**，
+// 于是"有审批在等"时新事件被追加进审批列表，跟批准/拒绝按钮混在一起
+// （jsdom 复现：事件跑到了 approvals 的 ul 里）。这页存在的理由是
+// "离开工位也能看一眼"，事件流落在别人的列表里正是它最不该出的错。
+const ul = document.querySelector("ul.events");
 es.onmessage = (m) => {
   const e = JSON.parse(m.data);
   const li = document.createElement("li");
@@ -225,6 +289,10 @@ es.onmessage = (m) => {
 };
 async function settle(id, granted) {
   await fetch("/approve", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ requestId: id, granted }) });
+  location.reload();
+}
+async function cancelRun() {
+  await fetch("/cancel", { method: "POST" });
   location.reload();
 }
 </script>
@@ -254,6 +322,21 @@ export interface ServeServer {
 export function startServe(opts: {
   port?: number;
   now?: () => string;
+  /**
+   * Pre-flight spec validation, run **before** the 202 is written.
+   *
+   * ⚠️ Why this exists: without it, `POST /run` only checked that the body was
+   * syntactically JSON and answered `202 {"accepted":true}` to *any* object —
+   * a spec missing `requirement`/`projectRoot`, or carrying an invalid enum,
+   * was "accepted" and then failed silently inside the run. A CI integration
+   * watching for 202 would read that as "queued" while `/state` had already
+   * flipped to `failed` with no exit code (measured 2026-10-05).
+   *
+   * Returning a message makes the endpoint answer `400` with the same
+   * aggregated text the CLI entrypoint prints — one validation, two hosts.
+   * Optional so tests can inject a permissive stub.
+   */
+  validate?: (payload: unknown) => string | undefined;
   run: (
     payload: unknown,
     emit: (e: HeadlessEvent) => void,
@@ -296,6 +379,39 @@ export function startServe(opts: {
     return true;
   };
 
+  /**
+   * 把挂着的审批**一律 fail-closed 放掉**，返回放掉了几条。
+   *
+   * 这正是桌面 `orchestration:cancel` 里 `abortAllApprovals()` 的那条纪律 ——
+   * 中止之后不会再有人来回答，而"没人回答"绝不能读成"批准"（`ApprovalGate`
+   * 的 fail-closed 就是为这件事存在的）。所以这里一律 resolve(false)，
+   * 不是 resolve(true)，也不是把 Promise 晾着不管。
+   *
+   * 晾着不管 = run 永远停在 await 上、busy 永远 true、后续 /run 全部 409 ——
+   * 那正是 2026-10-05 之前 serve 形态的实际处境。
+   */
+  const releaseAllApprovals = (): number => {
+    const waiting = [...pendingResolvers.keys()];
+    for (const requestId of waiting) settleApproval(requestId, false);
+    return waiting.length;
+  };
+
+  /**
+   * 没有引擎时的中止：放掉挂着的审批并如实汇报。
+   *
+   * ⚠️ 这条路径**同样必须放审批**。第一版我以为"卡在审批里说明引擎还没挂上"，
+   * 实测那个前提是错的 —— `onEngine` 在规划前就调用了（`run-spec.ts:312`），
+   * 审批发生在更后面的执行阶段。所以现在两条路径都调 `releaseAllApprovals()`。
+   */
+  const cancelWithoutEngine = (res: http.ServerResponse): void => {
+    const released = releaseAllApprovals();
+    state.cancelled = true;
+    delete state.paused;
+    state.updatedAt = (now ?? (() => new Date().toISOString()))();
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ paused: false, cancelled: true, releasedApprovals: released }));
+  };
+
   const server = http.createServer((req, res) => {
     const url = (req.url ?? "/").split("?")[0] ?? "/";
     const method = req.method ?? "GET";
@@ -320,6 +436,15 @@ export function startServe(opts: {
           res.end("body 不是合法 JSON");
           return;
         }
+        // 语法合法 ≠ spec 合法：缺 `requirement` / `projectRoot`、枚举写错之类
+        // 的问题必须在这一层就变成 400，而不是先回 202 再悄悄跑失败
+        // （见 startServe 的 `validate` 注释）。
+        const problem = opts.validate?.(payload);
+        if (problem) {
+          res.writeHead(400, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end(problem);
+          return;
+        }
         busy = true;
         res.writeHead(202, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ accepted: true }));
@@ -331,8 +456,10 @@ export function startServe(opts: {
           .finally(() => {
             busy = false;
             engine = undefined;
-            // 跑完了就没有"暂停中"这回事：键必须消失，否则状态页会一直显示暂停。
+            // 跑完了就没有"暂停中""已请求中止"这回事：键必须消失，
+            // 否则状态页会一直显示暂停/中止（serve.ts 原注释已为 paused 说明过理由）。
             delete state.paused;
+            delete state.cancelled;
           });
       });
       return;
@@ -374,12 +501,58 @@ export function startServe(opts: {
     const routed = routeRequest(state, method, url);
     if (routed.control) {
       // 没有 run 在跑时暂停/继续无从谈起 —— 409，并把原因写进响应体。
-      if (!engine) {
+      //
+      // ⚠️ `/cancel` 是例外，但判据必须是 **`busy` 而不是 `engine`**：
+      // 卡在等审批上的 run 引擎还没挂上（`engine` 为 undefined），它确实在跑，
+      // 而且正是最需要中止的那种 —— 按 engine 判会把它挡在 409 外面，
+      // 于是"审批没人答 → run 永远出不来"。
+      // 反过来按 engine 判也不对：从来没跑过任何 run 时 engine 永远是 undefined，
+      // 那样 `/cancel` 会报 200 "已中止"，而它什么都没中止（只是给空表做了遍循环）。
+      // busy 才是"此刻确有一个 run 在跑"的事实。
+      if (!busy && !engine) {
         res.writeHead(409, { "Content-Type": "text/plain; charset=utf-8" });
-        res.end("当前没有 run 在跑，暂停/继续无从谈起");
+        res.end("当前没有 run 在跑，暂停/继续/中止无从谈起");
         return;
       }
-      if (routed.control === "pause") {
+      if (!engine) {
+        if (routed.control === "cancel") return cancelWithoutEngine(res);
+        // busy 为真但引擎还没挂上（正卡在规划/审批阶段）：暂停与继续此刻无法生效，
+        // 说清楚比假装成功好。
+        res.writeHead(409, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end("run 还在准备中（尚未挂上引擎），暂停/继续暂不可用；需要中止请用 POST /cancel");
+        return;
+      }
+      if (routed.control === "cancel") {
+        // 引擎不支持中止（如只注入 pause/resume 的替身）→ 501，不假装成功。
+        if (!engine.cancel) {
+          res.writeHead(501, { "Content-Type": "text/plain; charset=utf-8" });
+          res.end("当前引擎不支持中止");
+          return;
+        }
+        engine.cancel();
+        // ⚠️ **必须连挂着的审批一起放掉**，哪怕引擎已经挂上了。
+        // 这是 2026-10-05 修 bug 时自己踩的第二坑：第一版只在"没有 engine"那条
+        // 路上放审批，理由是"卡在审批里说明引擎还没挂上" —— 实测**那个前提是错的**，
+        // `onEngine` 在规划前就被调用（run-spec.ts:312），审批发生在更后面的执行阶段，
+        // 于是引擎早就挂上了、走的正是这条分支、审批一个都没放 —— 死锁原封不动。
+        // `engine.cancel()` 只让引擎在检查点退出，**不会**去解审批的 Promise。
+        // 桌面那条纪律是对的：`orchestration:cancel` 里 cancel/abortEscalations/
+        // abortApprovals 三件事**并列**，少一件就解不开。
+        const released = releaseAllApprovals();
+        state.cancelled = true;
+        // 暂停中再中止：状态不该还留着"已暂停"（引擎已经在停，暂停标记会误导）
+        delete state.paused;
+        state.updatedAt = (now ?? (() => new Date().toISOString()))();
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            paused: false,
+            cancelled: true,
+            releasedApprovals: released,
+          }),
+        );
+        return;
+      } else if (routed.control === "pause") {
         engine.pause();
         state.paused = true;
       } else {
@@ -388,7 +561,9 @@ export function startServe(opts: {
       }
       state.updatedAt = (now ?? (() => new Date().toISOString()))();
       res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ paused: state.paused === true }));
+      res.end(
+        JSON.stringify({ paused: state.paused === true, cancelled: state.cancelled === true }),
+      );
       return;
     }
     if (routed.stream === "events") {

@@ -7,6 +7,8 @@ import {
   exampleManifest,
   parseAgentManifest,
   parseAgentManifestList,
+  templatePlaceholders,
+  unknownPlaceholders,
 } from "../electron/agents/manifest-schema";
 import {
   buildAdaptersFromManifests,
@@ -509,5 +511,107 @@ describe('parseAgentManifest · 回退分支', () => {
     });
     expect(m.entry).toBeDefined();
     expect((m.entry as { headers?: unknown }).headers).toBeUndefined();
+  });
+});
+
+/**
+ * D10（2026-10-05）：`argsTemplate` 占位符白名单。
+ *
+ * 为什么需要：渲染后的 argv 在 Windows 上会走 `cmd.exe /d /s /c`
+ * （`.cmd`/`.bat` shim 的硬约束），cmd 会**重新解析整行**。实测
+ * `quoteForCmd` 的 `\"` 转义挡不住注入 —— 参数 `say"hi&whoami` 里的
+ * `&whoami` 真的执行了。所以 argv 的安全不能来自"转义掉危险字符"，
+ * 只能来自"**每个插进去的值都不是自由文本**"。
+ *
+ * 而 `renderTemplate` 是 `vars[key] ?? whole`：未知占位符既不报错也不留痕，
+ * **原样 11 个字符进 argv**。实测一旦有人绑定 LLM 文本，`.cmd` 路径下
+ * `&` 真的会执行。没有任何门禁会红。
+ *
+ * 本组用例钉住白名单本身，以及"真实清单全部通过"这条兼容前提。
+ */
+describe("argsTemplate 占位符白名单（D10）", () => {
+  const manifest = (entry: Record<string, unknown>) =>
+    parseAgentManifest({
+      id: "ph",
+      displayName: "PH",
+      adapter: "cli",
+      entry: { kind: "cli", command: "codex", argsTemplate: ["exec"], ...entry },
+      capabilities: {
+        roles: ["backend-dev"],
+        zoneGlobs: ["src/**"],
+        supports: ["read"],
+        artifactKinds: ["files"],
+        maxConcurrency: 1,
+        selfIsolated: true,
+      },
+    });
+
+  it("白名单里的五个占位符全部放行", () => {
+    const m = manifest({
+      argsTemplate: [
+        "exec",
+        "--cd",
+        "{{projectRoot}}",
+        "{{promptPath}}",
+        "--task={{taskId}}",
+        "--run={{runId}}",
+        "--zone={{zone}}",
+      ],
+    });
+    expect(m.entry).toBeDefined();
+  });
+
+  it("绑定 LLM 自由文本的占位符被拒（title/description/prompt）", () => {
+    for (const bad of ["{{taskTitle}}", "{{title}}", "{{description}}", "{{prompt}}"]) {
+      expect(() => manifest({ argsTemplate: ["exec", bad] }), bad).toThrow(
+        /含未知占位符/,
+      );
+    }
+  });
+
+  it("拒绝理由要说清是哪个字段、哪些名字、允许什么", () => {
+    try {
+      manifest({ argsTemplate: ["exec", "{{taskTitle}}"] });
+      throw new Error("本该抛错却没抛");
+    } catch (e) {
+      const msg = (e as Error).message;
+      expect(msg).toContain("entry.argsTemplate");
+      expect(msg).toContain("{{taskTitle}}");
+      // 允许清单必须出现在理由里：操作员要能照着改，而不是放弃
+      expect(msg).toContain("{{promptPath}}");
+    }
+  });
+
+  it("probeArgs 同样受约束（它是另一条 argv）", () => {
+    expect(() => manifest({ argsTemplate: ["exec"], probeArgs: ["--label={{taskTitle}}"] })).toThrow(
+      /含未知占位符/,
+    );
+    expect(manifest({ argsTemplate: ["exec"], probeArgs: ["--version"] }).entry).toBeDefined();
+  });
+
+  it("envTemplate 的值同样受约束", () => {
+    expect(() => manifest({ argsTemplate: ["exec"], envTemplate: { TITLE: "{{taskTitle}}" } })).toThrow(
+      /含未知占位符/,
+    );
+    expect(
+      manifest({ argsTemplate: ["exec"], envTemplate: { ROOT: "{{projectRoot}}" } }).entry,
+    ).toBeDefined();
+  });
+
+  it("仓库里所有真实清单 + 内置示例都能通过（兼容性前提）", () => {
+    const dir = path.resolve(__dirname, "..", "agents.d");
+    const files = fs.readdirSync(dir).filter((n) => n.endsWith(".json"));
+    expect(files.length).toBeGreaterThan(0);
+    for (const f of files) {
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8"));
+      expect(() => parseAgentManifestList(raw), `${f} 应通过占位符白名单`).not.toThrow();
+    }
+    expect(exampleManifest().entry).toBeDefined();
+  });
+
+  it("未知占位符工具函数本身：去重 + 按出现顺序", () => {
+    expect(unknownPlaceholders("{{a}} {{b}} {{a}}")).toEqual(["a", "b"]);
+    expect(unknownPlaceholders("{{projectRoot}} {{zone}}")).toEqual([]);
+    expect(templatePlaceholders("--x={{projectRoot}}")).toEqual(["projectRoot"]);
   });
 });

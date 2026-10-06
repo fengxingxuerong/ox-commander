@@ -172,6 +172,23 @@ const TARGETS = [
   },
   { file: "electron/agents/sensenova-api.ts", test: "src/sensenova-api.test.ts", tier: 2 },
   { file: "electron/agents/http-bridge.ts", test: "src/http-bridge.test.ts", tier: 2 },
+  // 2026-10-05（D11/D12）：两个 headless 入口的参数解析。它们的逻辑只有十几行，
+  // 但**全是分支**（给错 / 不给 / 拼错 / 越界 / 协议不对），而这类代码的缺陷
+  // 形状恰好是"静默回落默认值 + exit 0"——覆盖率数字完全看不出问题，
+  // 只有把「回落」变异成「报错」（或反之）才会暴露断言够不够。
+  // tier 1：测试是纯函数 + 少量 spawn，秒级。
+  { file: "headless/serve-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
+  { file: "headless/mcp-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
+  // 2026-10-05：orchestration 的 IPC 控制面。此前它的**函数**覆盖 66.7%
+  // （全项目信任面最重的文件里最低），补测后 lines/functions/statements 均 100%，
+  // 2026-10-05 接入 tier 2 复核。守卫分支（update-prd 的两条 fail-closed）
+  // 是这批补测的主要目标。
+  { file: "electron/ipc/orchestration.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
+  // 2026-10-05（D11 同批）：receipt-verify 是**退出码即 CI 判定**的那个入口，
+  // 判据密集（它决定"这次重放到底算不算通过"）。此前完全不在表内 ——
+  // 由 scripts/check-mutation-targets.mjs 查出来：那道门禁比对 git diff 与本表，
+  // 漏挂的文件根本不参与变异统计，门禁照样报 PASS 而那个 PASS 对它是空的。
+  { file: "headless/receipt-verify-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
   // manifest-loader 与 manifest-schema 共用 src/manifest.test.ts —— 同一个测试
   // 文件挂两个目标是对的，不要为了"去重"只挂一个。
   { file: "electron/agents/manifest-loader.ts", test: "src/manifest.test.ts", tier: 2 },
@@ -616,6 +633,104 @@ function siteMutant(source, site, op) {
  * ⚠️ 行号是锚点：router.ts 该行如果移动，变异会重新出现并让门禁变红 ——
  * 那是故意的（fail-safe），届时重新评估是否仍是等价位点。
  */
+/**
+ * 逐位点审计基线：`文件 → 该文件当前的可执行代码位点数`。
+ *
+ * ## 它解决什么
+ *
+ * `--mode=site` 下"全部 N 处位点已逐点验证"这句话，**只有在 N 与上一次审计
+ * 时一致时才有意义**。代码改了、位点从 18 变成 20，而没人重跑审计 —— 门禁会
+ * 对着 18 个位点说"18/18 全杀"，新加的那 2 处从未被单独验证过。
+ *
+ * 文件头从 2026-09 就承诺"位点数与 SITE_BASELINE 不符 → exit 1"，但这个常量
+ * 一直**只存在于注释里**（2026-10-05 全量测试核实：全仓 4 处提及全是注释）——
+ * 假承诺比没有承诺更糟，因为它让人以为这条防线在。
+ *
+ * ## 怎么用
+ *
+ * - 漂移 → `--mode=site` 判 FAIL，打印基线值与当前值；
+ * - 跑 `npm run mutation:audit` 确认新位点也全杀之后，
+ *   `node scripts/site-baseline.mjs --write` 更新本常量并提交。
+ *
+ * ⚠️ 基线**只加不减**：位点变少通常是重构或等价变异收口，是好事，自动接受。
+ * 位点变多才是"有人加了新逻辑而没人验证"，必须停。
+ *
+ * ⚠️ aggregate 口径**不查**基线（它本来就不逐点验证，查它没有意义）；
+ * 只有 site 口径查 —— 这也正是基线存在的理由。
+ */
+const SITE_BASELINE = {
+  "electron/agents/cli-agent.ts": 21,
+  "electron/agents/http-bridge.ts": 37,
+  "electron/agents/index.ts": 9,
+  "electron/agents/manifest-loader.ts": 24,
+  "electron/agents/manifest-schema.ts": 72,
+  "electron/agents/registry.ts": 25,
+  "electron/agents/remote-endpoint.ts": 3,
+  "electron/agents/run-session.ts": 5,
+  "electron/agents/scoped-env.ts": 5,
+  "electron/agents/sensenova-api.ts": 39,
+  "electron/atomic-file.ts": 2,
+  "electron/audit-log.ts": 20,
+  "electron/board-derive.ts": 38,
+  "electron/engine/batch-guard.ts": 16,
+  "electron/engine/dev-server.ts": 5,
+  "electron/engine/orchestrator.ts": 51,
+  "electron/engine/router.ts": 25,
+  "electron/engine/scheduler.ts": 33,
+  "electron/engine/verifier.ts": 18,
+  "electron/engine/zone-guard.ts": 6,
+  "electron/ipc/agents.ts": 17,
+  "electron/ipc/context.ts": 24,
+  "electron/ipc/orchestration.ts": 5,
+  "electron/ipc/projects.ts": 6,
+  "electron/keys-store.ts": 21,
+  "electron/main.ts": 6,
+  "electron/platform.ts": 26,
+  "electron/sandbox/action-gate.ts": 13,
+  "electron/sandbox/approval-gate.ts": 3,
+  "electron/sandbox/circuit-breaker.ts": 18,
+  "electron/sandbox/command-policy.ts": 6,
+  "electron/sandbox/file-journal.ts": 18,
+  "electron/sandbox/kill-tree.ts": 11,
+  "electron/sandbox/path-policy.ts": 40,
+  "electron/sandbox/snapshot-store.ts": 13,
+  "electron/sandbox/spawn-plan.ts": 8,
+  "electron/sandbox/timeout-gate.ts": 3,
+  "electron/store.ts": 6,
+  "electron/zone-cost.ts": 9,
+  "headless/mcp-main.ts": 10,
+  "headless/mcp.ts": 77,
+  "headless/protocol.ts": 92,
+  "headless/receipt-verify-main.ts": 8,
+  "headless/run-spec.ts": 26,
+  "headless/serve-main.ts": 17,
+  "headless/serve.ts": 58,
+  "shared/agent-contract.ts": 5,
+  "shared/build-llm.ts": 12,
+  "shared/deliverable-format.ts": 23,
+  "shared/delivery-receipt.ts": 43,
+  "shared/glob.ts": 25,
+  "shared/graph.ts": 8,
+  "shared/http-clients.ts": 61,
+  "shared/llm-client.ts": 15,
+  "shared/policy-file.ts": 33,
+  "shared/prompt-text.ts": 1,
+  "shared/prompts.ts": 2,
+  "shared/providers.ts": 3,
+  "shared/redact.ts": 1,
+  "shared/routing.ts": 9,
+  "shared/schema.ts": 23,
+  "shared/usage-meter.ts": 18,
+  "shared/zone-coverage.ts": 21,
+  "src/store.ts": 32,
+};;;;;;;;;;;;;;;
+
+/**
+ * 等价变异白名单。
+ *
+ * 每条附理由与行号锚点；行号移动会让变异重新出现并让门禁变红 —— 那是故意的
+ * （fail-safe），届时重新评估是否仍是等价位点。
+ */
 const EQUIVALENT_SITES = [
   /**
    * `electron/sandbox/kill-tree.ts:37` 的 `&& → ||` —— **可证明等价**（一级）。
@@ -672,6 +787,31 @@ const EQUIVALENT_SITES = [
    * 不回落分支）→ 193 → 221。
    */
   { file: "electron/engine/router.ts", op: "&& → ||", line: 221 },
+  /**
+   * `headless/serve.ts` 控制面里 `if (!busy && !engine)`
+   * 的 `&& → ||` —— **可证明等价**（2026-10-05 反向注入时发现）。
+   *
+   * 记条件为 `!B && !E`（B = busy，E = engine 已挂上）。变异后是 `!B || !E`，
+   * 两者不同的输入只有 `B=0, E=0`（`!B&&!E` 为真、`!B||!E` 也为真 —— 同）；
+   * 真正需要比的是 `B=1, E=0`：`!B&&!E` 假（不进 409 那段），
+   * `!B||!E` **真**（会进 409）。所以只要能证明 `B=1 ∧ E=0` 不可达或等价即可。
+   *
+   * 逐个赋值点核对（`serve.ts`：busy 仅在 418 置 true、427 置回 false；
+   * engine 仅在 423 赋值、428 清空）：
+   *   · B=1 期间：run 已接受但引擎还没挂上 → 走下面那个 `if (!engine)` 分支。
+   *     两个分支在这一刻**都是 409**（或 cancel 都是 cancelWithoutEngine → 200），
+   *     `cancelWithoutEngine` 的响应不读 busy。
+   *   · 换句话说：唯一能区分两种写法的时刻是 B=1 ∧ E=0，而那一刻两种写法
+   *     都落到 `if (!engine)` 那一支 —— 只是快慢差别，不是行为差别。
+   *
+   * 实测佐证（2026-10-05）：从来没跑过 run（B=0,E=0）→ 409；跑完一个 run 之后
+   * （B=0,E=0）→ 409；run 在跑而引擎未挂上（B=1,E=0）→ 200。三态都对。
+   *
+   * ⚠️ 行号是锚点：serve.ts 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并**重新核对 busy 与 engine 的赋值顺序**（若将来 engine
+   * 改为在 busy 之前清空，或 busy 在别处置 true，这个等价就不再成立）。
+   */
+  { file: "headless/serve.ts", op: "&& → ||", line: 482 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 满载改派循环里的
    * `if (!d || d.inferredLegacy) return true;` —— **架构上不可达**（防御分支）。
@@ -1725,6 +1865,37 @@ if (slowest.length > 0 && slowest[0].ms > 0) {
       .map((r) => `${r.target.file} ${fmtMs(r.ms)}`)
       .join(" · ")}`,
   );
+}
+
+// 基线漂移检查（只在 site 口径下有意义 —— aggregate 本来就不逐点验证）。
+//
+// 这一段实现的是文件头从 2026-09 起就承诺、但一直**只存在于注释里**的那条
+// 退出码（2026-10-05 核实：SITE_BASELINE 全仓只出现在注释里）。
+//
+// 为什么必须在**报告之后**判：漂移不影响"这次的变异有没有被杀死"，它说的是
+// "被验证的那批位点，和源码里现在的位点，是不是同一批"。放在存活检查之后，
+// 是为了让最严重的两个原因（存活变异 / 基线测试失败）先报出来。
+if (mode === "site") {
+  const drifted = [];
+  for (const r of results) {
+    if (r.baselineFailed) continue; // 基线失败已经单独报过了，别混进漂移
+    const now = r.siteTotal ?? 0;
+    const was = SITE_BASELINE[r.target.file];
+    if (was === undefined) drifted.push({ file: r.target.file, was: "缺失", now });
+    else if (was < now) drifted.push({ file: r.target.file, was, now });
+  }
+  if (drifted.length > 0) {
+    console.error(`\nFAIL: ${drifted.length} 个目标的位点数比逐位点审计基线多 —— 这些新位点**没人逐点验证过**：`);
+    for (const d of drifted) console.error(`  ${d.file}  基线 ${d.was} → 当前 ${d.now}`);
+    console.error(
+      "\n「全部 N 处位点已逐点验证」这句话只有在 N 与上次审计一致时才成立：\n" +
+        "位点涨了却仍然 PASS，等于" +
+        '"每个位点都验过了"的假象。\n' +
+        "处置：跑 `npm run mutation:audit` 确认新位点也全杀，\n" +
+        "      然后 `node scripts/site-baseline.mjs --write` 更新基线并提交。\n",
+    );
+    process.exit(1);
+  }
 }
 
 // 基线失败必须 FAIL，而不是"无结论"然后照常 PASS。

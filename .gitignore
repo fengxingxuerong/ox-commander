@@ -8,6 +8,10 @@ logs/
 .env
 .env.local
 
+# 覆盖率产物：每次 `npm run test:coverage` 都会重写，且体积不小。
+# 实测漏掉这条时 `git add -A` 会把整个 coverage/ 收进去（2026-10-05 体检发现）。
+coverage/
+
 *.tsbuildinfo
 scripts/.mutation-pending/
 

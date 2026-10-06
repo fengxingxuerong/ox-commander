@@ -1,6 +1,6 @@
 ---
 name: ox-commander-dev
-description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（20 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
+description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（27 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
 ---
 
 # OxCommander 开发
@@ -13,14 +13,16 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 
 三条最容易踩的硬事实：
 
-1. **唯一验收入口是 `npm run verify`，只认退出码**（20 个 `npm run` 段 `&&` 串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 20 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-09-28 末次实测 1151 = 1142 passed + 9 skipped。
+1. **唯一验收入口是 `npm run verify`，只认退出码**（27 段串联，首段失败即中断）。
+   本机实测基线：EXIT 0 / 27 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-10-06 实测 1694 通过 + 9 跳过。
    2026-09-25 同日曾报 1020/1033 —— 那是"测试文件互相 import"把一份夹具的用例注册了两次，`check:tests-collected` 现在会拦它）。
    **第 1 段是 `check:residue`**（强杀自愈）：工作区留着活体变异体时，它还原并 exit 2 —— 别跳过它，
    残留不会让门禁红在相关处，而是把 `npm test` 砸成 4.6GB 堆 OOM 后挂住。
 2. **`verify` 里的变异档是最弱的**：`mutation:quick` = `--tier=1 --limit=1`，每个 tier-1 目标只跑 1 个
    aggregate 变异。它过了**不等于**"每处位点都有断言"——那要 `npm run mutation:audit`（site 口径全位点，CI 实测 16 min）。
-3. **README 的数字会过时**（它历史上写的是 15 步 / 930 用例，2026-09-25 是 19 段 / 996，2026-09-28 是 20 段 / 1142）。任何数字现跑现查。
+3. **README 的数字会过时**（历史上它报过 15 步 / 930、996、1142、1589 这些数，全部随链增长而过期；
+   2026-10-06 起这几个数由 `check:doc-claims` 对实物核：段数取自 `package.json`，用例数取自
+   `vitest list`。**任何数字现跑现查**这句话仍然成立 —— 门禁只是保证文档不再比实物强）。
 
 ## 铁律
 
@@ -47,7 +49,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 - **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`、
   `.qoder/skills/ox-commander-dev/SKILL.md`（本节）、`references/gates.md` 的逐段表与段数。
   **原始口令只说"两处"，就是它导致 `smoke:target-range` 进了串却在 gates.md 里没有行**（2026-10-03 才发现）。
-  只改一处等于没改：下一个人照旧会漏。
+  只改一处等于没改：下一个人照旧会漏。**这条纪律 2026-10-06 起有判据了**：`check:doc-claims` 会把
+  README / gates.md / SKILL.md 里每一处「N 段」对 `package.json` 核，并拦住「进了串但清单没行」的段。
 - **构建产物门禁**：`smoke:artifact` 与读 `dist*/` 的各条 smoke（`smoke:receipt-verify` / `snapshot-secrets` /
   `gateway` / `coze` / `import`）**单独跑它们之前必须先 `npm run build && npm run build:headless`**。
   两个 IT 用固定端口（8941 / 8933 / 8934）+ 固定 sleep，**别并发跑、别在别的流水线占端口时跑**。
@@ -58,7 +61,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | --- | --- | --- |
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
 | 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
-| **验收** | `npm run verify` | 23 段（2026-10-03 本机实测；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
+| 改文档数字/动 verify 链 | `npm run check:doc-claims` | +5s（会 spawn 一次 `vitest list`，收集不执行用例） |
+| **验收** | `npm run verify` | 27 段（2026-10-06 逐段实测；改动面越大 `mutation:touched` 越久，历史上到过 ~20min） |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
 
@@ -92,6 +96,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | `smoke:gateway` / `smoke:coze` 偶发红 | 固定端口被占 / 机器慢过固定 sleep | 单跑复现，别看一次就归因代码 |
 | `mutation-check` 中途被打断后工作区脏 | 它会临时改写源文件（SIGKILL 时还原钩子跑不到，**活体变异会留在盘上**）。症状不是"红在无关文件"，而是 `npm test` 堆涨到 ~4.6GB 后 **heap OOM 且父进程不退出**（2026-09-28 实测两次） | `ls scripts/.mutation-pending/` 即判定；**`npm run check:residue` 还原**（verify 第 1 段就是它）。别用 `git checkout --` 手工还原——那会连同一文件里本轮的真实改动一起删。**别用后台跑全量 `mutation:audit`（15-28min > 后台 10min 上限），按 `--file=` 分档跑，单档 13–60s** |
 | 门禁跑不完就红在 `check:masker` | 它靠 `indexOf` 锚点从 `mutation-check.mjs` 抠函数 | 那两个锚点字符串不能改 |
+| `check:doc-claims` 红在「读不到声明」 | 文档措辞改了，正则形状（`**N 段**` / `N 通过 + M 跳过`）不再匹配 | 把声明改回那个形状，或同步改正则 —— **别放宽判据**，读不到就当通过等于这道门禁不存在 |
+| `check:doc-claims` 红在「缺行」 | 新段进了 `verify` 但 README / gates.md 没写它 | 两处各补一行（这就是它存在的理由，不是误报） |
 
 ## 别信文档，以代码为准（2026-09-24 逐条核过）
 
@@ -106,5 +112,5 @@ README/docs 与代码有几处口径不一致，动相关文件前先读
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 逐段机制（23 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 逐段机制（27 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致

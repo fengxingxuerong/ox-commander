@@ -131,16 +131,34 @@ export function SettingsPage() {
     });
   };
 
+  /**
+   * 批量写入密钥。
+   *
+   * 空字符串被过滤掉（`.filter(e => e.value !== "")`）是刻意的：输入框清空
+   * **不等于**删除密钥。要删必须走 `clearKey` —— 否则用户只是把光标删干净了
+   * 就丢了盘上的凭据，那是个不可逆的意外。
+   */
   const handleSaveKeys = async () => {
     const entries = Object.entries(keyInputs)
       .map(([envVar, value]) => ({ envVar, value }))
       .filter((e) => e.value !== "");
     if (entries.length === 0) return;
     await window.oxCommander.saveKeys(entries);
+    // 存完要清输入框：留着等于让密钥明文在渲染进程里多待一会儿。
     setKeyInputs({});
     await refreshKeyStatus(draft);
   };
 
+  /**
+   * 删除一个密钥。
+   *
+   * 协议很反直觉：**删除 = 用空值再存一次**（`saveKeys` 的 value 语义是
+   * "写这个值"，空串即"清空"）。这不是 bug，是主进程那侧的既定契约 ——
+   * 注释写在这里是因为读代码的人第一反应一定是"漏了 delete 调用"。
+   *
+   * 为什么不提供独立的 delete 通道：删除与写入共用一条路径，就不存在
+   * "绕过写入的审计直接抹掉"的可能。
+   */
   const clearKey = async (envVar: string) => {
     await window.oxCommander.saveKeys([{ envVar, value: "" }]);
     await refreshKeyStatus(draft);

@@ -51,6 +51,13 @@ const ACCEPTED_ENTRIES = [
   ["smoke-fullchain.mjs", "全链路冒烟，需真实凭据；被 gen-repair-smoke.cjs 生成后人工跑（引用者自己也不在入口）"],
   ["smoke-repair.mjs", "重修循环冒烟，同上"],
   [
+    "doc-claims-injection.mjs",
+    "check:doc-claims 的判据体检（反向注入 7 条 + 正向对照）：它会**临时改写** README / gates.md / " +
+      "package.json 再在 finally 里还原 —— 接进 verify 就等于让门禁链自己制造脏文档现场，" +
+      "被强杀时下一段读到的就是注入后的内容。改完那条判据手动跑一次；中断后的现场由它自己的" +
+      "正向对照抓（不注入必须绿，否则先报错再停手）",
+  ],
+  [
     "loomy-bridge.mjs",
     "外部智能体桥，需对端服务在跑（启动方式记在 agents.d/onboarding-universal.md）；" +
       "它被 run-multiagent-e2e.mjs 引用，而该 runner 同样只在人工验收时跑 —— 链条未接到入口",
@@ -90,9 +97,74 @@ for (const cmd of Object.values(pkg.scripts ?? {})) {
 // ---- ② 脚本之间的引用边 ----------------------------------------------------
 // 只读 scripts/ 目录：文档与 README 的提及不构成自动执行，刻意不计入。
 const names = new Set(scripts.map((p) => path.basename(p)));
+
+/**
+ * Comment-only stripper for this gate.
+ *
+ * ⚠️ Deliberately NOT `maskNonCode`: that masker blanks **string literals** too,
+ * which is right for counting mutation sites but wrong here — a script really is
+ * wired when it does `spawn(node, [path.join(root, "scripts", "x.mjs")])`, and
+ * that name lives in a string literal. Masking it turned all three IT scripts
+ * into false "orphan" reports (2026-10-05 measured: `admission-gateway-it` →
+ * `admission-gateway.mjs` is masked away entirely).
+ *
+ * So: blank **comments only**, keep strings. What that removes is the real
+ * leak — a doc comment saying "see also x.mjs" while nothing ever calls it.
+ * Measured 17 comment-only edges, of which the misleading family is exactly this.
+ *
+ * Written here (rather than reusing the gate's masker) because the two gates
+ * need opposite treatment of strings; a shared "blank comments" helper was not
+ * worth a third file. The comment-only scanner is simple enough to state here:
+ * it must not confuse `//` inside a string with a line comment, nor `/*` in a
+ * regex or a URL.
+ */
+function blankComments(text) {
+  const out = text.split("");
+  let i = 0;
+  const n = text.length;
+  const blank = (from, to) => {
+    for (let k = from; k < to && k < n; k += 1) {
+      if (out[k] !== "\n") out[k] = " ";
+    }
+  };
+  while (i < n) {
+    const ch = text[i];
+    const next = text[i + 1];
+    if (ch === '"' || ch === "'" || ch === "`") {
+      // Skip the whole literal so `//` and `/*` inside it are not taken as comments.
+      i += 1;
+      while (i < n && text[i] !== ch) {
+        if (text[i] === "\\") i += 1;
+        i += 1;
+      }
+      i += 1;
+      continue;
+    }
+    if (ch === "/" && next === "/") {
+      const nl = text.indexOf("\n", i);
+      const end = nl < 0 ? n : nl;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === "/" && next === "*") {
+      const close = text.indexOf("*/", i + 2);
+      const end = close < 0 ? n : close + 2;
+      blank(i, end);
+      i = end;
+      continue;
+    }
+    i += 1;
+  }
+  return out.join("");
+}
+
 const sources = scripts
   .filter((p) => path.basename(p) !== SELF) // 见文件头「⚠️」：本文件必须排除
-  .map((p) => ({ name: path.basename(p), text: fs.readFileSync(p, "utf8") }));
+  .map((p) => {
+    const text = fs.readFileSync(p, "utf8");
+    return { name: path.basename(p), text, masked: blankComments(text) };
+  });
 
 /**
  * `text` 里是否**作为一个完整脚本名**提到 `name`。
@@ -127,29 +199,36 @@ if (process.argv.includes("--selftest")) {
     ["mycheck.mjs", "check.mjs", false], // 前面是字母
     ["`check.mjs`", "check.mjs", true], // 反引号是边界
     ["scripts/check.mjs\nscripts/other.mjs", "other.mjs", true],
+    // ---- 注释不是接线，字符串是接线（2026-10-05 补）----
+    ["// 参见 check.mjs\nconst x = 1;", "check.mjs", false], // 注释里提到 = 没接
+    ["/* 见 check.mjs */\nconst x = 1;", "check.mjs", false],
+    ["spawn(node, [path.join(root, 'scripts', 'check.mjs')]);", "check.mjs", true], // 字符串里 = 真接
+    ["const u = 'http://x'; // 注释里有 check.mjs", "check.mjs", false], // // 在字符串里不算行注释
+    ["const s = '/*'; // 注释里有 check.mjs", "check.mjs", false], // /* 在字符串里不算块注释
   ];
   let bad = 0;
   for (const [text, name, want] of cases) {
-    const got = mentions(text, name);
+    // 判据链完整跑一遍：先按边界切名字，再在**去注释**后的文本上找 ——
+    // 这样这些用例同时钉住"边界"与"注释不算接线"两件事。
+    const got = mentions(blankComments(text), name);
     if (got !== want) {
       bad += 1;
-      console.error(`  ✗ mentions(${JSON.stringify(text)}, ${name}) = ${got}，期望 ${want}`);
+      console.error(`  ✗ mentions(blankComments(${JSON.stringify(text)}), ${name}) = ${got}，期望 ${want}`);
     }
   }
   if (bad > 0) {
     console.error(`FAIL: 边界匹配自测 ${bad}/${cases.length} 例不符`);
     process.exit(1);
   }
-  console.log(`PASS: 边界匹配自测 ${cases.length} 例（名字不再被别家名字的后缀洗白）`);
+  console.log(
+    `PASS: 边界匹配自测 ${cases.length} 例（名字不再被别家名字的后缀洗白；注释里的提及不算接线）`,
+  );
 }
 
-/** name → 它引用的其他脚本名 */
+/** name → 它引用的其他脚本名（只看**可执行代码**里的提及） */
 const edges = new Map();
 for (const s of sources) {
-  edges.set(
-    s.name,
-    [...names].filter((t) => t !== s.name && mentions(s.text, t)),
-  );
+  edges.set(s.name, [...names].filter((t) => t !== s.name && mentions(s.masked, t)));
 }
 
 // ---- ③ 从 npm 入口做可达性分析 ---------------------------------------------

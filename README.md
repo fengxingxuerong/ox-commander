@@ -185,23 +185,32 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（2026-10-04 本机实测 EXIT 0，**23 段**，
-3–11 min —— 时长几乎全挂在 `mutation:touched` 上，改动面越大越久）：
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**27 段**，3–11 min —— 时长几乎全挂在
+`mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `check:doc-claims` 的 13 个静态段
++ `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
-  它让修复循环空转，症状是第 9 段 vitest 堆涨到 4.6GB 后 OOM 且不退出，完全不像"工作区脏"。
+  它让修复循环空转，症状是链里的 `npm test`（vitest）堆涨到 4.6GB 后 OOM 且不退出，完全不像"工作区脏"。
   有残留就还原并退出 2 逼人重跑；台账坏掉也退出 2，因为它无法证明工作区干净）
 → typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/；
   `scripts/**` 自 2026-09-28 起也进 lint —— 那 5.7k 行是门禁判据本身，而 tsc 一行都不看；
   `shared/**` 另有分层红线：禁 node API、禁依赖宿主层与上层）
 → check:unwired（导出符号在生产代码里零调用 → FAIL；豁免表项失效同样 FAIL）
+→ check:field-orphans（接口字段只有生产者、没有消费者 → 报候选；`shared/` 内的真孤儿 FAIL）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
-→ vitest（2026-10-04 实测 1589 通过 + 9 跳过（1598，60 文件）；真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
+→ check:ipc-channels（preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道，两个方向的漂移都拦；
+  一侧解析为空也 FAIL —— 解析失配当通过就等于一道永远绿的摆设）
+→ check:mutation-targets（改过的生产文件既不在变异 `TARGETS` 也不在显式豁免里 → FAIL。
+  漏挂的文件根本不参与统计，那个 PASS 对它没有任何含义）
+→ check:doc-claims（本节这几个数字**由命令现算**：段数、每段在文档里有没有行、
+  用例数是否等于 `vitest list` 的收集结果 —— 文档里的数字只会随时间变强，不会自己变准）
+→ vitest（2026-10-06 现跑 1694 通过 + 9 跳过，合计 1703 条，分布在 59 个有可执行用例的文件；
+  真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
@@ -216,8 +225,8 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:target-range（LLM 故障转移靶场：本地故障注入端点矩阵，18 场景走真实 HTTP 验证 failover/冷却/升级/恢复全行为）
 ```
 
-覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-09-25 复测 92.00% stmts（3843/4177）/
-86.68% branch（2356/2718），**不设阈值**，所以它不是门禁）。
+覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-10-05 复测 92.89% stmts（5580/6007）/
+89.11% branch（3661/4108），**不设阈值**，所以它不是门禁）。
 
 **变异门禁有两个口径，数字不可互换**：
 

@@ -3,6 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { CliAgentAdapter, killTree } from "../electron/agents/cli-agent";
+import { createDefaultCommandPolicy } from "../electron/sandbox/command-policy";
+import { parseDecompose } from "../shared/schema";
 import type { AgentEvent, TaskPayload } from "../shared/types";
 
 const NODE = process.execPath;
@@ -299,5 +301,68 @@ describe("CliAgentAdapter · 看门狗原因与失败分类", () => {
       expect(result?.status).toBe("failed");
       expect(result?.errorClass).not.toBe("timeout");
     })();
+  });
+});
+
+/**
+ * D9（2026-10-05 全方面体检 → **一条被推翻的建议**）。
+ *
+ * 体检发现：`cli-agent.ts` 是 `buildSpawnSpec` 的调用点里唯一不查
+ * `CommandPolicy` 的（`verifier.ts` 两处都查），而真机实测 `quoteForCmd`
+ * 的 `\"` 转义挡不住注入（`say"hi&whoami` 里的 `&whoami` 真的执行了）。
+ * 当时的建议是"给本文件补 policy.check"。
+ *
+ * **实测之后这个建议是错的，已撤销。** `CommandPolicy` 的白名单是
+ * **构建/测试工具链**（node/npm/tsc/vitest/git…），它服务的是"验证阶段允许跑
+ * 哪些命令"；CLI 智能体的 command 是 codex / claude / aider / goose / qwen，
+ * 实测 `agents.d/` 下 **11/11** 个清单都会被默认策略拒绝 —— 补上检查等于
+ * **让所有 CLI 智能体全部不可用**。这正是"假红比假绿更消耗信任"的又一次实例。
+ *
+ * 这组用例钉住的是**推翻它的那条证据**，而不是那条错误建议：
+ * 若将来有人再次"顺手"把 CommandPolicy 套到 agent 适配器上，本组会先红。
+ */
+describe("CLI 智能体命令与验证命令策略的边界（2026-10-05 D9）", () => {
+  const agentsDir = path.resolve(__dirname, "..", "agents.d");
+
+  it("CommandPolicy 的白名单服务的是构建/测试工具链，不是 agent CLI", () => {
+    const policy = createDefaultCommandPolicy();
+    // 构建工具链在白名单里 —— 这正是它该在的地方。
+    expect(policy.check("npm", ["run", "build"]).ok).toBe(true);
+    expect(policy.check("vitest", ["run"]).ok).toBe(true);
+    // agent CLI **不在** —— 这就是不能把这套策略套到 agent 适配器上的原因。
+    expect(policy.check("codex", ["exec"]).ok).toBe(false);
+  });
+
+  it("agents.d 下每个真实清单的 command 都不在 CommandPolicy 白名单里", () => {
+    const policy = createDefaultCommandPolicy();
+    const files = fs.readdirSync(agentsDir).filter((n) => n.endsWith(".json"));
+    expect(files.length).toBeGreaterThan(0);
+    const cliEntry = files.filter((f) => {
+      const m = JSON.parse(fs.readFileSync(path.join(agentsDir, f), "utf8"));
+      return typeof m.entry?.command === "string" && m.entry.command !== "";
+    });
+    expect(cliEntry.length, "至少要有几个带 command 的 CLI 清单").toBeGreaterThan(0);
+    for (const f of cliEntry) {
+      const m = JSON.parse(fs.readFileSync(path.join(agentsDir, f), "utf8"));
+      expect(
+        policy.check(m.entry.command, m.entry.argsTemplate ?? []).ok,
+        `${f}: ${m.entry.command} 若**能**通过 CommandPolicy，说明白名单变了，` +
+          "本组用例的前提（两套命令面互不相干）已失效，请重新评估",
+      ).toBe(false);
+    }
+  });
+
+  it("agent argv 的安全靠取值来源（生成物），不靠 CommandPolicy", () => {
+    // 把这条推理链钉死：将来加占位符时，这三条前提里断一条就要重新审视。
+    const policy = createDefaultCommandPolicy();
+    const spec = (zone: string) => ({
+      tasks: [{ id: "t1", title: "t", description: "d", zone, dependencies: [], suggestedRole: "backend-dev" }],
+      smoke: [],
+    });
+    // ① {{zone}} 的白名单不含任何 shell 元字符（shared/schema.ts）
+    expect(() => parseDecompose(spec("a&b"))).toThrow();
+    expect(() => parseDecompose(spec("src/core"))).not.toThrow();
+    // ② CommandPolicy 确实会拦元字符 —— 它是有用的，只是**用在这里用错了地方**
+    expect(policy.check("node", ["a&b"]).ok).toBe(false);
   });
 });

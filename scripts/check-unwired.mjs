@@ -22,7 +22,21 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+/** 定义侧：只在这些目录里找"导出"。`scripts/` 不算 —— 脚本不产出对外契约。 */
 const SCAN_DIRS = ["shared", "electron", "src", "headless"];
+/**
+ * 消费侧**额外**把 `scripts/` 算作"非测试消费者"（见下方 consumerFiles）。
+ *
+ * 为什么（2026-10-05 实测修）：`scripts/loomy-bridge.mjs` 是真实的运行时消费方
+ * —— 它 `require` 了 `dist-electron/shared/deliverable-format.js` 的
+ * `parseDeliverable` 并在 :149 调用，那正是 LLM 交付格式的解析入口。
+ * 但 `scripts/` 不在 `SCAN_DIRS` 里，所以它对门禁**不可见**，
+ * `parseDeliverable` 被判成"生产零调用" —— 一个假红。
+ *
+ * 假红比假绿更消耗信任（这是本门禁自己在注释里写的话），所以消费侧必须看得见
+ * 脚本。注意方向性：`scripts/` 只**消费**，不贡献"导出"判定 —— 否则
+ * `check-unwired.mjs` 自己会把它内部提到的名字算成导出。
+ */
 const EXT = new Set([".ts", ".tsx", ".mts"]);
 /**
  * `__fakes__/` 是**测试替身**，不是生产代码 —— 与 `vitest.config.mts` 的
@@ -50,17 +64,16 @@ const ACCEPTED = new Map([
   ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表（kimi-k3），刻意不加入默认轮转；测试守着这一点"],
   // ---- 诊断：安全地只输出名字，尚未接到生产日志 ----
   // （droppedSecretNames 已于 2026-09-27 接进 cli-agent dispatch 事件流，移出本表）
-  // ---- 经编译产物被 scripts/ 桥消费：运行时 require，静态扫描不可见 ----
-  ["shared/deliverable-format.ts::buildOutputRules", "OXFILE 交付格式的 prompt 指令段，loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费（同 buildLlmPool 模式）；解析侧 parseDeliverable 有同文件调用故不在本表。注意：本条理由刻意不写桥的完整文件名 —— script-wiring 门禁按字符串扫引用，写全名会把桥误判成已接入"],
-  ["shared/deliverable-format.ts::resolveDeliverablePath", "交付路径宽容归一（相对 zone 补全前缀），loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费；同 buildOutputRules 条目的口径 —— 理由刻意不写桥的完整文件名，防 script-wiring 按字符串扫引用把桥误判成已接入"],
-  ["shared/deliverable-format.ts::zoneWriteRule", "zone 写权限措辞（文件级/目录级各说各话），loomy 桥（scripts/ 下）运行时 require dist-electron 编译产物消费；同本表上两条的口径"],
-  // ---- zone 代价报告：对外对比要用的数字，消费方在产物侧 ----
-  ["electron/zone-cost.ts::summarizeZoneCost", "共享工作区互斥的代价统计（越权次数/处置分布/涉及路径），消费方是 npm run zone:cost 那个脚本，运行时 require dist-electron 编译产物 —— 静态扫描只扫源码故不可见（同本表 buildOutputRules 口径）。理由刻意不写脚本文件名：script-wiring 按字符串扫引用，写全名会把它误判成已接入"],
-  ["electron/zone-cost.ts::planCost", "规划期并行度代价（批次被切了几刀），同一脚本同一消费方式；与 summarizeZoneCost 同批评审"],
-  ["electron/zone-cost.ts::formatZoneCostReport", "代价报告的措辞（脚本与日志共用一份），同一脚本同一消费方式；不留第二份措辞是本条的用意"],
+  //
+  // 2026-10-05 移出 6 条「经 scripts/ 桥消费、静态扫描不可见」的条目
+  // （deliverable-format 的 buildOutputRules / resolveDeliverablePath / zoneWriteRule，
+  //  zone-cost 的 summarizeZoneCost / planCost / formatZoneCostReport）。
+  // 它们当初进表的理由就是"桥消费它"；现在 `scripts/` 进了**消费侧**扫描范围
+  // （CONSUMER_DIRS 注释），这些导出都能被看见并判为已接线 —— 白名单留着会让
+  // 下一个人以为"评审过 = 没接线"，而门禁会把它报成失效条目逼着清理。
 ]);
 
-function walk(dir, out = []) {
+function walk(dir, exts = EXT, out = []) {
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -70,13 +83,20 @@ function walk(dir, out = []) {
   for (const e of entries) {
     const p = path.join(dir, e.name);
     if (SKIP_DIR.test(p)) continue;
-    if (e.isDirectory()) walk(p, out);
-    else if (EXT.has(path.extname(e.name))) out.push(p);
+    if (e.isDirectory()) walk(p, exts, out);
+    else if (exts.has(path.extname(e.name))) out.push(p);
   }
   return out;
 }
 
 const files = SCAN_DIRS.flatMap((d) => walk(path.join(ROOT, d)));
+/**
+ * 消费侧多看 `scripts/` —— 桥与 IT 都是 `.mjs`，而 `walk` 默认只收 `.ts/.tsx/.mts`，
+ * 所以这里必须显式换扩展名集合（上一版把过滤写在 walk 之后，于是 `.mjs` 一个都
+ * 没进来，症状是 `parseDeliverable` 仍然被判死码）。
+ */
+const SCRIPT_EXT = new Set([".ts", ".mts", ".mjs", ".js", ".cjs"]);
+const consumerFiles = [...files, ...walk(path.join(ROOT, "scripts"), SCRIPT_EXT)];
 const rel = (p) => path.relative(ROOT, p).replace(/\\/g, "/");
 
 // 只扫「值导出」：type/interface 是编译期产物，运行时没有可调用点，
@@ -86,13 +106,40 @@ const VALUE_RE =
 const BRACE_RE = /^export\s*\{([^}]*)\}/gm;
 const isTest = (p) => /\.test\.(ts|tsx|mts)$/.test(p);
 
-const sources = files.map((f) => ({ file: f, text: fs.readFileSync(f, "utf8") }));
+const sources = consumerFiles.map((f) => ({ file: f, text: fs.readFileSync(f, "utf8") }));
+
+/**
+ * 「已接线」只在**可执行代码**里找，注释与字符串不算。
+ *
+ * 为什么（2026-10-05 实测修）：原先拿 `word.test(原文)` 打整份文件，
+ * 于是**注释里提到符号名**就算接线。实测 291 个导出里 **22 个**是这么被
+ * "洗白"的，其中 `topologicalSort` / `CycleError` 只因 `graph.ts:11` 的 JSDoc
+ * 提了一句就算已接线 —— 而它其实接在同文件 78 行，靠的是**同文件内部引用**
+ * 那条规则，不是那条注释。这条门禁的全部意义是"生产真的调用了它"，而注释
+ * 恰恰是最容易写、最不代表调用的地方。
+ *
+ * 复用 mutation-check 的 `maskNonCode` 而不是自己写一份：掩空器一旦判错，
+ * 位点数会静默归零（`masker-selftest` 就是为此存在的），而**两份实现必然
+ * 漂移** —— 同一条教训见 `scripts/site-baseline.mjs` 的注释。
+ */
+const GATE = path.join(ROOT, "scripts", "mutation-check.mjs");
+const gateSrc = fs.readFileSync(GATE, "utf8");
+const maskStart = gateSrc.indexOf("function regexMayStartAt");
+const maskEnd = gateSrc.indexOf("/** 1-based 行号。 */");
+if (maskStart < 0 || maskEnd < 0) {
+  console.error("无法在 mutation-check.mjs 里定位 maskNonCode（函数被改名或移动了？）");
+  process.exit(2);
+}
+const { maskNonCode } = new Function(`${gateSrc.slice(maskStart, maskEnd)}\nreturn { maskNonCode };`)();
+// 导出名抽取也走掩空后的文本：注释里写的 `export function foo` 不该算一个导出。
+for (const s of sources) s.masked = maskNonCode(s.text);
+
 const exportsByFile = new Map();
-for (const { file, text } of sources) {
+for (const { file, masked } of sources) {
   if (isTest(file)) continue;
   const values = new Set();
-  for (const m of text.matchAll(VALUE_RE)) values.add(m[1]);
-  for (const m of text.matchAll(BRACE_RE)) {
+  for (const m of masked.matchAll(VALUE_RE)) values.add(m[1]);
+  for (const m of masked.matchAll(BRACE_RE)) {
     for (const part of m[1].split(",")) {
       const t = part.trim();
       if (!t || /^type\s+/.test(t)) continue;
@@ -105,7 +152,7 @@ for (const { file, text } of sources) {
 
 const unwired = [];
 for (const [file, values] of exportsByFile) {
-  const selfText = sources.find((s) => s.file === file).text;
+  const selfText = sources.find((s) => s.file === file).masked;
   for (const name of values) {
     const word = new RegExp(`\\b${name.replace(/\$/g, "\\$")}\\b`, "g");
     // 「已接线」= 满足任一条：
@@ -115,15 +162,18 @@ for (const [file, values] of exportsByFile) {
     //
     // 测试引用刻意不算 —— 这正是本门禁要抓的「单测全绿但生产零调用」形态。
     //
+    // ⚠️ 一律在**掩空后**的文本上判定：注释/字符串里出现符号名不算调用
+    // （见上面 sources.masked 的注释：实测因此漏放 22 个导出）。
+    //
     // 已知局限：链式死代码（A 只被死代码 B 调用）会漏检。试过加 fixpoint 迭代，
     // 但实测误报大量在用的符号（`inlineField` 等）；误报比漏检更消耗信任，故不做。
     const selfHits = (selfText.match(word) || []).length;
     const wired =
       selfHits > 1 ||
-      sources.some(({ file: other, text }) => {
+      sources.some(({ file: other, masked }) => {
         if (other === file || isTest(other)) return false;
         word.lastIndex = 0;
-        return word.test(text);
+        return word.test(masked);
       });
     if (!wired) unwired.push({ key: `${rel(file)}::${name}`, file: rel(file), symbol: name });
   }

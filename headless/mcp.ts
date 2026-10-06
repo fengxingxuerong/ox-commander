@@ -37,6 +37,12 @@ const STATE_NOTE = "状态详情：GET {serve-url}/state；事件流：GET {serv
 interface ServeStateShape {
   status?: string;
   paused?: boolean;
+  /**
+   * 2026-10-05 随 serve 的 `/cancel` 一起加的。此前这里只认 `paused`，
+   * 于是 MCP 客户端在中止之后看到的是"状态 running"，**完全看不出有人点了中止** ——
+   * 而中止正是最需要被看见的状态（run 即将结束、审批会被 fail-closed 放掉）。
+   */
+  cancelled?: boolean;
   exitCode?: number;
   updatedAt?: string;
   receipt?: unknown;
@@ -82,10 +88,13 @@ export function mcpToolDefs(): McpToolDef[] {
     },
     {
       name: "ox_control",
-      description: "暂停或恢复当前 run（pause：当前任务跑完就停，不再派新的；resume：继续派发）。没有 run 在跑时会 409。",
+      description:
+        "控制当前 run：pause（可恢复，当前任务跑完就停，不再派新的）、resume（继续派发）、" +
+        "cancel（不可恢复地中止：正在跑的任务**不会**被掐断，跑完后引擎在检查点退出；" +
+        "等待中的人工审批会全部按拒绝放行）。没有 run 在跑时会 409。",
       inputSchema: {
         type: "object",
-        properties: { action: { type: "string", enum: ["pause", "resume"] } },
+        properties: { action: { type: "string", enum: ["pause", "resume", "cancel"] } },
         required: ["action"],
         additionalProperties: false,
       },
@@ -173,6 +182,9 @@ async function callTool(
     if (!s) return textContent(`serve 响应无法解析（HTTP ${res.status}）`, true);
     const parts = [`状态 ${s.status ?? "unknown"}`];
     if (s.paused === true) parts.push("已暂停");
+    // 中止与暂停分开报：中止不可恢复，且正在跑的任务不会被掐断 ——
+    // 合成一句"已停止"会让客户端以为此刻已经在收尾了。
+    if (s.cancelled === true) parts.push("已请求中止（正在跑的任务跑完后退出）");
     if (s.exitCode !== undefined) parts.push(`退出码 ${s.exitCode}`);
     parts.push(`事件 ${s.events?.length ?? 0} 条`);
     const pending = s.pendingApprovals ?? [];
@@ -220,14 +232,26 @@ async function callTool(
   }
   if (name === "ox_control") {
     const action = argStr(args, "action");
-    if (action !== "pause" && action !== "resume") {
-      return textContent('action 必须是 "pause" 或 "resume"', true);
+    // ⚠️ 三个动作，措辞各不相同 —— 合成一句"已停止"会让客户端以为在收尾：
+    //   pause  = 可恢复，当前批次跑完就不再派新的；
+    //   resume = 解除暂停；
+    //   cancel = 不可恢复，**正在跑的批次不会被掐断**，它跑完后引擎在检查点退出，
+    //           且等待中的审批会被 fail-closed 全部拒绝。
+    if (action !== "pause" && action !== "resume" && action !== "cancel") {
+      return textContent('action 必须是 "pause"、"resume" 或 "cancel"', true);
     }
     const res = await http.post(`/${action}`);
     if (res.status === 200) {
+      if (action === "cancel") {
+        return textContent(
+          "已请求中止：正在跑的任务跑完后退出（不会被掐断），等待中的审批已全部按拒绝放行。" +
+            "中止不可恢复（不像 pause 可以 resume）。",
+        );
+      }
       return textContent(action === "pause" ? "已暂停：当前任务跑完就停，不再派新的（ox_control resume 继续）。" : "已恢复派发。");
     }
-    if (res.status === 409) return textContent(`无法${action === "pause" ? "暂停" : "恢复"}：${res.body}`, true);
+    const verb = action === "pause" ? "暂停" : action === "resume" ? "恢复" : "中止";
+    if (res.status === 409) return textContent(`无法${verb}：${res.body}`, true);
     return textContent(`serve 拒绝（HTTP ${res.status}）：${res.body.slice(0, 300)}`, true);
   }
   if (name === "ox_approve") {

@@ -30,6 +30,48 @@ const ARTIFACTS = new Set<string>(["files", "diff", "logs", "report"]);
 const ADAPTERS = new Set<string>(["local-llm", "cli", "http-bridge"]);
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
+/**
+ * `argsTemplate` / `envTemplate` 里允许出现的占位符 —— **白名单**，不是黑名单。
+ *
+ * 为什么必须是白名单（2026-10-05 实测，勿删本段）：
+ * 这套占位符渲染出的 argv 在 Windows 上会经过 `cmd.exe /d /s /c`
+ * （`spawn-plan.ts`：`.cmd`/`.bat` shim 必须那样才能被 Node 执行），而 cmd 会
+ * **重新解析整行**。实测 `quoteForCmd` 的 `\"` 转义挡不住注入：参数
+ * `say"hi&whoami` 里的 `&whoami` 真的执行了。
+ *
+ * 于是 argv 的安全**不能**来自"把危险字符转义掉"，只能来自
+ * "**每个插进去的值都不是自由文本**"。本白名单就是这条保证的执行点。
+ *
+ * 表里这五个值**全都是生成物**，逐条有据：
+ *   · projectRoot — `workspaceRoot(projectId)` = `userData/workspaces/<id>`，
+ *     projectId 由 store 铸造，不是用户输入
+ *   · promptPath  — `cli-agent.writePrompt()` 生成的临时文件
+ *   · taskId / runId / zone — 引擎分配；zone 另经 `shared/schema.ts` 的
+ *     `VALID_ZONE = /^[A-Za-z0-9_][A-Za-z0-9_./-]*$/` 白名单，不含元字符
+ *
+ * **绝不要**把 LLM 产出的自由文本（`task.title` / `task.description` /
+ * PRD 片段 / 模型回显）加进来。加一个 `{{taskTitle}}` 就是静默开一条注入路径：
+ * `renderTemplate` 对未知键是 `vars[key] ?? whole`，既不报错也不留痕。
+ * 真要传正文，用 `{{promptPath}}` —— 任务书本来就该走文件，不该挤进 argv。
+ */
+const ALLOWED_PLACEHOLDERS = new Set<string>([
+  "projectRoot",
+  "promptPath",
+  "taskId",
+  "runId",
+  "zone",
+]);
+
+/** 取出模板里出现的所有 `{{name}}`。 */
+export function templatePlaceholders(template: string): string[] {
+  return [...template.matchAll(/\{\{(\w+)\}\}/g)].map((m) => m[1]!);
+}
+
+/** 模板里是否有不在白名单内的占位符；返回按出现顺序去重后的名字。 */
+export function unknownPlaceholders(template: string): string[] {
+  return [...new Set(templatePlaceholders(template).filter((n) => !ALLOWED_PLACEHOLDERS.has(n)))];
+}
+
 function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -179,6 +221,21 @@ function parseEntry(raw: unknown, adapter: string, issues: string[]): AgentEntry
         issues.push("entry.envTemplate 必须是 string→string 对象");
       } else {
         envTemplate = envTemplateRaw as Record<string, string>;
+      }
+    }
+    // 占位符白名单：渲染后的 argv 会进 cmd.exe，所以"插进去的值不是自由文本"
+    // 必须在这里成立。见 ALLOWED_PLACEHOLDERS 的注释（⚠️ 别改成黑名单）。
+    for (const [field, template] of [
+      ...argsTemplate.map((t) => ["entry.argsTemplate", t] as const),
+      ...(probeArgs ?? []).map((t) => ["entry.probeArgs", t] as const),
+      ...Object.entries(envTemplate ?? {}).map(([k, v]) => [`entry.envTemplate.${k}`, v] as const),
+    ]) {
+      const unknown = unknownPlaceholders(template);
+      if (unknown.length > 0) {
+        issues.push(
+          `${field} 含未知占位符：${unknown.map((n) => `{{${n}}}`).join("、")}` +
+            `（允许的：${[...ALLOWED_PLACEHOLDERS].map((n) => `{{${n}}}`).join("、")}）`,
+        );
       }
     }
     return command

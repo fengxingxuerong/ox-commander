@@ -72,6 +72,27 @@ function truncateMiddle(text: string, max: number): string {
  * - stdout/stderr are streamed into the run's event queue line by line and are
  *   budgeted, so a runaway agent cannot exhaust memory;
  * - `abort()` kills the whole process tree (Windows: `taskkill /F /T`).
+ *
+ * ⚠️ **不要在这里套 `CommandPolicy`**（2026-10-05 实测差点做，见体检报告 §P2）。
+ * `buildSpawnSpec` 把 Windows `.cmd` shim 交给 `cmd.exe /d /s /c`，那确实是
+ * shell，而真机实测 `quoteForCmd` 的 `\"` 转义挡不住注入 —— 这个观察是对的。
+ * 但结论**不是**"给本文件加 policy.check"：
+ *
+ * `CommandPolicy` 的白名单是**构建/测试工具链**（node/npm/tsc/vitest/git…），
+ * 它服务的是"验证阶段允许跑哪些命令"。CLI 智能体的 command 是
+ * codex / claude / aider / goose / qwen —— 实测 `agents.d/` 下 **11/11** 个
+ * 清单都会被默认策略拒绝，加上检查等于**让所有 CLI 智能体全部不可用**。
+ *
+ * 那 argv 靠什么安全？答：靠**渲染模板的取值**都是生成物，不是自由文本 ——
+ * `{{promptPath}}` 由 `writePrompt` 生成；`{{zone}}` 经 `shared/schema.ts:81`
+ * 的白名单 `^[A-Za-z0-9_][A-Za-z0-9_./-]*$`（不含任何 shell 元字符）；
+ * `{{projectRoot}}` 是 `workspaceRoot(projectId)` 拼出的服务端路径，
+ * `projectId` 由 store 铸造，不是用户输入。`argsTemplate` 本身来自清单，
+ * 而清单是操作员在本机显式注册/审核的，不是 LLM 产物。
+ *
+ * 所以真正的风险是**将来**给模板加一个绑到 LLM 自由文本的占位符
+ * （`{{taskTitle}}` 是最明显的候选）。防它的正确位置是
+ * `manifest-loader.ts`（占位符白名单），不是把验证阶段的策略套到这里。
  */
 export class CliAgentAdapter implements AgentAdapterV2 {
   readonly meta: { id: string; name: string; kind: "api" | "ui" };

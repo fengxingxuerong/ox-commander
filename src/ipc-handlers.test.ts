@@ -857,6 +857,145 @@ describe("orchestration handlers", () => {
     setRunningProjectId(null);
   });
 
+  /**
+   * 2026-10-05（体检 §6）：`orchestration.ts` 的**函数**覆盖 66.7% —— 全项目
+   * 信任面最重的文件里最低。逐个定位后确认未覆盖的是这七类：
+   * ① 两个事件转发闭包（save / log / onTaskStatus / onVerification /
+   *    onEscalation）—— 它们是**引擎 → 渲染进程**的桥，渲染端 UI 全靠它们刷新，
+   *    断了不会有任何报错，只是界面不动；
+   * ② `orchestration:pause` / `:resume` —— 暂停继续的 IO 边界；
+   * ③ `update-prd` 的两个守卫分支（项目不存在 / 执行中禁止改 PRD）。
+   *
+   * 其中 ③ 是 fail-closed 链条的一环：执行中改 PRD 会让"正在跑的批次"与
+   * "新拆出来的批次"不一致，所以守卫必须真的会红。
+   */
+  it("pause / resume 会对每个已建引擎调用对应方法", async () => {
+    const e1 = { pause: vi.fn(), resume: vi.fn() };
+    const e2 = { pause: vi.fn(), resume: vi.fn() };
+    enginesOf().set("a", e1 as never);
+    enginesOf().set("b", e2 as never);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:pause");
+    expect(e1.pause).toHaveBeenCalledTimes(1);
+    expect(e2.pause).toHaveBeenCalledTimes(1);
+    expect(e1.resume).not.toHaveBeenCalled();
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:resume");
+    expect(e1.resume).toHaveBeenCalledTimes(1);
+    expect(e2.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("pause / resume 在没有引擎时不崩（幂等，不是异常）", async () => {
+    enginesOf().clear();
+    // 这两个 handler 是**同步**的：invoke 直接返回 undefined，不包 Promise。
+    // 用 rejects/throws 才安全 —— 上游写成 .resolves 会拿到
+    // "You must provide a Promise" 的类型错，那是在测测试，不是在测产品。
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:pause")).not.toThrow();
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:resume")).not.toThrow();
+  });
+
+  it("update-prd 拒绝不存在的项目（fail-closed 守卫）", async () => {
+    const store = inst(h.projectInstances);
+    (store.get as Mock).mockReturnValue(undefined);
+    await expect(
+      (h.ipcMain as FakeIpcMain).invoke("orchestration:update-prd", "ghost", { title: "x" }),
+    ).rejects.toThrow(/project ghost not found/);
+    // 守卫必须发生在任何写入之前：项目都没找到，绝不能先 update 再报错
+    expect(store.update).not.toHaveBeenCalled();
+    expect(h.decompose).not.toHaveBeenCalled();
+  });
+
+  it("update-prd 在该项目执行中时拒绝（批次与 PRD 会不一致）", async () => {
+    const store = inst(h.projectInstances);
+    (store.get as Mock).mockReturnValue({ id: "p-busy", prdJson: "{}" });
+    setRunningProjectId("p-busy");
+    await expect(
+      (h.ipcMain as FakeIpcMain).invoke("orchestration:update-prd", "p-busy", { title: "x" }),
+    ).rejects.toThrow(/项目正在执行中，请先取消再修改 PRD/);
+    // 这是本条用例的全部意义：改 PRD 绝不能顺手把正在跑的批次换掉
+    expect(store.update).not.toHaveBeenCalled();
+    setRunningProjectId(null);
+  });
+
+  it("start 在没有 smokeJson 时用空数组，不当成解析错误（冒烟可选）", async () => {
+    // 覆盖 `rec.smokeJson ? ... : []` 的 else 分支：老项目只有 batches 没有 smoke，
+    // 走到 else 若抛错就是"历史数据全部无法启动"。
+    const store = inst(h.projectInstances);
+    (store.get as Mock).mockReturnValue({ id: "p-nosmoke", batchesJson: "[[]]" });
+    h.execute.mockResolvedValue(undefined);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-nosmoke");
+    // 与上面那条用同一个断言形状（workspaceRoot），别用 expect.any(String)：
+    // 那会顺带放过"工作区路径算错了"这种回归，而这条要守的正是它没有变化。
+    const [batchesArg, rootArg, optsArg] = (h.execute as Mock).mock.calls[0]!;
+    expect(batchesArg).toEqual([[]]); // 原样解析 `[[]]`，不去重不修剪
+    expect(rootArg).toBe(workspaceRoot("p-nosmoke"));
+    expect(optsArg).toEqual({ smoke: [] });
+  });
+
+  /**
+   * 2026-10-05：引擎 → 渲染进程的**事件桥**。这五个转发闭包此前一个都没被调用过
+   * （函数覆盖 66.7% 的一部分）。
+   *
+   * 它们的特点是"断了不会报错"：回调体只是 `send(...)`，少接一个就是 UI 上某个
+   * 面板永远不刷新，没有任何异常、没有任何日志。所以必须逐个点名。
+   */
+  it("log / onTaskStatus / onVerification / onEscalation 都真的转发到渲染进程", () => {
+    buildEngine("p-bridge");
+    const cfg = lastPlatformConfig();
+    const cb = cfg.host.callbacks;
+
+    cfg.host.log("hello from engine");
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", { type: "log", text: "hello from engine" });
+
+    cb.onTaskStatus("t1", "running", 2);
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", {
+      type: "taskStatus",
+      taskId: "t1",
+      status: "running",
+      attempts: 2,
+    });
+
+    const report = { ok: false, results: [] };
+    cb.onVerification(report);
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", { type: "verification", report });
+
+    cb.onEscalation("t1", "需要人工确认");
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", {
+      type: "escalation",
+      taskId: "t1",
+      summary: "需要人工确认",
+    });
+  });
+
+  it("journal.save 把快照写进该项目的日志（按 projectId 分，不串号）", () => {
+    buildEngine("p-journal");
+    // `journal` 是 createPlatform 配置的**顶层**字段（context.ts:278），
+    // 而 `log` 在 host 上 —— 这两个不在同一层，写错会拿到 undefined。
+    const journal = lastPlatformConfig().journal;
+    expect(journal).toBeDefined();
+
+    const snapshot = { phase: "stage", projectId: "p-journal" } as never;
+    expect(() => journal.save(snapshot)).not.toThrow();
+
+    // 写盘本身由 writeJournal 的测试守着；这里守的是"闭包接到了它，并且绑对了
+    // projectId"——绑错项目会让一个项目的快照覆盖另一个项目的（文件名就是 id）。
+    // 路径来自 context.ts:67 `journalDir()` = userData/runs，文件名 `${id}.json`。
+    const file = path.join(tmp, "runs", "p-journal.json");
+    expect(fs.existsSync(file), `journal.save 应写到 ${file}`).toBe(true);
+    expect(fs.existsSync(path.join(tmp, "runs", "other.json"))).toBe(false);
+  });
+
+  it("onStage 同时更新 store、审计流和渲染进程（三处都不能少）", () => {
+    const store = inst(h.projectInstances);
+    buildEngine("p-stage");
+    lastPlatformConfig().host.callbacks.onStage("IMPLEMENTING");
+
+    expect(store.update).toHaveBeenCalledWith("p-stage", { stage: "IMPLEMENTING" });
+    // 少了 send 就是"重启后看板空白"，少了 audit 就是"恢复不出进度"
+    expect(win.webContents.send).toHaveBeenCalledWith("ox:event", { type: "stage", stage: "IMPLEMENTING" });
+  });
+
   it("starts a run: scaffolds the workspace, executes the plan, releases the lock", async () => {
     const store = inst(h.projectInstances);
     const batches = [[task({ id: "t1" })]];

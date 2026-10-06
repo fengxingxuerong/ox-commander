@@ -136,9 +136,16 @@ describe("CommandPolicy", () => {
       ["node", ["--eval", "1"]],
       ["node", ["-p", "process.env"]],
       ["python", ["-c", "import os"]],
+      // ⚠️ `python3` 与 `python` 是两个独立的表项：2026-10-05 实测把
+      // EVAL_FLAGS.python3 清空（即取消这条禁令）后本文件**全绿** ——
+      // 那条禁令当时一条断言都没有。同族的 `--print`/`-m` 一并钉住。
+      ["python3", ["-c", "import os"]],
+      ["python3", ["-c"]],
+      ["node", ["--print", "1"]],
     ] as const) {
       const d = p.check(cmd, [...args]);
       expect(d.ok, `${cmd} ${args.join(" ")} should be rejected`).toBe(false);
+      if (!d.ok) expect(d.reason, `${cmd} ${args.join(" ")}`).toContain("内联求值");
     }
     // The rejection is attributed to the eval rule when nothing else trips first.
     const d = p.check("node", ["-e", "1"]);
@@ -146,6 +153,7 @@ describe("CommandPolicy", () => {
     if (!d.ok) expect(d.reason).toContain("内联求值");
     // A script file stays allowed — that is the supported way to run code.
     expect(p.check("node", ["scripts/check.js"]).ok).toBe(true);
+    expect(p.check("python3", ["scripts/check.py"]).ok).toBe(true);
     // And the rule can be lifted for a reviewed toolchain.
     expect(new CommandPolicy({ denyEvalFlags: false }).check("node", ["-e", "1"]).ok).toBe(true);
   });

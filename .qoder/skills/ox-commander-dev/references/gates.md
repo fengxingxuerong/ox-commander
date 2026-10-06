@@ -1,12 +1,19 @@
-# `npm run verify` 的逐段机制（23 段）
+# `npm run verify` 的逐段机制（27 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、23 段、1542 用例（1533 passed + 9 skipped，59 文件，2026-10-03，5m20s）。
-注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见第 8 步）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、27 段、
+1694 通过 + 9 跳过，合计 1703 条，分布在 59 个有可执行用例的文件（2026-10-06 逐段实测：链首到
+`check:doc-claims` 的 13 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
+整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）。
+注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
 README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都要同步，否则同类漂移会再发生一次）。
-**2026-10-03 又漂过一次**：`smoke:target-range` 早已进串，但本表漏了它这一行（表止于 #19），
+**2026-10-03 又漂过一次**：`smoke:target-range` 早已进串，但本表漏了它这一行，
 本次加 `smoke:receipt-verify` 时一并补上 —— 教训是**加段时只改一处就会漏**，四处清单必须同批改。
-（同日再加 `smoke:demo` 是同一批维护动作，四处（本表 #16、段数、README 门禁节、SKILL.md）
+（同日再加 `smoke:demo` 是同一批维护动作，四处（本表、段数、README 门禁节、SKILL.md）
 已一次性对齐 —— 这条规则之所以要写两遍，就是因为它被违反过两次。）
+**2026-10-06 第三次复发并被接上电**：本批未提交改动往链里加了 `check:field-orphans` /
+`check:ipc-channels` / `check:mutation-targets`，三处文档一处都没跟（README 与本表停在「23」这个旧数，
+SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `check:doc-claims` 判红 ——
+**纪律没有判据就会漂，而漂的方向是「数字看起来比实际强」**。
 
 | # | 步骤 | 实际执行 | 失败语义 |
 | --- | --- | --- | --- |
@@ -19,22 +26,26 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 > `build` / `build:headless` 仍用 `tsc -b`，因为它们要产出 `dist-electron`/`dist-headless`。
 | 2 | `lint` | `eslint .`（flat config） | error 即红；`react-hooks/exhaustive-deps` 只是 warn |
 | 3 | `check:unwired` | `scripts/check-unwired.mjs` | 零生产调用导出 → 红；**豁免表项失效也红** |
-| 4 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
-| 5 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 8 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
-| 6 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
-| 7 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
-| 8 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
-| 9 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
-| 10 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
-| 11 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
-| 12 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
-| 13 | `build:headless` | `tsc -b tsconfig.headless.json` | |
-| 14 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 12/13 的产物 |
-| 15 | `smoke:receipt-verify` | `scripts/receipt-verify-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-verify-main.js`（真 argv / 真退出码），8 例覆盖五档裁决：verified / contradicted / tampered / unsigned / not-replayed + 用法错与读不到 | 任一例的退出码或断言不符 ⇒ 红。两条**非空转证据**：复跑类用例断言命令留下的标记文件存在（证明真执行）；`tampered + --replay` 用例断言标记**不存在**（证明指纹不符时确实没复跑）。只对退出码断言是可以被"什么都不做、只返回预期码"的实现骗过的 |
-| 16 | `smoke:demo` | `scripts/demo-deliver.mjs`：**对外可复现样例**。临时目标项目 + 本进程起的假大脑（**随机端口**，经 `OX_LLM_BASE_URL_OLLAMA` 接入）+ 假 http-bridge 执行器 + 真 `dist-headless` 子进程 + 真 `node --test` 验证，然后把产出的交付凭据交给 `receipt-verify-main.js` 复核（默认模式 + `--replay`） | 零凭据、零网络、零固定端口。17 条断言任一不符 ⇒ 红。**非空转证据**：断言 `brainCalls >= 1`（大脑请求真打到了覆盖后的端点——若端点覆盖失效，`brainCalls=0` 且 PLANNING 阶段就 exit 1）；断言复核默认模式退出码为 **5**（not-replayed，即"指纹一致 ≠ 结论为真"）而 `--replay` 为 0。反向注入实测：去掉 env 里的端点覆盖后 14 条断言变红 |
-| 17-20 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 21 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
-| 22 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
+| 4 | `check:field-orphans` | `scripts/check-field-orphans.mjs`：找「只有生产者、没有消费者」的接口字段 | 报候选清单；`shared/` 内的真孤儿 → 红（2026-10-05 首跑 23 项，逐条查证后 6 项为真） |
+| 5 | `check:scripts` | `scripts/check-syntax.mjs` | `scripts/**` 下 `.mjs/.cjs/.js` 逐个 `node --check` |
+| 6 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 13 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
+| 7 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
+| 8 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
+| 9 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
+| 10 | `check:ipc-channels` | `scripts/check-ipc-channels.mjs`：preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道 | 悬空通道（一调就 reject）→ 红；注册了但没暴露（**静默不可用**）→ 红；同通道 invoke/handle 两次 → 红；**任一侧解析为空也红**（解析失配当通过 = 永远绿的摆设）。反向注入 6/6 |
+| 11 | `check:mutation-targets` | `scripts/check-mutation-targets.mjs`：本次改动的生产文件必须已在 `TARGETS` 或显式豁免里 | 漏挂 → 红。漏挂的文件**不参与**变异统计，那个 PASS 对它没有含义（2026-10-05 三个漏挂文件入表后一次暴露 9 处存活位点）。反向注入 4/4 |
+| 12 | `check:doc-claims` | `scripts/check-doc-claims.mjs --selftest`：本表 / README / SKILL.md 里那几个数字对**实物**（`package.json` 的段数、`vitest list` 的收集数） | 段数任一处不等 → 红；链里某段在两处清单都没行 → 红；声明的用例数 ≠ 现跑收集数 → 红；**读不到声明也红**（措辞改了却不匹配 = 门禁空转）。31 例判据自测 |
+| 13 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
+| 14 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
+| 15 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
+| 16 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
+| 17 | `build:headless` | `tsc -b tsconfig.headless.json` | |
+| 18 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 16/17 的产物 |
+| 19 | `smoke:receipt-verify` | `scripts/receipt-verify-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-verify-main.js`（真 argv / 真退出码），8 例覆盖五档裁决：verified / contradicted / tampered / unsigned / not-replayed + 用法错与读不到 | 任一例的退出码或断言不符 ⇒ 红。两条**非空转证据**：复跑类用例断言命令留下的标记文件存在（证明真执行）；`tampered + --replay` 用例断言标记**不存在**（证明指纹不符时确实没复跑）。只对退出码断言是可以被"什么都不做、只返回预期码"的实现骗过的 |
+| 20 | `smoke:demo` | `scripts/demo-deliver.mjs`：**对外可复现样例**。临时目标项目 + 本进程起的假大脑（**随机端口**，经 `OX_LLM_BASE_URL_OLLAMA` 接入）+ 假 http-bridge 执行器 + 真 `dist-headless` 子进程 + 真 `node --test` 验证，然后把产出的交付凭据交给 `receipt-verify-main.js` 复核（默认模式 + `--replay`） | 零凭据、零网络、零固定端口。17 条断言任一不符 ⇒ 红。**非空转证据**：断言 `brainCalls >= 1`（大脑请求真打到了覆盖后的端点——若端点覆盖失效，`brainCalls=0` 且 PLANNING 阶段就 exit 1）；断言复核默认模式退出码为 **5**（not-replayed，即"指纹一致 ≠ 结论为真"）而 `--replay` 为 0。反向注入实测：去掉 env 里的端点覆盖后 14 条断言变红 |
+| 21-24 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
+| 25 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
+| 26 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -44,18 +55,19 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 > `OX_LLM_BASE_URL_OLLAMA` 覆盖，"本机真跑着 Ollama 就硬失败"那个坑已删）。
 > 盯的东西不同就够了，别再拿端口当区分点。
 
-> **本表的 `#` 是脚本序号，不等于 `verify` 串里的位置**：残留自愈记作 `#0`（它跑在最前），所以
-> `#1` 及其后的每一项在串里的位置都比表号大 1。引用某一段时**优先用 npm script 名**，别用序号 ——
-> 2026-09-28 加第 0 段之前，本手册与 README 各有三处序号已经漂过。
+> **本表的 `#` 就是 `verify` 串里的位置**（2026-10-06 从 0 起整表重排；段数由
+> `check:doc-claims` 与 `package.json` 对齐，README 与本表、SKILL.md 的任何一处「N 段」不等即判红）。
+> 引用某一段时**仍然优先用 npm script 名**，别用序号 —— 2026-09-28 加残留自愈那一段之前，
+> 本手册与 README 各有三处序号已经漂过；序号是这类文档里最容易烂掉的一种引用。
 
-## 0. `check:residue`：为什么自愈必须排在测试前面
+## `check:residue`：为什么自愈必须排在测试前面
 
 `mutation-check.mjs` 会**临时改写源文件**再跑测试。Windows 上进程被外部终止（IDE 关进程树 / CI 超时 /
 任务管理器，都是 `TerminateProcess`）时 SIGINT/SIGTERM 处理器**一个都不执行**，变异体就永久留在工作区。
 落盘备份 + 启动自愈（`armPendingRecord` / `recoverPendingRecord`，台账在 `scripts/.mutation-pending/`）
 是第四层兜底。
 
-**关键顺序事实**（2026-09-28 的账单）：这套自愈此前只在 `mutation:quick`（旧第 10 段）里运行，而
+**关键顺序事实**（2026-09-28 的账单）：这套自愈此前只在 `mutation:quick` 这一档里运行，而
 `npm test` 在它**前面**。残留的 `=== → !==` 会让编排器的升级判定空转，症状是 vitest 单进程堆涨到
 ~4.6GB 后 `Reached heap limit` OOM，且父进程不退出（挂住，不是失败）。排查成本 40 分钟，处置成本 30 秒。
 所以 `--recover-only` 被提成独立一段，放在链首。
@@ -68,7 +80,7 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 - 手工清残留**不要**用 `git checkout -- <文件>`：那会把同一文件里本轮的真实改动一起删掉。跑 `npm run check:residue`。
 - 全量 `mutation:audit`（15-28 min）**别放后台跑**（后台运行有 ~10 min 上限，会把跑到一半的运行砸成残留）。按 `--file=` 分档。
 
-## 1. typecheck：三套互不相干的工程
+## typecheck：三套互不相干的工程
 
 - `tsconfig.json` → `src` + `shared`（strict，开 `noUnusedLocals` / `noUnusedParameters`，`noEmit`）
 - `tsconfig.electron.json` → `electron` + `shared`，**会把 `electron/**/*.test.ts` 一起编进 `dist-electron`**
@@ -80,15 +92,15 @@ README 曾写「15 步 / 930 用例」是过时的（每次往链里加一步都
 这是 `shared/`  purity 唯一的机制保护。
 
 > **曾经的假绿来源（2026-09-24 起已由门禁本身解决）**：`tsc -b` 吃 `*.tsbuildinfo`（已 gitignore），
-> 改过 tsconfig、删过文件之后本地可能跳过重编而绿，CI 全新 checkout 不复现。现在第 1 步走
+> 改过 tsconfig、删过文件之后本地可能跳过重编而绿，CI 全新 checkout 不复现。现在 `typecheck` 走
 > `--incremental false`，所以**本地绿与 CI 绿是同一件事**。仍会产 `.tsbuildinfo` 的是
 > `build` / `build:headless`（它们要产出），怀疑产物脏就删 buildinfo 重跑。
 
-## 2. lint 的覆盖面
+## lint 的覆盖面
 
 `eslint.config.mjs` 只忽略 `docs/**`。**`scripts/**` 自 2026-09-28 起也进 lint**（`.mjs` 按 ESM、`.cjs` 与
 `scripts/acceptance/*.js` 按 CommonJS，node 全局名手写在 `SCRIPT_GLOBALS` 里，不引未声明的 `globals` 包）。
-此前脚本层只有第 4 步的 `node --check` —— 那是语法，不是语义，而 `tsc` 一行脚本都不看。
+此前脚本层只有 `check:scripts` 的 `node --check` —— 那是语法，不是语义，而 `tsc` 一行脚本都不看。
 落地即抓到 4 处真死代码/未用变量（`check-unwired.mjs` 里一个从未使用的 `TYPE_RE`、两个未用 import、
 网关 `/result` 里算了不用的 `agentId`）与 1 处缺断言（`admission-gateway-it.mjs` 把合规提交的响应
 接进 `result2` 却从未检查它的状态码）。
@@ -103,7 +115,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 **故意没给 `headless/**` 加同类规则**：`run-spec.ts` 现在经 `electron/platform` 拉进 `electron/sandbox`，
 加了当场就红 —— 那条要先解依赖，不能靠规则硬压。
 
-## 3. `check:unwired` 的判据细节
+## `check:unwired` 的判据细节
 
 - 扫描目录 `["shared","electron","src","headless"]`（`:25`），跳过 `node_modules|dist*|coverage|.git|__fakes__`（`:38`）
 - 只查**运行时导出**：`function` / `const` / `class` / `let` / `var` / `enum` 以及 `export {}` 列表
@@ -116,7 +128,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 
 > 反向坑：生产文件的**注释里提一次符号名**就能满足"全文词匹配"从而骗过它。别把门禁当设计审查用。
 
-## 4-5. 脚本层的两道门
+## `check:scripts` 与 `check:scripts-wired`：脚本层的两道门
 
 - `check-syntax.mjs:19` 认 `.mjs|.cjs|.js`（`.js` 是 2026-09-25 加的，此前 `scripts/acceptance/csvstat-acceptance.test.js` 两层都不覆盖）。
   `.js` 按 **CommonJS** 解析（本仓库 package.json 无 `"type":"module"`）→ `scripts/` 下要写 ESM 就**改成 `.mjs`**，别放宽门禁
@@ -128,18 +140,18 @@ async 门面（`text()` / `json()` / `chat()`）。
   - 白名单以 `ACCEPTED_ENTRIES` 数组登记，建 Map **之前**先查重复键 → 重复即红
     （旧版是 Map 字面量，里面同时登记过两次 `loomy-bridge.mjs`，被覆盖的那条理由静默消失）
 
-## 6. `check:packaged-paths`
+## `check:packaged-paths`
 
 只扫 `electron` + `shared` 的 ts/mts/cts。三条**同时**命中才 FAIL：出现 `getAppPath` + 出现
 `readFileSync|existsSync|readFile` + **没有** `getPath("userData"|"exe")`。它的 `ACCEPTED` 是空 Set 且**无失效检查**。
 用途是钉死"打包后 `__dirname` 变化导致读不到文件"这一类缺陷。
 
-## 7. `check:masker`
+## `check:masker`
 
 用 `indexOf("function regexMayStartAt")` 和 `indexOf("/** 1-based 行号。 */")` 从 `mutation-check.mjs` 里抠函数体，
 锚点字符串一改就 **exit 2**；随后跑 24 个位点用例。**改 `mutation-check.mjs` 时这两个锚点不能动。**
 
-## 8. `check:tests-collected`（2026-09-25 新增）
+## `check:tests-collected`（2026-09-25 新增）
 
 扫 `src|shared|electron|headless|scripts` 下所有 `*.test.{ts,tsx,js,mjs,cjs}`（跳过 `node_modules|dist*|coverage|release|.git`），
 与 **`vitest list --filesOnly` 的真实输出**做差集。差集里的每一项必须在 `ACCEPTED`（当前 1 条：
@@ -150,7 +162,7 @@ async 门面（`text()` / `json()` / `chat()`）。
   一旦与 vitest 的真实行为分叉，这道门禁查的就不是它声称在查的东西。代价是 ~6s（spawn 一个 vitest）
 - **`vitest list` 失败或产出空集合 → FAIL**（不是"没有未收集项"）：收集过程坏了却报绿，
   是"基线失败被静默容忍"的同一类空转
-- 与第 5 步同族：那边抓"写好的脚本没接进入口"，这边抓"写好的测试没进收集范围"
+- 与 `check:scripts-wired` 同族：那边抓"写好的脚本没接进入口"，这边抓"写好的测试没进收集范围"
 - **同族反向缺陷（2026-09-25 补）**：测试文件**互相 import**。被 import 的那份会连带执行它的
   `describe/it`，于是同一批用例注册两次 —— 报出来的 `Tests N` 与"每个文件几行"都不再可信。
   本仓库实测踩过：`router.test.ts` 从 `agent-registry.test` 借 `fakeAgent`，虚报 28 条
@@ -159,18 +171,18 @@ async 门面（`text()` / `json()` / `chat()`）。
   不做字符串包含匹配，免得注释里提一句就把门禁弄红。共享夹具的去处是 `src/__fakes__/`
   （`check-unwired` 的 `SKIP_DIR` 已包含它，所以"只有测试在用"的导出不会被它拦）
 
-## 9. vitest
+## `npm test`（vitest）
 
 - include 为 `src/**/*.test.{ts,tsx}`、`shared/**/*.test.ts`、`electron/**/*.test.ts`、**`headless/**/*.test.ts`**
   （最后一项 2026-09-25 补上；此前 `coverage.include` 含 `headless/**` 而 include 不含 →
-  往 headless 加测试会"不执行但计入覆盖率"）。`scripts/*.test.js` 仍不被收集，靠第 8 步的 ACCEPTED 兜住
+  往 headless 加测试会"不执行但计入覆盖率"）。`scripts/*.test.js` 仍不被收集，靠 `check:tests-collected` 的 ACCEPTED 兜住
 - **没有 `thresholds` / `enforceThresholds`** → 覆盖率永不致红，别把它当门禁
 - 没有 `setupFiles`、没有全局 environment；jsdom 靠文件首行 `// @vitest-environment jsdom`
 - `resolve.alias.electron` → `src/__fakes__/electron.ts`（否则测试里 `require("electron")` 拿到的是二进制路径字符串，`ipcMain` 为 undefined）
 - 真实 API 用例门控：`src/sensenova.smoke.test.ts` 要求 `OX_SMOKE==="1" && SENSENOVA_API_KEY`，`describe.skipIf` 默认跳过
 - 平台条件用例的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`
 
-## 10. 变异门禁：四个口径，数字不可互换
+## 变异门禁：四个口径，数字不可互换
 
 `scripts/mutation-check.mjs`：`TARGETS` 是手工登记的 `{file, test|tests, tier}`（`:119-303`），7 个算子（`:337-345`），
 `MAX_SURVIVORS = 0`（`:320`，任何存活位点即红），还会做"掩空自洽校验"（`siteTotal + maskedTotal === rawTotal`，`:964`）。
@@ -211,7 +223,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 > 另一个同类陷阱：往重修上下文里**复制失败摘要**会冲掉"这条线索归谁"的断言依据，
 > 所以基线注记只报命令名与退出码，原因留在给操作者的日志里。
 
-## 14-21. 产物与集成 IT
+## `build` 之后的产物与集成 IT（`smoke:artifact` 起的那些段）
 
 - `artifact-smoke.mjs`：累计 `failed` 不早退；查 `dist/index.html` 存在、`dist-electron/**/*.js` 全量 `node --check`、
   headless 两次 stdin 协议退出码
@@ -226,6 +238,31 @@ async 门面（`text()` / `json()` / `chat()`）。
 
 固定端口 + 固定 sleep ⇒ **并发跑、或机器负载高时会假红**。判定方法是单跑复现，而不是"重跑一次绿了就归因环境"。
 
+## `check:doc-claims`：把「四同步」这条纪律接上电（2026-10-06 新增）
+
+上面那些「第 N 步」引用与三份文档里并存的 20 / 23 / 27 三种段数，是同一类缺陷的两个面：**约定写在
+文档里，而没有任何判据看它**。SKILL.md 早就写了「碰 verify 链必须同改四处」，这条纪律被违反了三次
+（2026-09-28 序号漂、2026-10-03 `smoke:target-range` 进串没进行、2026-10-06 三个新段进了串而 README
+与本表停在「23」这个旧数）。所以这次不是再写一遍规则，而是给它加判据：
+
+- **段数**：真值 = `package.json` 里 `verify` 按 `&&` 切出的段数。README / 本表 / SKILL.md 里
+  **每一处**「N 段」声明都要等于它；「第 N 段」这种序数引用与「B-1 段」这种名字碎片被显式排除
+  （两个排除项都是实测踩出来的，不是想象中的）。
+- **逐段有名**：链里每一段的 npm script 名必须在 README 与本表都被提到 —— 抓的就是「进了串却没写行」。
+  段名按 **token 边界**匹配：`build` 是 `build:headless` 的前缀，纯 `includes` 会让只写了后者的文档
+  被判成两段都有行（与 `check-script-wiring.mjs` 2026-10-05 那次改严同族）。
+- **用例数**：真值 = 默认配置下 `vitest list` 的输出行数（现跑，约 4s，不执行用例）。文档声明的
+  「A 通过 + B 跳过」要在两份文档里一致，A 要等于现跑数，写了「合计 T」就必须 T == A+B。
+
+**三条判据的红线口径**：任一处**读不到**声明也 FAIL —— 文档措辞一改而正则匹配不到，这道门禁就会
+变成永远绿的摆设，而它承诺的恰好是「这些数字不会骗人」。带 `OX_SMOKE=1` 跑时真实 API 用例会被收集，
+文档数必然不符，所以那种配置下直接 FAIL 并说明原因，而不是去猜该匹配哪个数。
+
+**判据体检怎么复跑**：`node scripts/doc-claims-injection.mjs` —— 正向对照 + 7 条注入（段数漂 / 用例数漂 / 算术漂 / 清单漏行 / 措辞漂到读不到 / 历史数字紧贴「段」字 / 串里重复段），逐条断言会红并在 `finally` 里按内存原文还原，最后逐文件哈希核对。它**刻意不进 verify**：它会临时改写 README / gates.md / package.json，接进门禁链等于让门禁自己制造脏文档现场；被强杀后留下的现场由它的正向对照抓（不注入必须绿）。
+
+**它管不到的**：只查数字与段名，不评价某一段的判据好不好；`CHANGELOG.md` 与 `docs/*.md` 里的历史数字
+**刻意不查** —— 那是 dated 记录，改它们等于伪造历史。`--list` 是维护视图（它自己不判红，否则没法用来诊断）。
+
 ## CI 与本机 verify 的口径差
 
 `.github/workflows/verify.yml`：
@@ -235,8 +272,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按 `package.json` 的顺序是 `check:residue` 之后的**第 12 段，共 23 段**；
-  CHANGELOG 里"第 19 步"说的是"新加的那一段"，不是位置）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `check:doc-claims` 之后、共 27 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 

@@ -35,6 +35,7 @@
  */
 import * as fs from "node:fs";
 import { createHash } from "node:crypto";
+import { stripBom } from "../electron/atomic-file";
 import {
   auditReceipt,
   compareChecks,
@@ -72,7 +73,14 @@ async function main(argv: string[]): Promise<number> {
     // 反序列化后的对象形状由凭据自己决定 —— 校验函数对缺字段是容忍的
     // （缺 command 就是"没有可复跑的命令"，缺 fingerprint 就是"没盖章"），
     // 所以这里不做 schema 校验：一个坏掉的凭据该被**如实报成坏**，而不是崩掉。
-    receipt = JSON.parse(fs.readFileSync(files[0]!, "utf8")) as DeliveryReceipt;
+    //
+    // ⚠️ 必须剥 BOM：`JSON.parse` 不接受 U+FEFF，而凭据是**给人看、给人转递**
+    // 的文件 —— 用记事本 / PowerShell `Set-Content -Encoding UTF8` / Excel 打开
+    // 再存回，都会给它加一个 BOM。带 BOM 时旧实现直接 exit 1（"读不了凭据"），
+    // 于是"谁都能独立复核"这个卖点恰恰在最常见的流转方式下失效（2026-10-05 实测：
+    // 同一份凭据，仅差 BOM，退出码 4 → 1）。与 `electron/atomic-file.ts` 的
+    // `readJsonFile` 用同一个 `stripBom`，两处读凭据/读配置的 BOM 纪律一致。
+    receipt = JSON.parse(stripBom(fs.readFileSync(files[0]!, "utf8"))) as DeliveryReceipt;
   } catch (err) {
     process.stderr.write(`读不了凭据：${(err as Error).message}\n`);
     return 1;

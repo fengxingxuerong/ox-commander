@@ -40,6 +40,28 @@ const OPERATORS = [
   { name: "||", find: /\|\|/g },
   { name: "===", find: /===/g },
   { name: "!==", find: /!==/g },
+  // 2026-10-05 补齐（D7）：门禁实际启用 9 个算子，自测原本只数前 4 个 ——
+  // 掩空器在 `return true` / `continue;` 这类**单词边界**算子上判错，
+  // 位点数会静默偏掉，而那正是"零位点仍 PASS"那一族空转的上游。
+  { name: "return true", find: /\breturn true\b/g },
+  { name: "return false", find: /\breturn false\b/g },
+  { name: "continue;", find: /\bcontinue;/g },
+  { name: "??", find: /\?\?/g },
+];
+
+/**
+ * 真实靶位点 > 0：掩空器最容易的失败是**判严**（把真代码当注释吞掉），
+ * 于是位点数归零 —— 而 `mutation-check.mjs` 只在 `--mode=site` 下才把
+ * 零位点判 FAIL，aggregate 口径下"零位点"仍算 PASS（2026-10-04 已修的一半）。
+ *
+ * 拿**真实源文件**当靶子，而不是人造片段：人造片段证明不了掩空器在这批
+ * 代码上没判严。这里抽几个变异门禁的真实目标文件，断言掩空后仍有位点。
+ */
+const REAL_TARGETS = [
+  { file: "electron/sandbox/command-policy.ts", min: 5 },
+  { file: "electron/sandbox/file-journal.ts", min: 5 },
+  { file: "shared/zone-coverage.ts", min: 3 },
+  { file: "electron/board-derive.ts", min: 3 },
 ];
 
 function sitesOf(src) {
@@ -110,6 +132,23 @@ const cases = [
 
   // ---- 失效保护：掩空器出错必须抛错，不能静默 ----
   { name: "未闭合块注释必须抛错", src: "/* never closed\nconst x = p && q;", want: "throw" },
+
+  // ---- 单词边界类算子：计数不得越界（掩空器判错的第二种形态）----
+  {
+    name: "注释里的 return true / continue; 不计入",
+    src: "// return true; continue;\nconst x = p && q;",
+    want: 1,
+  },
+  {
+    name: "字符串里的 ?? 不计入",
+    src: 'const s = "a ?? b"; const t = x || y;',
+    want: 1,
+  },
+  {
+    name: "标识符里的 continue 不能被当成算子（词边界）",
+    src: "const continued = 1; const x = p && q;",
+    want: 1,
+  },
 ];
 
 let pass = 0;
@@ -131,5 +170,38 @@ for (const c of cases) {
   }
 }
 
-console.log(`掩空器自测：${pass}/${cases.length} 通过`);
+/* ---------------- 真实靶位点 > 0（掩空器判严的探针） ---------------- */
+
+const ROOT = path.resolve(HERE, "..");
+for (const t of REAL_TARGETS) {
+  const abs = path.join(ROOT, t.file);
+  let src;
+  try {
+    src = readFileSync(abs, "utf8");
+  } catch {
+    fail += 1;
+    console.error(`✗ 真实靶点读不到：${t.file}`);
+    continue;
+  }
+  let got;
+  try {
+    got = sitesOf(src);
+  } catch {
+    got = -1;
+  }
+  if (got >= t.min) {
+    pass += 1;
+  } else {
+    fail += 1;
+    console.error(
+      `✗ 真实靶点 ${t.file}  期望 ≥${t.min} 个真实位点，实得 ${got}` +
+        ` —— 掩空器可能判严（把代码吞成注释），位点归零会让门禁假绿`,
+    );
+  }
+}
+
+console.log(
+  `掩空器自测：${pass}/${cases.length + REAL_TARGETS.length} 通过` +
+    `（片段 ${cases.length} · 真实靶点 ${REAL_TARGETS.length}）`,
+);
 if (fail > 0) process.exit(1);

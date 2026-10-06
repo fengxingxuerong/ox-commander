@@ -73,6 +73,11 @@ export default [
       "node_modules/**",
       "coverage/**",
       "docs/**",
+      // 运行时工作区（已在 .gitignore 里），不是项目内容。不忽略的后果是实测过的：
+      // 会话期间落在 `.box-agent-scratch/` 里的临时 `.mjs` 会让 `npm run lint` 整段红
+      // （`no-undef: process/console`），而那份红与被改的代码毫无关系。
+      ".box-agent/**",
+      ".box-agent-scratch/**",
     ],
   },
   js.configs.recommended,

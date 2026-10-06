@@ -153,6 +153,66 @@ describe("MCP 工具（ox_run / ox_control）与失败分支", () => {
     expect(bad.text).toContain('action 必须是');
   });
 
+  /**
+   * `ox_control cancel`（2026-10-05 随 serve 的 `/cancel` 一起补的）。
+   *
+   * 为什么 MCP 这侧也得有：横向比对发现 serve 补了 `/cancel` 之后，
+   * **MCP 客户端仍然完全中止不了** —— 它只有 pause/resume，而 pause 在卡住时
+   * 恰恰不生效（引擎还没挂上）。那等于"用 MCP 驱动的人永远解不开死锁"。
+   */
+  it("ox_control cancel 走 /cancel，且说清它与 pause 的区别", async () => {
+    const paths: string[] = [];
+    const http = fakeHttp({
+      post: async (path) => {
+        paths.push(path);
+        return { status: 200, body: JSON.stringify({ cancelled: true, releasedApprovals: 1 }) };
+      },
+    });
+    const r = await call("ox_control", { action: "cancel" }, http);
+    expect(r.isError).toBe(false);
+    expect(paths).toEqual(["/cancel"]);
+    // 三件事必须都在答复里，否则客户端会误判：
+    expect(r.text).toContain("已请求中止");
+    //   ① 不可恢复（不像 pause 能 resume）
+    expect(r.text).toContain("不可恢复");
+    //   ② 正在跑的任务不会被掐断 —— 这是中止与暂停最容易被混同的地方
+    expect(r.text).toContain("不会被掐断");
+    //   ③ 等待中的审批被按拒绝放行（fail-closed）
+    expect(r.text).toContain("拒绝");
+  });
+
+  it("ox_control cancel 的 409/501 如实转述，不吞掉原因", async () => {
+    const http409 = fakeHttp({ post: async () => ({ status: 409, body: "当前没有 run 在跑" }) });
+    const a = await call("ox_control", { action: "cancel" }, http409);
+    expect(a.isError).toBe(true);
+    expect(a.text).toContain("无法中止");
+    expect(a.text).toContain("当前没有 run 在跑");
+    // 501 = 引擎不支持中止；不能被含糊成"中止失败"
+    const http501 = fakeHttp({ post: async () => ({ status: 501, body: "当前引擎不支持中止" }) });
+    const b = await call("ox_control", { action: "cancel" }, http501);
+    expect(b.isError).toBe(true);
+    expect(b.text).toContain("不支持中止");
+  });
+
+  it("ox_status 报出已请求中止（此前只认 paused，中止在 MCP 里完全不可见）", async () => {
+    // 中止是最需要被看见的状态：run 即将结束、审批被 fail-closed 放掉了。
+    // 看不见它，客户端只能看到"状态 running"。
+    const { text } = await call("ox_status", {}, fakeHttp({ state: { status: "running", cancelled: true } }));
+    expect(text).toContain("已请求中止");
+    // 措辞里必须带"正在跑的任务跑完后退出"，否则与"已中止"混同
+    expect(text).toContain("跑完后退出");
+  });
+
+  it("ox_control 的 action 枚举含 cancel（schema 与实现必须一致）", async () => {
+    // 直接问 handleMcpMessage 的原始信封 —— call() 那个 helper 只解 text/isError。
+    const res = await handleMcpMessage({ jsonrpc: "2.0", id: 9, method: "tools/list" }, fakeHttp());
+    const tools = (res?.result as { tools?: Array<{ name: string; inputSchema?: { properties?: { action?: { enum?: string[] } } } }> })?.tools ?? [];
+    const control = tools.find((t) => t.name === "ox_control");
+    // schema 里没有 cancel、而实现认 cancel = 客户端根本发现不了这个能力
+    expect(control?.inputSchema?.properties?.action?.enum).toContain("cancel");
+    expect(control?.inputSchema?.properties?.action?.enum).toEqual(["pause", "resume", "cancel"]);
+  });
+
   it("ox_approve 批准/拒绝/404 如实转述 serve 的答复", async () => {
     const posted: Array<{ requestId?: unknown; granted?: unknown }> = [];
     const http = fakeHttp({
