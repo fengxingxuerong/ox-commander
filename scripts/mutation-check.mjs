@@ -666,7 +666,7 @@ function siteMutant(source, site, op) {
  */
 const SITE_BASELINE = {
   "electron/agents/cli-agent.ts": 21,
-  "electron/agents/http-bridge.ts": 37,
+  "electron/agents/http-bridge.ts": 39,
   "electron/agents/index.ts": 9,
   "electron/agents/manifest-loader.ts": 24,
   "electron/agents/manifest-schema.ts": 72,
@@ -729,7 +729,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 32,
-};;;;;;;;;;;;;;;;
+};
 
 /**
  * 等价变异白名单。

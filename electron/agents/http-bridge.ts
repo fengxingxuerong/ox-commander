@@ -325,7 +325,28 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
       taskId: run.taskId,
       status: run.status === "running" ? "failed" : run.status,
       changes: [],
-      ...(run.lastError ? { errorClass: "resource" as const, retryable: true } : {}),
+      // ⚠️ **`errorClass` 必须以终态为准，不能只看 `lastError`**（2026-10-05 并档全表审计）。
+      //
+      // 旧写法是 `...(run.lastError ? { errorClass: "resource", retryable: true } : {})`。
+      // 但 `lastError` 记的是**轮询途中的传输异常**，而轮询异常的处理是
+      // "下一拍重试"（见下方 catch 分支）—— 它**根本不代表这次 run 失败了**。
+      //
+      // 实测：一次断连 + 之后正常完成（也就是一次普通网络抖动）产出
+      //
+      //   status     = "completed"
+      //   errorClass = "resource"
+      //   retryable  = true
+      //
+      // 三句话互相打架：成功了、但失败原因是资源问题、而且值得重试。
+      // 引擎读到"completed"就认成功，同时把 retryable 记进重修账 ——
+      // 一次抖动被算成了"可重试的失败"。
+      //
+      // 判据与 cli-agent.ts:374 同源（那里写的是
+      // `lastKind === "failed" && run.exitCode === null`）：
+      // **只有真失败才谈失败类别**。抖动过去就过去了，不该留痕。
+      ...(run.lastError && run.status === "failed"
+        ? { errorClass: "resource" as const, retryable: true }
+        : {}),
       logDigest: "",
       durationMs: Date.now() - run.startedAt,
     };

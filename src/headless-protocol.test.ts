@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
-import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups } from "../headless/run-spec";
+import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups, optionalHostHooks } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
 import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, createPlatform, executorTimeoutMsFor } from "../electron/platform";
 import { DEFAULT_SETTINGS } from "../shared/types";
@@ -1442,6 +1442,61 @@ describe("headless entry point", () => {
     // No tasks ⇒ nothing to develop; the engine still reports a terminal state.
     expect([0, 1, 2]).toContain(code);
     expect(events[0]!.type).toBe("hello");
+  });
+
+  /**
+   * 下面这一组来自 site 逐位点审计（`run-spec.ts` 2 处存活，2026-10-05）。
+   *
+   * 两处都是同一个形状：**"宿主没提供就整个键都不给"，而不是给一个 `undefined`**。
+   * 内联在对象字面量里时两处都零断言 —— 把三元翻成"有就给、没有就给
+   * `undefined`"这条变异存活了，说明没有测试能区分这两种写法。
+   * 修法是把对象构造抽成纯函数（`optionalHostHooks`），在这里直接断言**键在不在**。
+   *
+   * `in` 与 `Object.keys` 是本组断言的全部要害：
+   * **光断言"值是 undefined"区分不了这两种写法** —— 缺席的键读出来也是 undefined。
+   */
+  describe("可选宿主钩子 · 缺席时连键都不给", () => {
+    const noop = async () => true;
+    const beat = () => {};
+
+    it("两个钩子都给 ⇒ 两个键都在", () => {
+      const h = optionalHostHooks({ requestApproval: noop, onTaskActivity: beat });
+      expect("requestApproval" in h).toBe(true);
+      expect("onTaskActivity" in h).toBe(true);
+      expect(Object.keys(h).sort()).toEqual(["onTaskActivity", "requestApproval"]);
+    });
+
+    it("requestApproval 缺席 ⇒ 键整个不存在（fail-closed 靠的就是这个）", () => {
+      const h = optionalHostHooks({ onTaskActivity: beat });
+      expect("requestApproval" in h).toBe(false);
+      expect(Object.keys(h)).toEqual(["onTaskActivity"]);
+      // 关键：不能是"键在但值为 undefined"
+      expect(Object.prototype.hasOwnProperty.call(h, "requestApproval")).toBe(false);
+    });
+
+    it("onTaskActivity 缺席 ⇒ 键整个不存在（无消费者就不该产生事件量）", () => {
+      const h = optionalHostHooks({ requestApproval: noop });
+      expect("onTaskActivity" in h).toBe(false);
+      expect(Object.keys(h)).toEqual(["requestApproval"]);
+    });
+
+    it("两个都缺席 ⇒ 一个空对象（CLI 形态），不是 {a: undefined, b: undefined}", () => {
+      const h = optionalHostHooks({});
+      expect(Object.keys(h)).toEqual([]);
+      expect("requestApproval" in h).toBe(false);
+      expect("onTaskActivity" in h).toBe(false);
+    });
+
+    it("显式传 undefined 等同于缺席（键仍然不出现）", () => {
+      const h = optionalHostHooks({ requestApproval: undefined, onTaskActivity: undefined });
+      expect(Object.keys(h)).toEqual([]);
+    });
+
+    it("缺席一个、给出另一个时，给出的那个值原样透传", () => {
+      const h = optionalHostHooks({ requestApproval: noop });
+      expect(h.requestApproval).toBe(noop);
+      expect("onTaskActivity" in h).toBe(false);
+    });
   });
 });
 

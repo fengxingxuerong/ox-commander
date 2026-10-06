@@ -1,4 +1,31 @@
 /**
+ * 把**宿主可选钩子**铺进 callbacks。
+ *
+ * 抽出来的理由（2026-10-05，site 逐位点审计）：这两行原先内联在
+ * `runSpec` 的对象字面量里，两处三元**都零断言** ——
+ * 把"有就给、没有就给 `undefined`"这条变异存活了，
+ * 说明没有任何测试能区分这两种写法。
+ *
+ * 而它们**不是随手写的防御**，各自有独立语义：
+ *   · `requestApproval` —— CLI 形态缺席 = **fail-closed 拒绝**。
+ *     若改成 `{ requestApproval: undefined }`，引擎侧
+ *     `"requestApproval" in callbacks` 会是 `true`，fail-closed 就被绕过了。
+ *   · `onTaskActivity` —— 宿主缺席时**不发**（无消费者就不产生事件量）。
+ *
+ * 与本文件 `onRunComplete` 里的 `...(outcome.agentId ? {agentId} : {})`
+ * 是同一条契约：**缺失时连键都不出现**，不能简化成直接传。
+ */
+export function optionalHostHooks(io: {
+  requestApproval?: PlatformHost["requestApproval"];
+  onTaskActivity?: PlatformHost["onTaskActivity"];
+}): Pick<PlatformHost, "requestApproval" | "onTaskActivity"> {
+  return {
+    ...(io.requestApproval ? { requestApproval: io.requestApproval } : {}),
+    ...(io.onTaskActivity ? { onTaskActivity: io.onTaskActivity } : {}),
+  };
+}
+
+/**
  * Runs one `ParsedSpec` to completion and reports the exit code.
  *
  * Kept free of process/stdin/stdout so it can be driven by a test with injected
@@ -10,6 +37,7 @@ import * as path from "node:path";
 import { VerificationExhaustedError } from "../electron/engine";
 import type { OrchestratorCallbacks, OrchestratorEngine, RunSnapshot } from "../electron/engine";
 import type { AgentLayer } from "../electron/agents";
+import type { PlatformHost } from "../electron/platform";
 import { createFileJournal, createPlatform } from "../electron/platform";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import type { LlmClient } from "../shared/llm-client";
@@ -177,8 +205,7 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   const pruned = pruneStaleBackups(spec.snapshotRoot);
   // 措辞刻意不含"回收"二字：离线 IT 有一条断言就是"没谎报回收"，
   // 保留下来的东西不能被写成回收过。
-  if (pruned.kept.length > 0) {
-    io.emit({
+  if (pruned.kept.length > 0) {    io.emit({
       type: "log",
       text:
         `[snapshots] 保留 ${pruned.kept.length} 个未到期批备份：${pruned.kept.join("、")} —— ` +
@@ -291,9 +318,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       },
       requestEscalationDecision: callbacks.requestEscalationDecision,
       // 审批（P2-3）：serve 宿主注入的询问器；CLI 形态缺席 = fail-closed 拒绝。
-      ...(io.requestApproval ? { requestApproval: io.requestApproval } : {}),
       // 活性心跳（2026-10-03 竞品吸收）：宿主缺席时不发（无消费者就不产生事件量）。
-      ...(io.onTaskActivity ? { onTaskActivity: io.onTaskActivity } : {}),
+      // 两者的"缺席时连键都不给"契约收在 optionalHostHooks 里（见该函数注释）。
+      ...optionalHostHooks(io),
     },
   });
 

@@ -45,6 +45,42 @@
 
 ### 修复
 
+- **一次网络抖动会让 bridge 报出「成功、失败原因是资源、而且值得重试」三句互相矛盾的话**（2026-10-05 并档全表审计）。
+
+  `http-bridge.ts:328` 原本是
+  `...(run.lastError ? { errorClass: "resource", retryable: true } : {})`。
+  但 `lastError` 记的是**轮询途中的传输异常**，而那里的处理是"下一拍重试"
+  （见 `:224` 的 catch 分支）—— **它根本不代表这次 run 失败了**。
+
+  实测真实 bridge：断连一次、之后正常完成（也就是一次普通网络抖动）产出
+
+  ```
+  status     = "completed"      ← 后来正常完成了
+  errorClass = "resource"       ← 却说失败原因是资源问题
+  retryable  = true             ← 还说值得重试
+  终态事件    = "completed"
+  ```
+
+  引擎读到 `completed` 就认成功，同时把 `retryable` 记进重修账 ——
+  **一次抖动被算成了"可重试的失败"**。
+
+  判据改成 `run.lastError && run.status === "failed"`，与 `cli-agent.ts:374`
+  （`lastKind === "failed" && run.exitCode === null`）**同源**：
+  只有真失败才谈失败类别。**同一个仓库里，两处写着一个意思、却用着不同判据** ——
+  这正是"查全表"才看得见的东西。
+
+  ⚠️ 顺带**改判了一条把缺陷钉住的既有测试**：
+  `轮询抛错时结果标成 resource/可重试` 断言的正是上面那个矛盾形状。
+  它是照着实现写的、不是照着语义写的，所以一直是绿的。已改为
+  `轮询抛错不落 errorClass —— 抖动过去就过去了，不该留痕`，
+  并补三条守住另一侧（真失败该贴还得贴 / aborted 不贴 / 断连后完成不带）。
+
+  **只加"别乱贴"的断言是不够的** —— 那等于允许"永远不贴"。
+  反向注入里专门有一条 `③ 永远不贴`，它被"真失败才带 resource/可重试"咬住。
+
+  反向注入 4/4；`electron/agents/http-bridge.ts` **38/38**；
+  位点基线 **1344**。
+
 - **serve 状态页把"跑完了但门禁没过"和"中途崩了"印成同一句话 `未交付 / 出错`**（2026-10-05 状态标签审计）。
 
   `STATUS_LABEL` 只有四个键，`done(passed=false)` 与 `error` 两种结局共用
@@ -79,6 +115,29 @@
   这是本轮观察脚本的第二次自骗）。
 
   反向注入 4/4；`headless/serve.ts` **58/58**（原 55，新增 3 处位点）。
+
+- **补上"可选宿主钩子缺席时连键都不给"的断言**（2026-10-05，源自 `e01d3c5` 留下的 2 处变异存活）。
+
+  `headless/run-spec.ts` 里两处内联三元（`requestApproval` / `onTaskActivity`）
+  **各自零断言** —— "键不存在"和"键存在但值为 undefined"在行为上分不开，
+  所以把三元翻面这条变异存活了。
+
+  这**不是随手写的防御**，两处各有语义：
+  `requestApproval` 缺席 = **fail-closed 拒绝**，改成给 `undefined` 会让
+  `"requestApproval" in callbacks` 变成 `true`，**fail-closed 被静默绕过**；
+  `onTaskActivity` 缺席 = 不发心跳。同文件 `onRunComplete` 里
+  `...(outcome.agentId ? {agentId} : {})` 是同一条契约。
+
+  处置是**抽出纯函数** `optionalHostHooks()`（内联三元埋在一个七百行的
+  `runSpec` 里，外部无从断言），并**断言 `in` / `Object.keys` 而不是值** ——
+  光断言"值是 undefined"两种写法都能过。
+
+  补 6 条，反向注入 4/4；`headless/run-spec.ts` **24/26 → 26/26**，
+  位点基线 **1342**。
+
+  ⚠️ 这两处**不是本轮改的文件**，来自本轮进行中落地的 `e01d3c5`，
+  是别人代码上这条链第一次逐位点走到。首次复现时按第十五轮的惯例
+  先怀疑是环境噪声，单独重跑确认稳定后才当真缺口处理。
 
 ### 门禁
 

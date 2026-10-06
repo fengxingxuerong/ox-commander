@@ -320,8 +320,26 @@ describe("HttpBridgeAdapter", () => {
     expect("retryable" in result!).toBe(false);
   });
 
-  it("轮询抛错时结果标成 resource/可重试（瞬态失败不该被当成终态失败）", async () => {
-    // `run.lastError` 只在事件拉取抛异常时落下（HTTP 非 2xx 走的是 finish，不是这里）。
+  it("轮询抛错不落 errorClass —— 抖动过去就过去了，不该留痕", async () => {
+    // `run.lastError` 只在事件拉取抛异常时落下（HTTP 非 2xx 走的是 finish，不是这里），
+    // 而那里的处理是"下一拍重试" —— **它根本不代表这次 run 失败了**。
+    //
+    // ⚠️ 这条用例 2026-10-05 **改判过**：原文断言的是
+    // `expect(result?.errorClass).toBe("resource")`，
+    // 那等于把"抖动"钉成"可重试的失败"，正是并档全表审计抓到的缺陷本身。
+    //
+    // 旧写法 `...(run.lastError ? { errorClass, retryable } : {})` 让一次普通网络抖动
+    // 产出三句互相打架的话（实测真实 bridge）：
+    //
+    //   status     = "completed"      ← 后来正常完成了
+    //   errorClass = "resource"       ← 却说失败原因是资源问题
+    //   retryable  = true             ← 还说值得重试
+    //
+    // 引擎读到 completed 就认成功，同时把 retryable 记进重修账 ——
+    // 一次抖动被算成了"可重试的失败"。
+    //
+    // 判据与 cli-agent.ts:374 同源（`lastKind === "failed" && run.exitCode === null`）：
+    // **只有真失败才谈失败类别**。
     let polls = 0;
     const fetchImpl = fakeFetch([
       {
@@ -340,9 +358,81 @@ describe("HttpBridgeAdapter", () => {
     await new Promise((r) => setTimeout(r, 60));
     const result = await adapter.lastResult(handle);
     expect(polls).toBeGreaterThanOrEqual(2);
+    // run 还在跑（running → 折成 failed 只是"还没收尾"），但没有失败类别可言
+    expect("errorClass" in result!).toBe(false);
+    expect("retryable" in result!).toBe(false);
+    await adapter.abort({ runId: handle.runId, agentId: "workbuddy-bridge", taskId: handle.taskId });
+  });
+
+  /**
+   * 抖动之后**正常完成**的那一格（2026-10-05 并档全表审计抓到的那一格）。
+   *
+   * 上一条只覆盖"抖动之后一直跑"。这一条覆盖真实世界里更常见的顺序：
+   * **断一次 → 下一拍恢复 → 远端报 completed**。
+   * 旧写法在这一格上产出 `completed` + `resource` + `retryable` 三句矛盾的话。
+   */
+  it("断连之后正常完成 ⇒ completed 且不带 errorClass/retryable", async () => {
+    let polls = 0;
+    const fetchImpl = fakeFetch([
+      {
+        match: "/v1/runs/42/events",
+        reply: () => {
+          polls += 1;
+          // 第一拍断连（走 catch 记 lastError），之后远端报 completed
+          if (polls === 1) throw new Error("ECONNRESET");
+          return { status: 200, body: { events: [{ kind: "completed", text: "ok" }], status: "completed" } };
+        },
+      },
+      { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+    ]);
+    const adapter = bridge(fetchImpl);
+    const handle = await adapter.dispatch(payload());
+    const events = await collect(adapter, handle);
+    expect(events.some((e) => e.kind === "completed")).toBe(true);
+    const result = await adapter.lastResult(handle);
+    expect(result?.status).toBe("completed");
+    expect("errorClass" in result!).toBe(false);
+    expect("retryable" in result!).toBe(false);
+  });
+
+  it("真失败（远端报 failed）才带 resource/可重试", async () => {
+    // 上一两条守的是"别乱贴"，这一条守的是"该贴还得贴" ——
+    // 两边都少一条，判据就只剩"永远不贴"，那不是修好而是删掉。
+    let polls = 0;
+    const fetchImpl = fakeFetch([
+      {
+        match: "/v1/runs/42/events",
+        reply: () => {
+          polls += 1;
+          if (polls === 1) throw new Error("ECONNRESET");
+          return { status: 200, body: { events: [], status: "failed" } };
+        },
+      },
+      { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+    ]);
+    const adapter = bridge(fetchImpl);
+    const handle = await adapter.dispatch(payload());
+    await collect(adapter, handle);
+    const result = await adapter.lastResult(handle);
+    expect(result?.status).toBe("failed");
     expect(result?.errorClass).toBe("resource");
     expect(result?.retryable).toBe(true);
-    await adapter.abort({ runId: handle.runId, agentId: "workbuddy-bridge", taskId: handle.taskId });
+  });
+
+  it("aborted 不带 errorClass（中止不是失败，第三档不许并进第二档）", async () => {
+    const fetchImpl = fakeFetch([
+      {
+        match: "/v1/runs/42/events",
+        reply: () => ({ status: 200, body: { events: [], status: "aborted" } }),
+      },
+      { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+    ]);
+    const adapter = bridge(fetchImpl);
+    const handle = await adapter.dispatch(payload());
+    await collect(adapter, handle);
+    const result = await adapter.lastResult(handle);
+    expect(result?.status).toBe("aborted");
+    expect("errorClass" in result!).toBe(false);
   });
 });
 
