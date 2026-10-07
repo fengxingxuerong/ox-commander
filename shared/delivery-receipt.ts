@@ -1,4 +1,4 @@
-import type { VerificationKind } from "./types";
+import type { RepairRecord, VerificationKind } from "./types";
 import type { UsageSnapshot } from "./usage-meter";
 
 /**
@@ -97,6 +97,22 @@ export interface ReceiptTask {
    * 但**差异必须留着可见**，不能各说各话还以为是同一个数。
    */
   errorClass?: string;
+  /**
+   * 逐轮重修记录 —— **每一轮为什么修、当时看到的摘要是什么**（2026-10-07）。
+   *
+   * 为什么补它：`attempts` 只说"试过几次"，说不出"每次为什么没成"。
+   * 2026-10-06 那次真实拆解端到端的负结果里，最花时间的一格正是
+   * "这一轮到底归因到了什么" —— 事件流里有，凭据里没有，于是事后只能翻日志。
+   *
+   * 两类事实刻意分开：
+   *   · `attempts` = 派发次数（含首轮）；
+   *   · `repairs`  = **重修轮**（`round > 0`），首轮不属于重修，不在里面。
+   * 两者对不上不是 bug：`attempts = repairs.length + 1` 只在"首轮派发过"时成立。
+   *
+   * 缺席 = 从未进入过重修轮（不是"重修了 0 次"的空数组 —— 空数组会让人
+   * 分不清"没修过"与"修过但记录丢了"，与 `outcomeOk` 同一条纪律）。
+   */
+  repairs?: RepairRecord[];
 }
 
 /** 用量投影：只留"对账用得上"的字段，`byModel` 明细留给 `usage` 协议事件。 */

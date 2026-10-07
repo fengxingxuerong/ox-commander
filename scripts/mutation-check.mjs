@@ -680,7 +680,7 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 38,
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
-  "electron/engine/orchestrator.ts": 55,
+  "electron/engine/orchestrator.ts": 57,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 33,
   "electron/engine/verifier.ts": 18,
@@ -729,7 +729,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 32,
-};
+};;
 
 /**
  * 等价变异白名单。

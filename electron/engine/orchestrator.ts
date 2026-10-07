@@ -15,7 +15,7 @@ import type {
 } from "../../shared/delivery-receipt";
 import { runSmokeChecks } from "./verifier";
 import type { ActionGateLike } from "../sandbox/action-gate";
-import type { SmokeCheck } from "../../shared/types";
+import type { RepairRecord, SmokeCheck } from "../../shared/types";
 import { planBatches, skippedDescendants } from "../../shared/graph";
 import { routeVerificationErrors, environmentalRulingNote } from "../../shared/routing";
 import type { DispatchOutcome } from "./scheduler";
@@ -228,6 +228,12 @@ export class OrchestratorEngine {
   private readonly inFlight = new Set<string>();
   /** Last attempt number emitted per task, reused by the cancel sweep. */
   private readonly attemptsSeen = new Map<string, number>();
+  /**
+   * 逐轮重修台账（2026-10-07）：`attempts` 只记"派发过几次"，而排查时真正
+   * 要的是"每一轮为什么没成、当时看到的摘要是什么" —— 那份数据只在事件流里
+   * 活过一轮，跑完就没了。这里攒下来，最后由 `emitReceipt` 写进凭据的逐任务账。
+   */
+  private readonly repairsSeen = new Map<string, RepairRecord[]>();
 
   constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {}
 
@@ -456,6 +462,7 @@ export class OrchestratorEngine {
     allDone: Set<string>;
     skipped: Set<string>;
     attempts: Map<string, number>;
+    repairs: Map<string, RepairRecord[]>;
     preexistingKinds: string[];
     round: number;
     verified: boolean;
@@ -496,6 +503,11 @@ export class OrchestratorEngine {
         // 字段（ReceiptTask.errorClass?），直接传值与条件展开等价（三元算子转正后
         // 该形状首次全量审计存活，据此简化消灭位点）。
         errorClass: outcome?.errorClass,
+        // 逐轮重修记录：缺席 = 没进过重修轮（不是空数组 —— 空数组分不清
+        // "没修过"与"修过但记录丢了"，与 outcomeOk 同一条纪律）。
+        ...(args.repairs.get(t.id)?.length
+          ? { repairs: args.repairs.get(t.id) }
+          : {}),
       };
     });
     const checks: ReceiptCheck[] = args.report.results.map((r) => ({
@@ -661,6 +673,20 @@ export class OrchestratorEngine {
         for (const t of pending) {
           attempts.set(t.id, (attempts.get(t.id) ?? 0) + 1);
           this.attemptsSeen.set(t.id, attempts.get(t.id)!);
+          if (isRepair) {
+            // 只在**重修轮**记：首轮不属于重修（与 `ReceiptTask.repairs` 的
+            // 注释同一口径）。reason 区分两种来路，因为排查路径不同：
+            //   · 上次这个任务自己没派成 ⇒ 看执行器/沙箱；
+            //   · 上次派成了但验证没过 ⇒ 看归因摘要（走 zone 归属那条线）。
+            const list = this.repairsSeen.get(t.id) ?? [];
+            list.push({
+              round,
+              reason: lastFailedLogs.has(t.id) ? "上一轮该任务未派发成功" : "上一轮验证未通过",
+              errorLogDigest: routedByTask.get(t.id) ?? lastDigest,
+              dispatchedAt: new Date().toISOString(),
+            });
+            this.repairsSeen.set(t.id, list);
+          }
           this.inFlight.add(t.id);
           this.cb.onTaskStatus(t.id, "running", attempts.get(t.id)!);
         }
@@ -819,6 +845,8 @@ export class OrchestratorEngine {
           allDone,
           skipped,
           attempts,
+
+          repairs: this.repairsSeen,
           preexistingKinds: preexistingKindList,
           round,
           ...this.verifiedFieldsFor(report),
@@ -929,6 +957,8 @@ export class OrchestratorEngine {
                 allDone,
                 skipped,
                 attempts,
+
+                repairs: this.repairsSeen,
                 preexistingKinds: preexistingKindList,
                 round,
                 ...this.verifiedFieldsFor(finalReport),
@@ -955,6 +985,8 @@ export class OrchestratorEngine {
           allDone,
           skipped,
           attempts,
+
+          repairs: this.repairsSeen,
           preexistingKinds: preexistingKindList,
           round,
           // 卡住的一律记成"没验过"：验证命令跑了但红着，与"根本没跑"在凭据里

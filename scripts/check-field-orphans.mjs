@@ -73,7 +73,15 @@ const SKIP_DIR =
  * 加项前必须能说清**谁会读它**（哪怕是"外部消费方"，也要写清楚是谁）。
  */
 const ACCEPTED = new Map([
-  // ---- 2026-10-05 首跑清点：6 项，全部是「从未被读、也从未被写」的可选字段 ----
+  // ---- 2026-10-07：第 3 条**被本门禁自己判失效并删除** ----
+  //
+  // `RepairRecord.dispatchedAt` 昨天还挂着"从未被读写"，今天 `orchestrator` 在
+  // `ReceiptTask.repairs` 里真的写上了它 —— 白名单项当场过期，于是删掉。
+  // 这正是「失效也红」要的那一次：**白名单该减不该增**，否则它会在下一次
+  // 有人真的接上消费者时，继续替那个人掩盖"这格已经有人管了"。
+  // ⚠️ 顺带说明本门禁的价值不是"抓孤儿"，是**让这类理由有保质期**。
+  //
+  // ---- 2026-10-05 首跑清点：6 项 → 现存 5 项 ----
   //
   // 判据（三条都查过，不是猜的）：
   //   1. `git log -S` 显示它们都在**首版提交**（a90ff3b）里，此后从未被动过；
@@ -97,7 +105,6 @@ const ACCEPTED = new Map([
   ["shared/agent-contract.ts::TaskRequest.allowedCommands", "同上：预留未兑现，保留以免破坏外部适配器"],
   ["shared/agent-contract.ts::TaskRequest.previousAttempt", "同上：预留未兑现，保留以免破坏外部适配器"],
   ["shared/types.ts::TaskState.assignedAgentId", "自首版起从未被读写；TaskState 是渲染层直接消费的类型，删字段会波及看板形状"],
-  ["shared/types.ts::RepairRecord.dispatchedAt", "RepairRecord 整体从未被读过（repairHistory 也没被读）；时间戳字段预留未兑现"],
   ["shared/types.ts::TaskState.repairHistory", "自首版起从未被读写；重修历史目前只活在 journal（RunSnapshot）里，这两套账还没打通 —— 属于已知缺口而非死字段，见 docs/2026-10-05-full-audit.md"],
 ]);
 

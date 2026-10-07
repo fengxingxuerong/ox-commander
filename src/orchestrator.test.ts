@@ -2265,6 +2265,99 @@ describe("OrchestratorEngine · 交付凭据", () => {
     expect(t.attempts).toBe(1);
   });
 
+  /**
+   * 逐轮重修台账进凭据（2026-10-07「两套账打通」）。
+   *
+   * 缺口形状：`attempts` 只说"派发过几次"，说不出"每一轮为什么没成"。
+   * 而重修上下文（每轮的归因摘要）此前**只在事件流里活一轮** —— 跑完就没了，
+   * 事后要复盘只能翻日志。2026-10-06 真实拆解端到端的负结果里，最花时间的
+   * 一格正是"这一轮到底归因到了什么"。
+   *
+   * 三条断言各自的理由：
+   *   · `repairs` 有 1 条 —— 只发生了一轮重修；
+   *   · `attempts === 2` —— 首轮 + 重修轮，两个数是**同源**的两份事实；
+   *   · `dispatchedAt` 是 ISO 串 —— 时间戳缺席会让"第几轮"失去时序。
+   *
+   * ⚠️ 反向注入（改完必做）：把 orchestrator 里那个 `list.push(...)` 删掉
+   * ⇒ 本用例当场红（`repairs` 变 undefined）。**只断言"加字段后绿"证明不了
+   * 任何东西。**
+   */
+  it("重修轮的原因与摘要进任务账（attempts 只说次数，repairs 说每一轮为什么）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    let round = 0;
+    // 首轮派发成功但验证未过 ⇒ 重修的来路是"上一轮验证未通过"。
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({
+          taskId: t.id, ok: true, logDigest: "", events: [], agentId: "sensenova-api", durationMs: 10,
+        }));
+      },
+    } as unknown as Scheduler;
+    const eng = buildReceiptEngine({
+      scheduler,
+      onReceipt: (r) => seen.push(r),
+      maxRounds: 1,
+      verify: async () => {
+        round += 1;
+        // 前两次都红：第 1 次是**派发前的基线验证**（动手前先跑基线），
+        // 第 2 次才是首轮派发后的验证 —— 两次都红才会真的进入重修轮。
+        return round < 3 ? makeReport(false) : makeReport(true);
+      },
+    });
+
+    await eng.execute([TASKS], ".");
+
+    const t = seen[0]!.tasks[0]!;
+    expect(t.attempts).toBe(2);
+    expect(t.repairs).toHaveLength(1);
+    expect(t.repairs![0]!.round).toBe(1);
+    // 首轮是"派发成功、验证没过"，**不是**"没派发成功" —— 这两种来路的
+    // 排查路径完全不同（看归因摘要 vs 看执行器/沙箱）。
+    expect(t.repairs![0]!.reason).toContain("验证未通过");
+    expect(t.repairs![0]!.dispatchedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it("上一轮没派发成功的任务，reason 说的是派发失败（不是含糊的「重修」）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    let round = 0;
+    let batchNo = 0;
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        batchNo += 1;
+        // 首轮派发失败（进 lastFailedLogs），重修轮成功 —— 否则"验证过了但
+        // 任务没完成"会走到 VerificationExhaustedError，凭据根本不会发出。
+        const ok = batchNo > 1;
+        return tasks.map((t: Task) => ({
+          taskId: t.id, ok, logDigest: ok ? "" : "boom-t1", events: [], durationMs: 10,
+        }));
+      },
+    } as unknown as Scheduler;
+    const eng = buildReceiptEngine({
+      scheduler,
+      onReceipt: (r) => seen.push(r),
+      maxRounds: 1,
+      verify: async () => {
+        round += 1;
+        return round === 1 ? makeReport(false) : makeReport(true);
+      },
+    });
+
+    await eng.execute([TASKS], ".");
+
+    const t = seen[0]!.tasks.find((x) => x.id === "t1")!;
+    expect(t.repairs).toHaveLength(1);
+    expect(t.repairs![0]!.reason).toContain("未派发成功");
+  });
+
+  /** 缺席 ≠ 空数组：一次就过的任务没有"重修"这回事，连键都不该出现。 */
+  it("一次就过的任务没有 repairs 键（空数组会分不清「没修过」与「记录丢了」）", async () => {
+    const seen: DeliveryReceipt[] = [];
+    const eng = buildReceiptEngine({ scheduler: attributed, onReceipt: (r) => seen.push(r) });
+    await eng.execute([TASKS], ".");
+
+    expect(seen[0]!.tasks[0]!.repairs).toBeUndefined();
+  });
+
   it("失败派发的任务带着 outcomeOk=false（不许只靠 status 传达）", async () => {
     const seen: DeliveryReceipt[] = [];
     const failing = {
