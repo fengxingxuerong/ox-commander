@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../shared/types";
+import { isFailureClass } from "../shared/types";
 import { useApp } from "./store";
 import { buildReceipt } from "../shared/delivery-receipt";
 
@@ -242,6 +243,77 @@ describe("handleEvent · taskOutcome", () => {
   it("defaults an unclassifiable failure to 'unknown'", () => {
     emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom" });
     expect(useApp.getState().tasks["t1"]!.errorClass).toBe("unknown");
+  });
+
+  /**
+   * 收窄必须发生在这个边界上（2026-10-07，由 `check:unwired` 抓出）。
+   *
+   * `TaskView.errorClass` 声明为 `FailureClass`，而 `BoardPage.tsx` 的注释写着
+   * "值已在边界经 `isFailureClass` 收窄" —— **那句话描述的接线并不存在**：
+   * `isFailureClass` 一直零调用者，`store.ts` 直接
+   * `next.errorClass = errorClass ?? "unknown"` 把 IPC 事件上的 `string`
+   * 直写进联合类型字段。
+   *
+   * 实测（改之前）：
+   *   送 "quantum-flux" → TaskView.errorClass === "quantum-flux"
+   *   送 42           → TaskView.errorClass === 42
+   *
+   * 后者尤其说明问题：连"是不是字符串"都没查。审计日志是 JSONL
+   * （`electron/audit-log.ts:218` 直接 `JSON.parse(line) as AuditRecord`），
+   * 旧版本写下的、或被人手改过的一行都可能带出登记外的值。
+   */
+  describe("errorClass 的边界收窄", () => {
+    it("未登记的字符串类别归到 unknown，不原样透传", () => {
+      emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom", errorClass: "quantum-flux" });
+      expect(useApp.getState().tasks["t1"]!.errorClass).toBe("unknown");
+    });
+
+    it("非字符串（连类型都不是）也归到 unknown", () => {
+      emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom", errorClass: 42 });
+      expect(useApp.getState().tasks["t1"]!.errorClass).toBe("unknown");
+    });
+
+    it("九档登记在册的值必须**原样保留**（收窄不是一律吞掉）", () => {
+      // 只钉一个值不够 —— 反向变异把 `isFailureClass(x) ? x : "unknown"`
+      // 改成 `undefined ? x : "unknown"` 也叫"收窄"，那会把界面全变成 unknown。
+      for (const c of [
+        "auth", "rate-limit", "timeout", "protocol",
+        "conflict", "resource", "no-agent", "contract", "unknown",
+      ] as const) {
+        emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom", errorClass: c });
+        expect(useApp.getState().tasks["t1"]!.errorClass, `class=${c}`).toBe(c);
+      }
+    });
+
+    it("缺席（undefined）仍是 unknown，不影响既有行为", () => {
+      emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom" });
+      expect(useApp.getState().tasks["t1"]!.errorClass).toBe("unknown");
+    });
+
+    /**
+     * 收窄器自身的判据（2026-10-07）。
+     *
+     * 前一组全是**间接**用例（经 store / derive 观察结果）。收窄器本身的值域
+     * 判据此前**一条直接断言都没有** —— 而它正是两个边界共同依赖的那一格。
+     *
+     * `FAILURE_CLASSES` 与 `FailureClass` 的同源由 `satisfies` 在编译期保证
+     * （少一档即 `tsc` 红），所以这里要守的是**运行时**那一半：
+     * 非字符串必须返回 false，而不是被 `includes` 的宽松比较放过去。
+     */
+    it("收窄器对九档在册值全部放行", () => {
+      for (const c of [
+        "auth", "rate-limit", "timeout", "protocol",
+        "conflict", "resource", "no-agent", "contract", "unknown",
+      ] as const) {
+        expect(isFailureClass(c), `class=${c}`).toBe(true);
+      }
+    });
+
+    it("收窄器拒绝表外的值：未登记串、非字符串、空串", () => {
+      for (const v of ["quantum-flux", "", "AUTH", "rate_limit", 42, null, undefined, {}, [], true]) {
+        expect(isFailureClass(v), `value=${JSON.stringify(v)}`).toBe(false);
+      }
+    });
   });
 
   it("ignores an outcome for a task it has never seen", () => {

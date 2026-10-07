@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import type { AppState, TaskView } from "./types";
 import type { Stage, TaskStatus } from "../shared/types";
+import { isFailureClass } from "../shared/types";
 import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
 
 const api = () => window.oxCommander;
@@ -273,6 +274,13 @@ export const useApp = create<AppState>((set, get) => ({
         ...(view.stage ? { stage: view.stage } : {}),
         ...(view.receipt ? { receipt: view.receipt } : {}),
         interrupted: view.interrupted,
+        // ⚠️ **恢复批次的时间戳与任务心跳不是同一个字段**（2026-10-07 tsc 修）。
+        //
+        // `AppState` 上有两个 `lastActivityTs`：`TaskView.lastActivityTs?: number`
+        // （毫秒时间戳，任务心跳）与 `AppState.lastActivityTs?: string`
+        // （ISO 串，恢复横幅用）。这里回填的是**后者**，
+        // 之前直接写了 `view.lastActivityTs`（string）—— `tsc` 早就报过这一行，
+        // 一直没被处理。显式点出键名比依赖推断更清楚，两种语义也不会被混。
         lastActivityTs: view.lastActivityTs,
         logs:
           view.interrupted || Object.keys(view.tasks).length > 0
@@ -427,7 +435,22 @@ export const useApp = create<AppState>((set, get) => ({
             ...(durationMs !== undefined ? { durationMs } : {}),
           };
           if (ok) delete next.errorClass;
-          else next.errorClass = errorClass ?? "unknown";
+          // ⚠️ **收窄发生在这里，这个边界之前是漏的**（2026-10-07）。
+          //
+          // 旧写法 `next.errorClass = errorClass ?? "unknown"` —— `errorClass`
+          // 是从 IPC 事件上读的 `string`，**没有任何检查**就直写进
+          // `TaskView.errorClass`（声明为 `FailureClass`）。实测：
+          //
+          //   送 "quantum-flux"（未登记）→ TaskView.errorClass === "quantum-flux"
+          //   送 42（连类型都不是）      → TaskView.errorClass === 42
+          //
+          // 而 `BoardPage.tsx:26` 的注释白纸黑字写着"值已在边界经
+          // `isFailureClass` 收窄" —— **收窄器 `isFailureClass` 一直零调用者**，
+          // 由 `check:unwired` 门禁当场抓出。这条注释描述的是一个从未存在的接线。
+          //
+          // 收窄之后 `Record<FailureClass, string>` 的"键受 tsc 兜着"才真正成立，
+          // 界面上 `ERROR_LABELS[c] ?? c` 的兜底才只会兜到 `unknown` 以外的**已知**档。
+          else next.errorClass = isFailureClass(errorClass) ? errorClass : "unknown";
           return { tasks: { ...s.tasks, [taskId]: next } };
         });
         break;

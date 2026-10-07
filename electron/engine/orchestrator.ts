@@ -914,7 +914,19 @@ export class OrchestratorEngine {
           if (this.cb.requestEscalationDecision) {
             const decision = await this.cb.requestEscalationDecision(t.id, summary);
             if (decision === "abort") {
-              throw new Error(`用户终止：任务「${t.title}」重修 ${attempts.get(t.id) ?? round + 1} 轮后仍未通过`);
+              // ⚠️ **量纲**：这里手里的数是**派发次数**（含首轮），不是重修轮数。
+              // 第十二轮修的是升级弹窗（`shared/prompts.ts`），**这一处漏网了** ——
+              // 旧文案把它直接念成"重修 N 轮"，于是 `maxRepairRounds: 0` 的 run
+              // （**一次重修都不许有**）终止时报的是"重修 1 轮后仍未通过"；
+              // 而同一条的 `stallReasonFor` 用的是 `maxRounds`，说的是"重修 0 轮"。
+              // 两句话挂在同一个失败上，差 1 —— 正是第十二轮付过学费的那一类。
+              //
+              // 改法不是换个变量，是**把两个量纲都写出来**：读者要知道烧了几次，
+              // 也要知道那几次里有多少属于重修才能判断"还剩没有机会再试一次"。
+              throw new Error(
+                `用户终止：任务「${t.title}」已尝试 ${attempts.get(t.id) ?? round + 1} 次` +
+                  `（重修上限 ${maxRounds} 轮）后仍未通过`,
+              );
             }
             if (decision === "skip") {
               skipped.add(t.id);

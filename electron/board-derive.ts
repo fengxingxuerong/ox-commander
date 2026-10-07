@@ -19,7 +19,8 @@
  */
 import type { AuditRecord } from "./audit-log";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
-import type { Stage, TaskStatus } from "../shared/types";
+import type { FailureClass, Stage, TaskStatus } from "../shared/types";
+import { isFailureClass } from "../shared/types";
 
 /**
  * One task's view as derived from run facts. Structurally identical to the
@@ -38,7 +39,7 @@ export interface DerivedTask {
   /** Which agent actually finished the last run (from run-end, not run-start). */
   agentId?: string;
   /** Coarse failure class from the last run, for grouping. */
-  errorClass?: string;
+  errorClass?: FailureClass;
   /** Duration of the last run. */
   durationMs?: number;
 }
@@ -72,7 +73,17 @@ export interface TrailRun {
   agentId?: string;
   ok?: boolean;
   durationMs?: number;
-  errorClass?: string;
+  /**
+   * 这次派发为什么失败。
+   *
+   * ⚠️ 这里已经是**收窄后**的值（2026-10-07）：它是 `FailureClass` 而不是
+   * `AuditRecord.errorClass` 那个 `string`。理由与 `DerivedTask` 那一条同源 ——
+   * `TrailRun` 不是审计原件的投影，它是**给下一个执行器读的履历**
+   * （`trailBriefForRepair` 会把 `${cls} × ${n}` 直接印进 prompt），
+   * 未登记的值到了那里就是一个没人认识、也没人登记过的裸 token，
+   * 而 LLM 拿它做不出任何判断。收窄就发生在构造这一处（下）。
+   */
+  errorClass?: FailureClass;
   digest?: string;
 }
 
@@ -126,7 +137,9 @@ export function taskTrail(records: AuditRecord[], taskId: string): TaskTrail {
       ...(record.ok
         ? {}
         : {
-            errorClass: record.errorClass ?? "unknown",
+            // 与 `DerivedTask.errorClass` 同一处收窄、同一处理由（2026-10-07）：
+            // 这段履历是要念给下一个执行器听的，登记外的值念出来就是裸 token。
+            errorClass: isFailureClass(record.errorClass) ? record.errorClass : "unknown",
             digest: record.detail ?? "无日志",
           }),
     });
@@ -256,6 +269,14 @@ export function deriveBoardView(records: AuditRecord[]): BoardRecoveryView {
     };
     // Optional fields follow the audit's own contract: a field that is absent
     // must not appear as a key at all (`"agentId" in obj === false`).
+    //
+    // ⚠️ `errorClass` 在这里**必须收窄**（2026-10-07）。`AuditRecord.errorClass`
+    // 是 `string`（审计 JSONL 来自 `JSON.parse(line) as AuditRecord`，
+    // 里面可能是旧版本写的、也可能被人手改过），而 `DerivedTask.errorClass`
+    // 是 `FailureClass`。旧写法 `record.errorClass ?? "unknown"` 把两者直接接上 ——
+    // 未登记的值会一路进到看板的 `Record<FailureClass, string>`，
+    // 落到 `ERROR_LABELS[c] ?? c` 那句兜底，界面吐出裸 token。
+    // 与 `src/store.ts` 的事件路径是同一个收窄、同一处理由。
     const next: DerivedTask = {
       ...base,
       status: record.ok ? "done" : "failed",
@@ -264,7 +285,7 @@ export function deriveBoardView(records: AuditRecord[]): BoardRecoveryView {
       ...(record.ok
         ? {}
         : {
-            errorClass: record.errorClass ?? "unknown",
+            errorClass: isFailureClass(record.errorClass) ? record.errorClass : "unknown",
             failureDigest: record.detail ?? "无日志",
           }),
     };

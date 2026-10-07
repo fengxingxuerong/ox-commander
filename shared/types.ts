@@ -27,6 +27,86 @@ export type TaskStatus =
    * not report an operator's cancel as an agent failure. */
   | "cancelled";
 
+/**
+ * 任务/派发域的失败类别 —— **单一真源**（2026-10-07）。
+ *
+ * 此前这一个概念在全仓有 **4 份互不打招呼的声明**，任何一份漏登记都不会红：
+ *
+ * | 位置 | 值域 | 约束 |
+ * |---|---|---|
+ * | `shared/agent-contract.ts` `AgentRunResult.errorClass` | 6 档 | TS 联合 |
+ * | `electron/audit-log.ts` `classifyFailure` 的返回值 | 8 档 | **返回 `string`，无约束** |
+ * | `electron/engine/scheduler.ts` `DispatchOutcome.errorClass` | 任意 | **无约束** |
+ * | `src/pages/BoardPage.tsx` `ERROR_LABELS` | 8 档（手抄） | 无约束 |
+ *
+ * 后果不是理论上的：引擎自写的 `contract`（契约路径违规，
+ * `orchestrator.ts` 置位）**不在任何一张表上** —— 而这一档恰好是 2026-10-06
+ * 真实拆解 e2e 里命中的场景（`src/core/csv/index.js` 交成了 `index` 布局）。
+ * 桌面上它走到 `ERROR_LABELS[t.errorClass] ?? t.errorClass` 的兜底分支，
+ * 中文界面里吐出一个英文裸 token「contract」，操作者看不出该去看什么。
+ *
+ * 收口办法沿用本仓的老办法：**把手抄变成编译期事实**。四处都引这个类型之后，
+ * 少一档 => `tsc` 当场红（`Record<FailureClass, string>` 缺键是编译错），
+ * 而不是等某个人凑巧并排看两张表。
+ *
+ * ⚠️ **与验证域的 `*-denied` 三档刻意分开**：那边（`VerificationReport`
+ * 的 `errorClass` 与 `shared/routing.ts` 的 `ERROR_CLASS_LABEL`）说的是
+ * "这条验证命令被沙箱/审批拒绝执行"，本 file 说的是"这个任务为什么没做出来"。
+ * 两者同名字段、不同值域 —— 合并会让"改代码有用"与"改代码没用"重新混起来
+ * （这正是 P2-3 失败类别细分当年要分开的东西）。
+ */
+export type FailureClass =
+  /** 密钥/鉴权失败（401/403）。 */
+  | "auth"
+  /** 平台限流（429 / Rate-Limit / 冷却中）。 */
+  | "rate-limit"
+  /** 超时或 deadline 到点。 */
+  | "timeout"
+  /** 输出不合协议约定的形状（解析不出供给侧 JSON 等）。 */
+  | "protocol"
+  /** zone 越权：改了不属于自己的文件。 */
+  | "conflict"
+  /** 资源面：磁盘满、权限、句柄耗尽。 */
+  | "resource"
+  /** 调度器没匹配到任何可执行者。 */
+  | "no-agent"
+  /** 契约路径违规：任务点名的文件没落在盘上（交成了等价布局也算）。 */
+  | "contract"
+  /** 归类不出具体原因 —— 与"没有 class"不同，这是明确的一条结论。 */
+  | "unknown";
+
+/**
+ * `FailureClass` 的运行时值域。
+ *
+ * 为什么类型之外还要一份值：**边界上的数据不信形状**。审计日志是 JSONL，
+ * 里边躺着的可能是旧版本写的、也可能被人手改过 —— 类型断言在反序列化处
+ * 等于没有。`shared/types.ts` 里已经有 `STAGE_ORDER` 这个先例：一份兼具
+ * 类型与运行时可枚举性的东西，恰恰是跨版本数据能收窄成类型的唯一方法。
+ */
+export const FAILURE_CLASSES = [
+  "auth",
+  "rate-limit",
+  "timeout",
+  "protocol",
+  "conflict",
+  "resource",
+  "no-agent",
+  "contract",
+  "unknown",
+] as const satisfies readonly FailureClass[];
+
+/**
+ * 把一个来自磁盘/JSON 的值收窄成 `FailureClass`。
+ *
+ * 认不出来的**一律落到 `unknown`**，而不是原样透传：那正是桌面端
+ * `ERROR_LABELS[c] ?? c` 那句兜底的来源，透传会让界面吐出一个既没有中文
+ * 名字、也没人登记过的裸 token。收窄发生在**边界**，界面层因此可以放心用
+ * `Record<FailureClass, string>` —— 它的键受 `tsc` 兜着。
+ */
+export function isFailureClass(value: unknown): value is FailureClass {
+  return typeof value === "string" && (FAILURE_CLASSES as readonly string[]).includes(value);
+}
+
 export interface PrdDocument {
   goal: string;
   features: string[];

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
-import type { Stage } from "../shared/types";
+import type { FailureClass, Stage } from "../shared/types";
 
 export type AuditPhase =
   | "run-start"
@@ -319,7 +319,7 @@ export class AuditLog {
  * Heuristic on purpose — the adapters produce prose, not error codes — and the
  * class is used for grouping in the UI, never for a decision.
  */
-export function classifyFailure(logDigest: string): string {
+export function classifyFailure(logDigest: string): FailureClass {
   const t = logDigest.toLowerCase();
   if (/401|403|unauthorized|invalid api key|认证失败/.test(t)) return "auth";
   if (/429|rate limit|限流|冷却|cooling|too many requests/.test(t)) return "rate-limit";

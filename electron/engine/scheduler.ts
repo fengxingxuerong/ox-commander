@@ -1,6 +1,7 @@
 import type {
   AgentAdapter,
   AgentEvent,
+  FailureClass,
   RunHandle,
   Task,
   TaskPayload,
@@ -23,7 +24,7 @@ export interface DispatchOutcome {
   agentId?: string;
   durationMs?: number;
   /** Coarse failure class, for grouping in the UI and the audit trail. */
-  errorClass?: string;
+  errorClass?: FailureClass;
 }
 
 export const DEFAULT_MAX_PARALLEL_RUNS = 4;

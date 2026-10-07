@@ -130,6 +130,116 @@
 
 ### 修复
 
+- **失败类别（`errorClass`）的值域收成一个类型 —— 此前它有 4 份互不打招呼的声明**（2026-10-07）。
+
+  | 位置 | 值域 | 约束 |
+  |---|---|---|
+  | `shared/agent-contract.ts` `AgentRunResult.errorClass` | 6 档 | TS 联合 |
+  | `electron/audit-log.ts` `classifyFailure` 返回值 | 8 档 | **返回 `string`，无约束** |
+  | `electron/engine/scheduler.ts` `DispatchOutcome.errorClass` | 任意 | **无约束** |
+  | `src/pages/BoardPage.tsx` `ERROR_LABELS` | 8 档（手抄） | 无约束 |
+
+  代价不是理论上的：**引擎自写的 `contract`（契约路径违规，见上面 10-06 那条 Stage 3.5）
+  不在任何一张表上**。它是 10-06 刚引入的新档，UI 词表写得更早 —— 中间这一段的衔接
+  完全靠"有人记得"，而没人记得。于是这类失败在中文看板上走到
+  `ERROR_LABELS[c] ?? c` 的兜底，吐出一个英文裸 token「contract」；
+  偏偏那一档就是 10-06 真实拆解 e2e 里最花时间的场景。
+
+  收口办法沿用本仓的老办法：**把手抄换成编译期事实**。新增 `shared/types.ts` 的
+  `FailureClass`（9 档）+ 运行时值域 `FAILURE_CLASSES` + 边界收窄器 `isFailureClass`，
+  四处全部引它。`BoardPage` 那张表改成 `Record<FailureClass, string>` 之后 ——
+  **少一档就是编译错**。反向注入实测：删掉 `contract` 那个键 ⇒
+  `tsc` 当场 `error TS2741: Property 'contract' is missing`（退出码 2）。
+  以前这类漏登记要人工把两张表并排对照才能发现，现在编译器管。
+
+  ⚠️ **值与类型之间刻意保留边界**：验证域那三档 `*-denied`
+  （`VerificationReport.errorClass` 与 `routing.ts` 的 `ERROR_CLASS_LABEL`）**没并进来** ——
+  它说的是"这条验证命令被沙箱/审批拒绝执行"，本 file 说的是"这个任务为什么没做出来"。
+  合并会让"改代码有用"与"改代码没用"重新混起来，那正是 P2-3 当年要分开的东西。
+
+- **用户选「终止」时的报错把派发次数念成了重修轮数**（2026-10-07，第十二轮的漏网之鱼）。
+
+  `orchestrator.ts` 手上是**派发次数**（含首轮），而同一次失败交给 `stallReasonFor`
+  的是 `maxRounds`（重修轮上限）。两个数量纲差 1，旧文案 `重修 ${attempts} 轮后仍未通过`
+  直接把前者灌进了后者那个词。
+
+  最刺眼的复现是 `maxRepairRounds: 0` —— **一次重修都不许有**的运行，终止时报的却是
+  「重修 1 轮后仍未通过」，而同一处的另一句话说「重修 0 轮」。
+
+  讽刺的是，就在上方 3 行处的注释（:900-904）**自己就写着**
+  "`round + 1` 是派发次数口径，别把它当重修轮次"。第十二轮修的是升级弹窗
+  （`shared/prompts.ts`，今天已有 `prompts.test.ts:114` 钉住），这一处漏了。
+
+  改法不是换个变量，是**把两个量纲都写出来**：「已尝试 N 次（重修上限 M 轮）」。
+
+- **`errorClass` 的边界收窄从来没有接上电 —— 未登记的值（包括非字符串）直写进联合类型字段**（2026-10-07）。
+
+  `BoardPage.tsx` 的注释白纸黑字写着"值已在边界经 `isFailureClass` 收窄"，
+  而**收窄器 `isFailureClass` 一直零调用者**。链路每一环都读过：
+
+  ```
+  electron/ipc/context.ts:324   outcome.errorClass（联合类型）
+    → IPC 事件（序列化成 JSON，运行时不再有任何类型）
+    → src/store.ts:414           errorClass?: string                ← 收窄器缺席
+    → src/store.ts:430           next.errorClass = errorClass ?? "unknown"  ← 无检查直写
+    → src/types.ts:60            errorClass?: FailureClass         ← 声称是联合类型
+    → BoardPage.tsx:175          ERROR_LABELS[c] ?? c                ← 兜底吐裸 token
+  ```
+
+  实测经真实 `handleEvent` 喂进去：
+
+  ```
+  >>> TaskView.errorClass = "quantum-flux"
+  >>> 非字符串时 TaskView.errorClass = 42
+  ```
+
+  **第二条更要紧**：连"是不是字符串"都没查。而这条数据来自审计 JSONL ——
+  `electron/audit-log.ts:218` 是 `JSON.parse(line) as AuditRecord`，
+  **旧版本写下的、被人手改过的一行都可能带出登记外的值**。
+
+  `src/store.ts`（IPC 事件路径）与 `electron/board-derive.ts`（审计恢复路径）
+  **是同一个缺陷的两个入口**，两处一起修成
+  `isFailureClass(x) ? x : "unknown"`。
+
+  `electron/board-derive.ts` 的 `DerivedTask.errorClass` 原先也声明成 `string`，
+  一并收成 `FailureClass`（它同时修好了 `DerivedTask` 与 `TaskView` 不兼容的问题）。
+
+- **收窄漏了第三个入口：`TrailRun.errorClass` —— 未登记的值会被印进给下一个执行器读的 prompt**（2026-10-07）。
+
+  上一条修完两处之后，`TrailRun.errorClass` 仍是 `string`：它把 `AuditRecord.errorClass`
+  原样搬进履历，而 `trailBriefForRepair` 会把 `${cls} × ${n}`
+  **直接印进重修轮拼给执行器的那段文本**（`[前任履历] 这个任务之前被试过：…`）。
+
+  与界面上的裸 token 同族，但更难发现：界面里的「contract」至少还有个人会看见、
+  会报过来；prompt 里的 `quantum-flux × 2` **只有模型看得见**，
+  而它拿一个没人登记过的词做不出任何判断 —— 履历那一句的全部价值是
+  "换思路"，前提是它得知道**换过什么**。
+
+  收窄同样发生在构造处（`taskTrail` 拼 `TrailRun` 时），类型一并收紧成 `FailureClass`。
+
+  反向注入实测（把那一处改回 `record.errorClass ?? "unknown"`）：
+  `src/board-derive.test.ts` 里「履历里的未登记 errorClass 归 unknown」与
+  「压给下一个执行器的文本里不出现登记外的类别」两条**当场红** ——
+  注意只回退**第一处**（履历）时红的正是这两条，只回退第二处（`deriveBoardView`）
+  时红的是另外两条：两个入口各自有自己的判据，不是共用一条。
+
+- **把 `errorClass` 的值域收成一个类型之后，`tsc` 一回就点出两处没收窄的边界**（2026-10-07）。
+
+  ⚠️ **说法要准：这两条报错不是 HEAD 上就有的红**。本轮开工前 `npm run verify`
+  在 `18ee758` 上 EXIT 0，而 `typecheck` 正是它的第 2 段 —— 也就是说 HEAD 干净。
+  那两条是**收紧类型之后当场冒出来的**，属于改造过程的中间态。把它们写成
+  "HEAD 上本就红着"会让后来人误以为那段门禁早就失灵，与实测相反。
+
+  真正的收获是另一件事：**收紧类型这一手本身就是探针**。它一次逮到三个点 ——
+  `store.ts` 的事件路径、`board-derive.ts` 的审计恢复路径、
+  `DerivedTask` 与 `TaskView` 两个 view 类型的字段不一致 ——
+  而这三处此前**全仓没有任何测试会红**。
+
+  第二条 `DerivedTask | TaskView` 不兼容一开始看着像"别人的历史遗留"，
+  是它把第三个收窄点（`board-derive.ts`）牵出来的 ——
+  **连续两条同源报错指向同一个概念时，别把第二条当噪音**，
+  它通常就是第一条的另一半。
+
 - **一次网络抖动会让 bridge 报出「成功、失败原因是资源、而且值得重试」三句互相矛盾的话**（2026-10-05 并档全表审计）。
 
   `http-bridge.ts:328` 原本是

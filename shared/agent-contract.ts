@@ -9,7 +9,7 @@
  * Dependency-free (no node, no DOM): this module is compiled by both the
  * renderer and the electron tsconfig projects.
  */
-import type { AgentAdapter, AgentEvent, RunHandle, TaskPayload } from "./types";
+import type { AgentAdapter, AgentEvent, FailureClass, RunHandle, TaskPayload } from "./types";
 
 export const AGENT_PROTOCOL_VERSION = "ox-agent/2";
 
@@ -142,7 +142,8 @@ export interface AgentRunResult {
   taskId: string;
   status: "completed" | "failed" | "aborted";
   changes: FileChange[];
-  errorClass?: "auth" | "timeout" | "protocol" | "resource" | "conflict" | "unknown";
+  /** Coarse failure class for grouping; see `FailureClass` for the closed set. */
+  errorClass?: FailureClass;
   retryable?: boolean;
   logDigest: string;
   durationMs: number;

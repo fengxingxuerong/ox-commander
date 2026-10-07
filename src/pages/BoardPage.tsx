@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
-import { STAGE_ORDER } from "../../shared/types";
+import { STAGE_ORDER, type FailureClass } from "../../shared/types";
 import { usageFact } from "../../shared/usage-meter";
 
 const STAGE_LABELS: Record<string, string> = {
@@ -13,8 +13,20 @@ const STAGE_LABELS: Record<string, string> = {
   DONE: "✅ 已交付",
 };
 
-/** Failure classes from the audit layer, in operator language. */
-const ERROR_LABELS: Record<string, string> = {
+/**
+ * Failure classes in operator language.
+ *
+ * 键的**类型**是整个收口的核心：`Record<FailureClass, string>` 缺一键是
+ * **编译错**，而不是等某个人把两张表并排对照才发现（2026-10-07）。
+ * 此前它是 `Record<string, string>`，于是引擎自写的 `contract` 这一档
+ * 一直没进这张表 —— 契约路径违规（文件交成了 `index` 布局那种错）在中文
+ * 界面里吐出一个英文裸 token，而那一档恰恰是 2026-10-06 真实拆解 e2e
+ * 里最花时间的一个场景。
+ *
+ * ⚠️ 值已在边界经 `isFailureClass` 收窄，正常情况下这里不会遇到表外的键；
+ * 渲染处仍保留 `?? t.errorClass` 那句兜底 —— 界面宁可吐 token，也不该白屏。
+ */
+const ERROR_LABELS: Record<FailureClass, string> = {
   auth: "密钥/鉴权",
   "rate-limit": "限流",
   timeout: "超时",
@@ -22,6 +34,7 @@ const ERROR_LABELS: Record<string, string> = {
   conflict: "zone 越权",
   resource: "资源",
   "no-agent": "无可用智能体",
+  contract: "契约路径违规（点名的文件没落在盘上）",
   unknown: "未知",
 };
 

@@ -130,6 +130,13 @@ const TARGETS = [
   // 2026-09-29：board-recovery 的纯函数推导层（facts/derived split）。新文件
   // 必须显式入表 —— touched 口径靠这张表映射，漏挂=永远无人审计。
   { file: "electron/board-derive.ts", test: "src/board-derive.test.ts", tier: 1 },
+  // 2026-10-07：`FailureClass` 的单一真源（union + FAILURE_CLASSES + isFailureClass）。
+  // 入表理由不是"它有代码"，而是**两个边界都靠它**：`src/store.ts`（IPC 事件路径）
+  // 与 `electron/board-derive.ts`（审计恢复路径）。这轮发现收窄器一直**零调用者**，
+  // 而 BoardPage 的注释却写着"值已在边界经 isFailureClass 收窄" ——
+  // 注释描述的是一条从未存在的接线。收窄器本身必须在表内，否则它退化成一个
+  // 没人验证的 `includes`。
+  { file: "shared/types.ts", tests: ["src/store.test.ts", "src/board-derive.test.ts"], tier: 2 },
   // 2026-09-29：跨动作状态机（竞品调研 §5.1）—— 规则在纯函数里（escalatedVerdict /
   // extractActionFacts），ActionGate 是薄壳；同批接入 CommandPolicy 的 npm 子命令地板。
   { file: "electron/sandbox/action-gate.ts", test: "src/action-gate.test.ts", tier: 1 },
@@ -677,7 +684,7 @@ const SITE_BASELINE = {
   "electron/agents/sensenova-api.ts": 39,
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
-  "electron/board-derive.ts": 38,
+  "electron/board-derive.ts": 40,
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/orchestrator.ts": 57,
@@ -726,9 +733,10 @@ const SITE_BASELINE = {
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 23,
+  "shared/types.ts": 2,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
-  "src/store.ts": 32,
+  "src/store.ts": 33,
 };;
 
 /**

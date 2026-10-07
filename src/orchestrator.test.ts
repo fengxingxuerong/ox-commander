@@ -835,6 +835,53 @@ describe("OrchestratorEngine.execute", () => {
     await expect(eng.execute([TASKS], ".")).rejects.toThrow(/用户终止/);
   });
 
+  /**
+   * 终止文案里的两个数字必须**各自带着量纲**（2026-10-07，第十二轮的漏网之鱼）。
+   *
+   * `orchestrator.ts` 手上拿的是**派发次数**（含首轮），而同一次失败里交给
+   * `stallReasonFor` 的是 `maxRounds`（重修轮上限）。两个数量纲差 1，
+   * 旧文案 `重修 ${attempts} 轮后仍未通过` 直接把前者灌进了后者那个词。
+   *
+   * 最刺眼的复现是 `maxRepairRounds: 0` —— **一次重修都不许有**的运行，
+   * 终止时报的却是「重修 1 轮后仍未通过」，而同一处的另一句话说「重修 0 轮」。
+   *
+   * 断言两个方向都要有：正确的量纲必须在，旧的错误形状也必须不在。
+   * 只写前者的话，"把数字干脆不印了"这种退化照样能绿。
+   */
+  it("用户选终止时：报错文案里的次数与重修上限各自带量纲，不得把派发次数念成重修轮数", async () => {
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        return tasks.map((t: Task) => ({ taskId: t.id, ok: false, logDigest: "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+    // maxRepairRounds: 0 —— 一次重修都不许有，于是"派发 1 次"与"重修 1 轮"必然冲突
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 0 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+      requestEscalationDecision: async () => "abort",
+    });
+    await expect(eng.execute([TASKS], ".")).rejects.toThrow(/用户终止/);
+    // 取文案要看清返回类型：`execute` 成功时回的是 `VerificationReport`
+    // （`message` 不在它身上），所以这里按 `unknown` 收，用 `instanceof` 收窄。
+    let message = "";
+    await eng.execute([TASKS], ".").catch((e: unknown) => {
+      message = e instanceof Error ? e.message : String(e);
+    });
+    expect(message).toContain("已尝试 1 次");
+    expect(message).toContain("重修上限 0 轮");
+    // 旧形状：把派发次数直接念成重修轮数
+    expect(message).not.toContain("重修 1 轮");
+  });
+
   it("grants an extra repair round when the user chooses redispatch", async () => {
     const events: string[] = [];
     let round = 0;

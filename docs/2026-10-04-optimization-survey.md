@@ -1779,8 +1779,9 @@ errorClass = undefined
 | 17 | 无消费者字段（机械化） | 0 处新缺陷，6 项存量已评审 |
 | 18 | 状态标签 | 1 处：**两种结局并档** |
 | 19 | **并档全表**（7 个分类点） | 1 处：**三句互相矛盾**；**排除 6 个** |
+| 20 | **收窄器有没有接上电** | 2 处（同一缺陷的两个入口）+ **修好 HEAD 上两条 tsc 红** |
 
-**九处缺陷，八处同一形状**：不是"某个函数被调了几次"，
+**十处缺陷，九处同一形状**：不是"某个函数被调了几次"，
 而是"**几个各自正确的东西放在一起不成立**"。
 
 第十九轮给这个形状找到了**第二个名字**：**并档**。
@@ -1788,7 +1789,108 @@ errorClass = undefined
 **"七个分类点、六个早就合规"这个事实，把"并档"从系统性毛病降级成了个别问题。**
 一份清单能同时说"这里有问题"和"这里没问题"，才叫清单。
 
-### 22.51 两条写测试的纪律（第九轮亲身踩的）
+### 22.52 第二十轮：注释里写着的那条接线，从来没有存在过
+
+第十九轮末尾我把两件顺带的事记了下来，其中一件是
+"`isFailureClass` **零调用者**，而 `BoardPage.tsx:26` 的注释写着
+「值已在边界经 `isFailureClass` 收窄」"。
+
+第二十轮就是去看那句注释。**它描述了一条从未存在的接线。**
+
+链路是这样的（每一环我都读过）：
+
+```
+electron/ipc/context.ts:324   ...(outcome.errorClass ? {...} : {})   ← 联合类型
+  → IPC 事件（序列化成 JSON，运行时不再有任何类型）
+  → src/store.ts:414           errorClass?: string                     ← 收窄器缺席
+  → src/store.ts:430           next.errorClass = errorClass ?? "unknown"  ← 无检查直写
+  → src/types.ts:60            errorClass?: FailureClass              ← 声称是联合类型
+  → BoardPage.tsx:175          ERROR_LABELS[t.errorClass] ?? t.errorClass ← 兜底吐裸 token
+```
+
+真跑一遍（`handleEvent` 喂进一个未登记的类别）：
+
+```
+>>> TaskView.errorClass = "quantum-flux"
+>>> 非字符串时 TaskView.errorClass = 42
+```
+
+**第二个结果更要紧**：连"是不是字符串"都没查。而这条数据来自
+审计 JSONL —— `electron/audit-log.ts:218` 是
+`JSON.parse(line) as AuditRecord`，**旧版本写下的、或被人手改过的一行**
+都可能带出登记外的值。
+
+修法两行：`isFailureClass(errorClass) ? errorClass : "unknown"`。
+`src/store.ts` 与 `electron/board-derive.ts`（恢复路径）**是同一个缺陷的两个入口**，
+两处一起改。
+
+### 22.53 `check:unwired` 第一跑就抓到了 —— 而我本来打算手查
+
+改之前我跑了一遍 `check:unwired` 想确认现状，输出第一行就是：
+
+```
+FAIL: 发现 1 个未接线的导出——生产代码从未调用：
+  shared/types.ts  ::  isFailureClass
+处置二选一：
+  1) 接到真实路径（推荐）—— 一个没被调用的防护等于没有防护
+```
+
+**这不是"顺手发现"，是门禁直接指着答案。**
+第十九轮我刚说"把观察变成机器查"，第二十轮就吃到了一次现成的。
+
+而它比手工搜索强的地方在于：`isFailureClass` 是导出的、
+有完整签名、没有任何调用 —— 这正是 `check-unwired` 的判据形状。
+**"注释描述了一条接线，但接线不存在"这种缺陷，手查要靠记得去查；门禁是免费的。**
+
+### 22.54 HEAD 上本来就红着：`npm run typecheck` 一直是 EXIT 非 0
+
+修完收窄后 typecheck 还剩一条错。查了一下，**HEAD 上本来就有两条**：
+
+```
+src/store.ts(430,16): error TS2322: Type 'string' is not assignable to type 'FailureClass | undefined'.
+src/store.ts(271,11): error TS2345: ... DerivedTask | TaskView ...
+```
+
+**第一条就是本轮这个缺陷。** `tsc` 一直在报它，一直没人处理 ——
+而 `check:doc-claims` / `mutation` 那些门禁都不会因为 typecheck 红而停下，
+所以这个红可以一直躺着。（本轮的 `FailureClass` 单一真源是**仓库里已有的
+未提交工作**，不是我写的；我只是接上去把那最后一格收窄接上。）
+
+第二条是 `DerivedTask` 与 `TaskView` 不兼容 —— 顺着它才发现
+`DerivedTask.errorClass` 也声明成 `string`，**恢复路径上同一个洞**。
+把 `DerivedTask.errorClass` 改成 `FailureClass` 之后，`tsc` 立刻把真正的
+收窄点指出来（`board-derive.ts:259`）。
+
+**结果：`npm run typecheck` 从本轮之前的 EXIT 非 0，第一次变成干净通过。**
+
+> 教训：**`tsc` 的报错不是待办清单，是已经算好的结论。**
+> 我一开始把第二条当"别人的历史遗留、不归我管"，
+> 是它把第一条和第三个收窄点一起牵出来的。
+> 连续两条同源报错指向同一个概念时，**别把第二条当噪音** ——
+> 它通常就是第一条的另一半。
+
+### 22.55 补断言时的一条：收窄器自己也缺直接用例
+
+我给 store 和 derive 各补了收窄用例（间接的：经边界观察结果）。
+写完才想起来 —— **`isFailureClass` 本身的运行时判据一条直接断言都没有**：
+
+- 九档在册值全部放行；
+- 表外的值全部拒绝，包括 `""`、`"AUTH"`（大小写）、`42`、`null`、`undefined`、`{}`、`[]`。
+
+前一条已由 `satisfies` 在编译期保证，**要守的是运行时那一半** ——
+`includes` 的宽松比较会不会把非字符串放过去。
+
+补完把它加进变异 TARGETS（**65 个目标**，理由写进了 `TARGETS`）：
+它不是"有代码所以入表"，而是**两个边界都靠它**，收窄器退化成一个
+没人验证的 `includes` 才是最坏的结果。变异 **2/2**。
+
+反向注入 **6/6**（含"永远吞成 unknown"与"判据翻面"两个方向 ——
+只钉"别乱贴"等于允许"永远不贴"）。变异：`store.ts` **33/33**、
+`board-derive.ts` **39/39**、`shared/types.ts` **2/2**。位点基线 **1350**。
+
+### 22.56 十轮采样的账
+
+### 22.57 两条写测试的纪律（第九轮亲身踩的）
 
 1. **跨异步边界的断言要轮询，不能写死 sleep**。这批用例跨了真实边界
    （POST /run 之后 run 才挂上审批）。写死一个 sleep 是在**赌机器快慢**：

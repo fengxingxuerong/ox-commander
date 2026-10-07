@@ -1,4 +1,4 @@
-import type { EscalationAction, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
+import type { EscalationAction, FailureClass, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { UsageSnapshot } from "../shared/usage-meter";
@@ -57,7 +57,7 @@ export interface TaskView {
   /** Which agent ran it last (P5 attribution). */
   agentId?: string;
   /** Coarse failure class from the last run, for grouping. */
-  errorClass?: string;
+  errorClass?: FailureClass;
   /**
    * 最后一次任务活性心跳（2026-10-03 竞品吸收，学 Orca 的 agent heartbeats）：
    * 派发与每条 agent 事件都会刷新它。running 任务超过 ~30s 无心跳 → 看板显示

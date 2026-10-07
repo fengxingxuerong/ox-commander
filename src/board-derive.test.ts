@@ -320,6 +320,41 @@ describe("trailBriefForRepair · 履历压成给下一个执行器读的文本�
     expect(text).toContain("protocol × 1");
   });
 
+  /**
+   * 履历这一路也必须收窄（2026-10-07）—— 同一缺陷族的**第三处**。
+   *
+   * 前两处（`store.ts` 的 IPC 事件路径、`deriveBoardView` 的恢复路径）修完之后，
+   * `TrailRun.errorClass` 仍是 `string`：它把 `AuditRecord.errorClass`
+   * 原样搬进履历，而 `trailBriefForRepair` 会把 `${cls} × ${n}`
+   * **直接印进给下一个执行器读的那段 prompt**。
+   *
+   * 后果与界面上的裸 token 同族、但更难发现：界面上的「contract」至少还有个人
+   * 会看见并报过来，prompt 里的 `quantum-flux × 2` 只有模型看得见 ——
+   * 而它拿一个没人登记过的词做不出任何判断（"换思路"这件事需要它知道**换过什么**）。
+   *
+   * 断言两处：履历里的值本身要是 `unknown`，压出来的文本里**不能**出现那个裸 token。
+   */
+  it("履历里的未登记 errorClass 归 unknown（它要被印进 prompt，不是给人看的）", () => {
+    const trail = taskTrail([end({ ts: "e1", ok: false, errorClass: "quantum-flux", detail: "x" })], "t1");
+    expect(trail.runs[0]!.errorClass).toBe("unknown");
+  });
+
+  it("压给下一个执行器的文本里不出现登记外的类别", () => {
+    const text = brief([start({ ts: "s1" }), end({ ts: "e1", ok: false, errorClass: "quantum-flux" })]);
+    expect(text).toContain("unknown × 1");
+    expect(text).not.toContain("quantum-flux");
+  });
+
+  it("履历里的九档在册值原样保留（收窄不是一律吞掉）", () => {
+    for (const c of [
+      "auth", "rate-limit", "timeout", "protocol",
+      "conflict", "resource", "no-agent", "contract", "unknown",
+    ] as const) {
+      const trail = taskTrail([end({ ts: "e1", ok: false, errorClass: c })], "t1");
+      expect(trail.runs[0]!.errorClass, `class=${c}`).toBe(c);
+    }
+  });
+
   it("点名上一任执行器（是谁跑失败的比第一个是谁有用）", () => {
     const text = brief([
       start({ ts: "s1", agentId: "planned-a" }),
@@ -365,6 +400,44 @@ describe("trailBriefForRepair · 履历压成给下一个执行器读的文本�
   it("缺 errorClass 的失败归unknown（字段即承诺：不猜原因）", () => {
     const text = brief([start({ ts: "s" }), end({ ts: "e", ok: false })]);
     expect(text).toContain("unknown × 1");
+  });
+
+  /**
+   * 恢复路径上的 `errorClass` 也必须收窄（2026-10-07）。
+   *
+   * 与 `src/store.ts` 的事件路径是**同一个缺陷的两个入口**：
+   * `AuditRecord.errorClass` 是 `string`（JSONL 来自
+   * `JSON.parse(line) as AuditRecord` —— 旧版本写的、人手改过的都算数），
+   * 而 `DerivedTask.errorClass` 是 `FailureClass`。
+   *
+   * 旧写法 `record.errorClass ?? "unknown"` 直接接上，未登记的值会一路进到
+   * 看板的 `Record<FailureClass, string>`，落到 `ERROR_LABELS[c] ?? c` 兜底，
+   * 中文界面吐出裸 token。
+   *
+   * ⚠️ 说法要准：这两条错误**不是 HEAD 上就有的红**。本轮开工前 `npm run verify`
+   * 在 `18ee758` 上 EXIT 0 —— 它们是本次把 `DerivedTask.errorClass` 收紧成
+   * `FailureClass` 之后**当场**冒出来的，属于改造过程的中间态。
+   * 写清楚这一点是为了不给将来留错觉：不是"typecheck 段本来就红"，
+   * 而是"**收紧类型这一手会立刻指出哪些边界还没收窄**" —— 那正是它的价值。
+   */
+  it("未登记的 errorClass 归 unknown，不原样透传", () => {
+    const view = deriveBoardView([end({ ts: "e", taskId: "t1", ok: false, errorClass: "quantum-flux" })]);
+    expect(view.tasks["t1"]!.errorClass).toBe("unknown");
+  });
+
+  it("非字符串的 errorClass 也归 unknown", () => {
+    const view = deriveBoardView([end({ ts: "e", taskId: "t1", ok: false, errorClass: 42 as never })]);
+    expect(view.tasks["t1"]!.errorClass).toBe("unknown");
+  });
+
+  it("在册的九档原样保留（收窄不是一律吞掉）", () => {
+    for (const c of [
+      "auth", "rate-limit", "timeout", "protocol",
+      "conflict", "resource", "no-agent", "contract", "unknown",
+    ] as const) {
+      const view = deriveBoardView([end({ ts: "e", taskId: "t1", ok: false, errorClass: c })]);
+      expect(view.tasks["t1"]!.errorClass, `class=${c}`).toBe(c);
+    }
   });
 
   it("无执行器归属时不提「上一任」（字段即承诺：没有就不编）", () => {
