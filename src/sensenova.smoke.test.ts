@@ -78,13 +78,6 @@ describe.skipIf(!enabled)("SenseNova real API smoke tests", () => {
     90_000,
   );
 
-  it("catalog contains sensenova entry", () => {
-    const p = getProvider("sensenova");
-    expect(p.baseUrl).toBe(BASE);
-    expect(p.defaultModel).toBe("deepseek-v4-flash");
-    expect(p.apiKeyEnvVar).toBe("SENSENOVA_API_KEY");
-  });
-
   it(
     "failover client (all configured keys × models) answers a real request",
     async () => {
@@ -99,4 +92,18 @@ describe.skipIf(!enabled)("SenseNova real API smoke tests", () => {
     },
     90_000,
   );
+});
+
+/**
+ * 这个用例**不**跟着上面的 OX_SMOKE 门控：它只查 provider 目录里的三个常量，
+ * 不出网、不花钱、不需要 key。锁在门控块里时，这三条契约只在"恰好设了 key
+ * 的那次运行"才被检查 —— 等于默认没有守卫（2026-10-08 核实那 9 个 skip 时挑出）。
+ */
+describe("SenseNova provider catalog（无网络）", () => {
+  it("catalog contains sensenova entry", () => {
+    const p = getProvider("sensenova");
+    expect(p.baseUrl).toBe(BASE);
+    expect(p.defaultModel).toBe("deepseek-v4-flash");
+    expect(p.apiKeyEnvVar).toBe("SENSENOVA_API_KEY");
+  });
 });

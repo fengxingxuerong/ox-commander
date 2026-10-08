@@ -447,6 +447,21 @@
   现在段数从 `package.json` 现算、用例数与合计从 README 现读、规模从 `site-baseline --json` 现取，
   派生失败就 exit 1，而不是把没跑成的用例算进通过数。
 
+- **核实那 9 个永久 skip 的 smoke 用例：8 个确属该跳，1 个是门控误伤**（2026-10-08）。
+
+  `sensenova.smoke.test.ts` 6 + `sandbox-llm-call.smoke.test.ts` 3，全部是
+  `describe.skipIf(!enabled)`（`OX_SMOKE=1` 且 `SENSENOVA_API_KEY` 存在才跑），
+  文件头已写明理由、429 SOP 与手动跑法 —— **剩下 8 个确属"真 API + 花钱"，该跳**。
+
+  但其中 `catalog contains sensenova entry` 只查 provider 目录的三个常量
+  （`baseUrl` / `defaultModel` / `apiKeyEnvVar`），**不出网、不花钱、不需要 key**，
+  却被锁在同一个门控块里 ⇒ 这三条契约只有"恰好设了 key 的那次运行"才被检查，
+  默认等于没有守卫。已把它移到文件末尾一个**非门控** describe，从此默认跑
+  （反向注入实测：把 `baseUrl` 断言改错 ⇒ 红；恢复 ⇒ 1 passed / 5 skipped）。
+
+  教训与 `check:field-orphans` 同族：**门控的粒度要跟着"这条用例真的需要什么"
+  走，而不是跟着文件走** —— 一个文件叫 smoke，里面未必每条都该被门控。
+
 - **`remedyFor` 的 `default` 加编译期穷尽断言：新增仲裁档位必须让 tsc 先红**（2026-10-08）。
 
   `switch + default` 是 tsc 的盲区（`check-exhaustive-maps` 的动机原文即此）：新增第 5 档
