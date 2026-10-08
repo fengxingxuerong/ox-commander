@@ -491,6 +491,36 @@
   剩下的 `"revert-batch"` 只有逻辑分支判断（`if (this.mode === …)` 与
   `case …`），那些本就该写字面量。
 
+- **默认 provider 池收成单一真源：`DEFAULT_LLM_POOL`**（2026-10-09）。
+
+  清单第 11 项。"默认池 = sensenova 打头、amd-radeon 兜底"此前在
+  `shared/providers.ts:214`（`DEFAULT_LLM_POOL`，与 `PROVIDER_CATALOG` 同处）与
+  `shared/types.ts` 的 `DEFAULT_SETTINGS.llmPool` **各写一份**
+  `["sensenova","amd-radeon"]`，互不引用 —— 换池子要记得改两处，漏掉一处
+  **不会有任何东西变红**（值相同、测试照过）。现在 `DEFAULT_SETTINGS.llmPool`
+  引 `[...DEFAULT_LLM_POOL]`：**拷一份**而不是直接引用，因为 `DEFAULT_LLM_POOL`
+  是 `as const` 只读元组，而 `SettingsStore.load()` 出来的数组允许调用方原地改
+  （污染防护仍然只靠 `load()` 的 `structuredClone`）。
+
+  `shared/types.ts` 因此第一次出现了 import（此前零依赖）。`providers.ts` 自身
+  零 import、且早就被渲染层引用（`src/pages/SettingsPage.tsx`），所以既不产生
+  循环也没有新的打包面。
+
+  **新增两条断言，各自反向注入验过**：`src/store.test.ts` 钉住默认池的**字面量**
+  —— 只写"与 `DEFAULT_LLM_POOL` 相等"是不够的，两边一起漂移照样全绿；
+  `electron/store.test.ts` 把"改 `load()` 出来的 `llmPool` 不污染进程默认值"
+  这条既有防护补到 `llmPool` 上。反向注入（把 `DEFAULT_LLM_POOL` 收窄成
+  `["sensenova"]`）：**两条新断言都红**，另有 5 条既有断言连带红 ⇒ 连锁是真的，
+  改真源必然牵动默认设置。
+
+  验证：四套 typecheck（headless / node 干净，根与 electron 只剩另一条工作线的
+  3 个 readonly 错）、eslint 全量 0、相关单测 **235/235**、位点基线 **1351 无漂移**
+  （65 目标）、check:exhaustive PASS。全量 `npm test` 本机 12 条红全在既有的
+  三个环境敏感文件里（`headless-entries` 5 / `mutation-residue` 6 /
+  `sandbox-journal` 1 —— 360 拦 spawnSync 与清理 hook 超时），与本次改动无关。
+  用例数真值 **1750 通过 + 8 跳过（合计 1758，61 个文件）**，已同步 README 与
+  gates.md（新增两条用例 ⇒ `check:doc-claims` 的数字必须跟着走）。
+
 ### 实测（真链路复证，不进门禁）
 
 - **真拆解那一格跑了一次，结论是负的**（2026-10-06，`run-multiagent-e2e.mjs --real`，

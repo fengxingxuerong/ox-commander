@@ -1,3 +1,7 @@
+// 默认 provider 池的真源在 `shared/providers.ts`（它与 PROVIDER_CATALOG 同处，
+// 改池子时两张表必须一起看）。这里只引用，不再第二份字面量。
+import { DEFAULT_LLM_POOL } from "./providers";
+
 export type Stage =
   | "PRD"
   | "PLANNING"
@@ -394,6 +398,8 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   arbitration: DEFAULT_ARBITRATION_MODE,
   maxParallelRuns: 4,
   raceRedundancy: 1,
-  llmPool: ["sensenova", "amd-radeon"],
+  // 拷贝而非直接引用：`DEFAULT_LLM_POOL` 是 `as const` 只读元组，
+  // 而 SettingsStore 允许调用方原地改 load() 出来的数组。
+  llmPool: [...DEFAULT_LLM_POOL],
   disabledKeyVars: [],
 };

@@ -93,6 +93,10 @@ describe("SettingsStore", () => {
     const loaded = store.load();
     loaded.enabledAgents.push("x");
     expect(DEFAULT_SETTINGS.enabledAgents).toEqual(["sensenova-api"]);
+    // 同一条防护也管 llmPool：它现在是 `[...DEFAULT_LLM_POOL]`（spread 只求值一次，
+    // 仍是模块级那一份数组），污染防护全靠 load() 的 structuredClone。
+    loaded.llmPool.push("x");
+    expect(DEFAULT_SETTINGS.llmPool).toEqual(["sensenova", "amd-radeon"]);
   });
 
   it("round-trips a full save and merges partial files over defaults", () => {

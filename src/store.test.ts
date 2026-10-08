@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_SETTINGS } from "../shared/types";
 import { isFailureClass } from "../shared/types";
+import { DEFAULT_LLM_POOL } from "../shared/providers";
 import { useApp } from "./store";
 import { buildReceipt } from "../shared/delivery-receipt";
 
@@ -529,6 +530,23 @@ describe("handleEvent · robustness", () => {
 
   it("survives a payload with no type at all", () => {
     expect(() => emit({})).not.toThrow();
+  });
+});
+
+/**
+ * 默认 provider 池曾经在 `DEFAULT_SETTINGS` 与 `shared/providers` 各写一份字面量
+ * （`["sensenova","amd-radeon"]` 两处互不引用）。2026-10-09 收成单一真源后，
+ * **字面量**那条用例是唯一能抓住"池子换血"的断言 —— 只比两份相等的话，
+ * 两边一起漂移照样全绿。
+ */
+describe("DEFAULT_SETTINGS · 默认 provider 池", () => {
+  it("默认池字面量：sensenova 打头、amd-radeon 兜底", () => {
+    expect(DEFAULT_SETTINGS.llmPool).toEqual(["sensenova", "amd-radeon"]);
+  });
+
+  it("与 shared/providers 的 DEFAULT_LLM_POOL 同源（不再有第二份字面量）", () => {
+    expect(DEFAULT_SETTINGS.llmPool).toEqual([...DEFAULT_LLM_POOL]);
+    // 反向注入已验：把 DEFAULT_LLM_POOL 收窄成 ["sensenova"]，上面第一条当场红。
   });
 });
 
