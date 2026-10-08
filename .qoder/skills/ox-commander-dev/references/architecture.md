@@ -167,9 +167,12 @@ IPC 运行时注册（`electron/ipc/agents.ts:52`）、headless stdin `agents`�
 
 ## 线路池（README 这条核实为真）
 
-`shared/providers.ts:144-150`：`SENSENOVA_MODELS` **4 个模型** × `SENSENOVA_KEY_VARS` **3 把 key** = 12 条，
-加 AMD 1 条 = 13。`SENSENOVA_MODELS_EXTRA`（`:153`，kimi-k3）**刻意不进默认轮转**，有测试守着；
-NVIDIA 与 OpenRouter 排除的理由写在 `:155-162`（实测 280s 无响应 / 账号被锁推理）。
+`shared/providers.ts:180-186`：`SENSENOVA_MODELS` **4 个模型** × `SENSENOVA_KEY_VARS` **3 把 key** = 12 条，
+加 AMD 1 条 = 13。`SENSENOVA_MODELS_EXTRA`（`:200`，kimi-k3）**刻意不进默认轮转**，有测试守着；
+**它是登记表不是开关** —— 生产代码零消费者，填进去并不等于入池（2026-10-09 核实：
+`build-llm.ts` 的 models 装配只认 `SENSENOVA_MODELS`；此前 providers 注释还把人指向一个
+根本不存在的 `LLM_POOL_EXTRA`，已改回真名）。
+NVIDIA 与 OpenRouter 排除的理由写在 `:202-209`（实测 280s 无响应 / 账号被锁推理）。
 **陈旧文案**：`package.json:7`、`electron/agents/index.ts:17`、`shared/build-llm.ts:28`、
 `src/pages/SettingsPage.tsx` 的界面文案、以及 `README.md` 的「LLM 线路池」一节曾长期写死
 "3 密钥 × 3 模型"或"13 条线路"。现在这些都表述为"由 `shared/providers.ts` 的两张表决定"——

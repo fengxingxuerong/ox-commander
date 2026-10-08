@@ -174,8 +174,8 @@ export function getProvider(id: string, env: NodeJS.ProcessEnv = process.env): P
  *
  * (`kimi-k3` is also offered by this endpoint; it is deliberately not in the
  * default rotation — 12 routes is the sweet spot before a single cooldown pass
- * costs more latency than it buys in availability. Add it to `LLM_POOL_EXTRA`
- * when a larger sweep is wanted.)
+ * costs more latency than it buys in availability. It is registered in
+ * `SENSENOVA_MODELS_EXTRA` below.)
  */
 export const SENSENOVA_MODELS = [
   "deepseek-v4-flash",
@@ -185,7 +185,18 @@ export const SENSENOVA_MODELS = [
 ] as const;
 export const SENSENOVA_KEY_VARS = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "SENSENOVA_API_KEY_3"] as const;
 
-/** Requested but not rotated by default (see above). */
+/**
+ * Registered but **not rotated** by default (see above).
+ *
+ * ⚠️ 它是**登记表，不是开关**：全仓生产代码零消费者 —— 没有任何一处把它并进
+ * 轮转表（`build-llm.ts` 的 models 装配只认 `SENSENOVA_MODELS`）。所以它不构成
+ * "两份值域同时参与计算"，而是"一份参与、一份只登记"。
+ * `check-unwired` 对它有显式豁免（理由同上），测试钉住两件事：它等于 `["kimi-k3"]`、
+ * 且不在 `SENSENOVA_MODELS` 里。
+ *
+ * 要真的启用属于**功能变更**（得给 models 装配开一个入口并配用例），不是改个
+ * 常量就能生效 —— 别以为填进这里就等于入了池。
+ */
 export const SENSENOVA_MODELS_EXTRA = ["kimi-k3"] as const;
 
 /**

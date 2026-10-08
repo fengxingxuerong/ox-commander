@@ -36,7 +36,7 @@
 | 7 | 并发上限 | `electron/engine/scheduler.ts:29` · `shared/types.ts:305` | 两处 `4` | ❌ | ⚠️ 欠账 #9 |
 | 8 | stdout 截断 | `shared/agent-contract.ts:73` · `electron/engine/verifier.ts:51` | 两处常量 | ❌ | ⚠️ 欠账 #9 |
 | 9 | 300_000（超时） | `electron/platform.ts:53` · `shared/http-clients.ts:145,274` · `electron/engine/verifier.ts:41` | 四处常量 | ❌ | ⚠️ 欠账 #9 |
-| 10 | SenseNova 模型清单 | `shared/providers.ts:180` `SENSENOVA_MODELS` · `:189` `SENSENOVA_MODELS_EXTRA` · `:186` `SENSENOVA_KEY_VARS` | 三个数组 | 部分 | ⚠️ 待看：`_EXTRA` 这种"追加数组"是事实上的第二份值域 |
+| 10 | SenseNova 模型清单 | `shared/providers.ts:180` `SENSENOVA_MODELS` · `:200` `SENSENOVA_MODELS_EXTRA` · `:186` `SENSENOVA_KEY_VARS` | 三个数组 | 部分 | ✅ **2026-10-09 已看清**：`_EXTRA` **不是**"两份值域同时参与计算"，它是**零消费的登记表**（生产代码无人把它并进轮转）。真缺陷是注释把人指向**根本不存在**的 `LLM_POOL_EXTRA` —— 已改回真名并写明"填进去不等于入池"。**要真启用属功能变更**（欠账 #17） |
 | 11 | 默认 LLM 池 | `shared/types.ts` 的 `DEFAULT_SETTINGS.llmPool` 引 `shared/providers.ts:214` 的 `DEFAULT_LLM_POOL`（`[...]` 拷贝） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第二项落地的） |
 | 12 | `cli-agent` vs `http-bridge` | — | 两处各写一套命令面 | ❌ | ⚠️ §7 原记的那一对，**本轮未展开**（需成对读代码，下一轮） |
 
@@ -73,7 +73,7 @@
 1. **机械重复**：第 2 项（默认仲裁模式）与第 11 项（默认 LLM 池）✅ 均已收口
    （2026-10-09）；第 7 / 8 / 9 项（`maxParallelRuns` / `maxStdoutBytes` /
    `300_000`）**暂不动** —— 抽公共常量会引入反向依赖（欠账 #9 已记原因）；
-   第 10 项（`SENSENOVA_MODELS_EXTRA` 这种"追加数组"式的第二份值域）待看；
+   第 10 项已看清并修掉指引错误（真启用属功能变更，欠账 #17）；
 2. **需要决策**：第 3 / 4 项（`"ask"` 是桌面独有的第五档，怎么收口要定形状）；
 3. **需要成对读代码**：第 12 项（`cli-agent` vs `http-bridge`）；
 4. **盲区补扫**：`check:exhaustive-maps` 跳过的那 19 处联合类型，人工过一遍。
