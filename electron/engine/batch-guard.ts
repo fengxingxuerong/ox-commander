@@ -4,6 +4,7 @@ import { FileJournal, isInsideZone, type FileChange } from "../sandbox/file-jour
 import { SnapshotStore, type RevertResult, type SnapshotToken } from "../sandbox/snapshot-store";
 import type { DispatchOutcome } from "./scheduler";
 import type { ArbitrationMode } from "../../shared/types";
+import { DEFAULT_ARBITRATION_MODE } from "../../shared/types";
 
 export type ConflictKind = "unauthorized-write" | "shared-drift";
 export type { ArbitrationMode };
@@ -157,7 +158,7 @@ export class BatchGuard {
   constructor(opts: BatchGuardOptions = {}) {
     this.journal = opts.journal ?? new FileJournal();
     this.snapshots = opts.snapshots ?? null;
-    this.mode = opts.mode ?? "revert-batch";
+    this.mode = opts.mode ?? DEFAULT_ARBITRATION_MODE;
     this.sharedPaths = opts.sharedPaths ?? DEFAULT_SHARED_PATHS;
     this.quarantineDirName = opts.quarantineDirName ?? ".ox-quarantine";
     if (opts.onEvent) this.onEvent = opts.onEvent;

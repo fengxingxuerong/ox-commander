@@ -1,6 +1,7 @@
 import type { AgentAdapter, Task } from "../../shared/types";
 import type { AgentManifest } from "../../shared/agent-contract";
 import type { ArbitrationMode } from "../../shared/types";
+import { DEFAULT_ARBITRATION_MODE } from "../../shared/types";
 import { SensenovaApiAdapter } from "./sensenova-api";
 import { AgentRegistry, createRegistry } from "./registry";
 import { buildAdaptersFromManifests, loadManifestDir, type ManifestLoadError } from "./manifest-loader";
@@ -159,7 +160,7 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
   if (opts.onRouting) schedulerOptions.onRouting = opts.onRouting;
   if (opts.onTaskActivity) schedulerOptions.onTaskActivity = opts.onTaskActivity;
   if (opts.snapshotRoot) {
-    const mode = opts.arbitration ?? "revert-batch";
+    const mode = opts.arbitration ?? DEFAULT_ARBITRATION_MODE;
     schedulerOptions.guard = new BatchGuard({
       journal: new FileJournal(),
       snapshots: new SnapshotStore({ backupRoot: opts.snapshotRoot }),

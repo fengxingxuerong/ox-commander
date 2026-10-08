@@ -258,6 +258,16 @@ export type EscalationAction = "skip" | "redispatch" | "abort";
  */
 export type ArbitrationMode = "report-only" | "deny-all" | "revert-batch" | "quarantine";
 
+/**
+ * 默认仲裁模式 —— **三个入口共用**：`DEFAULT_SETTINGS.arbitration`、
+ * `BatchGuard` 的构造兜底、agent 层装配（`opts.arbitration`）。
+ *
+ * 此前这三处各写一遍字面量 `"revert-batch"`，互不引用：改默认值要记得改三处，
+ * 而漏掉任何一处**都不会有任何东西变红**（三处值相同、测试照过）—— 典型的
+ * "只散落"型重复。收口见 `docs/2026-10-09-duplicate-declarations.md` 第 2 项。
+ */
+export const DEFAULT_ARBITRATION_MODE: ArbitrationMode = "revert-batch";
+
 export interface ProjectSettings {
   maxRepairRounds: number;
   verificationCommands: VerificationCommand[];
@@ -381,7 +391,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   enabledAgents: ["sensenova-api"],
   llmProvider: "sensenova",
   agentRouter: true,
-  arbitration: "revert-batch",
+  arbitration: DEFAULT_ARBITRATION_MODE,
   maxParallelRuns: 4,
   raceRedundancy: 1,
   llmPool: ["sensenova", "amd-radeon"],

@@ -28,7 +28,7 @@
 | # | 概念 | 声明处 | 形态 | 是否同源 | 状态 |
 |---|---|---|---|---|---|
 | 1 | 仲裁模式 | `shared/types.ts:259`（类型，4 档）· `headless/protocol.ts:237`（值域数组） | 类型 + 数组 | ✅ 数组引类型 | ✅ 有门禁（`check:exhaustive` 管 switch）+ 协议层运行时校验 |
-| 2 | **默认仲裁模式** | `shared/types.ts:384` · `electron/engine/batch-guard.ts:160` · `electron/agents/index.ts:162` | 三处字面量 `"revert-batch"` | ❌ 各写各的 | ⚠️ 待收口（优先级高） |
+| 2 | **默认仲裁模式** | 三处入口共用 `shared/types.ts` 的 `DEFAULT_ARBITRATION_MODE`（`DEFAULT_SETTINGS` / `BatchGuard` 构造兜底 / agent 层装配） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第一项落地的） |
 | 3 | 升级策略 | `headless/protocol.ts:61`（4 档）· `shared/types.ts:371`（5 档，多桌面独有的 `"ask"`） | 两个类型 | ❌ 无引用关系 | ⚠️ 有意为之，但**加档必须同改两处** |
 | 4 | 升级策略值域 | `headless/protocol.ts:236` 数组 · 桌面侧**无对应数组** | 数组 vs 无 | — | ⚠️ 桌面侧 escalationPolicy 与 arbitration 同病：`SettingsStore.load` 对字段零校验 |
 | 5 | 失败类别 | `shared/types.ts`：`FailureClass` + `FAILURE_CLASSES` + `isFailureClass` | 类型 + 值域 + 收窄器 | ✅ 单一真源 | ✅ 已收口（收口长什么样的样例） |
@@ -70,7 +70,9 @@
 
 ## 下一步（按优先级）
 
-1. **机械重复、有明确单一真源可归**：第 2 / 7 / 8 / 9 / 11 项；
+1. **机械重复**：第 2 项 ✅ 已收口（2026-10-09）；第 7 / 8 / 9 项
+   （`maxParallelRuns` / `maxStdoutBytes` / `300_000`）**暂不动** —— 抽公共常量
+   会引入反向依赖（欠账 #9 已记原因）；第 11 项（默认 LLM 池）待收口；
 2. **需要决策**：第 3 / 4 项（`"ask"` 是桌面独有的第五档，怎么收口要定形状）；
 3. **需要成对读代码**：第 12 项（`cli-agent` vs `http-bridge`）；
 4. **盲区补扫**：`check:exhaustive-maps` 跳过的那 19 处联合类型，人工过一遍。

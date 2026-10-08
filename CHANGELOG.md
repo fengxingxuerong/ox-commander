@@ -473,6 +473,24 @@
   外部改写，`SettingsStore.load` 对字段零校验），非登记值要的是 fail-safe 兜底
   （保留现场、整批判失败），而不是把整条裁决链炸掉。
 
+- **默认仲裁模式收成单一真源：`DEFAULT_ARBITRATION_MODE`**（2026-10-09）。
+
+  清单（`docs/2026-10-09-duplicate-declarations.md` 第 2 项）落地的第一项：
+  "默认用回滚"这件事此前在**三处各写一遍**字面量 `"revert-batch"` ——
+  `DEFAULT_SETTINGS.arbitration`、`BatchGuard` 的构造兜底（`opts.mode ?? …`）、
+  agent 层装配（`opts.arbitration ?? …`），互不引用。改默认值要记得改三处，
+  而漏掉任何一处**都不会有任何东西变红**（三处值相同、测试照过）—— 清单里
+  把它归为"只散落"型。现在三处都引 `shared/types.ts` 的
+  `DEFAULT_ARBITRATION_MODE`。
+
+  刻意**不动**清单里那几处常量重复（`maxParallelRuns` / `maxStdoutBytes` /
+  `300_000`）—— 抽公共常量会引入反向依赖，欠账 #9 已记下原因。
+
+  验证：四套 typecheck 干净（只剩另一条工作线的 3 个 readonly 错）、eslint 0、
+  相关单测 256/256、位点基线 1351 无漂移、check:exhaustive PASS。生产代码里
+  剩下的 `"revert-batch"` 只有逻辑分支判断（`if (this.mode === …)` 与
+  `case …`），那些本就该写字面量。
+
 ### 实测（真链路复证，不进门禁）
 
 - **真拆解那一格跑了一次，结论是负的**（2026-10-06，`run-multiagent-e2e.mjs --real`，
