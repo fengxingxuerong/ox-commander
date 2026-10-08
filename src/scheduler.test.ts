@@ -1270,3 +1270,147 @@ describe('createAgentLayer · 声明来源与目录加载', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 赛马补充维度（e52de2a 主测试之外）：onRunStart 组级只发一次、breaker 记账
+// （赢家 true / 终态失败者 false / 被中止的输家不记）、redundancy=1 单派发
+// 保真、快者失败时继续等下一个成功者。
+// ---------------------------------------------------------------------------
+describe("Scheduler · 赛马补充维度（组级 onRunStart / breaker 记账）", () => {
+  /** 可控行为 adapter：delayMs 后出终态；abort 让 collect 立即出 aborted。 */
+  function raceAdapter(
+    id: string,
+    opts: { ok: boolean; delayMs: number; dispatched?: string[]; aborts?: string[] },
+  ): AgentAdapter {
+    const runs = new Map<string, { aborted: boolean }>();
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        opts.dispatched?.push(id);
+        const runId = `${id}-${payload.runId}`;
+        runs.set(runId, { aborted: false });
+        return { runId, agentId: id, taskId: payload.taskId } as RunHandle;
+      },
+      async *collect(handle) {
+        const run = runs.get(handle.runId);
+        const step = 10;
+        let waited = 0;
+        while (waited < opts.delayMs) {
+          if (run?.aborted) {
+            yield { kind: "aborted", text: "已中止", timestamp: Date.now() };
+            return;
+          }
+          await new Promise((r) => setTimeout(r, step));
+          waited += step;
+        }
+        if (opts.ok) yield { kind: "completed", text: "done", timestamp: Date.now() };
+        else yield { kind: "failed", text: "exit code 1", timestamp: Date.now() };
+      },
+      async abort(handle) {
+        opts.aborts?.push(handle.agentId);
+        const run = runs.get(handle.runId);
+        if (run) run.aborted = true;
+      },
+    } as unknown as AgentAdapter;
+  }
+
+  it("第一个到终态成功者赢，慢者被 abort，输家的 aborted 不进任务账", async () => {
+    const dispatched: string[] = [];
+    const aborts: string[] = [];
+    const quick = raceAdapter("quick", { ok: true, delayMs: 20, dispatched, aborts });
+    const slow = raceAdapter("slow", { ok: true, delayMs: 400, dispatched, aborts });
+    const registry = new AgentRegistry([{ adapter: quick }, { adapter: slow }]);
+    const completes: Array<{ agent: string | undefined; ok: boolean }> = [];
+    const sched = new Scheduler([quick, slow], [], {
+      registry,
+      raceRedundancy: 2,
+      onRunComplete: (o) => completes.push({ agent: o.agentId, ok: o.ok }),
+    });
+    const outcomes = await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(dispatched.sort()).toEqual(["quick", "slow"]);
+    // 赢家是 quick；slow 被 abort。
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("quick");
+    expect(aborts).toEqual(["slow"]);
+    // 输家静默：onRunComplete 只有赢家一条。
+    expect(completes).toEqual([{ agent: "quick", ok: true }]);
+    // 全组归因在赢家 digest 里。
+    expect(outcomes[0]!.logDigest).toContain("[赛马]");
+    expect(outcomes[0]!.logDigest).toContain("slow");
+  });
+
+  it("快者失败时继续等下一个成功者；失败成员照记 breaker，赢家记 true", async () => {
+    const records: Array<{ id: string; ok: boolean }> = [];
+    const failing = raceAdapter("failing", { ok: false, delayMs: 20 });
+    const winning = raceAdapter("winning", { ok: true, delayMs: 80 });
+    const registry = new AgentRegistry([{ adapter: failing }, { adapter: winning }]);
+    const sched = new Scheduler([failing, winning], [], {
+      registry,
+      raceRedundancy: 2,
+      breaker: {
+        allow: () => true,
+        record: (id: string, ok: boolean) => records.push({ id, ok }),
+      } as never,
+    });
+    const outcomes = await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("winning");
+    expect(records).toContainEqual({ id: "failing", ok: false });
+    expect(records).toContainEqual({ id: "winning", ok: true });
+  });
+
+  it("全员失败 → 汇总失败 outcome 进重修（只发一条 onRunComplete）", async () => {
+    const a = raceAdapter("a", { ok: false, delayMs: 10 });
+    const b = raceAdapter("b", { ok: false, delayMs: 40 });
+    const registry = new AgentRegistry([{ adapter: a }, { adapter: b }]);
+    const completes: boolean[] = [];
+    const sched = new Scheduler([a, b], [], {
+      registry,
+      raceRedundancy: 2,
+      onRunComplete: (o) => completes.push(o.ok),
+    });
+    const outcomes = await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.logDigest).toContain("全部 2 个执行器失败");
+    expect(outcomes[0]!.logDigest).toContain("a");
+    expect(outcomes[0]!.logDigest).toContain("b");
+    expect(completes).toEqual([false]);
+  });
+
+  it("redundancy = 1（默认）保持单派发：无赛马标记", async () => {
+    const solo = raceAdapter("solo", { ok: true, delayMs: 10 });
+    const registry = new AgentRegistry([{ adapter: solo }]);
+    const sched = new Scheduler([solo], [], { registry });
+    const outcomes = await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("solo");
+    expect(outcomes[0]!.logDigest).not.toContain("[赛马]");
+  });
+
+  it("冗余度超过池子大小时按池子大小截断", async () => {
+    const dispatched: string[] = [];
+    const a = raceAdapter("a", { ok: true, delayMs: 10, dispatched });
+    const b = raceAdapter("b", { ok: true, delayMs: 200, dispatched });
+    const registry = new AgentRegistry([{ adapter: a }, { adapter: b }]);
+    const sched = new Scheduler([a, b], [], { registry, raceRedundancy: 5 });
+    await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(dispatched.sort()).toEqual(["a", "b"]);
+  });
+
+  it("onRunStart 组级只发一次（planned 归因）", async () => {
+    const starts: string[] = [];
+    const a = raceAdapter("a", { ok: true, delayMs: 30 });
+    const b = raceAdapter("b", { ok: false, delayMs: 300 });
+    const registry = new AgentRegistry([{ adapter: a }, { adapter: b }]);
+    const sched = new Scheduler([a, b], [], {
+      registry,
+      raceRedundancy: 2,
+      onRunStart: (agentId) => starts.push(agentId),
+    });
+    await sched.runBatch([task("t1", "t1-zone")], ".");
+    expect(starts.length).toBe(1);
+  });
+});
