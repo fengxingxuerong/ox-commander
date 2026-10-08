@@ -434,8 +434,14 @@ function remedyFor(mode: ArbitrationMode): Remedy["action"] {
       // "没覆盖"被写成了"覆盖其余一切"。显式列出后由
       // `scripts/check-exhaustive-maps.mjs` 守着：新增档位必须在这里登记。
       return "fail-batch";
-    default:
+    default: {
+      // 编译期穷尽断言：新增第 5 档仲裁模式而忘了登记 case 时，tsc 在下一行报错
+      // （does not satisfy `never`）—— 把 `check-exhaustive-maps` 的判据提前到编译期。
+      // 刻意**不**用抛错的 assertNever：default 在运行时仍**可达**（settings.json
+      // 可被外部改写），非登记值要的是 fail-safe 兜底，而不是把整条裁决链炸掉。
+      mode satisfies never;
       return "fail-batch";
+    }
   }
 }
 

@@ -447,6 +447,17 @@
   现在段数从 `package.json` 现算、用例数与合计从 README 现读、规模从 `site-baseline --json` 现取，
   派生失败就 exit 1，而不是把没跑成的用例算进通过数。
 
+- **`remedyFor` 的 `default` 加编译期穷尽断言：新增仲裁档位必须让 tsc 先红**（2026-10-08）。
+
+  `switch + default` 是 tsc 的盲区（`check-exhaustive-maps` 的动机原文即此）：新增第 5 档
+  `ArbitrationMode` 忘了登记 `case` 时会静默拿到 `default` 的 `"fail-batch"`，只有门禁
+  跑起来才红。现在 `default` 里多一行 `mode satisfies never;` —— **编译期**即报
+  `TS1360: does not satisfy the expected type 'never'`（反向注入实测：删
+  `case "quarantine"` ⇒ 精确报错；恢复 ⇒ 干净；位点基线 1351/1351 无漂移）。
+  刻意**不**用抛错的 `assertNever`：`default` 在运行时仍**可达**（`settings.json` 可被
+  外部改写，`SettingsStore.load` 对字段零校验），非登记值要的是 fail-safe 兜底
+  （保留现场、整批判失败），而不是把整条裁决链炸掉。
+
 ### 实测（真链路复证，不进门禁）
 
 - **真拆解那一格跑了一次，结论是负的**（2026-10-06，`run-multiagent-e2e.mjs --real`，
