@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { DEFAULT_SETTINGS } from "../shared/types";
+import { DEFAULT_ESCALATION_POLICY, DEFAULT_SETTINGS } from "../shared/types";
 import { isFailureClass } from "../shared/types";
 import { DEFAULT_LLM_POOL } from "../shared/providers";
 import { useApp } from "./store";
@@ -530,6 +530,17 @@ describe("handleEvent · robustness", () => {
 
   it("survives a payload with no type at all", () => {
     expect(() => emit({})).not.toThrow();
+  });
+});
+
+/**
+ * 默认升级处置此前在 platform 装配与设置页下拉框各写一遍 `"ask"`（清单第 3 / 4 项），
+ * 与默认仲裁模式同型的"只散落"。收成 `DEFAULT_ESCALATION_POLICY` 后，两处同源；
+ * 这条钉住**字面量** —— 只比"两处相等"的话，一起漂移照样全绿。
+ */
+describe("DEFAULT_ESCALATION_POLICY · 默认升级处置", () => {
+  it("默认 = ask（弹窗等人，桌面端独有的第五档）", () => {
+    expect(DEFAULT_ESCALATION_POLICY).toBe("ask");
   });
 });
 

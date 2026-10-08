@@ -272,6 +272,25 @@ export type ArbitrationMode = "report-only" | "deny-all" | "revert-batch" | "qua
  */
 export const DEFAULT_ARBITRATION_MODE: ArbitrationMode = "revert-batch";
 
+/**
+ * 重修轮耗尽时的升级处置（**桌面端 5 档**）。
+ *
+ * headless 协议的 `EscalationPolicy`（`headless/protocol.ts`）是它的 **4 档子集**：
+ * `"ask"`（弹窗等人）在无人值守场景没有意义，所以不进协议 —— 这是**有意**的，
+ * 不是漏写。但"有意"不等于"不会被改漏"：两边此前是两个**毫无引用关系**的类型，
+ * 协议加一档，`shared/types.ts` 必须同改，而改漏了只有"运行时少一档入口"这一个
+ * 症状（清单第 3 项）。现在协议侧由这个类型**派生**（`Exclude<…, "ask">`），
+ * 加档只改这一处。
+ */
+export type EscalationPolicySetting = "ask" | "abort" | "skip" | "redispatch_once" | "exhaust";
+
+/**
+ * 默认升级处置 —— **两个入口共用**：platform 装配（`electron/ipc/context.ts` 的
+ * `settings.escalationPolicy ?? …`）与设置页下拉框的回填值。此前两处各写一遍
+ * `"ask"`，与第 2 项同型的"只散落"重复（清单第 3 / 4 项）。
+ */
+export const DEFAULT_ESCALATION_POLICY: EscalationPolicySetting = "ask";
+
 export interface ProjectSettings {
   maxRepairRounds: number;
   verificationCommands: VerificationCommand[];
@@ -382,7 +401,7 @@ export interface ProjectSettings {
    * - `exhaust`：决策回调整个缺席，引擎把"重修预算耗尽"报成结构化错误
    *   （与 CLI 的 exit 2 同义），而不是永远等一个不会来的人。
    */
-  escalationPolicy?: "ask" | "abort" | "skip" | "redispatch_once" | "exhaust";
+  escalationPolicy?: EscalationPolicySetting;
 }
 
 export const DEFAULT_SETTINGS: ProjectSettings = {

@@ -104,6 +104,20 @@ describe("parseSpec", () => {
     if (!r.ok) expect(r.message).toContain("requirement");
   });
 
+  /**
+   * 值域的**字面量**必须由一条用例钉住：上面那条只断言"消息里提到了字段名"，
+   * 值域整个换掉它照样绿。这条是"协议加/减一档"唯一会红的断言
+   * （另一道是编译期：`ESCALATION_POLICIES` 改成 `Record<Union, …>` 之后，
+   * 桌面端加一档 ⇒ 这里缺键 ⇒ tsc 红，见 2026-10-09 清单第 3 项）。
+   */
+  it("rejects an unknown escalationPolicy and lists the whole value domain", () => {
+    const r = parseSpec(JSON.stringify({ requirement: "r", projectRoot: ".", escalationPolicy: "explode" }));
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    // 锚到串尾：用 toContain 的话，末尾多加一档（"... / defer"）依然命中。
+    expect(r.message).toMatch(/escalationPolicy 必须是 abort \/ skip \/ redispatch_once \/ exhaust$/);
+  });
+
   it("validates agent declarations with the same schema as agents.d", () => {
     const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, agents: [{ id: "bad id!", adapter: "cli" }] }));
     expect(r.ok).toBe(false);

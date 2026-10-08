@@ -22,7 +22,7 @@ import { redactSecrets } from "../../shared/redact";
 import type { AgentAdapter } from "../../shared/types";
 import type { AgentManifest } from "../../shared/agent-contract";
 import type { LlmClient } from "../../shared/llm-client";
-import type { EscalationAction, ProjectSettings } from "../../shared/types";
+import { DEFAULT_ESCALATION_POLICY, type EscalationAction, type ProjectSettings } from "../../shared/types";
 import { pairConflict } from "../../shared/delivery-receipt";
 
 let store: ProjectStore | null = null;
@@ -258,7 +258,7 @@ export function buildPlatformLayer(
   // 升级决策策略（P1-5）：`ask`（默认）= 弹窗等人；其余四种与 headless 协议同义。
   // redispatch 的"每任务一次"账本挂在本次 platform 上 —— buildEngine 每次 run
   // 重建 platform，账本天然 per-run，不会跨运行累积。
-  const escalation = settingsValue.escalationPolicy ?? "ask";
+  const escalation = settingsValue.escalationPolicy ?? DEFAULT_ESCALATION_POLICY;
   const autoRedispatched = new Set<string>();
   return createPlatform({
     settings: settingsValue,

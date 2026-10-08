@@ -537,6 +537,36 @@
   验证：eslint 0、llm-pool / failover / sensenova-api **123/123**、headless 与 node
   两套 typecheck 干净。行为零变化（纯注释与文档）。
 
+- **升级策略收口：协议侧 4 档由桌面 5 档派生，加档由编译器抓住**（2026-10-09）。
+
+  清单第 3 / 4 项。`"ask"`（弹窗等人）是桌面端独有的第五档，无人值守场景没有
+  意义，所以协议只要 4 档 —— 这是**有意**的。但两个类型此前**毫无引用关系**：
+  协议加一档，`shared/types.ts` 必须同改，而改漏了只有"运行时少一档入口"
+  这一个症状，没有任何东西会红。
+
+  现在协议侧 `EscalationPolicy = Exclude<EscalationPolicySetting, "ask">`（派生），
+  并把协议的值域常量 `ESCALATION_POLICIES` 从**数组改成 `Record<Union, true>`** ——
+  数组少一档 tsc 不红，`Record` 少一键**编译错**（与 `FAILURE_CLASSES` 同形状）。
+  反向注入：给桌面侧加一档 `defer` ⇒ `headless/protocol.ts` 立刻报
+  `TS2741: Property 'defer' is missing` ⇒ "加档必须同改两处"由编译器守着。
+
+  同一批收掉的还有**默认升级处置的"只散落"**：`?? "ask"` 此前写在 platform 装配
+  （`electron/ipc/context.ts`）与设置页下拉框（`SettingsPage.tsx`）两处、互不引用，
+  现在都引 `shared/types.ts` 的 `DEFAULT_ESCALATION_POLICY`（与第 2 项同型）。
+
+  **未做的那一半**（清单第 4 项 → 欠账 #18）：`SettingsStore.load` 对
+  `escalationPolicy`（以及 `arbitration`）**仍然零校验** —— 配置文件里写一个不在
+  值域里的值会一路带进引擎。要加兜底就两个字段一起加，别只做一个。
+
+  验证：两条新断言各自反向注入验过 —— `src/store.test.ts` 钉
+  `DEFAULT_ESCALATION_POLICY` 的字面量（改成 `"abort"` ⇒ 红）；
+  `src/headless-protocol.test.ts` 把值域串**锚到串尾**（补上 `defer` 键之后 ⇒ 红 ——
+  用 `toContain` 的话末尾加档会漏，这条踩过一次才改成正则）。
+  四套 typecheck（headless / node 干净，根与 electron 只剩另一条工作线的 3 个
+  readonly 错）、eslint 全量 0、相关单测 **295/295**、位点基线 **1351 无漂移**
+  （65 目标）。用例数真值 **1752 通过 + 8 跳过（合计 1760，61 个文件）**，
+  已同步 README 与 gates.md。
+
 ### 实测（真链路复证，不进门禁）
 
 - **真拆解那一格跑了一次，结论是负的**（2026-10-06，`run-multiagent-e2e.mjs --real`，

@@ -2,7 +2,13 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import { AgentsPanel } from "../components/AgentsPanel";
 import { getProvider, PROVIDER_CATALOG, SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
-import { DEFAULT_SETTINGS, type ArbitrationMode, type ProjectSettings, type VerificationKind } from "../../shared/types";
+import {
+  DEFAULT_ESCALATION_POLICY,
+  DEFAULT_SETTINGS,
+  type ArbitrationMode,
+  type ProjectSettings,
+  type VerificationKind,
+} from "../../shared/types";
 
 const KIND_LABELS: Record<VerificationKind, string> = {
   build: "构建",
@@ -496,7 +502,7 @@ export function SettingsPage() {
           <label htmlFor="escalation-policy">重修耗尽处置</label>
           <select
             id="escalation-policy"
-            value={draft.escalationPolicy ?? "ask"}
+            value={draft.escalationPolicy ?? DEFAULT_ESCALATION_POLICY}
             onChange={(e) =>
               patch({ escalationPolicy: e.target.value as ProjectSettings["escalationPolicy"] })
             }

@@ -22,6 +22,7 @@ import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import {
   DEFAULT_SETTINGS,
   type ArbitrationMode,
+  type EscalationPolicySetting,
   type PrdDocument,
   type ProjectSettings,
   type VerificationCommand,
@@ -57,8 +58,11 @@ export function runtimeGap(env: { nodeVersion: string; hasAbortSignalAny: boolea
  * - `skip`: drop the failing tasks and deliver the rest if verification passes — exit 1 if it still cannot.
  * - `redispatch_once`: grant one extra repair round per task, then stop — exit 1.
  * - `exhaust`: no intervention at all; report "budget spent" — exit 2.
+ *
+ * 由桌面端的 5 档**派生**（去掉 `"ask"` —— 无人值守场景没人可问）：
+ * 加档只改 `shared/types.ts` 那一处，两侧不再各自漂移（清单第 3 项）。
  */
-export type EscalationPolicy = "abort" | "skip" | "redispatch_once" | "exhaust";
+export type EscalationPolicy = Exclude<EscalationPolicySetting, "ask">;
 
 export interface HeadlessSpec {
   /** Optional in the wire format; echoed back in the `hello` event. */
@@ -233,7 +237,18 @@ const KNOWN_FIELDS = new Set<string>([
   "disabledKeyVars",
 ]);
 
-const ESCALATION_POLICIES: readonly EscalationPolicy[] = ["abort", "skip", "redispatch_once", "exhaust"];
+/**
+ * **`Record` 而不是数组**（与 `FAILURE_CLASSES` 同一形状）：数组少一档 tsc 不会红，
+ * `Record<Union, …>` 少一键**编译错**。桌面端 `EscalationPolicySetting` 加一档
+ * （且不是 `"ask"`）⇒ 这里的键立即缺一个 ⇒ 加档必须同改两处这条就由编译器守着了
+ * —— 此前它是"有意不同，但改漏了只有运行时少一档入口这一个症状"（清单第 3 项）。
+ */
+const ESCALATION_POLICIES: Record<EscalationPolicy, true> = {
+  abort: true,
+  skip: true,
+  redispatch_once: true,
+  exhaust: true,
+};
 const ARBITRATION_MODES: readonly ArbitrationMode[] = ["report-only", "deny-all", "revert-batch", "quarantine"];
 /**
  * `VerificationKind` 有四种，这里此前只收了三种（漏 `smoke`）—— 于是 CLI 宿主
@@ -413,8 +428,10 @@ export function parseSpec(rawText: string): ParseResult {
 
   let escalationPolicy: EscalationPolicy | undefined;
   if (raw.escalationPolicy !== undefined) {
-    if (typeof raw.escalationPolicy !== "string" || !ESCALATION_POLICIES.includes(raw.escalationPolicy as EscalationPolicy)) {
-      issues.push(`escalationPolicy 必须是 ${ESCALATION_POLICIES.join(" / ")}`);
+    // 走 `Object.keys` 而不是 `x in obj`：后者会把原型链上的名字也算"认识"。
+    const knownPolicies = Object.keys(ESCALATION_POLICIES);
+    if (typeof raw.escalationPolicy !== "string" || !knownPolicies.includes(raw.escalationPolicy)) {
+      issues.push(`escalationPolicy 必须是 ${knownPolicies.join(" / ")}`);
     } else {
       escalationPolicy = raw.escalationPolicy as EscalationPolicy;
     }
