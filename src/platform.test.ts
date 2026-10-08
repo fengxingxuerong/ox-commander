@@ -995,3 +995,29 @@ describe("设置里的 brainTimeoutMs 真的传进了大脑客户端", () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// 任务活性心跳的透传（platform.ts 条件展开）。every-site 变异审计抓到的
+// 存活位点：把 `host.onTaskActivity ? { onTaskActivity } : {}` 的分支互换后
+// 宿主提供了钩子反而拿不到心跳、缺席时反而多出一个 undefined 键 —— 本地
+// platform 层的透传此前没有任何断言（headless 侧的 optionalHostHooks 有，
+// 但那是另一条路径）。
+// ---------------------------------------------------------------------------
+describe("createPlatform · 任务活性心跳透传", () => {
+  it("宿主提供 onTaskActivity 时真的透传给执行层（心跳不断链）", () => {
+    const beat = () => undefined;
+    createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      host: { log: () => undefined, onTaskActivity: beat },
+    });
+    const cfg = vi.mocked(createAgentLayer).mock.calls.at(-1)![0] as { onTaskActivity?: unknown };
+    expect(cfg.onTaskActivity).toBe(beat);
+  });
+
+  it("宿主缺席 onTaskActivity 时键整个不存在（不产生空事件量）", () => {
+    createPlatform({ settings: settings(), promptDir: tempDir(), host: { log: () => undefined } });
+    const cfg = vi.mocked(createAgentLayer).mock.calls.at(-1)![0] as Record<string, unknown>;
+    expect("onTaskActivity" in cfg).toBe(false);
+  });
+});
