@@ -217,7 +217,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
   位点数涨了而基线没更新 = 新位点**没人逐点审计过**，此时「全部 N 处已逐点验证」是假象。
   这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道）
-→ vitest（2026-10-08 现跑 1747 通过 + 9 跳过，合计 1756 条，分布在 59 个有可执行用例的文件；
+→ vitest（2026-10-09 现跑 1748 通过 + 8 跳过，合计 1756 条，分布在 60 个有可执行用例的文件；
   真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
