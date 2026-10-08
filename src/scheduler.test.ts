@@ -9,7 +9,7 @@ import { createAgentLayer, createDefaultAdapters } from "../electron/agents";
 import { SensenovaApiAdapter } from "../electron/agents/sensenova-api";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
 import type { AgentCapabilities, AgentManifest } from "../shared/agent-contract";
-import type { AgentAdapter, RunHandle, Task } from "../shared/types";
+import type { AgentAdapter, RunHandle, Task, TaskPayload } from "../shared/types";
 
 function task(id: string, zone: string): Task {
   return {
@@ -1288,13 +1288,13 @@ describe("Scheduler · 赛马补充维度（组级 onRunStart / breaker 记账�
       async probe() {
         return true;
       },
-      async dispatch(payload) {
+      async dispatch(payload: TaskPayload) {
         opts.dispatched?.push(id);
         const runId = `${id}-${payload.runId}`;
         runs.set(runId, { aborted: false });
         return { runId, agentId: id, taskId: payload.taskId } as RunHandle;
       },
-      async *collect(handle) {
+      async *collect(handle: RunHandle) {
         const run = runs.get(handle.runId);
         const step = 10;
         let waited = 0;
@@ -1309,7 +1309,7 @@ describe("Scheduler · 赛马补充维度（组级 onRunStart / breaker 记账�
         if (opts.ok) yield { kind: "completed", text: "done", timestamp: Date.now() };
         else yield { kind: "failed", text: "exit code 1", timestamp: Date.now() };
       },
-      async abort(handle) {
+      async abort(handle: RunHandle) {
         opts.aborts?.push(handle.agentId);
         const run = runs.get(handle.runId);
         if (run) run.aborted = true;
