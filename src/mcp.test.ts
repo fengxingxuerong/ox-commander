@@ -3,7 +3,15 @@
  * HTTP 面全部注入假件（不联网），逐条断言响应 JSON-RPC 形状与文本事实。
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import { handleMcpMessage, mcpToolDefs, MCP_PROTOCOL_VERSION, type ServeHttp } from "../headless/mcp";
+
+/**
+ * MCP 握手对外报告的版本号必须与 `package.json` 一致 —— 此前它是手改的硬编码
+ * （5.5 落地时写死 0.1.7，而 v0.1.7 的发版提交只改 CHANGELOG/package.json/lock），
+ * 发版漏改不会有任何东西红。这条断言把两处钉在一起：改一边忘了另一边 = 测试红。
+ */
+const PKG_VERSION = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 
 function fakeHttp(over: Partial<Record<"get" | "post", (path: string, body?: unknown) => Promise<{ status: number; body: string }>>> & { state?: unknown } = {}): ServeHttp {
   const state = JSON.stringify(over.state ?? { status: "idle", events: [] });
@@ -35,7 +43,12 @@ describe("MCP 握手与协议层", () => {
     expect(res).toMatchObject({
       jsonrpc: "2.0",
       id: 7,
-      result: { protocolVersion: MCP_PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: "ox-commander" } },
+      result: {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        // version 不是字面量：与 package.json 钉在一起，发版漏改这里就红。
+        serverInfo: { name: "ox-commander", version: PKG_VERSION },
+      },
     });
   });
 
