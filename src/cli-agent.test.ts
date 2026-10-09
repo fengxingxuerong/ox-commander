@@ -171,6 +171,29 @@ describe("CliAgentAdapter", () => {
     await adapter.abort(handle);
   });
 
+  it("已结束但尚未被 collect 移除的 run：lastResult 回报真实终态，不误报 failed", async () => {
+    // 与 `http-bridge.ts` 同判据（2026-10-09 成对读代码，清单第 12 项）。
+    // 旧写法 `run.session.finished ? "failed" : "log"` 两个分支都映成 `failed`，
+    // 于是"跑完了、但 collect 还没来得及把它移出 runs"这一小段窗口里，
+    // 一个 `completed` 的 run 会被读成 `failed` —— 与 bridge 相反。
+    const adapter = cli(["-e", ""]);
+    const handle = await adapter.dispatch(payload());
+    // drain 只等 done、**不移除** run（移除只发生在 collect 的 finally）——
+    // 正好构造出"已结束且仍在 runs 里"的那个窗口。
+    expect(await adapter.drain(5000)).toBe("drained");
+    const result = await adapter.lastResult(handle);
+    expect(result?.status).toBe("completed");
+    // 收尾：正常消费事件流。
+    await drainEvents(adapter, handle);
+  });
+
+  it("lastResult 对未知 run 返回 undefined（不因缺 run 而抛）", async () => {
+    // 判据是 `run && !run.session.finished`：`&&` 改成 `||` 后，
+    // 缺 run 时会去读 `run.session` 抛 TypeError；这条钉住短路语义。
+    const adapter = cli(["-e", ""]);
+    expect(await adapter.lastResult({ runId: "ghost", agentId: "cli-under-test", taskId: "" })).toBeUndefined();
+  });
+
   it("caps the finished-result cache instead of growing forever", async () => {
     // The eviction guard is `oldest !== undefined`. With `===` it never fires,
     // because the key of a non-empty Map is never undefined — `results` then

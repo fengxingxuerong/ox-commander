@@ -358,7 +358,18 @@ export class CliAgentAdapter implements AgentAdapterV2 {
 
   async lastResult(handle: RunHandle): Promise<AgentRunResult | undefined> {
     const run = this.runs.get(handle.runId);
-    if (run) return this.buildResult(run, handle.runId, run.session.finished ? "failed" : "log");
+    // 与 `http-bridge.ts` 同判据（2026-10-09 成对读代码，清单第 12 项）：
+    // **仍在途的** run 报一个保守的 `failed`（它的终态还没到，唯一诚实的状态
+    // 是"没成"）；**已结束**的 run —— 无论它是否已被 collect 移出 `runs` ——
+    // 都回落到 `results` 里 `finish()`/`abort()` 存下的那份真结果。
+    //
+    // 旧写法是 `run.session.finished ? "failed" : "log"`：两个分支都映成 `failed`，
+    // 于是"已结束但尚未被 collect 移除"的 run 会把 `completed` 读成 `failed` ——
+    // 与 bridge 的行为相反（那边 `buildResult` 直接读 `run.status`）。当前 `lastResult`
+    // 尚无生产调用方，所以这是一条潜伏分歧而非线上缺陷；统一后由用例钉住。
+    if (run && !run.session.finished) {
+      return this.buildResult(run, handle.runId, "log");
+    }
     return this.results.get(handle.runId);
   }
 
