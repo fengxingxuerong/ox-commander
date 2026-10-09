@@ -77,13 +77,18 @@ function caseLiterals(switchNode) {
   return lits;
 }
 
-/** 扫一组源文件，返回 {tables, switches, skipped}；switches 按 文件:行 去重。 */
+/** 行号（1-based），用于跳过去重与列表输出。 */
+function lineOf(sf, node) {
+  return sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+}
+
+/** 扫一组源文件，返回 {tables, switches, skipped}；三者均按 `文件:行` 去重。 */
 function scanFiles(rootNames, options, root) {
   const program = ts.createProgram({ rootNames, options });
   const checker = program.getTypeChecker();
   const tables = [];
   const switches = new Map();
-  let skipped = 0;
+  const skipped = new Map();
 
   for (const sf of program.getSourceFiles()) {
     if (sf.isDeclarationFile || TEST_FILE.test(sf.fileName)) continue;
@@ -104,8 +109,10 @@ function scanFiles(rootNames, options, root) {
       ) {
         const keyType = checker.getTypeFromTypeNode(node.type.typeArguments[0]);
         const members = literalUnionMembers(checker, keyType);
-        if (!members) skipped++;
-        else {
+        if (!members) {
+          const line = lineOf(sf, node);
+          skipped.set(`${rel}:${line}`, { rel, line, kind: "表", name: node.name.getText() });
+        } else {
           const keys = objectLiteralKeys(node.initializer);
           const missing = members.filter((m) => !keys.includes(m));
           const extra = keys.filter((k) => !members.includes(k));
@@ -118,12 +125,19 @@ function scanFiles(rootNames, options, root) {
       // (2) 穷尽 switch
       if (ts.isSwitchStatement(node)) {
         const members = literalUnionMembers(checker, checker.getTypeAtLocation(node.expression));
-        if (!members) skipped++;
-        else {
+        if (!members) {
+          const line = lineOf(sf, node);
+          skipped.set(`${rel}:${line}`, {
+            rel,
+            line,
+            kind: "switch",
+            name: `switch(${node.expression.getText().slice(0, 40)})`,
+          });
+        } else {
           const cases = caseLiterals(node);
           const uncovered = members.filter((m) => !cases.includes(m));
           if (uncovered.length) {
-            const line = sf.getLineAndCharacterOfPosition(node.getStart()).line + 1;
+            const line = lineOf(sf, node);
             const key = `${rel}:${line}`;
             if (!switches.has(key)) {
               switches.set(key, {
@@ -142,11 +156,11 @@ function scanFiles(rootNames, options, root) {
     };
     visit(sf);
   }
-  return { tables, switches: [...switches.values()], skipped };
+  return { tables, switches: [...switches.values()], skipped: [...skipped.values()] };
 }
 
 function scanRepo() {
-  const acc = { tables: [], switches: new Map(), skipped: 0 };
+  const acc = { tables: [], switches: new Map(), skipped: new Map() };
   for (const cfgName of CONFIGS) {
     const cfgPath = path.join(ROOT, cfgName);
     if (!fs.existsSync(cfgPath)) continue;
@@ -156,9 +170,15 @@ function scanRepo() {
     const r = scanFiles(files, parsed.options, ROOT);
     acc.tables.push(...r.tables);
     for (const s of r.switches) acc.switches.set(`${s.rel}:${s.line}`, s);
-    acc.skipped += r.skipped;
+    // 跳过的同样按 `文件:行` 去重：`electron/` 同时进两份 tsconfig，
+    // 不去重会把同一处跳过计两遍（此前 skipped 是纯计数，口径虚高）。
+    for (const s of r.skipped) acc.skipped.set(`${s.rel}:${s.line}`, s);
   }
-  return { tables: acc.tables, switches: [...acc.switches.values()], skipped: acc.skipped };
+  return {
+    tables: acc.tables,
+    switches: [...acc.switches.values()],
+    skipped: [...acc.skipped.values()],
+  };
 }
 
 /** 用真 fixture 自检：判据能不能把"少写一个 case / 少写一个键"抓出来。 */
@@ -240,7 +260,10 @@ if (LIST) {
         (s.hasDefault ? "  ⚠️ 有 default（被吞掉）" : ""),
     );
   }
-  console.log(`跳过（联合含非字面量成员）${findings.skipped} 处`);
+  console.log(`跳过（联合含非字面量成员）${findings.skipped.length} 处：`);
+  for (const s of findings.skipped) {
+    console.log(`  ${s.rel}:${s.line} · ${s.kind} ${s.name}`);
+  }
 }
 console.log(
   total === 0

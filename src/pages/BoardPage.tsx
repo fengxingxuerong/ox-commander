@@ -1,10 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
-import { STAGE_ORDER, type FailureClass } from "../../shared/types";
+import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
+import type { ReceiptTaskStatus } from "../../shared/delivery-receipt";
 import { usageFact } from "../../shared/usage-meter";
 
-const STAGE_LABELS: Record<string, string> = {
+/**
+ * 阶段标签。键是 `Record<Stage, string>`（2026-10-09 盲区补扫收口）：此前是
+ * `Record<string, string>`，新增一个 `Stage` 时这里静默漏一档、界面回落到
+ * `?? s` 吐英文 token —— 与 `ERROR_LABELS` 同病，同样按"把手抄换成编译期事实"处置。
+ * `check:exhaustive-maps` 现在也管这张表（联合类型键 ⇒ 逐档登记）。
+ */
+const STAGE_LABELS: Record<Stage, string> = {
   PRD: "① 需求理解",
   PLANNING: "② 任务分解",
   DEVELOPMENT: "③ 并行开发",
@@ -52,7 +59,7 @@ export function SILENCE_LABEL(lastActivityTs: number, now: number): string | und
 }
 
 /** 凭据任务账的状态图标（与看板任务状态同色系，但这里是**结论**不是进度）。 */
-const RECEIPT_TASK_ICON: Record<string, string> = {
+const RECEIPT_TASK_ICON: Record<ReceiptTaskStatus, string> = {
   done: "✅",
   failed: "❌",
   skipped: "⏭",
