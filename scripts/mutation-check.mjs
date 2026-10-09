@@ -702,7 +702,7 @@ const SITE_BASELINE = {
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
   "electron/sandbox/circuit-breaker.ts": 18,
-  "electron/sandbox/command-policy.ts": 6,
+  "electron/sandbox/command-policy.ts": 15,
   "electron/sandbox/file-journal.ts": 18,
   "electron/sandbox/kill-tree.ts": 11,
   "electron/sandbox/path-policy.ts": 40,
@@ -737,7 +737,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;
+};;;;
 
 /**
  * 等价变异白名单。
