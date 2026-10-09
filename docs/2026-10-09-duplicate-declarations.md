@@ -43,8 +43,8 @@
 | 10 | SenseNova 模型清单 | `shared/providers.ts:180` `SENSENOVA_MODELS` · `:200` `SENSENOVA_MODELS_EXTRA` · `:186` `SENSENOVA_KEY_VARS` | 三个数组 | 部分 | ✅ **2026-10-09 已看清**：`_EXTRA` **不是**"两份值域同时参与计算"，它是**零消费的登记表**（生产代码无人把它并进轮转）。真缺陷是注释把人指向**根本不存在**的 `LLM_POOL_EXTRA` —— 已改回真名并写明"填进去不等于入池"。**要真启用属功能变更**（欠账 #17） |
 | 11 | 默认 LLM 池 | `shared/types.ts` 的 `DEFAULT_SETTINGS.llmPool` 引 `shared/providers.ts:214` 的 `DEFAULT_LLM_POOL`（`[...]` 拷贝） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第二项落地的） |
 | 12 | `cli-agent` vs `http-bridge` | `lastResult` 的终态判据 | 两处各写一套判据 | ❌→✅ | ✅ **2026-10-09 成对读完**：对"已结束、但尚未被 `collect` 移出追踪表"的 run，两边一个报真终态、一个报 `failed` —— 已统一为同判据并双向钉住（⚠️ `lastResult` 当前无生产调用方，属潜伏分歧非线上缺陷） |
-| 13 | 两个 agent 适配器的**默认能力兜底** | `cli-agent.ts` 的 `capabilities()` · `http-bridge.ts` 的 `capabilities()` | 两处各写一套字面量 | ❌ | ⚠️ **2026-10-10 成对读完**：值不同 —— CLI 侧 `run-test` + 并发 1，HTTP 侧 `review` + 并发 2。可能**有意**（本地 CLI 抢资源 / 远程桥可并行），也可能各写各的。**待判断**：改它等于改路由结果，不能凭猜测统一 |
-| 14 | **探测超时** | `cli-agent.ts`：`opts.probeTimeoutMs ?? 10_000`（可配）· `http-bridge.ts`：硬编码 `AbortSignal.timeout(5000)` | 可配 vs 硬编码 | ❌ | ⚠️ 同一件事（"探测等多久"）两种**形态**且两个值（10s / 5s）。**待决策**：是否统一为"可配 + 同一默认" |
+| 13 | 两个 agent 适配器的**默认能力兜底** | `cli-agent.ts` 的 `capabilities()` · `http-bridge.ts` 的 `capabilities()` | 两处各写一套字面量 | ❌ | ⚠️ **2026-10-10 成对读完**：值不同 —— CLI 侧 `run-test` + 并发 1，HTTP 侧 `review` + 并发 2。可能**有意**（本地 CLI 抢资源 / 远程桥可并行），也可能各写各的。✅ **2026-10-10 判断：差异是有意的** —— 值不动，已把理由写成注释钉在两个 `capabilities()` 上（含"别改用 `LEGACY_CAPABILITIES` 补齐 ⇒ 会放大到 `delete` / `run-command"）。**第三处**（`LEGACY_CAPABILITIES`，`supports` 全 7 项）其实**不参与路由**（legacy 候选 bypass 一切能力检查） |
+| 14 | **探测超时** | `cli-agent.ts`：`opts.probeTimeoutMs ?? 10_000`（可配）· `http-bridge.ts`：硬编码 `AbortSignal.timeout(5000)` | 可配 vs 硬编码 | ❌ | ⚠️ 同一件事（"探测等多久"）两种**形态**且两个值（10s / 5s）。✅ **2026-10-10 已统一"形态"**：HTTP 侧也读 `opts.probeTimeoutMs ?? 5_000`（默认仍是 5s，**行为零变化**）。**值不统一**（10s / 5s）—— 起一次子进程 vs 一次 HTTP GET，语义不同 |
 | 15 | 验证侧 spawn 的两条主路径 | `verifier.ts` 的 `runOnce` · `runSmokeChecks` | 两条各写一遍 spawn + 预算 | ✅ 关键项同源 | ⚠️ **2026-10-10 成对读完**：三道门 / `scopedEnv` / `windowsVerbatimArguments` / `MAX_LOG_BYTES` / 默认超时**全部对齐**（注释还互相指认），剩余差异属**语义不同**（`ok` 判据、dev-server 探活 30s），**不强行统一**。残留小重复：「输出超预算」提示文案两处各写一遍 |
 
 ## 说明
@@ -74,6 +74,19 @@
 手抄词表），收口做法是**把手抄换成编译期事实**：类型 + 值域常量 + 边界收窄器，
 词表改 `Record<Union, string>`（少一档即编译错）。收窄器此前零调用者由
 `check:unwired` 抓出。清单里其余各项的收口可以照这个形状做。
+
+### 第 13 / 14 项：判断过程（2026-10-10）
+
+**第 13 项**先找齐了声明处 —— 不止两处：`shared/agent-contract.ts` 的
+`LEGACY_CAPABILITIES` 是**第三处**（`supports` 全 7 项 + 并发 1）。但它在路由里
+**不生效**：legacy 候选 bypass 一切 capability 检查（`router.ts` 同口径），真正参与
+过滤（`:140`）与并发准入（`:155`）的只有两个 adapter 的默认值。统一它们会**改派发
+结果**（CLI 拿到 `review` / HTTP 拿到 `run-test`）；而且**不能**改成用
+`normalizeCapabilities` 补齐 —— `LEGACY_CAPABILITIES` 含 `delete` / `run-command`，
+那会把"没声明"变成"什么都能做"。⇒ 结论：**值不动**，理由写进注释。
+
+**第 14 项**统一的是**形态**而不是值：让 HTTP 侧也读 `probeTimeoutMs`（默认仍 5s，
+行为零变化）。两个默认值刻意不同（起一次子进程跑 `--version` vs 一次 HTTP GET）。
 
 ## 下一步（按优先级）
 
