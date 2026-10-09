@@ -1,7 +1,7 @@
 # `npm run verify` 的逐段机制（29 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
-1786 通过 + 8 跳过，合计 1794 条，分布在 60 个有可执行用例的文件（2026-10-10 逐段实测：链首到
+1787 通过 + 8 跳过，合计 1795 条，分布在 60 个有可执行用例的文件（2026-10-10 逐段实测：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 变异规模实物：**66 个目标** / 基线 **1373 处位点**（`node scripts/site-baseline.mjs --json` 现算，
