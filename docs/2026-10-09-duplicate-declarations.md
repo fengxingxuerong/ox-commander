@@ -6,6 +6,8 @@
 > "同一概念的多处声明"**，再逐对看。本文件是那份清单。
 >
 > 本轮只完成**列全 + 标状态**；逐对**处置**另起一轮（清单里已标优先级）。
+> **2026-10-09 已落地第一批处置**：第 3 / 4 / 6 / 12 项 + 盲区补扫（见文末「下一步」与
+> `CHANGELOG.md` 的「优化（清单收口 · 2026-10-09）」）。
 
 ## 口径
 
@@ -19,9 +21,11 @@
 **现有门禁能兜住的部分**：`check:exhaustive-maps` 管"以联合类型为键的映射表
 与穷尽 switch"逐档登记。**它管不了**"两处并列的类型声明"和"散落的默认值"。
 
-**它的盲区（本轮实测）**：联合类型**含非字面量成员**（`string` / `undefined` /
-对象）时整体跳过；`--list` 报告跳过项 **19 处**。那 19 处正是"漂移了也没人报警"
-的位置 —— 下一轮要人工扫的面。
+**它的盲区**：联合类型**含非字面量成员**（`string` / `undefined` /
+对象）时整体跳过。⚠️ 计数口径已修（2026-10-09）：此前 `--list` 只打印数量、
+且 `skipped` 跨 tsconfig 重复计 —— 实测虚报成 **19/20 处**；改为按 `文件:行`
+去重并列出后是 **11 处**，人工过完收口 2 处（`STAGE_LABELS` / `RECEIPT_TASK_ICON`），
+余 **9 处** 是真正动态键。详见文末「下一步」第 4 条。
 
 ## 清单
 
@@ -30,15 +34,15 @@
 | 1 | 仲裁模式 | `shared/types.ts:259`（类型，4 档）· `headless/protocol.ts:237`（值域数组） | 类型 + 数组 | ✅ 数组引类型 | ✅ 有门禁（`check:exhaustive` 管 switch）+ 协议层运行时校验 |
 | 2 | **默认仲裁模式** | 三处入口共用 `shared/types.ts` 的 `DEFAULT_ARBITRATION_MODE`（`DEFAULT_SETTINGS` / `BatchGuard` 构造兜底 / agent 层装配） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第一项落地的） |
 | 3 | 升级策略 | 协议侧 `EscalationPolicy` = `Exclude<shared/types.ts` 的 `EscalationPolicySetting`, `"ask">`（派生） | 类型（派生） | ✅ 协议引桌面 | ✅ **2026-10-09 收口完成**：加档只改桌面那一处；协议侧值域常量改 `Record<Union, …>` ⇒ 少一键 **tsc 编译错**（反向注入验过） |
-| 4 | 升级策略值域 | 协议侧 `ESCALATION_POLICIES`（`Record`，4 键）· 桌面侧仍无值域数组 | Record vs 无 | 部分 | ⚠️ **半收口**：加档已被编译期抓住；**`SettingsStore.load` 对字段零校验仍未做**（与 arbitration 同病）⇒ 欠账 #18，要动就两个字段一起动 |
+| 4 | 升级策略值域 | 协议侧 `ESCALATION_POLICIES`（`Record`，4 键）· 桌面侧 `ESCALATION_POLICY_SETTINGS`（`Record`，5 键） | Record × 2 | ✅ 各自引类型 + `load` 收窄 | ✅ **2026-10-09 收口完成**：`SettingsStore.load` 对 `arbitration` / `escalationPolicy` 一起接上 `is*` 收窄（欠账 #18 结） |
 | 5 | 失败类别 | `shared/types.ts`：`FailureClass` + `FAILURE_CLASSES` + `isFailureClass` | 类型 + 值域 + 收窄器 | ✅ 单一真源 | ✅ 已收口（收口长什么样的样例） |
-| 6 | 失败类别（跨版本产物） | `shared/delivery-receipt.ts:99` 仍是裸 `string` | 裸类型 | ❌ | ⚠️ 欠账 #16 |
+| 6 | 失败类别（跨版本产物） | `shared/delivery-receipt.ts` 的 `ReceiptTask.errorClass: FailureClass` | 类型（引单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（欠账 #16 结，纯类型收紧、行为零变化） |
 | 7 | 并发上限 | `electron/engine/scheduler.ts:29` · `shared/types.ts:305` | 两处 `4` | ❌ | ⚠️ 欠账 #9 |
 | 8 | stdout 截断 | `shared/agent-contract.ts:73` · `electron/engine/verifier.ts:51` | 两处常量 | ❌ | ⚠️ 欠账 #9 |
 | 9 | 300_000（超时） | `electron/platform.ts:53` · `shared/http-clients.ts:145,274` · `electron/engine/verifier.ts:41` | 四处常量 | ❌ | ⚠️ 欠账 #9 |
 | 10 | SenseNova 模型清单 | `shared/providers.ts:180` `SENSENOVA_MODELS` · `:200` `SENSENOVA_MODELS_EXTRA` · `:186` `SENSENOVA_KEY_VARS` | 三个数组 | 部分 | ✅ **2026-10-09 已看清**：`_EXTRA` **不是**"两份值域同时参与计算"，它是**零消费的登记表**（生产代码无人把它并进轮转）。真缺陷是注释把人指向**根本不存在**的 `LLM_POOL_EXTRA` —— 已改回真名并写明"填进去不等于入池"。**要真启用属功能变更**（欠账 #17） |
 | 11 | 默认 LLM 池 | `shared/types.ts` 的 `DEFAULT_SETTINGS.llmPool` 引 `shared/providers.ts:214` 的 `DEFAULT_LLM_POOL`（`[...]` 拷贝） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第二项落地的） |
-| 12 | `cli-agent` vs `http-bridge` | — | 两处各写一套命令面 | ❌ | ⚠️ §7 原记的那一对，**本轮未展开**（需成对读代码，下一轮） |
+| 12 | `cli-agent` vs `http-bridge` | `lastResult` 的终态判据 | 两处各写一套判据 | ❌→✅ | ✅ **2026-10-09 成对读完**：对"已结束、但尚未被 `collect` 移出追踪表"的 run，两边一个报真终态、一个报 `failed` —— 已统一为同判据并双向钉住（⚠️ `lastResult` 当前无生产调用方，属潜伏分歧非线上缺陷） |
 
 ## 说明
 
@@ -70,12 +74,16 @@
 
 ## 下一步（按优先级）
 
-1. **机械重复**：第 2 项（默认仲裁模式）与第 11 项（默认 LLM 池）✅ 均已收口
+1. **机械重复**：第 2 项（默认仲裁模式）、第 11 项（默认 LLM 池）✅ 均已收口
    （2026-10-09）；第 7 / 8 / 9 项（`maxParallelRuns` / `maxStdoutBytes` /
-   `300_000`）**暂不动** —— 抽公共常量会引入反向依赖（欠账 #9 已记原因）；
+   `300_000`）**仍不动** —— 抽公共常量会引入反向依赖（欠账 #9 已记原因）；
    第 10 项已看清并修掉指引错误（真启用属功能变更，欠账 #17）；
-2. ~~**需要决策**：第 3 / 4 项~~ → 第 3 项 ✅ 已收口（协议侧派生 + 值域 `Record` 化，
-   加档由 tsc 抓住）；第 4 项**半收口**，剩下的 `SettingsStore.load` 零校验
-   ⇒ 欠账 #18（`arbitration` 与 `escalationPolicy` 一起做，别只做一个字段）；
-3. **需要成对读代码**：第 12 项（`cli-agent` vs `http-bridge`）；
-4. **盲区补扫**：`check:exhaustive-maps` 跳过的那 19 处联合类型，人工过一遍。
+2. **需要决策**：第 3 / 4 项 ✅ 均已收口（2026-10-09）—— 第 3 项协议侧派生 +
+   值域 `Record` 化；第 4 项 `SettingsStore.load` 对 `arbitration` /
+   `escalationPolicy` **一起**接上收窄（欠账 #18 结）。
+3. **需要成对读代码**：第 12 项 ✅ 已读（2026-10-09）—— 命中 `lastResult` 的终态判据分歧，
+   已统一并双向钉住。同族可续找的下一对：`verifier.ts` 的两条 spawn 路径。
+4. **盲区补扫** ✅ 已完成（2026-10-09）：工具先修准（`--list` 从"计数"改为"可列出" +
+   按 `文件:行` 去重），实际跳过项从虚高的 19/20 修到 **11 处**；人工过完 ——
+   9 处是真正动态键（`Record<string, …>` / `unknown` switch），2 处漏网已收口
+   （`STAGE_LABELS` / `RECEIPT_TASK_ICON`），余 **9 处** 正确跳过。

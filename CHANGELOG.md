@@ -6,6 +6,42 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 优化（清单收口 · 2026-10-09）
+
+按 `docs/2026-10-09-duplicate-declarations.md` 的「下一步」逐项落地。
+
+- **欠账 #18 结：`SettingsStore.load` 对 `arbitration` / `escalationPolicy` 接上边界收窄**（清单第 4 项收口）。
+  `shared/types.ts` 新增运行时值域 `ARBITRATION_MODES` / `ESCALATION_POLICY_SETTINGS`（取
+  `Record<Union, true>` 形状 —— 少一键是编译错，且被 `check:exhaustive-maps` 逐档登记）
+  与收窄器 `isArbitrationMode` / `isEscalationPolicySetting`；`load()` 里两个同病字段一起收：
+  未登记的值此前会一路带进引擎，那里 `switch + default`（`remedyFor`）把它**静默吞成 `fail-batch`**。
+  非法 `arbitration` 落回 `DEFAULT_ARBITRATION_MODE`；非法 `escalationPolicy` **丢掉该键**
+  （与"用户从没选过"同义，让装配侧 `?? DEFAULT_ESCALATION_POLICY` 生效）。
+  `headless/protocol.ts` 同步丢掉自己那份 `ARBITRATION_MODES` 数组、改引共享真源（第 1 项的值域一并单一化）。
+  两个字段一起做 —— 只做一个等于没做。
+- **欠账 #16 结：`ReceiptTask.errorClass` 由裸 `string` 收成 `FailureClass`**（清单第 6 项）。
+  纯类型收紧、**行为零变化**：生产者 `outcome.errorClass` 本就来自已经是 `FailureClass` 的
+  `DispatchOutcome`，收口后新增一个未登记的类别会被编译器拦住，而不是靠"有人记得同步"。
+- **#12 成对读代码：`cli-agent` vs `http-bridge` 的 `lastResult` 判据统一**（清单第 12 项）。
+  bridge 对任何状态的 run 都报真实终态；cli 此前把 `session.finished` 也映成 `failed`，
+  于是"已结束、但还没被 `collect` 移出追踪表"的一小段窗口里，一个 `completed` 的 run 会被读成 `failed`。
+  判据统一为"在途 ⇒ 保守 `failed`；已结束 ⇒ 回 `results` 里那份真结果"。⚠️ `lastResult` 当前
+  **无生产调用方**，所以这是潜伏分歧而非线上缺陷；统一后由用例双向钉住（正例 + 未知 run 不抛）。
+- **盲区补扫：`check-exhaustive-maps` 的跳过项从"计数"改为"可列出"，并收口 2 处漏网映射表**。
+  工具此前 `--list` 声称"打印跳过项"却只打印数量，且 `skipped` **跨 tsconfig 重复计**（实测 19/20 虚高）。
+  改为按 `文件:行` 去重并逐条列出后，实际 **11 处**：9 处是真正动态键（`Record<string, …>` /
+  `unknown` switch，正确跳过），2 处是漏网 —— `BoardPage.tsx` 的 `STAGE_LABELS` /
+  `RECEIPT_TASK_ICON` 用了 `Record<string, string>`，按 `ERROR_LABELS` 同款收口成
+  `Record<Stage, string>` / `Record<ReceiptTaskStatus, string>`（新增一档不再静默漏标签）。
+  收口后跳过项降到 **9 处**，两张表进入逐档登记范围。
+
+**实测**：`npm test` **1759 通过 + 8 跳过（1767，60 文件）**；四套 typecheck 干净；eslint 0；
+29 段 verify 全绿（含 `mutation:quick` 与 `mutation:touched` 对本次改到的 5 个目标逐位点审计
+**全部 100% 杀死**：`shared/types.ts` 6/6 · `electron/store.ts` 8/8 · `cli-agent.ts` 21/21 ·
+`delivery-receipt.ts` 43/43 · `protocol.ts` 90/90）；位点基线 **1351 → 1355**（65 目标，
+`mutation:baseline` 无漂移）。为避免新位点"没人逐点验证过"，把 `electron/store.test.ts`
+挂进 `shared/types.ts` 目标的测试列表（新收窄器的断言在那里，否则那 4 处位点无人审）。
+
 ### 新增（引擎能力）
 
 - **契约路径合规（Stage 3.5）：任务点名的文件必须真的在盘上**（2026-10-06）。
