@@ -185,7 +185,7 @@ h.builtAdapter = {
 
 import type { FakeIpcMain } from "./__fakes__/electron";
 import { app, shell } from "electron";
-import { attachWindow, buildEngine, registerIpc } from "../electron/ipc";
+import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
 import {
   abortAllApprovals,
   abortAllEscalations,
@@ -968,6 +968,20 @@ describe("orchestration handlers", () => {
     });
   });
 
+  it("onTaskOutcome 无 meta：事件不带多余字段（`...(meta ?? {})` 的缺省分支）", () => {
+    // 引擎对没带 meta 的任务也发 outcome —— 缺省分支不走到，就没人验证
+    // "没有 meta 时事件里不多出 undefined 字段"这个形状。
+    buildEngine("p-nometa");
+    const cb = lastPlatformConfig().host.callbacks;
+    cb.onTaskOutcome("t1", true, "digest");
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", {
+      type: "taskOutcome",
+      taskId: "t1",
+      ok: true,
+      logDigest: "digest",
+    });
+  });
+
   it("journal.save 把快照写进该项目的日志（按 projectId 分，不串号）", () => {
     buildEngine("p-journal");
     // `journal` 是 createPlatform 配置的**顶层**字段（context.ts:278），
@@ -1029,6 +1043,26 @@ describe("orchestration handlers", () => {
     // comparison and a red verification loop would silently read as green.
     expect(testJs).toContain("r.status !== 0");
     expect(getRunningProjectId()).toBeNull();
+  });
+
+  it("ensureWorkspace 幂等：脚手架已存在时不重写（重复 start 不冲掉手改内容）", () => {
+    // 二次调用走的是 `if (!fs.existsSync(pkg))` / `if (!fs.existsSync(file))`
+    // 的 **else 分支** —— 头一次 start 只验证"写出来了"，没验证"第二次别再动"。
+    // 幂等不是礼貌：智能体在项目里手改的 build.js / package.json，重跑一轮就被
+    // 冲回模板，验证判据就跟这次会话的实际约定脱钩了。
+    const root = ensureWorkspace("p-idem");
+    const pkgPath = path.join(root, "package.json");
+    const buildPath = path.join(root, "ox-scripts", "build.js");
+    const pkgBefore = fs.readFileSync(pkgPath, "utf8");
+    const buildBefore = fs.readFileSync(buildPath, "utf8");
+
+    // 模拟"上一轮之后被人动过"：故意改掉 package.json 的 name，重跑必须保留
+    fs.writeFileSync(pkgPath, pkgBefore.replace('"name": "ox-p-idem"', '"name": "ox-renamed"'), "utf8");
+
+    const again = ensureWorkspace("p-idem");
+    expect(again).toBe(root);
+    expect(fs.readFileSync(pkgPath, "utf8")).toContain("ox-renamed");
+    expect(fs.readFileSync(buildPath, "utf8")).toBe(buildBefore);
   });
 
   it("releases the running lock even when execute throws", async () => {
