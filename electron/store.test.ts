@@ -119,4 +119,34 @@ describe("SettingsStore", () => {
     fs.writeFileSync(file, "\uFEFF" + JSON.stringify({ maxRepairRounds: 2 }), "utf8");
     expect(new SettingsStore(file).load().maxRepairRounds).toBe(2);
   });
+
+  /**
+   * 值域在边界收窄（欠账 #18）。`settings.json` 可被外部改写，字段上的类型只是
+   * 声明、运行时没保证；未登记的值此前会一路带进引擎，那里 `switch + default`
+   * 把它静默吞成 fail-batch。两个同病字段（arbitration / escalationPolicy）一起收窄。
+   */
+  it("收窄未登记的 arbitration / escalationPolicy 到默认值", () => {
+    const file = path.join(dir, "settings.json");
+    fs.writeFileSync(file, JSON.stringify({ arbitration: "quantum-flux", escalationPolicy: "explode" }), "utf8");
+    const loaded = new SettingsStore(file).load();
+    expect(loaded.arbitration).toBe(DEFAULT_SETTINGS.arbitration);
+    // 非法档被丢掉（不是填默认）：缺席正是装配侧 `?? DEFAULT_ESCALATION_POLICY` 的触发条件
+    expect("escalationPolicy" in loaded).toBe(false);
+  });
+
+  it("非字符串的值域值同样收窄（数据来自 JSON，不保证是字符串）", () => {
+    const file = path.join(dir, "settings.json");
+    fs.writeFileSync(file, JSON.stringify({ arbitration: 42, escalationPolicy: true }), "utf8");
+    const loaded = new SettingsStore(file).load();
+    expect(loaded.arbitration).toBe(DEFAULT_SETTINGS.arbitration);
+    expect("escalationPolicy" in loaded).toBe(false);
+  });
+
+  it("合法值域原样保留，不误伤", () => {
+    const file = path.join(dir, "settings.json");
+    fs.writeFileSync(file, JSON.stringify({ arbitration: "quarantine", escalationPolicy: "abort" }), "utf8");
+    const loaded = new SettingsStore(file).load();
+    expect(loaded.arbitration).toBe("quarantine");
+    expect(loaded.escalationPolicy).toBe("abort");
+  });
 });

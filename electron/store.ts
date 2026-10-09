@@ -1,6 +1,12 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DEFAULT_SETTINGS, type ProjectSettings } from "../shared/types";
+import {
+  DEFAULT_ARBITRATION_MODE,
+  DEFAULT_SETTINGS,
+  isArbitrationMode,
+  isEscalationPolicySetting,
+  type ProjectSettings,
+} from "../shared/types";
 import { readJsonFile, writeFileAtomic } from "./atomic-file";
 
 interface ProjectRecord {
@@ -103,7 +109,18 @@ export class SettingsStore {
     // Clone the defaults so nested arrays (verificationCommands / enabledAgents /
     // llmPool) are never shared with DEFAULT_SETTINGS: a caller mutating the
     // loaded settings in place must not be able to poison process-wide defaults.
-    return { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
+    const merged: ProjectSettings = { ...structuredClone(DEFAULT_SETTINGS), ...parsed };
+    // 值域收窄（欠账 #18）：`readJsonFile` 的泛型只是断言，`settings.json` 里的值
+    // 运行时没有保证 —— 一个手改的/旧版本写的未登记值此前会一路带进引擎，
+    // 那里 `switch + default` 把它静默吞掉（`remedyFor` 的 default 分支）。
+    // 两个同病字段一起收窄，缺一个都留着同一条缝。
+    if (!isArbitrationMode(merged.arbitration)) merged.arbitration = DEFAULT_ARBITRATION_MODE;
+    if (merged.escalationPolicy !== undefined && !isEscalationPolicySetting(merged.escalationPolicy)) {
+      // 丢掉非法键而不是填默认值：缺席正是装配侧 `?? DEFAULT_ESCALATION_POLICY`
+      // 的触发条件，与"用户从没选过"同义。
+      delete merged.escalationPolicy;
+    }
+    return merged;
   }
 
   save(settings: ProjectSettings): void {

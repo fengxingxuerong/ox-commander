@@ -20,7 +20,9 @@ import { parseAgentManifestList } from "../electron/agents/manifest-schema";
 import type { AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import {
+  ARBITRATION_MODES,
   DEFAULT_SETTINGS,
+  isArbitrationMode,
   type ArbitrationMode,
   type EscalationPolicySetting,
   type PrdDocument,
@@ -249,7 +251,6 @@ const ESCALATION_POLICIES: Record<EscalationPolicy, true> = {
   redispatch_once: true,
   exhaust: true,
 };
-const ARBITRATION_MODES: readonly ArbitrationMode[] = ["report-only", "deny-all", "revert-batch", "quarantine"];
 /**
  * `VerificationKind` 有四种，这里此前只收了三种（漏 `smoke`）—— 于是 CLI 宿主
  * 传一条 smoke 验证命令会被整段拒掉，而同样的命令在桌面端是合法的（那边走
@@ -439,10 +440,11 @@ export function parseSpec(rawText: string): ParseResult {
 
   let arbitration: ArbitrationMode | undefined;
   if (raw.arbitration !== undefined) {
-    if (typeof raw.arbitration !== "string" || !ARBITRATION_MODES.includes(raw.arbitration as ArbitrationMode)) {
-      issues.push(`arbitration 必须是 ${ARBITRATION_MODES.join(" / ")}`);
+    // 值域来自 `shared/types.ts` 的单一真源（欠账 #18：此前这里各写一份数组）。
+    if (!isArbitrationMode(raw.arbitration)) {
+      issues.push(`arbitration 必须是 ${Object.keys(ARBITRATION_MODES).join(" / ")}`);
     } else {
-      arbitration = raw.arbitration as ArbitrationMode;
+      arbitration = raw.arbitration;
     }
   }
 

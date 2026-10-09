@@ -263,6 +263,30 @@ export type EscalationAction = "skip" | "redispatch" | "abort";
 export type ArbitrationMode = "report-only" | "deny-all" | "revert-batch" | "quarantine";
 
 /**
+ * `ArbitrationMode` 的运行时值域 —— **边界收窄**用（与 `FAILURE_CLASSES` 同一用途，
+ * 形状取本仓更强的 `Record<Union, …>` 约定：数组少一档 tsc 不红，`Record` 少一键
+ * 是编译错，且它由 `check:exhaustive-maps` 逐档登记）。
+ *
+ * 为什么需要：`settings.json` 可被外部改写，字段上的类型只是声明、运行时没有保证。
+ * 未登记的值此前会一路带进引擎，那里 `switch + default` 把它静默吞成 fail-batch
+ * （2026-10-09 清单第 4 项 · 欠账 #18）。收窄发生在边界，引擎层因此可以放心 switch。
+ */
+export const ARBITRATION_MODES: Record<ArbitrationMode, true> = {
+  "report-only": true,
+  "deny-all": true,
+  "revert-batch": true,
+  "quarantine": true,
+};
+
+/**
+ * 把一个来自磁盘/JSON 的值收窄成 `ArbitrationMode`。认不出来的由调用方决定回退
+ * （`SettingsStore.load` 落到 `DEFAULT_ARBITRATION_MODE`）。
+ */
+export function isArbitrationMode(value: unknown): value is ArbitrationMode {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(ARBITRATION_MODES, value);
+}
+
+/**
  * 默认仲裁模式 —— **三个入口共用**：`DEFAULT_SETTINGS.arbitration`、
  * `BatchGuard` 的构造兜底、agent 层装配（`opts.arbitration`）。
  *
@@ -283,6 +307,31 @@ export const DEFAULT_ARBITRATION_MODE: ArbitrationMode = "revert-batch";
  * 加档只改这一处。
  */
 export type EscalationPolicySetting = "ask" | "abort" | "skip" | "redispatch_once" | "exhaust";
+
+/**
+ * `EscalationPolicySetting` 的运行时值域 —— 与 `ARBITRATION_MODES` 同形状同用途
+ * （欠账 #18：设置文件可被外部改写，边界必须能收窄回类型）。
+ *
+ * ⚠️ 它与 headless 协议的 `ESCALATION_POLICIES`（4 档，`Exclude<…, "ask">`）
+ * **刻意不是一份**：协议不接受 `"ask"`（无人值守没人可问）。两者都从
+ * `EscalationPolicySetting` 派生，桌面端加一档时协议侧缺键、编译期即红。
+ */
+export const ESCALATION_POLICY_SETTINGS: Record<EscalationPolicySetting, true> = {
+  ask: true,
+  abort: true,
+  skip: true,
+  redispatch_once: true,
+  exhaust: true,
+};
+
+/**
+ * 把一个来自磁盘/JSON 的值收窄成 `EscalationPolicySetting`。认不出来的由调用方
+ * 决定回退（`SettingsStore.load` 丢掉该键，让装配侧的 `?? DEFAULT_ESCALATION_POLICY`
+ * 生效 —— 与"字段缺席"同义）。
+ */
+export function isEscalationPolicySetting(value: unknown): value is EscalationPolicySetting {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(ESCALATION_POLICY_SETTINGS, value);
+}
 
 /**
  * 默认升级处置 —— **两个入口共用**：platform 装配（`electron/ipc/context.ts` 的

@@ -136,7 +136,7 @@ const TARGETS = [
   // 而 BoardPage 的注释却写着"值已在边界经 isFailureClass 收窄" ——
   // 注释描述的是一条从未存在的接线。收窄器本身必须在表内，否则它退化成一个
   // 没人验证的 `includes`。
-  { file: "shared/types.ts", tests: ["src/store.test.ts", "src/board-derive.test.ts"], tier: 2 },
+  { file: "shared/types.ts", tests: ["src/store.test.ts", "src/board-derive.test.ts", "electron/store.test.ts"], tier: 2 },
   // 2026-09-29：跨动作状态机（竞品调研 §5.1）—— 规则在纯函数里（escalatedVerdict /
   // extractActionFacts），ActionGate 是薄壳；同批接入 CommandPolicy 的 npm 子命令地板。
   { file: "electron/sandbox/action-gate.ts", test: "src/action-gate.test.ts", tier: 1 },
@@ -709,11 +709,11 @@ const SITE_BASELINE = {
   "electron/sandbox/snapshot-store.ts": 13,
   "electron/sandbox/spawn-plan.ts": 8,
   "electron/sandbox/timeout-gate.ts": 3,
-  "electron/store.ts": 6,
+  "electron/store.ts": 8,
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 77,
-  "headless/protocol.ts": 92,
+  "headless/protocol.ts": 90,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
   "headless/serve-main.ts": 17,
@@ -733,11 +733,11 @@ const SITE_BASELINE = {
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 23,
-  "shared/types.ts": 2,
+  "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;
+};;;
 
 /**
  * 等价变异白名单。
