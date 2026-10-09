@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AuditLog, classifyFailure } from "../electron/audit-log";
+import type { AuditRecord } from "../electron/audit-log";
 import { Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
 import type { AgentAdapter, Task } from "../shared/types";
@@ -539,5 +540,48 @@ describe('AuditLog · read() 的 memo 与失效', () => {
     log.append({ phase: 'run-end', taskId: 't1', ok: true });
     const first = log.read().length;
     for (let i = 0; i < 20; i++) expect(log.read()).toHaveLength(first);
+  });
+});
+
+/**
+ * `read()` 的返回值与 `readMemo.out` 是**同一份数组**：一个调用者 `push`/`sort`
+ * 就会把污染留在缓存里，下一个读的人拿到脏数据而**没有任何东西变红**
+ * （2026-10-08 探针取证：第二次 read 拿到被 push 过的数组，且 memo 命中同引用）。
+ *
+ * 类型（`readonly AuditRecord[]`）把新调用点挡在编译期；这组用例钉的是**运行期**
+ * 那一半 —— 从别的文件 cast 回可变视图的人，编译器拦不住，冻结拦得住。
+ */
+describe('AuditLog · read() 返回冻结数组', () => {
+  it('冷读 / memo 命中 / 带 limit 的切片，三条路径都是冻结的', () => {
+    const log = new AuditLog({ dir: scratch('audit-freeze') });
+    for (let i = 0; i < 3; i++) log.append({ phase: 'run-end', taskId: `t${i}`, ok: true });
+
+    const cold = log.read(); // 冷读，顺带建 memo
+    const warm = log.read(); // 命中 memo —— 与 cold 同一份引用
+    const capped = log.read({ limit: 2 }); // slice 分支
+
+    expect(Object.isFrozen(cold)).toBe(true);
+    expect(Object.isFrozen(warm)).toBe(true);
+    // 两条分支（`slice` 出来的新数组 / 原数组本身）都要冻到：
+    // 只冻一条，"带 limit"或"不带 limit"就有一个读的人仍能改缓存。
+    expect(Object.isFrozen(capped)).toBe(true);
+    expect(capped).toHaveLength(2);
+  });
+
+  it('运行期写入当场被挡住，且没把 memo 污染给下一个调用者', () => {
+    const log = new AuditLog({ dir: scratch('audit-freeze-mutate') });
+    log.append({ phase: 'run-end', taskId: 't1', ok: true });
+
+    const shared = log.read();
+    // 测试文件是 ESM（严格模式）→ 对冻结数组写入抛 TypeError。
+    // 这里刻意 cast 回可变视图：正是编译期那道 readonly 拦不住的形状。
+    expect(() =>
+      (shared as AuditRecord[]).push({ ts: new Date().toISOString(), phase: 'run-end', taskId: 'evil', ok: true }),
+    ).toThrow();
+
+    // 要钉的不是"抛了"，而是抛完之后缓存仍然干净 ——
+    // 去掉 `Object.freeze` 时上面不再抛、这里读到 2 条，用例当场红。
+    expect(log.read()).toHaveLength(1);
+    expect(log.read().map((r) => r.taskId)).toEqual(['t1']);
   });
 });

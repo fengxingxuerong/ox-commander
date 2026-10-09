@@ -107,7 +107,7 @@ export interface TaskTrail {
  *     它**没有 `endedAt`** —— 那是"被腰斩"的唯一诚实表达；
  *   · run-end 早于任何 start（start 被轮转掉了）⇒ 照样算一次派发，只是没有开始时间。
  */
-export function taskTrail(records: AuditRecord[], taskId: string): TaskTrail {
+export function taskTrail(records: readonly AuditRecord[], taskId: string): TaskTrail {
   const runs: TrailRun[] = [];
   let title: string | undefined;
   let zone: string | undefined;
@@ -217,7 +217,7 @@ export function trailBriefForRepair(trail: TaskTrail): string {
  * its run-start. Each rule states what it does in that case — the layer never
  * invents attribution it did not observe.
  */
-export function deriveBoardView(records: AuditRecord[]): BoardRecoveryView {
+export function deriveBoardView(records: readonly AuditRecord[]): BoardRecoveryView {
   const tasks: Record<string, DerivedTask> = {};
   let stage: Stage | undefined;
   let receipt: DeliveryReceipt | undefined;

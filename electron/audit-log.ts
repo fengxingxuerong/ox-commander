@@ -101,12 +101,18 @@ export class AuditLog {
    * Single-slot memo for `read()`, keyed on a fingerprint of what is actually
    * on disk (file list + current file's size/mtime), not on an in-memory
    * counter. See `readFingerprint()` for why the disk is the source of truth.
+   *
+   * The memoised array is **frozen** before it is stored and returned: it is
+   * shared with every caller that hits the memo, so a single `push`/`sort` by
+   * one consumer would silently mutate the cache and hand corrupted data to
+   * everyone else — and nothing would go red (2026-10-08 探针取证：污染真实
+   * 发生，第二次 read 拿到被 push 过的数组且 memo 命中同引用）。
    */
   private readMemo: {
     fingerprint: string;
     limit: number | undefined;
     phase: AuditPhase | undefined;
-    out: AuditRecord[];
+    out: readonly AuditRecord[];
   } | null = null;
 
   constructor(opts: AuditLogOptions) {
@@ -187,8 +193,16 @@ export class AuditLog {
     return `${files.length}|${files[files.length - 1] ?? ""}|${tail}`;
   }
 
-  /** Reads records back, newest last. `limit` caps how many are returned. */
-  read(opts: { limit?: number; phase?: AuditPhase } = {}): AuditRecord[] {
+  /**
+   * Reads records back, newest last. `limit` caps how many are returned.
+   *
+   * Returns a **frozen** array (`readonly AuditRecord[]`): the value is shared
+   * with the memo and with every other caller of the same query, so it must be
+   * treated as read-only. The type stops new callers at compile time, the
+   * freeze stops them at runtime — a mutation attempt either throws (strict
+   * mode) or is silently ignored, and never reaches the cache.
+   */
+  read(opts: { limit?: number; phase?: AuditPhase } = {}): readonly AuditRecord[] {
     // Why the memo exists: `read()` is O(entire trail) — it reads every
     // retained file and JSON.parses every line, then discards most of it via
     // `slice`. At the documented retention ceiling (20 files x 2 MiB) that
@@ -223,7 +237,9 @@ export class AuditLog {
         }
       }
     }
-    const result = opts.limit !== undefined ? out.slice(-opts.limit) : out;
+    const result: readonly AuditRecord[] = Object.freeze(
+      opts.limit !== undefined ? out.slice(-opts.limit) : out,
+    );
     this.readMemo = { fingerprint, limit: opts.limit, phase: opts.phase, out: result };
     return result;
   }
