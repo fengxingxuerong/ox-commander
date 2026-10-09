@@ -43,6 +43,9 @@
 | 10 | SenseNova 模型清单 | `shared/providers.ts:180` `SENSENOVA_MODELS` · `:200` `SENSENOVA_MODELS_EXTRA` · `:186` `SENSENOVA_KEY_VARS` | 三个数组 | 部分 | ✅ **2026-10-09 已看清**：`_EXTRA` **不是**"两份值域同时参与计算"，它是**零消费的登记表**（生产代码无人把它并进轮转）。真缺陷是注释把人指向**根本不存在**的 `LLM_POOL_EXTRA` —— 已改回真名并写明"填进去不等于入池"。**要真启用属功能变更**（欠账 #17） |
 | 11 | 默认 LLM 池 | `shared/types.ts` 的 `DEFAULT_SETTINGS.llmPool` 引 `shared/providers.ts:214` 的 `DEFAULT_LLM_POOL`（`[...]` 拷贝） | 常量（单一真源） | ✅ 已收口 | ✅ **2026-10-09 收口完成**（清单里第二项落地的） |
 | 12 | `cli-agent` vs `http-bridge` | `lastResult` 的终态判据 | 两处各写一套判据 | ❌→✅ | ✅ **2026-10-09 成对读完**：对"已结束、但尚未被 `collect` 移出追踪表"的 run，两边一个报真终态、一个报 `failed` —— 已统一为同判据并双向钉住（⚠️ `lastResult` 当前无生产调用方，属潜伏分歧非线上缺陷） |
+| 13 | 两个 agent 适配器的**默认能力兜底** | `cli-agent.ts` 的 `capabilities()` · `http-bridge.ts` 的 `capabilities()` | 两处各写一套字面量 | ❌ | ⚠️ **2026-10-10 成对读完**：值不同 —— CLI 侧 `run-test` + 并发 1，HTTP 侧 `review` + 并发 2。可能**有意**（本地 CLI 抢资源 / 远程桥可并行），也可能各写各的。**待判断**：改它等于改路由结果，不能凭猜测统一 |
+| 14 | **探测超时** | `cli-agent.ts`：`opts.probeTimeoutMs ?? 10_000`（可配）· `http-bridge.ts`：硬编码 `AbortSignal.timeout(5000)` | 可配 vs 硬编码 | ❌ | ⚠️ 同一件事（"探测等多久"）两种**形态**且两个值（10s / 5s）。**待决策**：是否统一为"可配 + 同一默认" |
+| 15 | 验证侧 spawn 的两条主路径 | `verifier.ts` 的 `runOnce` · `runSmokeChecks` | 两条各写一遍 spawn + 预算 | ✅ 关键项同源 | ⚠️ **2026-10-10 成对读完**：三道门 / `scopedEnv` / `windowsVerbatimArguments` / `MAX_LOG_BYTES` / 默认超时**全部对齐**（注释还互相指认），剩余差异属**语义不同**（`ok` 判据、dev-server 探活 30s），**不强行统一**。残留小重复：「输出超预算」提示文案两处各写一遍 |
 
 ## 说明
 
@@ -82,7 +85,11 @@
    值域 `Record` 化；第 4 项 `SettingsStore.load` 对 `arbitration` /
    `escalationPolicy` **一起**接上收窄（欠账 #18 结）。
 3. **需要成对读代码**：第 12 项 ✅ 已读（2026-10-09）—— 命中 `lastResult` 的终态判据分歧，
-   已统一并双向钉住。同族可续找的下一对：`verifier.ts` 的两条 spawn 路径。
+   已统一并双向钉住。第 15 项（`verifier.ts` 两条 spawn 路径）✅ **2026-10-10 已读**：
+   结论是**同源做得好** —— 三道门 / 凭证 / `windowsVerbatimArguments` / 预算 /
+   默认超时全部对齐（注释互相指认），剩余差异属语义不同，**不强行统一**。
+   同族新挑出两对：**第 13 项（两个适配器的默认能力兜底）**、**第 14 项
+   （探测超时：可配 10s vs 硬编码 5s）** —— 都需先判断"差异是有意还是漂移"再动。
 4. **盲区补扫** ✅ 已完成（2026-10-09）：工具先修准（`--list` 从"计数"改为"可列出" +
    按 `文件:行` 去重），实际跳过项从虚高的 19/20 修到 **11 处**；人工过完 ——
    9 处是真正动态键（`Record<string, …>` / `unknown` switch），2 处漏网已收口
