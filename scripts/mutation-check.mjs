@@ -881,7 +881,10 @@ const EQUIVALENT_SITES = [
    * 断言 drained 路径不发任何 /abort 请求 —— 该用例在两种写法下都通过，
    * 正说明差别不可观测。保留该用例（它仍是对 drained 路径的有效断言）。
    */
-  { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 309 },
+  // 锚点 309 → 315（2026-10-10 校准）：本文件在它之前多了 6 行（`probeTimeoutMs`
+  // 选项 + 两处"为什么这么写"的注释），行号整体后移。**位点数未变**（1369 无漂移），
+  // 漂的只是锚点 —— 这正是"行号是锚点"的 fail-safe：宁可重现让人重看一遍。
+  { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 315 },
   /**
    * `electron/agents/sensenova-api.ts` 里 `readSnapshotContents` 的那行
    * `if (isSecretLikeFile(rel)) continue;` 的 `continue → break` —— **可证明不可达**（一级）。
