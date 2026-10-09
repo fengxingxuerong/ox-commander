@@ -16,6 +16,9 @@ const KIND_LABELS: Record<VerificationKind, string> = {
   test: "测试",
   smoke: "独立冒烟",
 };
+// 前三个是批次内的硬性验证（每轮重修都重跑，首败即停）；
+// smoke 是**另一个面**：跑大脑 decompose 产出的真实样例命令，防"自证盲区"，
+// 它不进重修循环、由引擎在交付前单独执行。留空 = 跳过该项。
 
 interface KeyStatus {
   envVar: string;
@@ -30,6 +33,8 @@ export function SettingsPage() {
   const setPage = useApp((s) => s.setPage);
   const settingsError = useApp((s) => s.settingsError);
   const [draft, setDraft] = useState<ProjectSettings>(settings ?? DEFAULT_SETTINGS);
+  // 读盘失败时先用默认值把页面渲染出来（不要让设置页白屏），
+  // 保存按钮由 `!settings` 锁死 —— "保存失败"与"读取失败"在错误横幅里区分。`
   const [saving, setSaving] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatus[]>([]);
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
@@ -37,6 +42,8 @@ export function SettingsPage() {
   const [testResult, setTestResult] = useState<string>("");
   const [keySecurity, setKeySecurity] = useState<{ encryptedAtRest: boolean; plaintextCount: number } | null>(null);
 
+  // 挂载时异步拉一次设置：主进程在启动时已把 settings 塞进 store（首帧即准），
+  // 这里只为"启动晚于设置变更/失败重载"兜底，不阻塞首帧渲染。
   useEffect(() => {
     void loadSettings();
   }, [loadSettings]);
@@ -75,6 +82,8 @@ export function SettingsPage() {
   const draftRef = useRef(draft);
   draftRef.current = draft;
 
+  // 密钥状态是"展示用"的辅助信息：刷新失败时清空列表而不是弹错 ——
+  // 设置页的主要职责是编辑配置，key 的实况由保存/测试动作负责暴露。
   useEffect(() => {
     void refreshKeyStatus(draftRef.current).catch(() => setKeyStatus([]));
   }, [draft.llmProvider, draft.llmPool, refreshKeyStatus]);
@@ -82,6 +91,11 @@ export function SettingsPage() {
   const patch = (p: Partial<ProjectSettings>) => setDraft((d) => ({ ...d, ...p }));
 
   const setCommand = (kind: VerificationKind, value: string) => {
+    // 必须拆成 command + args：沙箱的 CommandPolicy 对两者**分别**判定
+    // （command 查白名单、args 拒绝元字符/内联求值标志）。合并成一条字符串提交，
+    // 策略会把整条当 command 查白名单——要么直接拒绝、要么把被夹在参数里的
+    // 元字符漏过去。按空白切分（不引号感知）：验证命令本来就不该有引号嵌套，
+    // 有就该在沙箱门那里被拦下来，而不是靠这里的解析去理解。
     const parts = value.trim().split(/\s+/).filter(Boolean);
     const [command, ...args] = parts;
     setDraft((d) => {
@@ -171,6 +185,9 @@ export function SettingsPage() {
   };
 
   const runTestLlm = async () => {
+    // ⚠️ 测的是**已保存**的配置：`llm:test` 在 main 侧 `buildLlm(settingsStore().load())`。
+    // 改了提供商/密钥还没点保存就点这里，测到的是旧配置 —— 这是刻意的
+    // （草稿是渲染进程自己的，main 侧只有落盘的那份才可信），界面不加提示。
     setTesting(true);
     setTestResult("");
     try {
@@ -295,6 +312,8 @@ export function SettingsPage() {
             </label>
           </div>
         ))}
+        {/* 与 handleSaveKeys 的空串过滤同一面：有非空输入才出现保存按钮，
+            免得用户误触把整批空白当成"删除全部"。 */}
         {Object.keys(keyInputs).some((v) => keyInputs[v] !== "") && (
           <button className="primary" onClick={() => void handleSaveKeys()}>
             保存密钥
