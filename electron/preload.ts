@@ -40,6 +40,11 @@ const api = {
   auditFiles: () => ipcRenderer.invoke("audit:files"),
   exportAudit: () => ipcRenderer.invoke("audit:export"),
   boardRecovery: () => ipcRenderer.invoke("board:recovery"),
+  // ── 交付凭据复核（欠账 #7）──
+  // 默认只查指纹 + 列出可复跑命令；`replay: true` 才真的执行（与 CLI 默认模式
+  // "没复跑就不等于结论为真"同一条纪律，界面不能替用户默认勾选）。
+  verifyReceipt: (projectId: string, replay?: boolean) =>
+    ipcRenderer.invoke("receipt:verify", projectId, replay ? { replay: true } : undefined),
   onEvent: (handler: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown) => handler(payload);
     ipcRenderer.on("ox:event", listener);

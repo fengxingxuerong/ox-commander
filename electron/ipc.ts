@@ -12,6 +12,7 @@ import { ensureStores } from "./ipc/context";
 import { registerAgentHandlers, registerObservabilityHandlers } from "./ipc/agents";
 import { registerOrchestrationHandlers } from "./ipc/orchestration";
 import { registerProjectHandlers, registerSettingsHandlers } from "./ipc/projects";
+import { registerReceiptHandlers } from "./ipc/receipt";
 
 export { attachWindow } from "./ipc/context";
 export { buildEngine, ensureWorkspace } from "./ipc/orchestration";
@@ -28,4 +29,5 @@ export function registerIpc(): void {
   registerOrchestrationHandlers();
   registerAgentHandlers();
   registerObservabilityHandlers();
+  registerReceiptHandlers();
 }

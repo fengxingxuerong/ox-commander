@@ -161,6 +161,7 @@ describe("registerIpc · channel contract", () => {
       "projects:delete",
       "projects:list",
       "projects:open-workspace",
+      "receipt:verify",
       "settings:get",
       "settings:save",
     ]);

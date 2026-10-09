@@ -1,9 +1,10 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { dialog } from "electron";
-import { buildReceipt } from "../shared/delivery-receipt";
+import { buildReceipt, sealReceipt } from "../shared/delivery-receipt";
 
 /**
  * Behavioural tests for the per-domain IPC handlers under `electron/ipc/*`.
@@ -32,6 +33,8 @@ const h = vi.hoisted(() => ({
   builtAdapter: null as any,
   buildAdapters: null as any,
   createAgentLayerFn: null as any,
+  /** 平台层「跑一组命令」的观察点（欠账 #7：凭据复跑走的就是这一条）。 */
+  verifyCommands: null as any,
   writeFileAtomic: null as any,
   saveManifest: null as any,
   removeManifest: null as any,
@@ -158,6 +161,11 @@ vi.mock("../electron/platform", () => ({
         resume: h.resumeEngine,
       },
       buildLlm: vi.fn(() => ({ chat: h.llmChat })),
+      // 延迟读 h.verifyCommands（本工厂执行时它还没赋值），与上面几个同形状。
+      // `??=` 而非 `=`：本工厂**每次**建平台都会跑，用 `=` 会在 receipt:verify
+      // 复跑时把测试刚设好的 mockResolvedValue 冲成一个新的空 vi.fn()，
+      // 于是 `report.results` 读到 undefined（2026-10-10 接手修）。
+      verifyCommands: (h.verifyCommands ??= vi.fn()),
     };
   }),
   // 原样实现：context.ts 用它算 agent layer 的缓存 signature，这里不该被 mock 掉
@@ -186,6 +194,7 @@ h.builtAdapter = {
 import type { FakeIpcMain } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
+import type { ReceiptVerifyResult } from "../electron/ipc/receipt";
 import {
   abortAllApprovals,
   abortAllEscalations,
@@ -269,6 +278,9 @@ beforeEach(() => {
   dynamicAgentMap().clear();
   setRunningProjectId(null);
   h.createPlatformCalls.length = 0;
+  // 复跑默认「命令跑通」；要造矛盾的用例各自改返回值。
+  h.verifyCommands?.mockReset();
+  h.verifyCommands?.mockResolvedValue({ results: [] });
   h.writeFileAtomic.mockClear();
   // 落盘相关的两个 mock 带"可编程返回值"：`mockClear` 只清调用记录、**不清
   // mockReturnValue**，上一条用例的 EACCES 会漏进下一条。必须连默认实现一起重设。
@@ -1673,5 +1685,129 @@ describe("cancel 收尾挂起的人_answer_ 通道（fail-closed）", () => {
     (h.ipcMain as FakeIpcMain).invoke("orchestration:cancel");
     await expect(esc.promise).resolves.toBe("abort");
     await expect(approval).resolves.toBe(false);
+  });
+});
+
+describe("交付凭据复核（receipt:verify · 欠账 #7）", () => {
+  const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
+
+  /** 一份带命令、已盖章的凭据 —— 可复跑这一格必须有东西，否则测的是"没命令"那条路径。 */
+  function sealedReceipt(overrides: Partial<Parameters<typeof buildReceipt>[0]> = {}): any {
+    return sealReceipt(
+      buildReceipt({
+        outcome: "delivered",
+        verified: true,
+        rounds: 0,
+        checks: [
+          { kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "", command: "node", args: ["ox-scripts/test.js"] },
+        ],
+        tasks: [{ id: "t1", title: "t1", zone: "src/**", attempts: 1, status: "done" as const }],
+        conflicts: [],
+        ...overrides,
+      }),
+      sha256,
+    );
+  }
+
+  function withReceipt(receipt: unknown): void {
+    (inst(h.projectInstances).get as Mock).mockReturnValue({
+      id: "p1",
+      stage: "DONE",
+      receiptJson: JSON.stringify(receipt),
+    });
+  }
+
+  const invoke = (...args: unknown[]) =>
+    (h.ipcMain as FakeIpcMain).invoke("receipt:verify", ...(args as [])) as Promise<ReceiptVerifyResult>;
+
+  it("拒绝复核一个不存在的项目", async () => {
+    await expect(invoke("ghost")).rejects.toThrow(/project ghost not found/);
+    expect(h.verifyCommands).not.toHaveBeenCalled();
+  });
+
+  it("没有凭据时说清「跑完一次才会有」，而不是报一个空裁决", async () => {
+    (inst(h.projectInstances).get as Mock).mockReturnValue({ id: "p1", stage: "PRD" });
+    await expect(invoke("p1")).rejects.toThrow(/还没有交付凭据/);
+  });
+
+  it("凭据本身读不出来时如实报坏，不静默当成「没凭据」", async () => {
+    (inst(h.projectInstances).get as Mock).mockReturnValue({ id: "p1", receiptJson: "{ 不是 JSON" });
+    await expect(invoke("p1")).rejects.toThrow(/读不出来/);
+  });
+
+  it("默认模式只查完整性 —— 一条命令都不执行", async () => {
+    withReceipt(sealedReceipt());
+    const res = await invoke("p1");
+    // 指纹一致 ≠ 结论为真：没复跑就必须停在 not-replayed，报 verified 是撒谎。
+    expect(res.audit.verdict).toBe("not-replayed");
+    expect(res.replayed).toBe(false);
+    expect(res.commands).toEqual([{ kind: "test", command: "node", args: ["ox-scripts/test.js"] }]);
+    expect(h.verifyCommands).not.toHaveBeenCalled();
+  });
+
+  it("显式 replay 才真的跑，且跑的是凭据里的命令、落在项目工作区", async () => {
+    withReceipt(sealedReceipt());
+    h.verifyCommands.mockResolvedValue({
+      results: [{ kind: "test", ok: true, exitCode: 0, logDigest: "", durationMs: 12 }],
+    });
+    const res = await invoke("p1", { replay: true });
+    expect(res.replayed).toBe(true);
+    expect(res.audit.verdict).toBe("verified");
+    expect(res.audit.comparisons[0]).toMatchObject({ kind: "test", verdict: "reproduced" });
+    expect(h.verifyCommands).toHaveBeenCalledWith(
+      [{ kind: "test", command: "node", args: ["ox-scripts/test.js"] }],
+      workspaceRoot("p1"),
+    );
+  });
+
+  it("复跑与凭据矛盾时判 contradicted —— 不把矛盾粉饰成复现", async () => {
+    withReceipt(sealedReceipt());
+    h.verifyCommands.mockResolvedValue({
+      results: [{ kind: "test", ok: false, exitCode: 1, logDigest: "boom", durationMs: 3 }],
+    });
+    const res = await invoke("p1", { replay: true });
+    expect(res.audit.verdict).toBe("contradicted");
+    expect(res.audit.comparisons[0]).toMatchObject({ claimed: true, observed: false });
+  });
+
+  it("指纹被改过时连命令都不跑 —— 比出来的「矛盾」是伪证的产物", async () => {
+    const receipt = sealedReceipt();
+    receipt.checks[0].ok = false; // 改内容但不重算指纹 ⇒ mismatch
+    withReceipt(receipt);
+    const res = await invoke("p1", { replay: true });
+    expect(res.audit.verdict).toBe("tampered");
+    expect(res.replayed).toBe(false);
+    expect(h.verifyCommands).not.toHaveBeenCalled();
+  });
+
+  it("没盖章的凭据不复跑（比对结果会被整档丢掉，跑了是白跑副作用）", async () => {
+    const receipt = sealedReceipt();
+    delete receipt.fingerprint;
+    withReceipt(receipt);
+    const res = await invoke("p1", { replay: true });
+    expect(res.audit.verdict).toBe("unsigned");
+    expect(h.verifyCommands).not.toHaveBeenCalled();
+  });
+
+  it("凭据不经过任何命令时，replay 也没有东西可跑（不是「能跑但不想跑」）", async () => {
+    withReceipt(
+      sealedReceipt({
+        checks: [{ kind: "build", ok: true, exitCode: 0, preexisting: false, headline: "" }],
+      }),
+    );
+    const res = await invoke("p1", { replay: true });
+    expect(res.commands).toEqual([]);
+    expect(res.replayed).toBe(false);
+    expect(res.audit.verdict).toBe("not-replayed");
+    expect(h.verifyCommands).not.toHaveBeenCalled();
+  });
+
+  it("复跑走的是平台层那一道门（不是自己另装一套策略）", async () => {
+    withReceipt(sealedReceipt());
+    h.verifyCommands.mockResolvedValue({ results: [] });
+    await invoke("p1", { replay: true });
+    // 平台是现建的：命令的沙箱白名单 / 审批门 / 超时都挂在它身上，
+    // 这里只钉住「复跑真的经过了平台」这件事本身。
+    expect(h.createPlatformCalls.length).toBeGreaterThan(0);
   });
 });

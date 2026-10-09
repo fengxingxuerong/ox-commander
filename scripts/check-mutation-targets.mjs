@@ -116,6 +116,14 @@ const listMode = args.includes("--list");
 
 const targets = readTargets();
 
+/**
+ * 精确路径的豁免项。**必须参与**下面的 unregistered 判定 —— 否则 EXEMPT 只是
+ * 一句声明："已评审接受不在 TARGETS 里"的文件一旦被改动，照样被判 FAIL
+ * （2026-10-10：receipt 改动第一次让 `electron/ipc.ts` 落入这条缝，暴露了它）。
+ * 带 `*` 的 glob 项（`src/**`）不在此列：`src/` 不在 PROD_DIRS 内，本就进不了判定。
+ */
+const exemptExact = new Set(EXEMPT.filter((e) => !e.file.includes("*")).map((e) => e.file));
+
 // 豁免表的失效检查与 check-unwired.mjs 同一纪律：腐烂的白名单比缺失的更糟。
 const staleExempt = EXEMPT.filter((e) => {
   if (e.file.includes("*")) return false;
@@ -143,7 +151,9 @@ const changed = changedFiles(baseArg ? baseArg.slice("--base=".length) : "HEAD")
 const isProd = (f) =>
   PROD_DIRS.some((d) => f.startsWith(`${d}/`)) && !EXCLUDE.some((re) => re.test(f));
 
-const unregistered = changed.filter((f) => isProd(f) && !targets.has(f));
+const unregistered = changed.filter(
+  (f) => isProd(f) && !targets.has(f) && !exemptExact.has(f),
+);
 
 if (unregistered.length > 0) {
   console.error(

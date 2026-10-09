@@ -42,6 +42,7 @@ import type {
   ArbitrationMode,
   EscalationAction,
   ProjectSettings,
+  VerificationCommand,
   VerificationReport,
 } from "../shared/types";
 
@@ -198,6 +199,18 @@ export interface Platform {
   usage(): UsageSnapshot;
   /** 最近一份线路健康事实（池里每条线路的冷却与限流账）。空数组 = 没有线路。 */
   lineHealth(): LineHealth[];
+  /**
+   * 用**与生产验证同一套门**跑一组任意命令（欠账 #7：桌面侧凭据复跑）。
+   *
+   * 与 `engine` 内部那次验证的差别只在**命令来源**：那边跑设置里的
+   * `verificationCommands`，这边跑交付凭据里记下的命令。刻意不另装一遍
+   * 策略/审批门 —— 两处各装一次的话，同一条命令可能"生产被问、复跑不问"，
+   * 那道门就成了只在一半路径上存在的摆设。
+   */
+  verifyCommands(
+    commands: readonly VerificationCommand[],
+    cwd: string,
+  ): Promise<VerificationReport>;
 }
 
 /**
@@ -416,22 +429,31 @@ export function createPlatform(config: PlatformConfig): Platform {
   // 一个平台一个实例：批次边界由引擎 reset（与 ActionGate 同一个生命单位）。
   const approvalGate = buildApprovalGate();
 
+  /**
+   * 验证装配的**唯一一份**（静态策略 + 跨动作升级 + 审批门）。
+   *
+   * 两条调用路径共用它：引擎的生产验证（`settings.verificationCommands`）与
+   * 桌面侧凭据复跑（凭据里记下的命令，欠账 #7）。命令不同、门必须同一道 ——
+   * 否则"这条命令要不要先问人"会随入口而变，而两个入口跑的是同一批脚本。
+   */
+  const runVerification = (commands: readonly VerificationCommand[], cwd: () => string) =>
+    verifyProject(commands as VerificationCommand[], {
+      cwd,
+      onEvent: log,
+      actionGate: gate,
+      // 策略即代码（`policy.d/`）：内置地板之上再叠加一层本地规则。
+      // 验证跑的是**智能体刚写下的脚本**，这里是最该被策略管住的地方。
+      ...(policy ? { policy: buildPolicy() } : {}),
+      ...(approvalGate ? { approvalGate } : {}),
+    });
+
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
       scheduler: new Scheduler(layer.adapters, settings.enabledAgents, schedulerOptions()),
       verify:
         config.verify ??
-        ((cwd: string) =>
-          verifyProject(settings.verificationCommands, {
-            cwd: () => cwd,
-            onEvent: log,
-            actionGate: gate,
-            // 策略即代码（`policy.d/`）：内置地板之上再叠加一层本地规则。
-            // 验证跑的是**智能体刚写下的脚本**，这里是最该被策略管住的地方。
-            ...(policy ? { policy: buildPolicy() } : {}),
-            ...(approvalGate ? { approvalGate } : {}),
-          })),
+        ((cwd: string) => runVerification(settings.verificationCommands, () => cwd)),
       settings,
       usage: () => meter.snapshot(),
       conflicts: () => verdictConflicts,
@@ -455,6 +477,7 @@ export function createPlatform(config: PlatformConfig): Platform {
     buildLlm,
     usage: () => meter.snapshot(),
     lineHealth: () => latestLines,
+    verifyCommands: (commands, cwd) => runVerification(commands, () => cwd),
   };
 }
 

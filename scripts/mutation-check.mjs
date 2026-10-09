@@ -194,6 +194,11 @@ const TARGETS = [
   // 2026-10-05 接入 tier 2 复核。守卫分支（update-prd 的两条 fail-closed）
   // 是这批补测的主要目标。
   { file: "electron/ipc/orchestration.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
+  // 2026-10-10：桌面侧的交付凭据复核（receipt:verify，欠账 #7）。与命令行入口
+  // `headless/receipt-verify-main.ts` 共用 `shared/delivery-receipt` 的判据，
+  // 但本文件自己有承判逻辑（指纹三档门、canReplay 合取、BOM 剥离、裁决装配）——
+  // 逻辑密集、可测，故独立挂表（挂 ipc-handlers.test.ts 的那组 receipt:verify 用例）。
+  { file: "electron/ipc/receipt.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
   // 2026-10-05（D11 同批）：receipt-verify 是**退出码即 CI 判定**的那个入口，
   // 判据密集（它决定"这次重放到底算不算通过"）。此前完全不在表内 ——
   // 由 scripts/check-mutation-targets.mjs 查出来：那道门禁比对 git diff 与本表，
@@ -696,6 +701,7 @@ const SITE_BASELINE = {
   "electron/ipc/context.ts": 24,
   "electron/ipc/orchestration.ts": 5,
   "electron/ipc/projects.ts": 6,
+  "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
   "electron/platform.ts": 26,
@@ -737,7 +743,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;
+};;;;;
 
 /**
  * 等价变异白名单。
