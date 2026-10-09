@@ -180,6 +180,36 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
     expect(fs.existsSync(PENDING_INDEX)).toBe(false);
   });
 
+  it("refuses to start while another run is live — its ledger is not residue", () => {
+    // `PENDING_DIR` 是仓库级全局路径：本机同时开两个会话跑门禁时，旧实现会把别人活着的
+    // 台账连备份一起 `rm -rf`，那一轮被强杀后残留就彻底没人认得。
+    // 这里 pid 用测试自己进程的 —— 子进程看它是别人的、且活着，判据是确定性的。
+    const file = makeTarget("original\n", "MUTANT");
+    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: process.pid });
+
+    const run = recoverOnly();
+
+    expect(run.status).toBe(2);
+    expect(run.err).toContain("另一轮变异正在运行");
+    // 现场一点不许动：文件、备份、台账都得留给那一轮自己收
+    expect(fs.readFileSync(file, "utf8")).toBe("MUTANT");
+    expect(fs.existsSync(path.join(PENDING_DIR, "target.ts.orig"))).toBe(true);
+    expect(fs.existsSync(PENDING_INDEX)).toBe(true);
+  });
+
+  it("still heals a ledger whose pid is not a live process", () => {
+    // 与上一条只差 pid：无效 pid ⇒ 上一轮已经死了，还原照旧。
+    const file = makeTarget('if (decision === "skip") {\n', 'if (decision !== "skip") {\n');
+    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: -1 });
+
+    const run = recoverOnly();
+
+    expect(run.status).toBe(2);
+    expect(run.err).toContain("已自动还原");
+    expect(fs.readFileSync(file, "utf8")).toBe('if (decision === "skip") {\n');
+    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+  });
+
   it("refuses to call the workspace clean when the record is unreadable", () => {
     const file = makeTarget("original\n", "MUTANT");
     writeIndex("{ this is not json");
@@ -373,5 +403,54 @@ describe("restoreSource · 还原写盘不能抛在 finally 里", () => {
     expect(threw).toBeNull();
     expect(returned).toBe(false);
     expect(messages.some((m) => m.includes("反复无法还原") && m.includes("自愈"))).toBe(true);
+  });
+});
+
+describe("clearPendingRecord · 只清自己这一轮的", () => {
+  /**
+   * 按锚点抠出 `clearPendingRecord`，注入 fs/path/PENDING_INDEX 与一个假 pid ——
+   * 手法与本文件其它节一致（"pid"是运行时的，测试必须能决定"我是谁"）。
+   */
+  function loadClear(myPid: number): () => void {
+    const src = fs.readFileSync(SCRIPT, "utf8");
+    const start = src.indexOf("/** 一个目标跑完");
+    const nextDoc = src.indexOf("启动自愈：上一次运行被强杀");
+    const end = nextDoc < 0 ? -1 : src.lastIndexOf("/**", nextDoc);
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error("无法在 mutation-check.mjs 里定位 clearPendingRecord（锚点被改名或移动了？）");
+    }
+    const factory = new Function(
+      "fs",
+      "path",
+      "PENDING_INDEX",
+      "process",
+      `${src.slice(start, end)}\nreturn { clearPendingRecord };`,
+    );
+    const { clearPendingRecord } = factory(fs, path, PENDING_INDEX, { pid: myPid });
+    return clearPendingRecord as () => void;
+  }
+
+  it("台账属于别的 pid 时，备份与台账一个字节都不动", () => {
+    const theirs = path.join(PENDING_DIR, "theirs.orig");
+    fs.mkdirSync(PENDING_DIR, { recursive: true });
+    fs.writeFileSync(theirs, "original\n", "utf8");
+    writeIndex({ file: path.join(ROOT, "gone.ts"), backup: theirs, pid: 999_999 });
+
+    loadClear(4242)();
+
+    expect(fs.readFileSync(theirs, "utf8")).toBe("original\n");
+    expect(fs.existsSync(PENDING_INDEX)).toBe(true);
+  });
+
+  it("自己这一轮的备份与台账一起清掉", () => {
+    const mine = path.join(PENDING_DIR, "mine.orig");
+    fs.mkdirSync(PENDING_DIR, { recursive: true });
+    fs.writeFileSync(mine, "original\n", "utf8");
+    writeIndex({ file: path.join(ROOT, "gone.ts"), backup: mine, pid: 4242 });
+
+    loadClear(4242)();
+
+    expect(fs.existsSync(mine)).toBe(false);
+    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
   });
 });

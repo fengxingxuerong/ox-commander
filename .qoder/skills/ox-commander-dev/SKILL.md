@@ -95,7 +95,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | site 口径冒出"等价位点未命中" | 白名单行号漂移 | 按新行号校回 + 确认防御仍在 |
 | `smoke:gateway` / `smoke:coze` 偶发红 | 固定端口被占 / 机器慢过固定 sleep | 单跑复现，别看一次就归因代码 |
 | `mutation-check` 中途被打断后工作区脏 | 它会临时改写源文件（SIGKILL 时还原钩子跑不到，**活体变异会留在盘上**）。症状不是"红在无关文件"，而是 `npm test` 堆涨到 ~4.6GB 后 **heap OOM 且父进程不退出**（2026-09-28 实测两次） | `ls scripts/.mutation-pending/` 即判定；**`npm run check:residue` 还原**（verify 第 1 段就是它）。别用 `git checkout --` 手工还原——那会连同一文件里本轮的真实改动一起删。**别用后台跑全量 `mutation:audit`（15-28min > 后台 10min 上限），按 `--file=` 分档跑，单档 13–60s** |
-| 门禁跑不完就红在 `check:masker` | 它靠 `indexOf` 锚点从 `mutation-check.mjs` 抠函数 | 那两个锚点字符串不能改 |
+| `check:residue` 红在"另一轮变异正在运行" | 台账里的 pid 属于一个还活着的进程：本机有第二个会话正在跑变异档 | **不是你改坏了**。等那一轮跑完再跑；别去删 `scripts/.mutation-pending/`，那是那唯一一轮的还原凭据 |
+| 门禁跑不完就红在 `check:masker` | 它靠 `indexOf` 锚点从 `mutation-check.mjs` 抠函数 | 那两个锚点字符串不能改（`src/mutation-residue.test.ts` 也按锚点抠 `armPendingRecord` / `clearPendingRecord`，改那两处函数名或文档首行同样会红） |
 | `check:doc-claims` 红在「读不到声明」 | 文档措辞改了，正则形状（`**N 段**` / `N 通过 + M 跳过`）不再匹配 | 把声明改回那个形状，或同步改正则 —— **别放宽判据**，读不到就当通过等于这道门禁不存在 |
 | `check:doc-claims` 红在「缺行」 | 新段进了 `verify` 但 README / gates.md 没写它 | 两处各补一行（这就是它存在的理由，不是误报） |
 

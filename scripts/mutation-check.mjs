@@ -1477,6 +1477,17 @@ function settleOrphanBackups(orphans) {
   return provablyClean;
 }
 
+/** 进程号是否还活着。`signal 0` 只做存在性探测；`EPERM` 同样算活着（进程属于别人）。 */
+function isPidAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return e?.code === "EPERM";
+  }
+}
+
 /** 改写源文件**之前**调用：把原文落到磁盘。 */
 function armPendingRecord(filePath, original) {
   const backup = path.join(PENDING_DIR, pendingBackupName(filePath));
@@ -1486,7 +1497,9 @@ function armPendingRecord(filePath, original) {
     // 备份自己也可能是坏的（Windows 上杀软会掏空刚写下的文件）。拿坏备份去自愈等于把
     // 源码写成截断的原文，比没有备份更糟，所以这里做写后校验。
     if (fs.readFileSync(backup, "utf8") !== original) throw new Error("备份写后校验不一致");
-    fs.writeFileSync(PENDING_INDEX, JSON.stringify({ file: filePath, backup }, null, 2), "utf8");
+    // pid 让台账能分出"谁的"：PENDING_DIR 是仓库级全局路径，两轮并发时没有 pid 就分不清
+    // 该谁清、该不该动别人的凭据。
+    fs.writeFileSync(PENDING_INDEX, JSON.stringify({ file: filePath, backup, pid: process.pid }, null, 2), "utf8");
   } catch (e) {
     // 2026-10-09 改判：原为"警告后继续跑"，而那正是盲区的来源 —— `check:residue` 只认台账，
     // 没有落盘记录还照样改写源码，强杀之后留下的活体变异体就会被下一轮判成"工作区干净"。
@@ -1534,10 +1547,33 @@ function restoreSource(filePath, original) {
   return false;
 }
 
-/** 一个目标跑完、源码已确认还原后调用。 */
-function clearPendingRecord() {
+/** 一个目标跑完、源码已确认还原后调用：**只清自己这一轮的**。
+ *
+ * 旧实现是 `rm -rf` 整个 `PENDING_DIR`，而那个目录是仓库级全局路径 —— 另一轮变异正在跑时，
+ * 这一句会把它的台账连同备份一起删掉，它那轮的启动自愈与 `check:residue` 于是同时失明
+ * （正是"残留看不见"那一格的最后一格；2026-10-09 本机就有两个会话并行跑门禁的场景）。
+ *
+ * @param ownsIt 调用方已确认这份台账不属于任何活着的进程（启动自愈走这条），
+ *               此时连"pid 不是我的"的旧台账也一起收 —— 否则还原完了台账还挂在原地。
+ */
+function clearPendingRecord(ownsIt = false) {
+  let rec = null;
   try {
-    fs.rmSync(PENDING_DIR, { recursive: true, force: true });
+    rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));
+  } catch {
+    /* 没有台账，或台账读不动：按"无可清之处"处理 */
+  }
+  // 没有 pid 的旧格式台账按"我的"处理：本仓脚本自带 pid，只有混用两个版本才可能读到它。
+  if (!ownsIt && rec?.pid !== undefined && rec.pid !== process.pid) return;
+  if (rec?.backup) {
+    try {
+      fs.rmSync(rec.backup, { force: true });
+    } catch {
+      /* 清不掉留给下一轮的孤儿处置 */
+    }
+  }
+  try {
+    fs.rmSync(PENDING_INDEX, { force: true });
   } catch {
     /* 清不掉不影响结论 */
   }
@@ -1557,6 +1593,9 @@ function clearPendingRecord() {
  *                           而备份还在且证不了一致。这时**不能**声称干净：目标文件可能仍是
  *                           变异体，而我们已经没有还原它的手段。让人去 `git status` 自查。
  *   - `restored`         —— 刚从变异体还原回来（内部已 exit 2，不会真的返回）。
+ *   - `foreign-live`     —— 台账属于**还活着的另一个进程**：那不是残留，是别人正在跑的现场，
+ *                           还原它、清它都是破坏证据。同一份源码上两轮互踩也没有可信结论，
+ *                           所以调用方一律拒绝启动（exit 2）。
  */
 function recoverPendingRecord() {
   if (!fs.existsSync(PENDING_INDEX)) {
@@ -1572,8 +1611,16 @@ function recoverPendingRecord() {
   } catch {
     rec = null;
   }
+  if (rec?.pid !== undefined && rec.pid !== process.pid && isPidAlive(rec.pid)) {
+    console.error(
+      `另一轮变异正在运行（pid ${rec.pid}，目标 ${relFromRoot(rec.file ?? PENDING_INDEX)}）—— ` +
+        "那份台账是它被强杀后唯一的凭据，本轮既不动它也不判它。等它跑完再跑：" +
+        "两轮在同一份源码上互踩，谁的结果都不可信。",
+    );
+    return "foreign-live";
+  }
   if (!rec?.file || !rec.backup || !fs.existsSync(rec.backup)) {
-    clearPendingRecord();
+    clearPendingRecord(true);
     console.error(
       "警告：变异备份台账存在但不可用（JSON 损坏或备份文件缺失）—— 已清掉台账，" +
         "但无法确认工作区是否还留着变异体。请执行 `git status` 与 `git diff` 自查。",
@@ -1583,12 +1630,12 @@ function recoverPendingRecord() {
   const original = fs.readFileSync(rec.backup, "utf8");
   const current = fs.existsSync(rec.file) ? fs.readFileSync(rec.file, "utf8") : null;
   if (current === original) {
-    clearPendingRecord();
+    clearPendingRecord(true);
     return "already-restored";
   }
   try {
     fs.writeFileSync(rec.file, original, "utf8");
-    clearPendingRecord();
+    clearPendingRecord(true);
   } catch (e) {
     console.error(`严重：无法还原 ${relFromRoot(rec.file)}（${e?.message ?? e}）—— 请手动 git checkout 该文件。`);
     process.exit(2);
@@ -1605,6 +1652,12 @@ function recoverPendingRecord() {
 }
 
 const recovery = recoverPendingRecord();
+
+// 别人正在跑：卫生检查与真跑都拒绝启动 —— 一句"工作区干净"不能拿别人的现场换。
+if (recovery === "foreign-live") {
+  console.error("另一轮变异运行仍在场，本轮不启动。");
+  process.exit(2);
+}
 
 if (recoverOnly) {
   // 只做卫生检查。`unknown` 不能当成干净 —— 那句「工作区干净」必须是可证的。
