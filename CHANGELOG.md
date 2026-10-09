@@ -33,7 +33,32 @@
   残留就同时躲过启动自愈与孤儿处置（"看不见"那一格的最后一格）。配套：启动时见到"pid 活着且不是
   我的"台账判为 `foreign-live`，既不还原也不清，`--recover-only` 与真跑都 exit 2 拒绝启动 ——
   那不是残留，是别人正在跑的现场；两轮在同一份源码上互踩，"杀死/存活"本来就没有可信结论。
-  反向注入：摘掉 pid 归属 ⇒ 1 条红。用例 14 → 18。
+   反向注入：摘掉 pid 归属 ⇒ 1 条红。用例 14 → 18。
+
+### 收口合流（2026-10-09 晚 · 两个会话同仓合流）
+
+同日两个智能体会话在同一仓库并行干活（对方提交里已自记"确有两个会话并行跑门禁"）。
+本批按"只落自己、不碰对方未提交 WIP"协调，对方完工后由本会话统一落库、数字对齐、推送收口。
+
+- **`dev-server` 托管检查的 spawn 失败由 `error` 竞速接住**（`00921a8`，本会话）：`verifier.ts`
+  里同一件事有三条 spawn 路径（`runOnce` / 普通 smoke / dev-server），前两条都有 `error` 监听，
+  唯独 dev-server 漏了 —— `buildSpawnSpec` 对不存在的命令不抛、失败在异步 emit，无监听器时
+  Node 把它抛成**未处理异常、当场带崩宿主**（桌面端=整个应用没了）。补上后与 `close` 守卫同处置：
+  error 一到立即判死，不再白等整个 HTTP 超时预算。先红后绿已验（摘掉监听器用例红在 uncaught ENOENT）。
+- **冒烟样例的 stdin 送达有了归宿校验**（`20b12bb`，并行会话完成、本合流落库）：`SmokeOutcome`
+  增 `stdinError`，`ok` 判定加"样例那一笔写有归宿"；stdin 的 write 回调与 error 监听器接住
+  （子进程不读管道输入就退出时，挂起的写以 error 落在 stdin 流上、宿主进程当场退出）；
+  `settle` 收口等写有归宿（超时自行解除）。真 spawn 用例三组：不看管道输入就退出 ⇒ 判失败且
+  error 被接住；1MB 读到底 ⇒ 判过且 digest 带消费字节数；写回调不归宿 ⇒ 超时收口不挂起。
+- **`npx` / `npm exec` 经启动器转发内联求值标志的拦截**（`04e3cd5`，并行会话完成、本合流落库）：
+  `EVAL_FLAGS` 里 `npx` 曾是空表，空表守卫把整档跳过 —— `npx -c 'node -e …'` 从没被判定过。
+  `launcherEvalHit` 按 npm 家族（npx/npm exec/pnpm dlx/bun x）从左到右读转发 argv：
+  启动器自身位上的 `-c/--call` 是 shell 串；一旦普通 token 点名的嵌套程序，其后 argv 用同一张
+  `EVAL_FLAGS` 表判。用例 11 个拒绝 + 合法透传（`npx eslint -c` / `npm exec vitest --coverage`）不误伤。
+- **合流方式与数字**：对方两个 WIP 落库前各自全绿（stdin 用例先红后绿、command-policy 位点
+  15/15 逐点审过）；`SITE_BASELINE` 随 command-policy 新位点补落到 **1369**；门禁数字
+  1774+8 / 1369 与实物对齐（`check:doc-claims` 对实物核）。推送 `5f4e444..e758909` 共 8 个提交，
+  CI 三 job 全绿（ubuntu / windows verify + site 全量变异）。
 
 ### 优化（清单收口 · 2026-10-09）
 
