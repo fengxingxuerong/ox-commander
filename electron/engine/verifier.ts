@@ -248,6 +248,15 @@ interface SmokeOutcome {
   exitCode: number | null;
   /** 超时终止（此时退出码无意义）。 */
   timedOut: boolean;
+  /**
+   * 样例那一笔写交不出去的原因（子进程读端已关时操作系统会直接拒），null 表示
+   * 这一笔写成功了。
+   *
+   * ⚠️ null 只说明"交进了管道"，**不说明子进程读过它** —— 小于一块内核缓冲的
+   * 样例写完就成功，而压根不看管道输入的交付物照样退 0。要判"吃没吃"得子进程
+   * 自己回执，那不是验证器能替它承诺的事。本字段管的是写侧这一笔的归宿。
+   */
+  stdinError: string | null;
 }
 
 /**
@@ -255,7 +264,8 @@ interface SmokeOutcome {
  *
  * 与 verifyProject 的区别：命令来自大脑的 decompose 产物（针对交付后的主入口），
  * 支持通过 stdin 喂样例数据，且 ok = **真实退出码为 0** 且 stdout 包含全部
- * expectContains 片段。同样过 CommandPolicy 沙箱门 —— 冒烟命令也不得越界。
+ * expectContains 片段 且样例那一笔写有归宿（没写坏；见 `SmokeOutcome.stdinError`）。
+ * 同样过 CommandPolicy 沙箱门 —— 冒烟命令也不得越界。
  * 首败即停，与 verifyProject 保持一致，让失败进入重修循环。
  *
  * ⚠️ 判定不读子进程的输出文本（R1「判据必须独立于被判定方」）：`ok` 只看
@@ -387,6 +397,12 @@ export async function runSmokeChecks(
 
     const outcome = await new Promise<SmokeOutcome>((resolve) => {
       let timedOut = false;
+      /** 样例写入的归宿：原因或 null（成功送达）。见 `SmokeOutcome.stdinError`。 */
+      let stdinError: string | null = null;
+      /** 样例那一笔写还没归宿时才拦住收口；没动过 stdin 就不必为它多等一步。 */
+      let stdinPending = false;
+      /** 子进程退出码；undefined 表示尚未退出。 */
+      let closedCode: number | null | undefined;
       let child: ReturnType<typeof spawnImpl>;
       try {
         child = spawnImpl(plan.file, plan.args, {
@@ -397,14 +413,14 @@ export async function runSmokeChecks(
           windowsVerbatimArguments: plan.windowsVerbatimArguments,
         });
       } catch (err) {
-        resolve({ log: `spawn failed (${plan.note}): ${String(err)}`, exitCode: null, timedOut: false });
+        resolve({
+          log: `spawn failed (${plan.note}): ${String(err)}`,
+          exitCode: null,
+          timedOut: false,
+          stdinError: null,
+        });
         return;
       }
-      const timer = setTimeout(() => {
-        timedOut = true;
-        deps.onEvent?.(`[smoke] ${check.title} 超过 ${Math.round(timeoutMs / 1000)}s，终止进程树`);
-        killTree(child);
-      }, timeoutMs);
       // Same byte budget as runOnce. Note: expect-fragment matching runs
       // against the capped log — a fragment past the budget reads as missing,
       // which is the honest outcome for output that large anyway.
@@ -426,27 +442,90 @@ export async function runSmokeChecks(
           `\n[沙箱] 输出超过 ${Math.round(MAX_LOG_BYTES / 1024)}KB 预算，已丢弃约 ${Math.round(droppedBytes / 1024)}KB`
         );
       };
+      /**
+       * 收口条件：进程已退出，**且**样例那一笔写已经有了归宿。
+       *
+       * ⚠️ 别把这一门读成那次崩溃的必要条件 —— 本机真管道实测四轮（两种死法 ×
+       * 两种载荷），write 回调与 stdin 的 error 都**先于** `close` 到，差 1–3ms。
+       * 所以少这一门今天也不会漏判。它买的是另一样东西：`ok` 为真 ⇒ 样例那一笔写
+       * 有归宿，这条不变量由构造成立，而不是靠 stdio 的关闭顺序恰好如此
+       * （那顺序我只在 win32 量过，CI 另一侧是 ubuntu）。
+       *
+       * 兜底同样不能省：子进程活着而管道写满时，写回调就是可以不来（实测零信号），
+       * 那时必须由超时放行 —— 否则一次超时变成一次永久挂起。摘掉兜底后用例红在
+       * vitest 自己的 5s 超时上，不是红在某条断言。
+       */
+      const settle = (): void => {
+        if (closedCode === undefined || stdinPending) return;
+        clearTimeout(timer);
+        resolve({
+          log: withDroppedMark(),
+          exitCode: timedOut ? null : closedCode,
+          timedOut,
+          stdinError,
+        });
+      };
+      const timer = setTimeout(() => {
+        timedOut = true;
+        deps.onEvent?.(`[smoke] ${check.title} 超过 ${Math.round(timeoutMs / 1000)}s，终止进程树`);
+        // 超时路径自己解除"等样例"：进程树都要杀了，送达已无意义，
+        // 而继续拦住收口等于把一次超时变成永久挂起（摘掉这一行实测挂在 5s 用例时限上）。
+        stdinPending = false;
+        killTree(child);
+        settle();
+      }, timeoutMs);
       child.stdout?.on("data", onChunk);
       child.stderr?.on("data", onChunk);
       child.on("error", (err) => {
         clearTimeout(timer);
-        resolve({ log: `${log}\nspawn failed: ${String(err)}`, exitCode: null, timedOut });
+        resolve({
+          log: `${log}\nspawn failed: ${String(err)}`,
+          exitCode: null,
+          timedOut,
+          stdinError,
+        });
       });
       // 退出码只从这里来：`close` 是子进程与操作系统之间的直接约定，
       // 子进程无法通过在 stdout 写字影响它（R1）。
       child.on("close", (code) => {
-        clearTimeout(timer);
-        resolve({ log: withDroppedMark(), exitCode: timedOut ? null : code, timedOut });
+        closedCode = code;
+        settle();
       });
-      if (check.stdin !== undefined) child.stdin?.write(check.stdin);
+      /*
+       * 挂在 stdin 上的 error 必须有监听器接住，否则 Node 把它抛成未处理的
+       * error 事件，**宿主进程当场退出**：桌面端是整个应用没了，headless 是
+       * 编排断在半路、连交付凭据都不写。触发条件实测很平常 —— 样例超过约 64KB
+       * 就有一截压在父进程的写缓冲里，而子进程不读 stdin 就退出（交付物压根不
+       * 看管道输入、或启动即崩，都是冒烟最常见的死法）。本机 1MB 样例十次里十
+       * 次触发，会读 stdin 的对照组十次里零次。
+       */
+      child.stdin?.on("error", (err) => {
+        stdinError = (err as Error).message;
+        deps.onEvent?.(`[smoke] ${check.title} 的样例数据写入失败：${stdinError}`);
+      });
+      if (check.stdin !== undefined) {
+        // 先立门再写：写回调是这一笔唯一的归宿信号（真流上它比 `close` 先到，
+        // 实测四轮都如此），而万一它不来 —— 兜底在超时那一行，不在这儿。
+        stdinPending = true;
+        child.stdin?.write(check.stdin, (err) => {
+          if (err) stdinError = err.message;
+          stdinPending = false;
+          settle();
+        });
+      }
       child.stdin?.end();
     });
 
-    // 判定只看结构化事实：真实退出码 + 期望片段是否出现。
+    // 判定只看结构化事实：真实退出码 + 期望片段是否出现 + 样例那一笔写有没有归宿。
     // 期望片段仍是对输出文本的匹配 —— 但它是**正向**要求（必须出现什么），
     // 子进程无法用"多打印一行"把失败改写成通过，只能靠真的输出正确内容达成。
+    // 写侧一项同源：连交都交不进去的样例，不该因为"没人看它"而换来一个绿。
     const missing = (check.expectContains ?? []).filter((frag) => !outcome.log.includes(frag));
-    const ok = !outcome.timedOut && outcome.exitCode === 0 && missing.length === 0;
+    const ok =
+      !outcome.timedOut &&
+      outcome.exitCode === 0 &&
+      missing.length === 0 &&
+      outcome.stdinError === null;
 
     const digestParts = [
       `[smoke] ${check.title}`,
@@ -457,6 +536,7 @@ export async function runSmokeChecks(
       outcome.log,
     ];
     if (missing.length > 0) digestParts.push(`缺失期望片段：${JSON.stringify(missing)}`);
+    if (outcome.stdinError !== null) digestParts.push(`样例数据写入失败：${outcome.stdinError}`);
 
     results.push({
       kind: "smoke",

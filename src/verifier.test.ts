@@ -1,10 +1,19 @@
 /**
- * runSmokeChecks 直接单测：用注入的 fake spawn 覆盖全部边界分支
+ * runSmokeChecks 直接单测：用注入的 fake spawn 覆盖边界分支
  * （沙箱拒 / 缺失期望片段 / stdin 传递 / 非零退出 / 超时 / 空期望只看退出码）。
- * 全部确定性，不真实 spawn 任何进程。
+ * 这一段全部确定性，不真实 spawn 任何进程。
+ *
+ * ⚠️ 末尾「stdin 送达」那一组**必须真 spawn**，是这个文件的例外（2026-10-09）：
+ * fake 的 stdin 是一块内存 Writable，写完就回调，**永远不会**在子进程退出之后
+ * 补一条 write error —— 于是"样例压在父进程缓冲里、子进程不看管道输入就退出"
+ * 这条真实路径在这里全绿，而生产上它会以未处理的 error 打死宿主进程。
+ * 这正是"只测被调函数、入口却是坏的"那一类：替身替掉的那一步就是缺陷藏身的地方。
  */
 import { describe, expect, it } from "vitest";
 import { PassThrough, Writable } from "node:stream";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { runSmokeChecks } from "../electron/engine/verifier";
 import type { SmokeCheck } from "../shared/types";
 
@@ -15,6 +24,11 @@ interface FakeBehavior {
   /** close 延迟（毫秒）；undefined = 立即，null = 永不（配合超时测用 60ms 场景） */
   closeDelay?: number | null;
   onStdin?: (chunk: string) => void;
+  /**
+   * 写回调永不归宿（`_write` 不调 `cb`）。真实 Node 迟早会给个结果，这一档
+   * 替身建模的是"结果还没来而超时先到"——收口的两个出口之一只能这么造。
+   */
+  stdinStall?: boolean;
   /** 拿到真正传给 spawn 的 env —— 断言"子进程看不到凭证"要用它，不能只测 scopedEnv 纯函数。 */
   onSpawn?: (env: NodeJS.ProcessEnv | undefined) => void;
 }
@@ -47,7 +61,9 @@ function fakeSpawnImpl(b: FakeBehavior) {
       stdin: new Writable({
         write(chunk, _enc, cb) {
           b.onStdin?.(String(chunk));
-          cb();
+          // ⚠️ 真实 pipe 的写要等冲出去才回调，所以"回调还没来"是一种合法状态；
+          // 建模它就必须**不**调 cb —— 否则替身永远比生产快一步收口。
+          if (!b.stdinStall) cb();
         },
       }),
       on(ev, fn) {
@@ -312,4 +328,85 @@ describe("输出字节预算（P2-4）", () => {
     expect(results[0]!.ok).toBe(true);
     expect(results[0]!.logDigest).toContain("HEAD-MARK");
   });
+});
+
+/**
+ * stdin 样例的送达（2026-10-09 补，缺陷来自真实链路而非推理）。
+ *
+ * 生产代码把样例一次性 `write` 进子进程就 `end`，从不监听 stdin 的 error。
+ * 样例超过 OS 管道缓冲（本机实测 64KB 这一线，超过就有一截留在父进程里）而
+ * 子进程不读管道输入就退出时，那条挂起的写会以 error 事件落在 stdin 流上 ——
+ * **没有监听器，Node 就把它抛成未处理的 error 事件，宿主进程当场退出**：
+ * 桌面端整个应用没了，headless 编排断在半路、连交付凭据都不写。
+ *
+ * 本机四种形状各跑十次的复现率：子进程不读 stdin（立即退出）与（活 300ms 再退）
+ * 各 10/10，64KB 载荷 0/10，**会读 stdin 的对照组 0/10** —— 最后这条是关键：
+ * 触发条件不是"载荷大"，而是"样例压根没被消费"。而"交付物不看管道输入"
+ * 恰是冒烟最常见的死法，所以这一条既易触发又难归因（表现为应用无故退出）。
+ *
+ * ⚠️ 本组钉住的范围是"写坏了要接住、且要计入判定"。样例小于一块内核缓冲时
+ * 写完即成功，压根不读管道的交付物照样退 0 报绿 —— 那一次假绿不在这里的判据
+ * 范围内：要判"吃没吃"得子进程自己回执，那不是验证器能替它承诺的事。
+ */
+describe("runSmokeChecks · stdin 送达（真 spawn，fake 替不掉的那一步）", () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ox-stdin-"));
+  // 压根不碰 stdin 就退出的交付物
+  const ignoreScript = path.join(tmp, "ignore.js");
+  fs.writeFileSync(ignoreScript, "process.exit(0);\n", "utf8");
+  // 对照组：把样例读到底再报数
+  const readScript = path.join(tmp, "read.js");
+  fs.writeFileSync(
+    readScript,
+    'let n = 0;\nprocess.stdin.on("data", (c) => {\n  n += c.length;\n});\nprocess.stdin.on("end", () => {\n  console.log("READ " + n);\n});\n',
+    "utf8",
+  );
+  // 1MB：远超 Windows 与 Linux 两侧的管道缓冲，不靠某一档实测阈值取边界值
+  const bigSample = "a".repeat(1024 * 1024);
+
+  it("子进程不看管道输入就退出：error 必须被接住，且这一格判失败", async () => {
+    const uncaught: string[] = [];
+    const record = (err: Error): void => {
+      uncaught.push(String(err));
+    };
+    process.on("uncaughtException", record);
+    try {
+      const results = await runSmokeChecks(
+        [check({ command: process.execPath, args: [ignoreScript], stdin: bigSample, expectContains: [] })],
+        { cwd: tmp, timeoutMs: 15_000 },
+      );
+      // 摘掉监听器 ⇒ 这里收到 write EOF ⇒ 生产上进程已经没了
+      expect(uncaught, `未处理的 stdin error 会打死宿主进程：${uncaught.join("; ")}`).toEqual([]);
+      expect(results).toHaveLength(1);
+      // 退出码确实是 0（交付物自己退得干干净净）。这一格必须因为"样例没交进去"
+      // 而判失败 —— 只挂着监听器不记入判定，等于"应用不崩了，但冒烟报的是假绿"。
+      expect(results[0]!.exitCode).toBe(0);
+      expect(results[0]!.ok).toBe(false);
+      expect(results[0]!.logDigest).toContain("样例数据写入失败");
+    } finally {
+      process.removeListener("uncaughtException", record);
+    }
+  }, 30_000);
+
+  it("子进程真把 1MB 样例读到底：判过，且 digest 带得上消费字节数", async () => {
+    const results = await runSmokeChecks(
+      [check({ command: process.execPath, args: [readScript], stdin: bigSample, expectContains: [] })],
+      { cwd: tmp, timeoutMs: 15_000 },
+    );
+    expect(results[0]!.ok).toBe(true);
+    expect(results[0]!.exitCode).toBe(0);
+    expect(results[0]!.logDigest).toContain(`READ ${bigSample.length}`);
+  }, 30_000);
+
+  it("写回调迟迟不归宿时，超时那一下必须自己收口（判定不得挂在 stdin 上）", async () => {
+    // 这条回到 fake：要建模的正是"回调还没来"，真 spawn 造不出这一档且也不必 ——
+    // 它守的是收口的另一半：万一写永不归宿，代价应是一次超时，而不是一次永久挂起。
+    const results = await runSmokeChecks([check({ stdin: "sample", expectContains: [] })], {
+      cwd: ".",
+      timeoutMs: 40,
+      spawnImpl: fakeSpawnImpl({ out: "", code: 0, closeDelay: 10, stdinStall: true }) as never,
+    });
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.exitCode).toBeNull();
+    expect(results[0]!.logDigest).toContain("[exit]timeout");
+  }, 5_000);
 });
