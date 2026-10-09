@@ -690,7 +690,7 @@ const SITE_BASELINE = {
   "electron/engine/orchestrator.ts": 57,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 33,
-  "electron/engine/verifier.ts": 18,
+  "electron/engine/verifier.ts": 23,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 17,
   "electron/ipc/context.ts": 24,
@@ -1411,16 +1411,91 @@ function relFromRoot(p) {
   return path.relative(ROOT, p).split(path.sep).join("/");
 }
 
+/** 备份文件名：把仓库相对路径里的分隔符换成 `__`。
+ *  用 basename 会让不同目录的同名文件（`router.ts` / `agents/router.ts`）顶掉同一份备份，
+ *  而孤儿处置要靠文件名映射回源文件，名字里必须带着路径。
+ */
+function pendingBackupName(filePath) {
+  return `${relFromRoot(filePath).split("/").join("__")}.orig`;
+}
+
+/**
+ * 备份文件名 → 源文件绝对路径；映射不回去（源文件已改名或删除、或是旧命名留下的）时返回 null。
+ */
+function sourceFromBackupName(backupName) {
+  const rel = backupName.slice(0, -".orig".length).split("__").join(path.sep);
+  const abs = path.resolve(ROOT, rel);
+  if (abs !== ROOT && !abs.startsWith(ROOT + path.sep)) return null;
+  return fs.existsSync(abs) ? abs : null;
+}
+
+/** 台账目录里没被 `index.json` 指着的那些 `.orig`：上一轮丢了台账，或清目录时删除失败。 */
+function listOrphanBackups() {
+  let names;
+  try {
+    names = fs.readdirSync(PENDING_DIR);
+  } catch {
+    return [];
+  }
+  return names.filter((n) => n.endsWith(".orig")).map((n) => path.join(PENDING_DIR, n));
+}
+
+/**
+ * 没有可用台账时，逐份向孤儿备份要证据：内容与它映射回的源文件一致 → 这一份可证干净，清掉；
+ * 不一致或映射不回去 → 返回 false，调用方就**不许**说工作区干净。
+ *
+ * 刻意不拿孤儿备份去覆盖源码：备份可能是写盘写坏的一半，拿它"自愈"会把好文件截断。
+ */
+function settleOrphanBackups(orphans) {
+  let provablyClean = true;
+  for (const backup of orphans) {
+    const file = sourceFromBackupName(path.basename(backup));
+    let same = false;
+    if (file) {
+      try {
+        same = fs.readFileSync(backup, "utf8") === fs.readFileSync(file, "utf8");
+      } catch {
+        same = false;
+      }
+    }
+    if (same) {
+      try {
+        fs.rmSync(backup);
+      } catch {
+        /* 清不掉就留给下一轮再看 */
+      }
+      continue;
+    }
+    provablyClean = false;
+    console.error(
+      `无法证明干净：${relFromRoot(backup)} 是台账已丢失的变异备份，` +
+        (file ? `而 ${relFromRoot(file)} 的内容与它不一致` : "且按命名映射不回源文件") +
+        "。请自己核对那个文件（别用 git 按文件还原，那会连本轮真实改动一起删），" +
+        "确认后删除 scripts/.mutation-pending/ 再重跑。",
+    );
+  }
+  return provablyClean;
+}
+
 /** 改写源文件**之前**调用：把原文落到磁盘。 */
 function armPendingRecord(filePath, original) {
+  const backup = path.join(PENDING_DIR, pendingBackupName(filePath));
   try {
     fs.mkdirSync(PENDING_DIR, { recursive: true });
-    const backup = path.join(PENDING_DIR, `${path.basename(filePath)}.orig`);
     fs.writeFileSync(backup, original, "utf8");
+    // 备份自己也可能是坏的（Windows 上杀软会掏空刚写下的文件）。拿坏备份去自愈等于把
+    // 源码写成截断的原文，比没有备份更糟，所以这里做写后校验。
+    if (fs.readFileSync(backup, "utf8") !== original) throw new Error("备份写后校验不一致");
     fs.writeFileSync(PENDING_INDEX, JSON.stringify({ file: filePath, backup }, null, 2), "utf8");
   } catch (e) {
-    // 落盘失败不该让门禁跑不下去：内存兜底仍在，只是少了强杀保护。
-    console.error(`警告：无法写入变异备份（${e?.message ?? e}）—— 进程被强杀时将无法自动还原。`);
+    // 2026-10-09 改判：原为"警告后继续跑"，而那正是盲区的来源 —— `check:residue` 只认台账，
+    // 没有落盘记录还照样改写源码，强杀之后留下的活体变异体就会被下一轮判成"工作区干净"。
+    // 此刻源文件还没被动过，退出 2 是零副作用的。
+    console.error(
+      `严重：无法建立变异备份（${e?.message ?? e}）—— 没有可自愈的台账就不改写源码。` +
+        `请确认 ${relFromRoot(PENDING_DIR)} 可写（它已被 git 忽略，杀软常占它），再重跑本命令。`,
+    );
+    process.exit(2);
   }
 }
 
@@ -1475,16 +1550,22 @@ function clearPendingRecord() {
  * 「杀死/存活」结论可信度存疑，让人重跑一次比给一个脏的 PASS 强。
  *
  * 返回值给 `--recover-only` 用，由它决定「能说工作区干净」的那几种情形：
- *   - `clean`            —— 根本没有台账。
+ *   - `clean`            —— 根本没有台账，且目录里也没有任何还活着的备份。
  *   - `already-restored` —— 有台账，但源文件内容与备份一致（上次其实还原成功了，
  *                           只是没来得及清台账）。
- *   - `unknown`          —— 有台账却读不出可用记录（JSON 坏 / 备份文件没了）。
- *                           这时**不能**声称干净：目标文件可能仍是变异体，而我们
- *                           已经没有还原它的手段。让人去 `git status` 自查。
+ *   - `unknown`          —— 有台账却读不出可用记录（JSON 坏 / 备份文件没了），或台账丢了
+ *                           而备份还在且证不了一致。这时**不能**声称干净：目标文件可能仍是
+ *                           变异体，而我们已经没有还原它的手段。让人去 `git status` 自查。
  *   - `restored`         —— 刚从变异体还原回来（内部已 exit 2，不会真的返回）。
  */
 function recoverPendingRecord() {
-  if (!fs.existsSync(PENDING_INDEX)) return "clean";
+  if (!fs.existsSync(PENDING_INDEX)) {
+    // 「没有台账」过去直接等于「干净」，那正是盲区：手工清掉台账、或 `clearPendingRecord`
+    // 的删除被杀软挡住的场合，备份还在而源码可能仍是变异体。逐份备份要证据才放行。
+    const orphans = listOrphanBackups();
+    if (orphans.length === 0) return "clean";
+    return settleOrphanBackups(orphans) ? "clean" : "unknown";
+  }
   let rec;
   try {
     rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));

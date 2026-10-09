@@ -194,7 +194,8 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
   它让修复循环空转，症状是链里的 `npm test`（vitest）堆涨到 4.6GB 后 OOM 且不退出，完全不像"工作区脏"。
-  有残留就还原并退出 2 逼人重跑；台账坏掉也退出 2，因为它无法证明工作区干净）
+  有残留就还原并退出 2 逼人重跑；台账坏掉也退出 2，因为它无法证明工作区干净；
+  台账丢了而备份还在时，逐份按备份名映射回源码核内容 —— 对得上才算干净，对不上退出 2 且只点名不动手）
 → typecheck（renderer / electron / headless / vite 配置 四套 tsconfig）
 → lint（eslint flat config，含 react-hooks 规则；不覆盖 docs/；
   `scripts/**` 自 2026-09-28 起也进 lint —— 那 5.7k 行是门禁判据本身，而 tsc 一行都不看；
@@ -217,7 +218,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
   位点数涨了而基线没更新 = 新位点**没人逐点审计过**，此时「全部 N 处已逐点验证」是假象。
   这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道）
-→ vitest（2026-10-09 现跑 1759 通过 + 8 跳过，合计 1767 条，分布在 60 个有可执行用例的文件；
+→ vitest（2026-10-09 现跑 1764 通过 + 8 跳过，合计 1772 条，分布在 60 个有可执行用例的文件；
   真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
