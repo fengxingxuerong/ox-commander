@@ -158,6 +158,53 @@ describe("CommandPolicy", () => {
     expect(new CommandPolicy({ denyEvalFlags: false }).check("node", ["-e", "1"]).ok).toBe(true);
   });
 
+  it("refuses inline evaluation reached through a package-manager launcher", () => {
+    // `npx` IS `npm exec` (npm >= 7) and both accept `-c/--call '<cmd>'`, which
+    // hands that string to a shell; the tokens after the nested program are that
+    // program's own argv. Before 2026-10-09 `npx` sat in EVAL_FLAGS with an empty
+    // list, and the empty list was skipped outright — every line below was waved
+    // through while the same code spelled `node -e` was refused.
+    const p = createDefaultCommandPolicy();
+    for (const [cmd, args] of [
+      ["npx", ["-c", "node -e 1"]],
+      ["npx", ["--call", "node -e 1"]],
+      ["npx", ["--call=node -e 1"]],
+      ["npx", ["-y", "-c", "python -c import_os"]],
+      // The scan must not stop at the first token it cannot use: an option value
+      // in front, or the nested interpreter's own leading flags, both hide the
+      // eval flag further down the argv.
+      ["npx", ["--package", "cowsay", "node", "-e", "1"]],
+      ["npx", ["node", "--trace-warnings", "-e", "1"]],
+      ["npm", ["exec", "--workspace", "web", "python3", "-c", "import os"]],
+      // No launcher flag: the interpreter is the nested program instead.
+      ["npx", ["node", "-e", "1"]],
+      ["npx", ["node", "--eval", "1"]],
+      ["npx", ["python3", "-c", "import os"]],
+      ["npm", ["exec", "node", "-e", "1"]],
+      ["npm", ["x", "node", "--print", "1"]],
+      ["pnpm", ["dlx", "node", "-e", "1"]],
+      ["yarn", ["dlx", "python", "-c", "import os"]],
+    ] as const) {
+      const d = p.check(cmd, [...args]);
+      expect(d.ok, `${cmd} ${args.join(" ")} should be rejected`).toBe(false);
+      if (!d.ok) expect(d.reason, `${cmd} ${args.join(" ")}`).toContain("内联求值");
+    }
+    // The launcher's own option position is what turns `-c` into an escape. Once
+    // the nested program is named, the flags belong to it — eslint's config flag
+    // must stay allowed or every lint run through npx breaks.
+    expect(p.check("npx", ["eslint", "-c", ".eslintrc.json"]).ok).toBe(true);
+    expect(p.check("npx", ["-y", "tsc", "-b"]).ok).toBe(true);
+    expect(p.check("npm", ["exec", "vitest", "run", "--coverage"]).ok).toBe(true);
+    // A non-launcher subcommand keeps its arguments opaque: that argv is npm's
+    // own, not a nested command line.
+    expect(p.check("npm", ["install", "node", "-e", "1"]).ok).toBe(true);
+    // And the forwarding rule is scoped to the npm family.
+    expect(p.check("git", ["x", "node", "-e", "1"]).ok).toBe(true);
+    const loose = new CommandPolicy({ denyEvalFlags: false });
+    expect(loose.check("npx", ["-c", "node -e 1"]).ok).toBe(true);
+    expect(loose.check("npm", ["exec", "node", "-e", "1"]).ok).toBe(true);
+  });
+
   it("can be told to permit metacharacters for an exotic toolchain", () => {
     const p = new CommandPolicy({ denyShellMetacharacters: false });
     expect(p.check("npm", ["run", "build", "&&", "echo ok"]).ok).toBe(true);

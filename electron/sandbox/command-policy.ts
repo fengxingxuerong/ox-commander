@@ -143,13 +143,71 @@ const SHELL_METACHARACTERS = /[;&|`$<>^!]|%[A-Za-z0-9_()#][^%]*%|\$\(|\r|\n/;
  * interpreter into an arbitrary-code launcher, which defeats the point of a
  * command allow list: the sandbox would be checking the door while the window
  * is open. Real verification scripts live in files, which stay allowed.
+ *
+ * `npx` has no entry here on purpose: it does not evaluate, it forwards, and the
+ * forwarding is judged by the launcher rules below. An empty list used to sit in
+ * this table, and the empty-list guard skipped it outright, so npx was never
+ * judged at all — `npx -c 'node -e …'` reached arbitrary code through the door
+ * that `node -e` is refused at (2026-10-09).
  */
 const EVAL_FLAGS: Record<string, readonly string[]> = {
   node: ["-e", "--eval", "-p", "--print"],
   python: ["-c"],
   python3: ["-c"],
-  npx: [],
 };
+
+/**
+ * Subcommands that hand the rest of argv to *another* program, so the inline-eval
+ * flags never appear in that program's own position: `npm exec` and its `x`
+ * alias, verified against npm 11.16 (`npm e` is not an alias there, so it is not
+ * listed), and pnpm's `dlx`, verified against pnpm 11.21. Yarn Berry and bun use
+ * the same names but are not installed on this machine. `npx` is `npm exec`.
+ */
+const EXEC_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "x", "dlx"]);
+
+/**
+ * Launcher options that consume the token after them as their value. While only
+ * these come first, no nested program has been named yet — that is what tells
+ * `npm exec --package cowsay -c 'node -e …'` (a shell string) apart from
+ * `npm exec eslint -c config.json` (eslint's own flag). Read off
+ * `npm exec --help` on npm 11.16.
+ */
+const EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set(["--package", "-w", "--workspace"]);
+
+/** The launcher's own shell-string option: one string, handed to a shell. */
+function isShellCallFlag(token: string): boolean {
+  return token === "-c" || token === "--call" || token.startsWith("--call=");
+}
+
+const NO_EVAL_FLAGS: readonly string[] = [];
+
+/**
+ * An inline-eval token reachable only through a launcher, or null when the
+ * command forwards nothing. The forwarded argv reads left to right: a `-c/--call`
+ * in the launcher's option position is a shell string; once a plain token names
+ * the nested program, its own argv is judged with the same EVAL_FLAGS table.
+ */
+function launcherEvalHit(base: string, args: readonly string[]): string | null {
+  let tail: readonly string[] | null = null;
+  if (base === "npx") tail = args;
+  else if (NPM_FAMILY.has(base) && EXEC_SUBCOMMANDS.has((args[0] ?? "").toLowerCase())) {
+    tail = args.slice(1);
+  }
+  if (tail === null) return null;
+
+  let flags: readonly string[] | null = null;
+  for (let i = 0; i < tail.length; i++) {
+    const token = tail[i] ?? "";
+    if (flags !== null) {
+      if (flags.includes(token)) return token;
+      continue;
+    }
+    if (isShellCallFlag(token)) return token;
+    if (EXEC_VALUE_OPTIONS.has(tail[i - 1] ?? "")) continue;
+    if (!token.startsWith("-")) flags = EVAL_FLAGS[baseName(token)] ?? NO_EVAL_FLAGS;
+  }
+  return null;
+}
 
 export interface CommandPolicyOptions {
   /** Replaces `DEFAULT_ALLOWED_COMMANDS` when provided. */
@@ -231,11 +289,18 @@ export class CommandPolicy {
     }
     if (this.denyEval) {
       const evalFlags = EVAL_FLAGS[base];
-      if (evalFlags && evalFlags.length > 0) {
+      if (evalFlags) {
         const hit = args.find((a) => evalFlags.includes(a));
         if (hit) {
           return { ok: false, reason: `拒绝内联求值参数 ${hit}（把代码放进脚本文件再执行）` };
         }
+      }
+      const forwarded = launcherEvalHit(base, args);
+      if (forwarded) {
+        return {
+          ok: false,
+          reason: `拒绝经 ${base} 转发的内联求值参数 ${forwarded}（把代码放进脚本文件再执行）`,
+        };
       }
     }
     if (base === "git") {
