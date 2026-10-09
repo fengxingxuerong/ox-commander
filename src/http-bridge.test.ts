@@ -632,4 +632,28 @@ describe("HttpBridgeAdapter · drain 的宽限期收敛", () => {
       await iter.return?.(undefined); // 收尾，避免留下悬挂的生成器
     })();
   });
+
+  it("[322] 真正超时时必须中止在跑的 run（该杀的杀）", async () => {
+    // 同一行 `if (settled === "timeout")` 的另一半：改成 `!==` 后，**超时这一支
+    // 反而不中止任何 run** —— 批次卡住时该杀的没杀。
+    //
+    // 上面那条只覆盖了 drained（收敛）一侧，而它构造的 run 其 session 已 finished，
+    // `abort()`（`run.session.finished` 早退）对本就是空操作 —— 两边都观察不到差异，
+    // 于是变异存活（2026-10-10 CI 全量审计抓到）。这一条让 run 真挂住
+    // （不调 collect ⇒ done 永不 resolve ⇒ drain 必超时）⇒ abort 必须打到 /abort。
+    const calls: Call[] = [];
+    const adapter = bridge(
+      fakeFetch(
+        [
+          { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "1" } }) },
+          { match: "/v1/runs/1/events", reply: () => ({ status: 200, body: { events: [], status: "running" } }) },
+          { match: "/abort", method: "POST", reply: () => ({ status: 200, body: {} }) },
+        ],
+        calls,
+      ),
+    );
+    await adapter.dispatch(payload());
+    expect(await adapter.drain(120)).toBe("timeout");
+    expect(calls.some((c) => c.url.includes("/abort")), "超时未中止在跑的 run").toBe(true);
+  });
 });
