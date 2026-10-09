@@ -114,6 +114,15 @@ export class CliAgentAdapter implements AgentAdapterV2 {
     this.promptDir = opts.promptDir ?? path.join(os.tmpdir(), "ox-commander-prompts", opts.id);
   }
 
+  /**
+   * 清单没声明能力时的兜底。**刻意**与 `HttpBridgeAdapter` 的不同：本地 CLI
+   * （codex / claude / aider …）能跑测试、一次只跑一个（`maxConcurrency: 1`），
+   * 不当 reviewer —— 这两个值进路由（`supports` 过滤 + `maxConcurrency` 准入），
+   * 改这里等于改派发结果。见 `docs/2026-10-09-duplicate-declarations.md` 第 13 项。
+   *
+   * ⚠️ 不要改成用 `normalizeCapabilities` 补齐：`LEGACY_CAPABILITIES` 含
+   * `delete` / `run-command`，那会把"没声明"变成"什么都能做"（权限放大）。
+   */
   capabilities(): AgentCapabilities {
     return (
       this.opts.capabilities ?? {

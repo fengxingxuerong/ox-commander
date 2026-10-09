@@ -37,6 +37,12 @@ export interface HttpBridgeOptions {
   fetchImpl?: FetchLike;
   /** Resolves the bearer token (env / file / execToken are handled by the caller). */
   resolveToken?: () => Promise<string | undefined>;
+  /**
+   * 探活超时（毫秒），默认 5000。与 `CliAgentOptions.probeTimeoutMs` **同形态**（都可配），
+   * 但默认值**刻意不同**：那边是"起一次子进程跑 `--version`"，这边只是一次 HTTP GET。
+   * 见 `docs/2026-10-09-duplicate-declarations.md` 第 14 项。
+   */
+  probeTimeoutMs?: number;
 }
 
 interface BridgeRun {
@@ -91,6 +97,13 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
     this.baseUrl = opts.baseUrl.replace(/\/+$/, "");
   }
 
+  /**
+   * 清单没声明能力时的兜底。**刻意**与 `CliAgentAdapter` 的不同：远程桥适合
+   * 评审、可以并发 2（本地 CLI 抢资源所以是 1，且它能跑测试而这里不声明）。
+   * 这两个值进路由 —— 见 `docs/2026-10-09-duplicate-declarations.md` 第 13 项。
+   *
+   * ⚠️ 同理不要改用 `normalizeCapabilities` 补齐（会放大到含 delete / run-command）。
+   */
   capabilities(): AgentCapabilities {
     return (
       this.opts.capabilities ?? {
@@ -109,7 +122,7 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
     try {
       const res = await this.fetch(`${this.baseUrl}${this.opts.healthPath ?? "/health"}`, {
         method: "GET",
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(this.opts.probeTimeoutMs ?? 5_000),
       });
       return res.ok;
     } catch {
