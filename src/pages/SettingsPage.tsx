@@ -34,7 +34,7 @@ export function SettingsPage() {
   const settingsError = useApp((s) => s.settingsError);
   const [draft, setDraft] = useState<ProjectSettings>(settings ?? DEFAULT_SETTINGS);
   // 读盘失败时先用默认值把页面渲染出来（不要让设置页白屏），
-  // 保存按钮由 `!settings` 锁死 —— "保存失败"与"读取失败"在错误横幅里区分。`
+  // 保存按钮由 `!settings` 锁死 —— "保存失败"与"读取失败"在错误横幅里区分。
   const [saving, setSaving] = useState(false);
   const [keyStatus, setKeyStatus] = useState<KeyStatus[]>([]);
   const [keyInputs, setKeyInputs] = useState<Record<string, string>>({});
