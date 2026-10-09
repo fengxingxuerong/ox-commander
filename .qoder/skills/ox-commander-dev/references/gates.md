@@ -1,10 +1,10 @@
 # `npm run verify` 的逐段机制（29 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
-1773 通过 + 8 跳过，合计 1781 条，分布在 60 个有可执行用例的文件（2026-10-09 逐段实测：链首到
+1774 通过 + 8 跳过，合计 1782 条，分布在 60 个有可执行用例的文件（2026-10-09 逐段实测：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
-变异规模实物：**65 个目标** / 基线 **1360 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**65 个目标** / 基线 **1369 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
