@@ -1,4 +1,4 @@
-import type { RepairRecord, VerificationKind } from "./types";
+import type { FailureClass, RepairRecord, VerificationKind } from "./types";
 import type { UsageSnapshot } from "./usage-meter";
 
 /**
@@ -91,12 +91,17 @@ export interface ReceiptTask {
   /**
    * 失败大类。
    *
-   * 缺席 = 没有可归类的失败原因（**不是** `"unknown"`）—— ��看板上
+   * 缺席 = 没有可归类的失败原因（**不是** `"unknown"`）—— 看板上
    * `store.ts` 会把缺省填成 `"unknown"`，那是**另一个面**的口径。
    * 两者不必强行统一（看板要渲染，机器判读的原样更诚实），
    * 但**差异必须留着可见**，不能各说各话还以为是同一个数。
+   *
+   * 类型是 `FailureClass`（2026-10-09 收口，清单第 6 项 · 欠账 #16）：此前是裸
+   * `string`，与 `FailureClass` 的单一真源脱节 —— 生产者若要塞进一个未登记的值，
+   * 编译器不会拦。收窄发生在构造处（`orchestrator.ts` 的 `outcome.errorClass`
+   * 本就来自已经是 `FailureClass` 的 `DispatchOutcome`）。
    */
-  errorClass?: string;
+  errorClass?: FailureClass;
   /**
    * 逐轮重修记录 —— **每一轮为什么修、当时看到的摘要是什么**（2026-10-07）。
    *
