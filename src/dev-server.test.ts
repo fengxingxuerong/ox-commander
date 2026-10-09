@@ -20,6 +20,7 @@ import {
   type PollResult,
 } from "../electron/engine/dev-server";
 import { runSmokeChecks } from "../electron/engine/verifier";
+import { CommandPolicy } from "../electron/sandbox/command-policy";
 
 const servers: Array<{ close: () => Promise<void> }> = [];
 
@@ -109,6 +110,15 @@ describe("pollDevServerProcess：真子进程的退出守卫", () => {
     expect(r.detail).toContain("探活期间退出");
     expect(r.detail).toContain("3");
   });
+
+  it("spawn 失败（命令不在 PATH）：error 一到立即判死，不抛未处理异常", async () => {
+    // 不存在的二进制 → `spawn` 异步 emit `error`（不是 `close`）。没有监听器时
+    // Node 把它抛成未处理异常、当场带崩宿主；这条钉住 `error` 与 `close` 同处置。
+    const child = spawn("ox-definitely-missing-binary-xyz", [], { stdio: "ignore" });
+    const r = await pollDevServerProcess("http://127.0.0.1:1/", child, { timeoutMs: 10_000, intervalMs: 50 });
+    expect(r.ok).toBe(false);
+    expect(r.detail).toContain("启动失败");
+  });
 });
 
 describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () => {
@@ -157,6 +167,25 @@ describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () 
     expect(results[0]!.ok).toBe(false);
     expect(results[0]!.logDigest).toContain("[沙箱]");
     expect(spawned).toBe(false);
+  });
+
+  it("devServer 命令不存在：spawn 异步失败被判死并如实记录，不崩宿主", async () => {
+    // 走真子进程的真实 `error` 事件（造假 child 会替掉出问题的那一步）。
+    // permissive policy 只为放它过静态门，让失败落在 spawn 而不是沙箱拒绝。
+    const results = await runSmokeChecks(
+      [
+        {
+          title: "起不来",
+          command: "ox-definitely-missing-binary-xyz",
+          args: [],
+          devServer: { url: "http://127.0.0.1:1/", timeoutMs: 5_000 },
+        },
+      ],
+      { cwd: tmp, policy: new CommandPolicy({ allow: ["ox-definitely-missing-binary-xyz"] }) },
+    );
+    expect(results).toHaveLength(1);
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.logDigest).toContain("启动失败");
   });
 
   it("探活成功的检查不挡后续检查；失败的检查首败即停（与普通 smoke 同纪律）", async () => {

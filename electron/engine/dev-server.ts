@@ -111,9 +111,33 @@ export async function pollDevServerProcess(
     });
   });
   const poll = pollDevServer(url, opts);
+  /**
+   * spawn 失败（命令不在 PATH / 不可执行）走的是 **`error` 事件**，不是 `close`。
+   *
+   * 为什么必须有这一门：`buildSpawnSpec` 对不存在的命令**不抛**、照常返回 spec，
+   * 失败在异步 emit —— 于是没有监听器时 Node 把它抛成**未处理异常、当场带崩宿主**
+   * （桌面端 = 整个应用没了，headless = 编排断在半路、连交付凭据都不写）。
+   * 同模块另一处 `verifier.ts` 的两条 spawn 路径（`runOnce` / 普通 smoke）都挂了
+   * `error` 监听，唯独 dev-server 这一条漏了 —— 典型的"同一件事三处写、一处漏"
+   * （2026-10-09 成对读代码抓到）。有了它，处置与 `close` 守卫一致：**一到就判死**，
+   * 不再白等整个 HTTP 超时预算。
+   *
+   * 用 `on`（而非 `once`）且**不**在 finally 里摘除：竞速结束后进程若再抛 `error`，
+   * 仍要有监听器接着，否则又回到未处理异常。
+   */
+  const onError = new Promise<PollResult>((resolve) => {
+    child.on("error", (err) => {
+      resolve({
+        ok: false,
+        attempts: 0,
+        elapsedMs: 0,
+        detail: `dev server 进程启动失败：${(err as Error).message}`,
+      });
+    });
+  });
   let winner: PollResult;
   try {
-    winner = await Promise.race([poll, onExit]);
+    winner = await Promise.race([poll, onExit, onError]);
   } finally {
     // 摘掉还没触发的退出监听（poll 赢时进程可能还活着）；已触发过的摘除是无害空操作。
     child.removeAllListeners("close");
