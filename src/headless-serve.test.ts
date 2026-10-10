@@ -817,3 +817,56 @@ describe("serve · 状态页的事件流落点（D8）", () => {
     dom.window.close();
   });
 });
+
+describe("serve · opt-in token 鉴权（2026-10-10）", () => {
+  const TOKEN = "s3cr3t-token";
+
+  it("设了 token：无凭证 → 401（改状态的 /run 也必须被挡）", async () => {
+    const srv = await startServe({ authToken: TOKEN, run: async () => 0 });
+    open.push(srv);
+    const state = await fetch(`http://127.0.0.1:${srv.port}/state`);
+    expect(state.status).toBe(401);
+    expect(state.headers.get("www-authenticate")).toBe("Bearer");
+    // 关键：鉴权在路由之前，`/run` 不该在未授权时被触达
+    const run = await fetch(`http://127.0.0.1:${srv.port}/run`, {
+      method: "POST",
+      body: JSON.stringify({ requirement: "x", projectRoot: "." }),
+    });
+    expect(run.status).toBe(401);
+  });
+
+  it("设了 token：Authorization: Bearer → 放行", async () => {
+    const srv = await startServe({ authToken: TOKEN, run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/state`, {
+      headers: { authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ status: "idle" });
+  });
+
+  it("设了 token：?token= 也放行（SSE / 页面导航带不了自定义头）", async () => {
+    const srv = await startServe({ authToken: TOKEN, run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/state?token=${TOKEN}`);
+    expect(res.status).toBe(200);
+  });
+
+  it("设了 token：错的凭证 → 401（头与 query 各测一次）", async () => {
+    const srv = await startServe({ authToken: TOKEN, run: async () => 0 });
+    open.push(srv);
+    const wrongHeader = await fetch(`http://127.0.0.1:${srv.port}/state`, {
+      headers: { authorization: "Bearer nope" },
+    });
+    expect(wrongHeader.status).toBe(401);
+    const wrongQuery = await fetch(`http://127.0.0.1:${srv.port}/state?token=nope`);
+    expect(wrongQuery.status).toBe(401);
+  });
+
+  it("不设 token：旧行为，免鉴权（本机/CI 调试面不变）", async () => {
+    const srv = await startServe({ authToken: "", run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/state`);
+    expect(res.status).toBe(200);
+  });
+});

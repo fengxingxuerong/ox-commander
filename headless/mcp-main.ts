@@ -13,7 +13,7 @@
  * 客户端（如 Loomy）把本进程注册为 MCP stdio server 即可；stdin 关闭即退出。
  */
 import * as readline from "node:readline";
-import { handleMcpMessage, type ServeHttp } from "./mcp";
+import { handleMcpMessage, serveAuthHeaders, type ServeHttp } from "./mcp";
 
 /**
  * 解析 `--serve-url=`。
@@ -62,17 +62,23 @@ export function serveArgv(argv: string[]): { base?: string; error?: string } {
   return {};
 }
 
-function makeServeHttp(base: string): ServeHttp {
+function makeServeHttp(base: string, token?: string): ServeHttp {
   const url = (path: string) => `${base.replace(/\/$/, "")}${path}`;
+  // 与 serve 侧的 opt-in 鉴权配对：设了 token（`OX_SERVE_TOKEN`）就给每个请求带上。
+  // 不带的话，开了鉴权的 serve 会对 MCP 的每一次 get/post 回 401，看板整个哑掉。
+  const headers = (extra?: Record<string, string>): Record<string, string> => ({
+    ...serveAuthHeaders(token),
+    ...extra,
+  });
   return {
     async get(path) {
-      const res = await fetch(url(path));
+      const res = await fetch(url(path), { headers: headers() });
       return { status: res.status, body: await res.text() };
     },
     async post(path, body) {
       const res = await fetch(url(path), {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: headers({ "content-type": "application/json" }),
         body: JSON.stringify(body ?? {}),
       });
       return { status: res.status, body: await res.text() };
@@ -87,8 +93,12 @@ async function main(): Promise<void> {
     process.exit(1);
   }
   const base = parsedArgv.base ?? "http://127.0.0.1:8787";
-  const http = makeServeHttp(base);
+  const token = process.env.OX_SERVE_TOKEN;
+  const http = makeServeHttp(base, token);
   process.stderr.write(`[ox-mcp] serve-url=${base}（stdout 是协议通道，本行在 stderr）\n`);
+  // 单独一行而不是把它塞进上一条模板的三元里：模板三元会多出一个"没人断言的
+  // 日志文案位点"（逐位点审计里只会撒出存活、又不值得为一句 stderr 写 spawn 测试）。
+  if (token) process.stderr.write("[ox-mcp] 已启用 OX_SERVE_TOKEN 鉴权（每个请求带 Authorization）\n");
 
   const rl = readline.createInterface({ input: process.stdin });
   for await (const line of rl) {

@@ -718,12 +718,12 @@ const SITE_BASELINE = {
   "electron/store.ts": 8,
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
-  "headless/mcp.ts": 77,
+  "headless/mcp.ts": 78,
   "headless/protocol.ts": 90,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
   "headless/serve-main.ts": 17,
-  "headless/serve.ts": 58,
+  "headless/serve.ts": 63,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
   "shared/deliverable-format.ts": 23,
@@ -743,7 +743,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;
+};;;;;;
 
 /**
  * 等价变异白名单。

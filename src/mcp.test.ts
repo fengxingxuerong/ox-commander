@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
-import { handleMcpMessage, mcpToolDefs, MCP_PROTOCOL_VERSION, type ServeHttp } from "../headless/mcp";
+import { handleMcpMessage, mcpToolDefs, MCP_PROTOCOL_VERSION, serveAuthHeaders, type ServeHttp } from "../headless/mcp";
 
 /**
  * MCP 握手对外报告的版本号必须与 `package.json` 一致 —— 此前它是手改的硬编码
@@ -386,5 +386,16 @@ describe("MCP 坏形状输入（类型守卫真值表——变异审计的用例
     expect(p.text).toContain("无法暂停");
     const r = await call("ox_control", { action: "resume" }, http);
     expect(r.text).toContain("无法恢复");
+  });
+});
+
+describe("serveAuthHeaders（与 serve 侧 opt-in 鉴权配对）", () => {
+  it("设了 token：带上 Authorization: Bearer", () => {
+    expect(serveAuthHeaders("tok-123")).toEqual({ authorization: "Bearer tok-123" });
+  });
+
+  it("未设 / 空串：不带头（旧行为，请求与以前一模一样）", () => {
+    expect(serveAuthHeaders(undefined)).toEqual({});
+    expect(serveAuthHeaders("")).toEqual({});
   });
 });

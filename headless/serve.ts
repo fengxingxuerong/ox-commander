@@ -11,8 +11,10 @@ import type { HeadlessEvent } from "./protocol";
  * 只有我们（Orca 有桌面 + 手机伴生 + SSH worktree）。这是**唯一的空白格**。
  *
  * 刻意不做的事：
- *   · 不做鉴权 —— 这是本机/CI 侧的调试与观察面，不是要暴露到公网的服务。
- *     要远程就走 SSH 隧道，别在这里发明一套登录；
+ *   · **默认**不做鉴权 —— 这是本机/CI 侧的调试与观察面，不是要暴露到公网的服务。
+ *     要远程就走 SSH 隧道（默认主张不变）。**例外**（2026-10-10）：设了
+ *     `OX_SERVE_TOKEN`（或注入 `authToken`）就启用 opt-in 的 Bearer 校验 ——
+ *     给"确实要直接暴露"的用法留一道门，只做 token 校验，不发散成登录系统；
  *   · 不做任务队列 —— 一次只跑一个 run，第二个 POST 拿 409。并发编排是引擎
  *     内部的事（批次与并发闸），这里重复做一层只会让"到底哪个在跑"变成猜谜；
  *   · 不内嵌完整 React 看板 —— 那需要把 renderer 的构建产物塞进来，体积与
@@ -75,6 +77,24 @@ export interface ServeOptions {
 
 export function createServeState(): ServeState {
   return { status: "idle", events: [] };
+}
+
+/**
+ * opt-in 鉴权判据（纯函数，2026-10-10）。
+ *
+ * 设了 token 才校验；比对 `Authorization: Bearer <token>` **或** `?token=<token>`。
+ * 为什么必须有 query 那条：SSE（`EventSource`）与浏览器页面导航**都带不了自定义头**，
+ * 只能用 URL 参数 —— 否则"离开工位打开看板"这条主线会被鉴权挡在门外。
+ *
+ * 只做等值比对，不做时间恒定比对：这是本机/内网的低价值目标，token 由使用方自己
+ * 生成（不是密码体系）；把它当成登录系统来加固反而背离 serve 的定位。
+ */
+export function tokenAccepted(
+  authorization: string | undefined,
+  queryToken: string | null,
+  expected: string,
+): boolean {
+  return authorization === `Bearer ${expected}` || queryToken === expected;
 }
 
 /**
@@ -337,6 +357,13 @@ export function startServe(opts: {
    * Optional so tests can inject a permissive stub.
    */
   validate?: (payload: unknown) => string | undefined;
+  /**
+   * opt-in 鉴权 token（2026-10-10）。设了就要求每个请求带
+   * `Authorization: Bearer <token>` 或 `?token=<token>`；不设（或空串）= 旧行为
+   * （本机/CI 调试面保持免鉴权）。默认取 `process.env.OX_SERVE_TOKEN`；
+   * 这里可注入是为了让测试不依赖进程环境。
+   */
+  authToken?: string;
   run: (
     payload: unknown,
     emit: (e: HeadlessEvent) => void,
@@ -347,6 +374,8 @@ export function startServe(opts: {
   const state = createServeState();
   const clients = new Set<http.ServerResponse>();
   const now = opts.now;
+  /** opt-in 鉴权 token：注入优先，其次环境变量；空/未设 = 免鉴权（旧行为）。 */
+  const authToken = opts.authToken ?? process.env.OX_SERVE_TOKEN;
   /** 一次只跑一个 run：第二个 POST 拿 409，而不是悄悄排队。 */
   let busy = false;
   /** 当前 run 的引擎控制面；没有 run 在跑时为 undefined。 */
@@ -413,6 +442,20 @@ export function startServe(opts: {
   };
 
   const server = http.createServer((req, res) => {
+    // opt-in 鉴权放在**最前面**：设了 token 时，路由里任何一条（含改状态的
+    // `/run` 与 `/approve`）都不该在未授权时被触达。未设 token 时整段跳过。
+    if (authToken) {
+      const header = req.headers["authorization"];
+      const queryToken = new URL(req.url ?? "/", "http://localhost").searchParams.get("token");
+      if (!tokenAccepted(typeof header === "string" ? header : undefined, queryToken, authToken)) {
+        res.writeHead(401, {
+          "WWW-Authenticate": "Bearer",
+          "Content-Type": "text/plain; charset=utf-8",
+        });
+        res.end("未授权：需要 Bearer token（Authorization 头或 ?token=）");
+        return;
+      }
+    }
     const url = (req.url ?? "/").split("?")[0] ?? "/";
     const method = req.method ?? "GET";
 

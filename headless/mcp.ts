@@ -25,6 +25,18 @@ export interface ServeHttp {
   post(path: string, body?: unknown): Promise<{ status: number; body: string }>;
 }
 
+/**
+ * 给 serve 的请求构造鉴权头（纯函数，2026-10-10）。
+ *
+ * 与 serve 侧的 opt-in 鉴权配对：设了 token（`OX_SERVE_TOKEN`）就返回
+ * `{ authorization: "Bearer <token>" }`，否则空对象（旧行为，什么都不带）。
+ * 抽在这里而不是内联进 mcp-main 的 fetch，是因为 mcp-main 是入口、不在变异门禁表内
+ * —— 放这里它才进得了逐位点审计。
+ */
+export function serveAuthHeaders(token: string | undefined): Record<string, string> {
+  return token ? { authorization: `Bearer ${token}` } : {};
+}
+
 export interface McpToolDef {
   name: string;
   description: string;
