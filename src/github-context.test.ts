@@ -1,0 +1,284 @@
+import { describe, expect, it } from "vitest";
+import {
+  clampChars,
+  clampLimit,
+  clipText,
+  DEFAULT_MAX_CHARS,
+  DEFAULT_MAX_ITEMS,
+  fetchGithubContext,
+  githubArgs,
+  MAX_ITEMS_CEILING,
+  parseIssues,
+  renderIssues,
+  renderPr,
+  REPO_RE,
+  type GithubContextKind,
+} from "../electron/context/github-readonly";
+
+/**
+ * 注入式 runner：记录每次调用并按脚本回放（不真 spawn `gh`）。
+ * 与 git-export.test.ts 的 fakeRunner 同款 —— 判定核心逐点可审，进程边界只在这里。
+ */
+function recorder(results: Array<{ code: number; stdout?: string; stderr?: string }>) {
+  const calls: Array<{ command: string; args: readonly string[] }> = [];
+  let i = 0;
+  const run = async (command: string, args: readonly string[]) => {
+    calls.push({ command, args });
+    const r = results[Math.min(i, results.length - 1)]!;
+    i += 1;
+    return { code: r.code, stdout: r.stdout ?? "", stderr: r.stderr ?? "" };
+  };
+  return { run, calls };
+}
+
+const okJson = (stdout: string) => ({ code: 0, stdout });
+
+describe("github-readonly · 预算收敛（clampLimit / clampChars）", () => {
+  it("条数：缺席 / 非安全整数 / 非正 → 默认；超上限 → 上限；合法 → 原值", () => {
+    expect(clampLimit(undefined)).toBe(DEFAULT_MAX_ITEMS);
+    expect(clampLimit(1.5)).toBe(DEFAULT_MAX_ITEMS); // 非整数
+    expect(clampLimit(Number.NaN)).toBe(DEFAULT_MAX_ITEMS);
+    expect(clampLimit(0)).toBe(DEFAULT_MAX_ITEMS); // 非正
+    expect(clampLimit(-3)).toBe(DEFAULT_MAX_ITEMS);
+    expect(clampLimit(3)).toBe(3); // 合法取值不被误当缺席
+    expect(clampLimit(MAX_ITEMS_CEILING + 10)).toBe(MAX_ITEMS_CEILING); // 收敛到上限，不是放大
+    expect(clampLimit(MAX_ITEMS_CEILING)).toBe(MAX_ITEMS_CEILING);
+  });
+
+  it("字符：缺席 / 非安全整数 / 非正 → 默认；超 50000 → 上限；合法 → 原值", () => {
+    expect(clampChars(undefined)).toBe(DEFAULT_MAX_CHARS);
+    expect(clampChars(2.5)).toBe(DEFAULT_MAX_CHARS);
+    expect(clampChars(Number.POSITIVE_INFINITY)).toBe(DEFAULT_MAX_CHARS);
+    expect(clampChars(0)).toBe(DEFAULT_MAX_CHARS);
+    expect(clampChars(-1)).toBe(DEFAULT_MAX_CHARS);
+    expect(clampChars(1000)).toBe(1000);
+    expect(clampChars(999_999)).toBe(50_000);
+  });
+});
+
+describe("github-readonly · 仓库名与命令构造（githubArgs）", () => {
+  it("REPO_RE：接受 owner/repo；拒绝空格、分号、缺斜杠、越界串", () => {
+    expect(REPO_RE.test("owner/repo")).toBe(true);
+    expect(REPO_RE.test("a.b-c_d/e.f")).toBe(true);
+    expect(REPO_RE.test("bad;rm -rf /")).toBe(false);
+    expect(REPO_RE.test("no-slash")).toBe(false);
+    expect(REPO_RE.test("nested/with/slash")).toBe(false);
+    expect(REPO_RE.test("-leading/repo")).toBe(false);
+    expect(REPO_RE.test("")).toBe(false);
+  });
+
+  it("非法 repo：直接拒绝（返回 null，不出命令）——调用方忘了校验也出不去", () => {
+    expect(githubArgs({ kind: "issues", repo: "bad;rm" })).toBeNull();
+    expect(githubArgs({ kind: "issues", repo: "no-slash" })).toBeNull();
+  });
+
+  it("issues：repo 与 search 出现才带对应 flag（缺席不产生空参数）", () => {
+    expect(githubArgs({ kind: "issues", repo: "owner/repo", limit: 3 })).toEqual([
+      "issue",
+      "list",
+      "--repo",
+      "owner/repo",
+      "--limit",
+      "3",
+      "--json",
+      "number,title,body,state",
+    ]);
+    const noRepo = githubArgs({ kind: "issues" });
+    expect(noRepo).not.toContain("--repo");
+    expect(noRepo).toContain("--limit");
+    expect(noRepo).toContain(String(DEFAULT_MAX_ITEMS)); // limit 缺省落到默认
+    expect(githubArgs({ kind: "issues", search: "is:open" })).toContain("--search");
+    expect(githubArgs({ kind: "issues" })).not.toContain("--search");
+  });
+
+  it("pr：合法编号出命令；缺编号 / 0 / 负数一律拒绝", () => {
+    expect(githubArgs({ kind: "pr", pr: 7 })).toEqual(["pr", "view", "7", "--json", "number,title,body"]);
+    expect(githubArgs({ kind: "pr", pr: 7, repo: "o/r" })).toEqual([
+      "pr",
+      "view",
+      "7",
+      "--repo",
+      "o/r",
+      "--json",
+      "number,title,body",
+    ]);
+    expect(githubArgs({ kind: "pr" })).toBeNull();
+    expect(githubArgs({ kind: "pr", pr: 0 })).toBeNull();
+    expect(githubArgs({ kind: "pr", pr: -1 })).toBeNull();
+    expect(githubArgs({ kind: "pr", pr: 1.5 })).toBeNull();
+  });
+
+  it("未知 kind：不被接受（返回 null，靠调用方说清原因）", () => {
+    expect(githubArgs({ kind: "nope" as unknown as GithubContextKind })).toBeNull();
+  });
+});
+
+describe("github-readonly · 解析（parseIssues）", () => {
+  it("空串 / 坏 JSON / 非数组 → null（拿不到就说拿不到）", () => {
+    expect(parseIssues("")).toBeNull();
+    expect(parseIssues("   ")).toBeNull();
+    expect(parseIssues("{not json")).toBeNull();
+    expect(parseIssues("{}")).toBeNull();
+    expect(parseIssues("42")).toBeNull();
+  });
+
+  it("数组：缺字段按空处理，number 非数字归 0", () => {
+    expect(parseIssues('[{"number":5,"title":"t","body":"b","state":"open"}]')).toEqual([
+      { number: 5, title: "t", body: "b", state: "open" },
+    ]);
+    expect(parseIssues('[{"title":"only-title"}]')).toEqual([{ number: 0, title: "only-title", body: "", state: "" }]);
+    expect(parseIssues('[{"number":"not-a-number"}]')).toEqual([{ number: 0, title: "", body: "", state: "" }]);
+  });
+
+  it("非对象元素跳过、不中断循环 —— 它后面的合法项必须还在", () => {
+    // null 元素：`||` 与 `continue` 的 mutant 会在这里露出来（换成 break 会丢掉后面的项）
+    expect(parseIssues('[null,{"number":9,"title":"after"}]')).toEqual([
+      { number: 9, title: "after", body: "", state: "" },
+    ]);
+    // 非 object 的标量同样跳过
+    expect(parseIssues('[7,{"number":9}]')).toEqual([{ number: 9, title: "", body: "", state: "" }]);
+  });
+});
+
+describe("github-readonly · 渲染与裁剪（renderIssues / renderPr / clipText）", () => {
+  it("issue 渲染成 `- #N [state] title\\nbody`，CRLF 归一为 LF", () => {
+    const { text, truncated } = renderIssues(
+      [{ number: 3, title: "标题", body: "第一行\r\n第二行", state: "open" }],
+      1000,
+    );
+    expect(truncated).toBe(false);
+    expect(text).toBe("- #3 [open] 标题\n第一行\n第二行");
+  });
+
+  it("多条 issue 用空行分隔", () => {
+    const { text } = renderIssues(
+      [
+        { number: 1, title: "A", body: "a", state: "open" },
+        { number: 2, title: "B", body: "b", state: "closed" },
+      ],
+      1000,
+    );
+    expect(text).toBe("- #1 [open] A\na\n\n- #2 [closed] B\nb");
+  });
+
+  it("PR 渲染成 `PR #N: title\\nbody`", () => {
+    expect(renderPr({ number: 7, title: "标题", body: "正文" }, 1000)).toEqual({
+      text: "PR #7: 标题\n正文",
+      truncated: false,
+    });
+  });
+
+  it("clipText：预算内原样返回；超了在尾部标注省略多少字符（不静默丢）", () => {
+    expect(clipText("abc", 10)).toEqual({ text: "abc", truncated: false });
+    expect(clipText("abcdefghij", 10)).toEqual({ text: "abcdefghij", truncated: false });
+    const long = "x".repeat(100);
+    const clipped = clipText(long, 50);
+    expect(clipped.truncated).toBe(true);
+    // keep = max(0, 50-40) = 10 —— 头部保留 10 字符，再补标注
+    expect(clipped.text).toBe(`${"x".repeat(10)}\n…（已截断，省略 ${100 - 10} 字符）`);
+  });
+
+  it("预算小于 40 时 keep 收敛到 0（不出现负数的 slice）", () => {
+    const clipped = clipText("y".repeat(30), 20);
+    expect(clipped.truncated).toBe(true);
+    expect(clipped.text).toBe(`\n…（已截断，省略 30 字符）`);
+  });
+});
+
+describe("github-readonly · fetchGithubContext（注入 runner）", () => {
+  it("非法 repo：不 spawn，直接说清原因", async () => {
+    const { run, calls } = recorder([]);
+    const r = await fetchGithubContext({ kind: "issues", repo: "bad;rm", run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("仓库名不合法");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("参数不被接受（pr 缺编号）：说清不支持，不猜", async () => {
+    const { run, calls } = recorder([]);
+    const r = await fetchGithubContext({ kind: "pr", run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("不支持的拉取方式");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("gh 非零退出：ok=false 且原因带上命令与 stderr 尾部", async () => {
+    const { run, calls } = recorder([{ code: 1, stderr: "gh: not logged in\nrun gh auth login" }]);
+    const r = await fetchGithubContext({ kind: "issues", repo: "o/r", run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("gh issue list 失败");
+    expect(r.reason).toContain("not logged in");
+    expect(calls).toEqual([{ command: "gh", args: githubArgs({ kind: "issues", repo: "o/r" }) }]);
+  });
+
+  it("issues 快乐路径：条数如实计入，非截断时 truncated 字段缺席", async () => {
+    const { run } = recorder([okJson('[{"number":1,"title":"A","body":"a","state":"open"}]')]);
+    const r = await fetchGithubContext({ kind: "issues", run });
+    expect(r.ok).toBe(true);
+    expect(r.items).toBe(1);
+    expect(r.text).toBe("- #1 [open] A\na");
+    expect(r.truncated).toBeUndefined(); // 缺席，不是 false
+  });
+
+  it("issues 截断：truncated=true 如实上报", async () => {
+    const body = "z".repeat(200);
+    const { run } = recorder([okJson(JSON.stringify([{ number: 1, title: "A", body, state: "open" }]))]);
+    const r = await fetchGithubContext({ kind: "issues", maxChars: 50, run });
+    expect(r.ok).toBe(true);
+    expect(r.truncated).toBe(true);
+    expect(r.text).toContain("已截断");
+  });
+
+  it("issues 输出解析不了：ok=false 且原因带 stdout 尾部", async () => {
+    const { run } = recorder([okJson("not json at all")]);
+    const r = await fetchGithubContext({ kind: "issues", run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("解析不了");
+  });
+
+  it("pr 快乐路径：标题正文成文，非截断时 truncated 缺席", async () => {
+    const { run, calls } = recorder([okJson('{"number":7,"title":"T","body":"B"}')]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 7, run });
+    expect(r.ok).toBe(true);
+    expect(r.items).toBe(1);
+    expect(r.text).toBe("PR #7: T\nB");
+    expect(r.truncated).toBeUndefined();
+    expect(calls).toEqual([{ command: "gh", args: githubArgs({ kind: "pr", pr: 7 }) }]);
+  });
+
+  it("pr 截断：truncated=true 如实上报", async () => {
+    const body = "z".repeat(200);
+    const { run } = recorder([okJson(JSON.stringify({ number: 7, title: "T", body }))]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 7, maxChars: 50, run });
+    expect(r.ok).toBe(true);
+    expect(r.truncated).toBe(true);
+  });
+
+  it("pr 响应缺 number 时回落到请求里的 PR 号（拿不到就不许编成 undefined）", async () => {
+    const { run } = recorder([okJson('{"title":"T","body":"B"}')]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 42, run });
+    expect(r.ok).toBe(true);
+    expect(r.text).toContain("PR #42: T");
+  });
+
+  it("pr 输出非 JSON：ok=false 且原因带 stdout 尾部", async () => {
+    const { run } = recorder([okJson("<html>not json</html>")]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 7, run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("不是 JSON");
+  });
+
+  it("pr 输出是标量（非对象）：ok=false", async () => {
+    const { run } = recorder([okJson("123")]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 7, run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("不是对象");
+  });
+
+  it("pr 输出是 null：ok=false（不因 typeof null 而误判成对象）", async () => {
+    const { run } = recorder([okJson("null")]);
+    const r = await fetchGithubContext({ kind: "pr", pr: 7, run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("不是对象");
+  });
+});

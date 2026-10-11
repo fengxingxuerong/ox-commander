@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BRAIN_POOL_TIMEOUT_MS,
   brainTimeoutMsFor,
+  contextSourcesFor,
   createFileJournal,
   createPlatform,
   deliveryRemoteHookFor,
@@ -1042,5 +1043,26 @@ describe("createPlatform · 远端分发接线（5.7 远端半边，2026-10-12�
       settings({ deliveryRemote: { mode: "pr", remote: "upstream", base: "next", draft: true, awaitChecks: {} } }),
     )!;
     expect(typeof hook).toBe("function");
+  });
+});
+
+describe("createPlatform · 只读外部上下文源接线（P2-1 本地半边，2026-10-12）", () => {
+  it("没配 contextSources：空数组（引擎侧判空即不拉，提示与历史一致）", () => {
+    expect(contextSourcesFor(settings())).toEqual([]);
+  });
+
+  it("配了：每个来源一个 name（缺省名带序号）与 fetch", () => {
+    const srcs = contextSourcesFor(
+      settings({ contextSources: [{ kind: "issues" }, { kind: "pr", name: "myPR", pr: 5 }] }),
+    );
+    expect(srcs).toHaveLength(2);
+    expect(srcs[0]!.name).toBe("github:issues#1"); // 缺省名带 1-based 序号
+    expect(srcs[1]!.name).toBe("myPR"); // 显式名字原样保留
+    expect(typeof srcs[0]!.fetch).toBe("function");
+  });
+
+  it("fetch 拿不到（非法 repo）：抛错且原因可见 —— 交给引擎那句 [context] 失败日志", async () => {
+    const srcs = contextSourcesFor(settings({ contextSources: [{ kind: "issues", repo: "bad;repo" }] }));
+    await expect(srcs[0]!.fetch()).rejects.toThrow(/仓库名不合法/);
   });
 });

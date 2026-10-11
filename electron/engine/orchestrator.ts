@@ -90,6 +90,17 @@ export interface OrchestratorDeps {
    * 且本地导出真的产出了分支 —— 三个条件缺一不可（导出跳过时不推）。
    * 永不 throw；失败只写日志，**绝不影响交付结论**。
    */
+  /**
+   * 规划前的只读外部上下文源（P2-1 本地半边，2026-10-12）：每个来源给一份
+   * 成文文本，引擎把它们**标注为不可信数据**后拼进 PRD 提示。
+   * **为什么注入**：拉取要 spawn（`gh`），引擎层至今零进程依赖；而且"拉什么"
+   * 是宿主的决定（桌面用 settings、headless 用 spec）。
+   * 缺省 = 没有来源 = 提示与历史逐字一致（缺席必须零副作用）。
+   */
+  contextSources?: readonly {
+    name: string;
+    fetch: () => Promise<string>;
+  }[];
   publishRemote?: (input: {
     projectRoot: string;
     branch: string;
@@ -316,16 +327,45 @@ export class OrchestratorEngine {
 
   async generatePrd(userRequirement: string): Promise<PrdDocument> {
     this.cb.onStage("PRD");
+    const context = await this.collectExternalContext();
     const prd = await this.brainCall(
       "PRD 生成",
       () =>
         chatJson(
           this.deps.llm,
-          { messages: [{ role: "user", content: buildPrdPrompt(userRequirement) }] },
+          { messages: [{ role: "user", content: buildPrdPrompt(userRequirement, context) }] },
           { schemaName: "PRD", validate: parsePrd },
         ),
     );
     return prd;
+  }
+
+  /**
+   * 规划前的外部上下文（P2-1 本地半边，2026-10-12）。**缺席是常态**（默认不配），
+   * 配了才拉；拉失败只写日志 —— 上下文是背景，不是需求本身。
+   *
+   * ⚠️ 两个"不许"：拉不到不许退化成空字符串（那等于"当作没有这项需求"，
+   * 操作者会以为拉到了只是没内容）；拉到的内容**不许当指令**
+   * （`externalContextBlock` 负责声明它是数据 —— issue 正文是任何人都能写的）。
+   */
+  private async collectExternalContext(): Promise<Array<{ name: string; text: string }>> {
+    const sources = this.deps.contextSources ?? [];
+    if (sources.length === 0) return [];
+    this.cb.onLog(`── 外部上下文（${sources.length} 个来源，只读拉取）──`);
+    const out: Array<{ name: string; text: string }> = [];
+    for (const s of sources) {
+      try {
+        const text = await s.fetch();
+        if (!text) {
+          this.cb.onLog(`[context] ${s.name}：没拿到内容 —— 按缺席处理，不当作"没有这项需求"`);
+          continue;
+        }
+        out.push({ name: s.name, text });
+      } catch (err) {
+        this.cb.onLog(`[context] ${s.name} 失败（不影响规划）：${(err as Error).message}`);
+      }
+    }
+    return out;
   }
 
   /**

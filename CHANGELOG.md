@@ -6,6 +6,26 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 规划前只读外部上下文（P2-1 本地半边，2026-10-12）
+
+- **`settings.contextSources`（缺省不配 = 不拉）**：规划之前从本机已登录的 `gh`
+  拉 GitHub 的 issue / PR 文本，作为**背景**喂给规划大脑（`buildPrdPrompt` 的新可选参数）。
+  `electron/context/github-readonly.ts` 是纯判定核心（命令白名单 = `issue list` /
+  `pr view` 枚举、`owner/repo` 与 PR 号字符集、条数/字符预算收敛、issue/PR 输出的解析与
+  裁剪、`gh` 非零退出与坏 JSON 如实说破），spawn 由平台注入（引擎层零进程依赖）。
+- **信任面说破**：拉来的内容来自远端仓库，任何人都能在 issue 正文里写"忽略上述规则"。
+  三处一起做：`externalContextBlock`（提示层声明为**不可信数据**）、PRD 的 schema 校验、
+  沙箱；只说"没人以为它是指令"，不说"拦得住"。**失败 ≠ 空上下文**：`gh` 不在 / 未登录 /
+  网络失败一律如实报"没拿到"，绝不退化成"当作没有这项需求"。
+- **顺带消掉 10 个不可观察的分支**：`contextSourcesFor` 原用 5 个
+  `...(x !== undefined ? {x} : {})` 拼参数（每个 2 处位点在变异里必存活）—— 现在直接把
+  配置对象（`GithubContextInput` 的超集）交给 `fetchGithubContext`，platform.ts 的位点
+  从 38 降回 **28**。与 5.7 的 `deliveryRemoteArgs` 同款处置。
+- 门禁数字：在册目标 70 → **71**（新增 github-readonly，tier 1）；site 基线 1518 →
+  **1554**；本轮四个改动目标逐点审计全杀（github-readonly 32/32、orchestrator 72/72、
+  platform 28/28、prompts 4/4）。新增 `src/github-context.test.ts`（27 条）+
+  orchestrator / platform / prompts 补 12 条断言，全量 1940 通过 + 8 跳过。
+
 ### 交付后远端分发（2026-10-12，竞品刷新清单 5.7 的**远端半边**）
 
 - **`settings.deliveryRemote`（缺省不做）**：本地半边（`git-export`，2026-10-11）

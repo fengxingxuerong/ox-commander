@@ -415,6 +415,31 @@ export interface ProjectSettings {
    * 指定分支；CI 结论只回流进日志与返回值，**不自动触发重修**（策略问题，v1 不做）。
    * 分发失败只写日志，不影响交付结论。
    */
+  /**
+   * 规划前的只读外部上下文（P2-1 本地半边，2026-10-12）：从本机 `gh` 拉 GitHub
+   * 的 issue / PR 文本，作为**背景**喂给规划大脑。缺省 = 不拉（提示与历史一致）。
+   *
+   * ⚠️ 只读：只认 `gh issue list/view` 与 `gh pr view`；绝不评论、绝不建 PR。
+   * 需要本机 `gh` 已登录（我们不碰凭据）；拉不到就如实说"没拿到"，**不退化成
+   * "当作没有这项需求"**。拉到的内容来自远端仓库 —— 提示里会被声明为不可信数据
+   * （issue 正文里写"忽略上述规则"是免费的），真正的强制力在 schema 校验与沙箱。
+   */
+  contextSources?: Array<{
+    /** 显示在上下文块里的名字（也进日志，便于追责"这段是谁给的"）。 */
+    name?: string;
+    /** `"issues"` = issue 列表；`"pr"` = 指定 PR 的描述。 */
+    kind: "issues" | "pr";
+    /** `owner/repo`；缺省 = 交给 `gh` 自己认当前仓库。 */
+    repo?: string;
+    /** issues：搜索条件（原样传 `--search`）。 */
+    search?: string;
+    /** issues：条数（默认 10，上限 50）。 */
+    limit?: number;
+    /** pr：PR 号。 */
+    pr?: number;
+    /** 单份字符上限（默认 8000），超出尾部截断并标注。 */
+    maxChars?: number;
+  }>;
   deliveryRemote?: {
     /**
      * `"off"`（缺省同义）= 什么都不做；`"push"` = 只推分支；`"pr"` = 推送后开 PR

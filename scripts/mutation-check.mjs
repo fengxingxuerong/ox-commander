@@ -159,6 +159,10 @@ const TARGETS = [
   // 轮询的停条件。spawn 由平台注入，所以判定核心在这里就能被逐点审计；
   // orchestrator/platform 的接线位点随各自既有目标审计。
   { file: "electron/engine/git-remote.ts", test: "src/git-remote.test.ts", tier: 1 },
+  // 2026-10-12：规划前的只读外部上下文（P2-1 本地半边）——`gh` 命令构造白名单、
+  // owner/repo 与 PR 号字符集、条数/字符预算收敛、issue/PR 输出解析与裁剪。
+  // 全是纯函数 + 注入 runner（默认分支才真 spawn，测试不碰网络）。tier 1：整份 ~0.4s。
+  { file: "electron/context/github-readonly.ts", test: "src/github-context.test.ts", tier: 1 },
   // 2026-10-01 补挂：策略即代码（P2-2）的契约层。落地时漏登记，本次与审批门同批补上 ——
   // 它承载"只加严不放宽"这条安全语义（归一化 / 合并 / 只产出 denyMore），
   // 在执行面接线位点之外还该有自己的逐位点保护。
@@ -710,11 +714,12 @@ const SITE_BASELINE = {
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
+  "electron/context/github-readonly.ts": 32,
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 70,
+  "electron/engine/orchestrator.ts": 72,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 42,
   "electron/engine/verifier.ts": 23,
@@ -758,7 +763,7 @@ const SITE_BASELINE = {
   "shared/llm-client.ts": 15,
   "shared/policy-file.ts": 33,
   "shared/prompt-text.ts": 1,
-  "shared/prompts.ts": 2,
+  "shared/prompts.ts": 4,
   "shared/providers.ts": 3,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
@@ -767,7 +772,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;;;;;;
+};;;;;;;;;;;
 
 /**
  * 等价变异白名单。

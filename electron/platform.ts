@@ -18,6 +18,7 @@ import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, verifyProject } from "./engine";
 import { exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
 import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from "./engine/git-remote";
+import { fetchGithubContext } from "./context/github-readonly";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
 import type { BatchVerdict } from "./engine/batch-guard";
@@ -220,6 +221,35 @@ export interface Platform {
     commands: readonly VerificationCommand[],
     cwd: string,
   ): Promise<VerificationReport>;
+}
+
+/**
+ * 只读外部上下文源的装配（P2-1 本地半边，2026-10-12）：没配 ⇒ 空数组。
+ *
+ * 导出是为了让装配本身可测；`fetchGithubContext` 的判定（白名单、字符集、预算）
+ * 是纯函数，逐点审过。失败不在这里吞 —— 交给引擎那句"[context] … 失败"日志，
+ * 因为"没拿到上下文"是给操作者看的事实，不是可忽略的异常。
+ */
+export function contextSourcesFor(
+  settings: ProjectSettings,
+): Array<{ name: string; fetch: () => Promise<string> }> {
+  const cfgs = settings.contextSources ?? [];
+  return cfgs.map((cfg, i) => ({
+    name: cfg.name ?? `github:${cfg.kind}#${i + 1}`,
+    fetch: async () => {
+      // 直接把配置对象交给 `fetchGithubContext` —— 它本来就是
+      // `GithubContextInput` 的超集（多一个只在本层用的 `name`，读取方按字段名取，
+      // 忽略多余键）。**刻意不逐字段拼 `...(x !== undefined ? {x} : {})`**：
+      // 那种三元造出的「undefined 与缺席等价」的分支在变异里必然存活（见 5.7
+      // 的同款处置），是纯负债 —— 判定语义是"字段在不在"，本层不该再复述一遍。
+      //
+      // 不传 `cwd`：`gh` 认进程当前目录，而宿主这一层的 cwd 不是项目根
+      // （桌面端是应用目录）。要指定仓库就显式给 `repo` —— 那也是更明确的写法。
+      const r = await fetchGithubContext(cfg);
+      if (!r.ok) throw new Error(r.reason ?? "拉取失败（无原因）");
+      return r.text ?? "";
+    },
+  }));
 }
 
 /**
@@ -485,10 +515,14 @@ export function createPlatform(config: PlatformConfig): Platform {
   // 刻意**不用三元**拼 deps —— "接不接"是引擎的判空语义，宿主这里不该再长一个
   // 不可观察的分支（那种分支在变异审计里活下来只能靠登记等价锚点，是纯负债）。
   const publishRemote = deliveryRemoteHookFor(settings);
+  // 只读外部上下文源（P2-1 本地半边）：缺省 = 空数组（提示与历史逐字一致）。
+  // 每个来源一次拉取；`gh` 不在 / 未登录由 `fetchGithubContext` 自己说破。
+  const contextSources = contextSourcesFor(settings);
 
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
+      contextSources,
       scheduler: new Scheduler(layer.adapters, settings.enabledAgents, schedulerOptions()),
       verify:
         config.verify ??

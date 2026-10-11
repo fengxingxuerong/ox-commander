@@ -978,6 +978,97 @@ describe("OrchestratorEngine brain cooldown handling", () => {
   });
 });
 
+/**
+ * P2-1 本地半边（2026-10-12）：规划前拉来的只读外部上下文。
+ * 三个不变量：缺席零副作用、失败不中断后面的来源、拉不到不伪装成"没有"。
+ */
+describe("OrchestratorEngine · 规划前只读外部上下文", () => {
+  const PRD_JSON = JSON.stringify({ goal: "g", features: [], techStack: [], acceptanceCriteria: [] });
+
+  function eng(
+    sources: OrchestratorDeps["contextSources"],
+    events: string[],
+    prompts: string[],
+  ): OrchestratorEngine {
+    const llm: LlmClient = {
+      async chat(req) {
+        // `chatJson` 会在最前面插一条 JSON 约束消息 —— 用户提示不是第 0 条。
+        // 拼全部消息，断言在其中任一位置出现即可。
+        prompts.push(req.messages.map((m) => m.content).join("\n"));
+        return { content: PRD_JSON, provider: "t", model: "m" };
+      },
+    };
+    const deps: OrchestratorDeps = {
+      llm,
+      scheduler: fakeScheduler(false),
+      verify: async () => makeReport(true),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      ...(sources ? { contextSources: sources } : {}),
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (l) => events.push(l),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+  }
+
+  it("0 个来源：不注入、也不打头部日志（缺席必须零副作用）", async () => {
+    const events: string[] = [];
+    const prompts: string[] = [];
+    await eng([], events, prompts).generatePrd("demo");
+    expect(prompts[0]).not.toContain("External context");
+    expect(events.some((e) => e.includes("外部上下文"))).toBe(false);
+  });
+
+  it("有来源：打一条头部日志，内容作为不可信数据块注入", async () => {
+    const events: string[] = [];
+    const prompts: string[] = [];
+    await eng([{ name: "gh:issues#1", fetch: async () => "ISSUE-TEXT" }], events, prompts).generatePrd("demo");
+    expect(events.some((e) => e.includes("外部上下文") && e.includes("1 个来源"))).toBe(true);
+    expect(prompts[0]).toContain("External context");
+    expect(prompts[0]).toContain("ISSUE-TEXT");
+  });
+
+  it("某来源抛错：跳过它、写失败日志，但**不中断**后面的来源（continue 不是 break）", async () => {
+    const events: string[] = [];
+    const prompts: string[] = [];
+    const sources = [
+      {
+        name: "bad",
+        fetch: async () => {
+          throw new Error("boom");
+        },
+      },
+      { name: "good", fetch: async () => "SECOND-TEXT" },
+    ];
+    await eng(sources, events, prompts).generatePrd("demo");
+    expect(events.some((e) => e.includes("[context] bad 失败"))).toBe(true);
+    expect(prompts[0]).toContain("SECOND-TEXT");
+  });
+
+  it("某来源返回空串：按缺席处理并写日志，**不中断**后面的来源（continue 不是 break）", async () => {
+    const events: string[] = [];
+    const prompts: string[] = [];
+    const sources = [
+      { name: "empty", fetch: async () => "" },
+      { name: "after", fetch: async () => "AFTER-EMPTY" },
+    ];
+    await eng(sources, events, prompts).generatePrd("demo");
+    expect(events.some((e) => e.includes("没拿到内容"))).toBe(true);
+    // 空串来源被跳过后，后面的来源必须照样注入 —— `continue` 变异成 `break` 会在这里露出来
+    expect(prompts[0]).toContain("AFTER-EMPTY");
+  });
+
+  it("全部来源都拿不到：整份上下文缺席，不产出空块", async () => {
+    const events: string[] = [];
+    const prompts: string[] = [];
+    await eng([{ name: "empty", fetch: async () => "" }], events, prompts).generatePrd("demo");
+    expect(prompts[0]).not.toContain("External context");
+  });
+});
+
 describe("OrchestratorEngine.execute · 依赖失败跳过下游（配额守卫）", () => {
   function twoBatchTasks(): Task[][] {
     const A: Task = { ...TASKS[0], id: "A", dependencies: [] };
