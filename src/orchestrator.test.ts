@@ -13,7 +13,7 @@ import {
 } from "../electron/engine/orchestrator";
 import type { Scheduler } from "../electron/engine/scheduler";
 import type { LlmClient } from "../shared/llm-client";
-import { DEFAULT_SETTINGS, type EscalationAction, type PrdDocument, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type EscalationAction, type PrdDocument, type ProjectSettings, type SmokeCheck, type Task, type VerificationReport } from "../shared/types";
 import type { DeliveryReceipt, ReceiptConflict } from "../shared/delivery-receipt";
 
 const TASKS: Task[] = [
@@ -59,6 +59,8 @@ function engine(opts: {
   events: string[];
   exportDeliveryBranch?: boolean;
   exportDelivery?: OrchestratorDeps["exportDelivery"];
+  deliveryRemote?: ProjectSettings["deliveryRemote"];
+  publishRemote?: OrchestratorDeps["publishRemote"];
 }): OrchestratorEngine {
   const deps: OrchestratorDeps = {
     llm: fakeLlm(),
@@ -68,8 +70,10 @@ function engine(opts: {
       ...DEFAULT_SETTINGS,
       maxRepairRounds: opts.maxRounds ?? 3,
       ...(opts.exportDeliveryBranch !== undefined ? { exportDeliveryBranch: opts.exportDeliveryBranch } : {}),
+      ...(opts.deliveryRemote ? { deliveryRemote: opts.deliveryRemote } : {}),
     },
     ...(opts.exportDelivery ? { exportDelivery: opts.exportDelivery } : {}),
+    ...(opts.publishRemote ? { publishRemote: opts.publishRemote } : {}),
   };
   // verify passes when scheduler's first round succeeded; else fails until repair.
   // 第 1 次调用是**基线验证**（引擎动手前跑的），它必须返回绿：基线红会往日志与
@@ -3064,6 +3068,191 @@ describe("OrchestratorEngine · 交付后 git 导出", () => {
     });
     await eng.execute([TASKS], ".");
     expect(events.some((l) => l.includes("[git-export] 失败（不影响交付）：disk gone"))).toBe(true);
+    expect(events).toContain("stage:DONE");
+  });
+});
+
+describe("orchestrator · 远端分发接线（5.7 远端半边，2026-10-12）", () => {
+  const exported = () => ({ ok: true, branch: "oxcommander/delivery-x", commit: "abc1234", filesCommitted: 1 });
+
+  it("默认（没配 deliveryRemote）：实现即使在场也不调用——这一层默认什么都不做", async () => {
+    const events: string[] = [];
+    const calls: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      exportDelivery: async () => exported(),
+      publishRemote: async (input) => {
+        calls.push(input);
+        return { ok: true, pushed: true };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-remote]"))).toHaveLength(0);
+  });
+
+  it("mode=off 显式关闭：同样不调用", async () => {
+    const events: string[] = [];
+    const calls: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "off" },
+      exportDelivery: async () => exported(),
+      publishRemote: async (input) => {
+        calls.push(input);
+        return { ok: true, pushed: true };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toHaveLength(0);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("mode=pr 且导出成功：推送 + PR + CI 失败各说各的话，且点明不自动重修", async () => {
+    const events: string[] = [];
+    const calls: Array<{ projectRoot: string; branch: string }> = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "pr" },
+      exportDelivery: async () => exported(),
+      publishRemote: async (input) => {
+        calls.push(input);
+        return {
+          ok: true,
+          remote: "origin",
+          branch: input.branch,
+          pushed: true,
+          prUrl: "https://github.com/o/r/pull/9",
+          checks: { state: "fail", failed: ["verify (ubuntu-latest)"], polls: 2 },
+        };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toEqual([{ projectRoot: ".", branch: "oxcommander/delivery-x" }]);
+    expect(events.some((l) => l.includes("[git-remote] 已推送 oxcommander/delivery-x 到 origin"))).toBe(true);
+    expect(events.some((l) => l.includes("[git-remote] 已开 PR：https://github.com/o/r/pull/9"))).toBe(true);
+    const ci = events.find((l) => l.includes("CI 结论"))!;
+    expect(ci).toContain("失败");
+    expect(ci).toContain("verify (ubuntu-latest)");
+    expect(ci).toContain("不自动重修");
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("CI 通过/未定：两种结论的日志不一样（=== 互换的 mutant 会张冠李戴）", async () => {
+    const cases: Array<{ state: "pass" | "pending"; phrase: string }> = [
+      { state: "pass", phrase: "CI 结论：通过" },
+      { state: "pending", phrase: "CI 结论：pending" },
+    ];
+    for (const c of cases) {
+      const events: string[] = [];
+      const eng = engine({
+        failFirstRound: false,
+        events,
+        exportDeliveryBranch: true,
+        deliveryRemote: { mode: "pr" },
+        exportDelivery: async () => exported(),
+        publishRemote: async () => ({
+          ok: true,
+          pushed: true,
+          checks: { state: c.state, failed: [], polls: 1 },
+        }),
+      });
+      await eng.execute([TASKS], ".");
+      expect(events.some((l) => l.includes(c.phrase))).toBe(true);
+    }
+  });
+
+  it("本地导出跳过（no-repo）：不推送——没有本地分支就没有远端动作", async () => {
+    const events: string[] = [];
+    const calls: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      exportDelivery: async () => ({ ok: true, skipped: "no-repo" as const }),
+      publishRemote: async (input) => {
+        calls.push(input);
+        return { ok: true, pushed: true };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-remote]"))).toHaveLength(0);
+  });
+
+  it("本地导出成功但没给出分支名：不推送（没有分支就没有远端动作）", async () => {
+    // 变异锚点：`!branch ||` 那个 `||` → `&&`（orchestrator.ts @609）。换成 && 后
+    // "branch 缺失但实现在场" 会漏过这道门 —— 这条用例会红。
+    const events: string[] = [];
+    const calls: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      exportDelivery: async () => ({ ok: true, filesCommitted: 1 }),
+      publishRemote: async (input) => {
+        calls.push(input);
+        return { ok: true, pushed: true };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-remote]"))).toHaveLength(0);
+  });
+
+  it("没有这个远端：跳过不是失败，日志点名是哪个 remote", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push", remote: "upstream" },
+      exportDelivery: async () => exported(),
+      publishRemote: async () => ({ ok: true, skipped: "no-remote" as const, remote: "upstream" }),
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("没有名为 upstream 的远端"))).toBe(true);
+    expect(events.filter((l) => l.includes("失败（不影响交付）"))).toHaveLength(0);
+  });
+
+  it("分发失败（push 失败）：日志写明不影响交付，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      exportDelivery: async () => exported(),
+      publishRemote: async () => ({ ok: false, reason: "git push 失败：Permission denied" }),
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-remote] 失败（不影响交付）：git push 失败：Permission denied"))).toBe(true);
+    expect(events.filter((l) => l.includes("已推送"))).toHaveLength(0);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("分发实现自己抛错：同一条失败日志接住，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "pr" },
+      exportDelivery: async () => exported(),
+      publishRemote: async () => {
+        throw new Error("gh gone");
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-remote] 失败（不影响交付）：gh gone"))).toBe(true);
     expect(events).toContain("stage:DONE");
   });
 });

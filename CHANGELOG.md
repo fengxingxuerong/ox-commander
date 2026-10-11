@@ -6,6 +6,43 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 交付后远端分发（2026-10-12，竞品刷新清单 5.7 的**远端半边**）
+
+- **`settings.deliveryRemote`（缺省不做）**：本地半边（`git-export`，2026-10-11）
+  只产本地分支且**永不 push**；这一层在操作者**显式开开关**时把那个分支推到
+  指定 remote、可选开 PR、可选等 CI 结论。`electron/engine/git-remote.ts` 是纯
+  判定核心（字符集自证、`gh pr checks` 解析、PR URL 提取、轮询停条件），spawn 由
+  平台注入；orchestrator 的接线点在本地导出**真的产出分支**之后（导出跳过 = 不推）。
+- **信任面说破**：`CommandPolicy` 的地板把 `git push` 判为拒绝，那是给**智能体
+  生成/执行的验证命令**用的；这里是操作者授权的分发动作（remote 名、分支名、
+  基分支全部字符集校验、全程 `shell: false`），走另一条信任面 —— 地板的语义不变。
+- **刻意不做**：不碰凭据（push 走本机 git 凭据链、PR 走 `gh` 登录态；`gh` 不在
+  或未登录如实说破，绝不退化成"把 token 交给某个参数"）；**永不 `--force`**；
+  只推指定 remote 的指定分支。**CI 结论只回流进日志与返回值 —— 不自动触发重修**
+  （"CI 红了要不要再派一轮"是策略问题，需要幂等与次数上限的设计，v1 不做）。
+- **`gh pr checks` 解析不出结论一律 `unknown`**：这道闸的意义是"CI 说了什么"，
+  不是"我们觉得它应该绿"；坏数据（`null` 元素、非 JSON、"no checks reported"）
+  不许被读成绿。轮询到上限仍是 pending 就如实报 pending。
+- 门禁数字：在册目标 69 → **70**（新增 git-remote，tier 1）；site 基线 1469 →
+  **1518**；本轮四个改动目标逐点审计全杀（git-remote 39/39、orchestrator 70/70、
+  platform 28/28、types 4/4）。
+- **顺带消掉 10 个不可观察的分支**：platform 装配原本用一串
+  `...(x !== undefined ? { k: x } : {})` 拼参数 —— 那些三元在变异审计里活下来
+  （9 处存活）只能靠登记等价锚点糊过去，而"接不接"本就是引擎的判空语义。现在
+  参数由纯函数 `deliveryRemoteArgs` 造（可逐点审），宿主直接把 `undefined` 交给
+  deps（`publishRemote?: fn | undefined`），platform 的位点从 38 降到 **28 且全杀**。
+
+### 本机环境：node 同步子进程的 stdio pipe 被阻断（EBUSY，2026-10-12 记录）
+
+- 现象：本机 `spawnSync` / `execFileSync` 用默认 pipe 时返回 `status=null`、
+  `stdout=undefined` 并报 EBUSY；同一命令换成 `stdio:'inherit'`、`'ignore'` 或
+  **文件描述符**都正常 —— 被拦的是 pipe 那一种。受影响的段：`mutation:quick` /
+  `mutation:touched` / `check:mutation-targets` / `check:doc-claims` 的规模核 /
+  `smoke:artifact` 的 headless 段，以及 17 条真进程用例（`spawnSync git`）。
+- **处置：不改生产代码去适配一台机器**（CI 上 pipe 正常）。本机审计改用一次性
+  `--require` shim 把 pipe 换成临时文件 fd（不入版本库），语义不变：
+  拿得到同样的 stdout/stderr 与退出码。结论照旧以 CI（Linux）为准。
+
 ### 门禁提速：变异按目标并行（2026-10-11，第七轮）
 
 - **`--jobs=N`（默认 1 = 与历史逐字节同序）**：`>1` 时按**目标**分进程池——每个

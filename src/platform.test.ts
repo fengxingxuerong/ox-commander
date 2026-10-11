@@ -7,6 +7,7 @@ import {
   brainTimeoutMsFor,
   createFileJournal,
   createPlatform,
+  deliveryRemoteHookFor,
   executorTimeoutMsFor,
 } from "../electron/platform";
 import { createAgentLayer } from "../electron/agents";
@@ -1019,5 +1020,27 @@ describe("createPlatform · 任务活性心跳透传", () => {
     createPlatform({ settings: settings(), promptDir: tempDir(), host: { log: () => undefined } });
     const cfg = vi.mocked(createAgentLayer).mock.calls.at(-1)![0] as Record<string, unknown>;
     expect("onTaskActivity" in cfg).toBe(false);
+  });
+});
+
+describe("createPlatform · 远端分发接线（5.7 远端半边，2026-10-12）", () => {
+  it("没配 deliveryRemote：不接（引擎侧判空即没接，宿主不再造一个三元分支）", () => {
+    expect(deliveryRemoteHookFor(settings())).toBeUndefined();
+  });
+
+  it("mode=off：同样不接", () => {
+    expect(deliveryRemoteHookFor(settings({ deliveryRemote: { mode: "off" } }))).toBeUndefined();
+  });
+
+  it("mode=push / pr：接上，且 mode 透传（=== 与 || 的 mutant 都会被这两条打掉）", () => {
+    expect(typeof deliveryRemoteHookFor(settings({ deliveryRemote: { mode: "push" } }))).toBe("function");
+    expect(typeof deliveryRemoteHookFor(settings({ deliveryRemote: { mode: "pr" } }))).toBe("function");
+  });
+
+  it("参数经 deliveryRemoteArgs 成形：draft / awaitChecks 的默认值在这里落地", () => {
+    const hook = deliveryRemoteHookFor(
+      settings({ deliveryRemote: { mode: "pr", remote: "upstream", base: "next", draft: true, awaitChecks: {} } }),
+    )!;
+    expect(typeof hook).toBe("function");
   });
 });

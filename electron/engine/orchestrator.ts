@@ -83,6 +83,18 @@ export interface OrchestratorDeps {
     zones: string[];
   }) => Promise<import("./git-export").GitExportResult>;
   /**
+   * 交付后的可选远端分发（5.7 远端半边，2026-10-12）：把本地导出的分支推到
+   * remote / 开 PR / 等 CI 结论。**为什么注入**：与 `exportDelivery` 同一理由
+   * （引擎零 spawn 依赖），且这一层要碰外部系统，宿主必须显式接。
+   * 什么时候被调：`settings.deliveryRemote?.mode` 不是 `"off"`、本回调在场、
+   * 且本地导出真的产出了分支 —— 三个条件缺一不可（导出跳过时不推）。
+   * 永不 throw；失败只写日志，**绝不影响交付结论**。
+   */
+  publishRemote?: (input: {
+    projectRoot: string;
+    branch: string;
+  }) => Promise<import("./git-remote").GitRemoteResult>;
+  /**
    * 跨动作状态机（竞品调研 §5.1，可选）：批次边界上由引擎 reset —— 批次是
    * "已发生过什么"的生命周期单位。观察面（agent 日志）与执行面（验证命令
    * 升级审查）分别由 scheduler 和 verifier 持有同一个实例。
@@ -569,6 +581,7 @@ export class OrchestratorEngine {
         this.cb.onLog(
           `[git-export] 已导出分支 ${result.branch}（commit ${result.commit ?? "无"}，${result.filesCommitted ?? 0} 个文件）`,
         );
+        await this.maybePublishRemote(projectRoot, result.branch);
       } else if (result.skipped === "no-repo") {
         this.cb.onLog("[git-export] 跳过：项目不在 git 仓库内（要导出请先 git init）");
       } else if (result.skipped === "no-changes") {
@@ -580,6 +593,42 @@ export class OrchestratorEngine {
       }
     } catch (err) {
       this.cb.onLog(`[git-export] 失败（不影响交付）：${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 远端分发（5.7 远端半边）。三个条件缺一不动：`settings.deliveryRemote?.mode`
+   * 不是 `"off"`、`deps.publishRemote` 在场、本地导出真的产出了分支。
+   *
+   * **CI 结论只回流进日志**：`failed` 名单是给人看的事实，也是下一轮决策的
+   * 输入；这里**不自动触发重修** —— "CI 红了要不要再派一轮"需要幂等与次数上限
+   * 的设计，v1 刻意不做，日志里说破。
+   */
+  private async maybePublishRemote(projectRoot: string, branch?: string): Promise<void> {
+    const mode = this.deps.settings.deliveryRemote?.mode;
+    if (!mode || mode === "off" || !branch || !this.deps.publishRemote) return;
+    try {
+      const r = await this.deps.publishRemote({ projectRoot, branch });
+      if (r.skipped === "no-remote") {
+        this.cb.onLog(`[git-remote] 跳过：仓库没有名为 ${r.remote ?? "origin"} 的远端（要分发请先 git remote add）`);
+        return;
+      }
+      if (r.pushed) this.cb.onLog(`[git-remote] 已推送 ${r.branch ?? branch} 到 ${r.remote ?? "origin"}`);
+      if (r.prUrl) this.cb.onLog(`[git-remote] 已开 PR：${r.prUrl}`);
+      if (r.checks) {
+        if (r.checks.state === "fail") {
+          this.cb.onLog(
+            `[git-remote] CI 结论：失败（${r.checks.failed.join("、") || "未点名"}）—— 只回流，不自动重修`,
+          );
+        } else if (r.checks.state === "pass") {
+          this.cb.onLog(`[git-remote] CI 结论：通过（轮询 ${r.checks.polls} 次）`);
+        } else {
+          this.cb.onLog(`[git-remote] CI 结论：${r.checks.state}（轮询 ${r.checks.polls} 次，未拿到确定结论）`);
+        }
+      }
+      if (!r.ok) this.cb.onLog(`[git-remote] 失败（不影响交付）：${r.reason}`);
+    } catch (err) {
+      this.cb.onLog(`[git-remote] 失败（不影响交付）：${(err as Error).message}`);
     }
   }
 

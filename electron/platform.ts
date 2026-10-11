@@ -17,6 +17,7 @@ import path from "node:path";
 import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, verifyProject } from "./engine";
 import { exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
+import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from "./engine/git-remote";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
 import type { BatchVerdict } from "./engine/batch-guard";
@@ -219,6 +220,28 @@ export interface Platform {
     commands: readonly VerificationCommand[],
     cwd: string,
   ): Promise<VerificationReport>;
+}
+
+/**
+ * 远端分发的接线钩子（5.7 远端半边，2026-10-12）：没配 `deliveryRemote` 或
+ * `mode:"off"` 时返回 `undefined` —— **宿主这一层不接，引擎侧判空即"没接"**，
+ * 于是"接不接"没有第二个分支，也不用靠登记等价锚点来糊过去。
+ *
+ * 参数形状由 `deliveryRemoteArgs`（纯函数，逐点审过）造；凭据由本机 git / gh
+ * 自己持有，本层不碰。导出是为了让接线本身可测（platform 装配过去没有可观察面）。
+ */
+export function deliveryRemoteHookFor(
+  settings: ProjectSettings,
+): ((input: { projectRoot: string; branch: string }) => Promise<GitRemoteResult>) | undefined {
+  const cfg = settings.deliveryRemote;
+  if (!cfg || cfg.mode === "off") return undefined;
+  return (input) =>
+    publishDeliveryRemote({
+      projectRoot: input.projectRoot,
+      // `!` 是类型层面的补白：上面已经把 `mode:"off"` 排除掉了，TS 不会把
+      // `cfg.mode` 的窄化带进这个函数调用。
+      ...deliveryRemoteArgs(input.branch, cfg)!,
+    });
 }
 
 /**
@@ -458,6 +481,11 @@ export function createPlatform(config: PlatformConfig): Platform {
       ...(approvalGate ? { approvalGate } : {}),
     });
 
+  // 远端分发（5.7 远端半边）：没配 / `mode:"off"` ⇒ `undefined`，引擎侧判空即"没接"。
+  // 刻意**不用三元**拼 deps —— "接不接"是引擎的判空语义，宿主这里不该再长一个
+  // 不可观察的分支（那种分支在变异审计里活下来只能靠登记等价锚点，是纯负债）。
+  const publishRemote = deliveryRemoteHookFor(settings);
+
   const engine = new OrchestratorEngine(
     {
       llm: buildLlm(),
@@ -480,6 +508,10 @@ export function createPlatform(config: PlatformConfig): Platform {
               }),
           }
         : {}),
+      // 5.7 远端半边（2026-10-12）：只在操作者显式开了 mode 时才接（否则是
+      // `undefined`，引擎侧判空即没接）。这一层会碰外部系统（push / PR），
+      // 默认必须是"什么都不做"；凭据由本机 git / gh 自己持有，这里不碰。
+      publishRemote,
       journal: config.journal,
       // 前任履历（P1-3）：宿主给查询口，引擎只负责在重修轮把它拼进上下文。
       ...(config.priorAttempts ? { priorAttempts: config.priorAttempts } : {}),

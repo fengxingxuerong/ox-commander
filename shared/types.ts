@@ -406,6 +406,36 @@ export interface ProjectSettings {
    */
   exportDeliveryBranch?: boolean;
   /**
+   * 交付后的可选**远端分发**（5.7 远端半边，2026-10-12）：在本地导出分支之后，
+   * 把它推到指定 remote、可选开 PR、可选等 CI 结论。缺省 = 不做（与本地半边
+   * 同一口径：默认只产本地分支，永不自动 push）。
+   *
+   * ⚠️ 这是**外部动作**，必须由操作者显式打开；打开即表示"我为本机 git 凭据链
+   * （或 `gh` 登录态）负责"。本层不碰凭据、永不 `--force`、只推指定 remote 的
+   * 指定分支；CI 结论只回流进日志与返回值，**不自动触发重修**（策略问题，v1 不做）。
+   * 分发失败只写日志，不影响交付结论。
+   */
+  deliveryRemote?: {
+    /**
+     * `"off"`（缺省同义）= 什么都不做；`"push"` = 只推分支；`"pr"` = 推送后开 PR
+     * （并在开得出时等 CI 结论，见 `awaitChecks`）。
+     */
+    mode: "off" | "push" | "pr";
+    /** 远端名，默认 `"origin"`。 */
+    remote?: string;
+    /** PR 的基分支，默认 `"main"`。 */
+    base?: string;
+    /** 草稿 PR。 */
+    draft?: boolean;
+    /**
+     * 开 PR 后是否轮询 CI 结论。默认不轮询 —— 分发不该默认阻塞到 CI 跑完，
+     * 而 CI 结论要等它自己跑完才有。
+     */
+    awaitChecks?: { intervalMs?: number; maxPolls?: number };
+    /** 单条命令超时（毫秒），默认 120s。 */
+    timeoutMs?: number;
+  };
+  /**
    * 本次 run 的墙钟上限（毫秒）。只在批/轮边界生效，不掐断在途请求 ——
    * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。
    * `undefined` 或 `<= 0` 都是不限（要"不限"就省略这个字段，与 maxTokensPerRun 同风格）。

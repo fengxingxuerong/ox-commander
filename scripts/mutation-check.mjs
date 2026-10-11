@@ -154,6 +154,11 @@ const TARGETS = [
   // 2026-10-11：交付后 git 导出（5.7 本地半边）——porcelain -z 解析、zone 过滤、
   // 分块 add、身份兜底重试；真 git 集成用例在 src/git-export.test.ts 尾部。
   { file: "electron/engine/git-export.ts", test: "src/git-export.test.ts", tier: 1 },
+  // 2026-10-12：交付后的远端分发（5.7 远端半边）——remote/分支名字符集自证、
+  // `gh pr checks` 的 JSON 解析（解析不出一律 unknown，绝不猜成绿）、PR URL 提取、
+  // 轮询的停条件。spawn 由平台注入，所以判定核心在这里就能被逐点审计；
+  // orchestrator/platform 的接线位点随各自既有目标审计。
+  { file: "electron/engine/git-remote.ts", test: "src/git-remote.test.ts", tier: 1 },
   // 2026-10-01 补挂：策略即代码（P2-2）的契约层。落地时漏登记，本次与审批门同批补上 ——
   // 它承载"只加严不放宽"这条安全语义（归一化 / 合并 / 只产出 denyMore），
   // 在执行面接线位点之外还该有自己的逐位点保护。
@@ -708,7 +713,8 @@ const SITE_BASELINE = {
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
-  "electron/engine/orchestrator.ts": 62,
+  "electron/engine/git-remote.ts": 39,
+  "electron/engine/orchestrator.ts": 70,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 42,
   "electron/engine/verifier.ts": 23,
@@ -720,7 +726,7 @@ const SITE_BASELINE = {
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
-  "electron/platform.ts": 26,
+  "electron/platform.ts": 28,
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
   "electron/sandbox/circuit-breaker.ts": 26,
@@ -761,7 +767,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;;;;;
+};;;;;;;;;;
 
 /**
  * 等价变异白名单。
