@@ -219,6 +219,9 @@ export function ensureAgentLayer(settingsValue: ProjectSettings): AgentLayer {
     onRouting: (decision, task) => logLine(agentRoutingLogLine(decision, task)),
     onEvent: (text) => logLine(`[sandbox] ${text}`),
     breakerOptions: { onEvent: (text) => logLine(`[breaker] ${text}`) },
+    // 成功率总账跨 run 保留（2026-10-11 竞品吸收，ruflo「自适应记忆」对位）：
+    // 路由的质量分从此不随进程重启清零。路径在 userData 下，与快照/审计同域。
+    breakerStatsFile: path.join(app.getPath("userData"), "agent-stats.json"),
   });
   for (const { adapter, manifest } of dynamicAgents.values()) {
     layer.registry.register({ adapter, manifest });

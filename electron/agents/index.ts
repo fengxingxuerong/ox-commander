@@ -6,10 +6,16 @@ import { SensenovaApiAdapter } from "./sensenova-api";
 import { AgentRegistry, createRegistry } from "./registry";
 import { buildAdaptersFromManifests, loadManifestDir, type ManifestLoadError } from "./manifest-loader";
 import { createCapabilityRouter, type RouterOptions } from "../engine/router";
-import { CircuitBreaker, type CircuitBreakerOptions } from "../sandbox/circuit-breaker";
+import {
+  CircuitBreaker,
+  type AgentTotals,
+  type CircuitBreakerOptions,
+  type CircuitPersistence,
+} from "../sandbox/circuit-breaker";
 import { BatchGuard, type BatchVerdict } from "../engine/batch-guard";
 import { SnapshotStore } from "../sandbox/snapshot-store";
 import { FileJournal } from "../sandbox/file-journal";
+import { readJsonFile, writeFileAtomic } from "../atomic-file";
 import type { SchedulerOptions } from "../engine/scheduler";
 import type { UsageMeter } from "../../shared/usage-meter";
 import { remoteExecutorNote } from "./remote-endpoint";
@@ -102,6 +108,43 @@ export interface AgentLayerOptions {
    * 省略 = 内置默认（`DEFAULT_FORBIDDEN_WRITE`）。见 `createDefaultAdapters` 的注释。
    */
   forbiddenWrite?: readonly string[];
+  /**
+   * 成功率总账的落盘文件（2026-10-11 竞品刷新，ruflo「自适应记忆」对位）。
+   * 给了就接 `CircuitPersistence`：路由的历史成功率分跨 run 保留。桌面端传
+   * `userData/agent-stats.json`；headless 宿主想接也要显式给路径。缺省 =
+   * 纯内存，行为同从前。与 `breakerOptions.persistence` 互斥时以注入的
+   * `breaker` / 显式 `breakerOptions` 为准（本字段只在**自建**熔断器时生效）。
+   */
+  breakerStatsFile?: string;
+  /**
+   * 循环输出检测配置（2026-10-11 竞品刷新，闭环 loop detection 软挂起项）。
+   * `false` = 显式关闭；缺省 = 默认参数开启（threshold 8 / minLineLength 16）。
+   */
+  loopDetection?: SchedulerOptions["loopDetection"];
+}
+
+/**
+ * `userData/agent-stats.json` 用的文件持久化。损坏/缺文件一律按"从零开始"
+ * 处理——账本是给路由加分的先验，不是权威数据，坏账不该拖垮装配；
+ * save 的 IO 错误同样自吞（见 `CircuitPersistence` 的接口注释）。
+ */
+export function fileBreakerPersistence(file: string): CircuitPersistence {
+  return {
+    load(): Record<string, AgentTotals> | undefined {
+      try {
+        return readJsonFile<Record<string, AgentTotals> | undefined>(file, undefined);
+      } catch {
+        return undefined;
+      }
+    },
+    save(totals: Record<string, AgentTotals>): void {
+      try {
+        writeFileAtomic(file, JSON.stringify(totals));
+      } catch {
+        // 落盘失败不影响熔断判定与派发；下次 record 会再试。
+      }
+    },
+  };
 }
 
 export interface AgentLayer {
@@ -147,8 +190,16 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
     if (note) opts.onEvent?.(note);
   }
   const registry = createRegistry(adapters, { manifests: [...declaredById.values()] });
-  const breaker = opts.breaker ?? new CircuitBreaker(opts.breakerOptions ?? {});
-  const schedulerOptions: SchedulerOptions = { registry, breaker };
+  const breaker = opts.breaker ?? new CircuitBreaker({
+    ...(opts.breakerOptions ?? {}),
+    ...(opts.breakerStatsFile ? { persistence: fileBreakerPersistence(opts.breakerStatsFile) } : {}),
+  });
+  const schedulerOptions: SchedulerOptions = {
+    registry,
+    breaker,
+    // 循环检测默认开启；`false` 原样透传（显式关闭），undefined → {}（默认参数）。
+    loopDetection: opts.loopDetection ?? {},
+  };
   if (opts.enableRouter !== false) {
     // The router scores with the same breaker the scheduler admits with, so a
     // cooling agent is both deprioritised and (in open state) skipped.

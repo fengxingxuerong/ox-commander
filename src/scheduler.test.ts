@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { admitConcurrency, digest, Scheduler } from "../electron/engine/scheduler";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
+import { CircuitBreaker } from "../electron/sandbox/circuit-breaker";
 import { createAgentLayer, createDefaultAdapters } from "../electron/agents";
 import { SensenovaApiAdapter } from "../electron/agents/sensenova-api";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
@@ -185,6 +186,9 @@ describe("Scheduler.abortInFlight", () => {
     const sched = new Scheduler([ghost, good], [], {
       registry: {
         activeAdapters: () => (ghostInPool ? [ghost, good] : [good]),
+        // 预算闸（2026-10-11）会查 registry.get 拿 limits.maxTokens；这个最小假
+        // registry 只关心 activeAdapters，get 返回 undefined = 无上限、全放行。
+        get: () => undefined,
       },
     } as never);
     const batch = sched.runBatch([task("t1", "src/a"), task("t2", "src/b")], ".");
@@ -1412,5 +1416,232 @@ describe("Scheduler · 赛马补充维度（组级 onRunStart / breaker 记账�
     });
     await sched.runBatch([task("t1", "t1-zone")], ".");
     expect(starts.length).toBe(1);
+  });
+});
+
+/**
+ * 循环输出检测 + per-agent 预算闸（2026-10-11 竞品刷新：
+ * agentguard-llm 的 loop 检测、paperclip 的 per-agent budget + throttling）。
+ */
+describe("Scheduler 循环输出检测", () => {
+  const LOOP_LINE = "npm ERR! code ERESOLVE unable to resolve dependency tree — retrying install";
+
+  function streamingAdapter(id: string, lines: string[], hooks?: { aborts?: string[] }): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        for (const text of lines) yield { kind: "log", text, timestamp: Date.now() };
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {
+        hooks?.aborts?.push(id);
+      },
+    };
+  }
+
+  const repeat = (n: number) => Array.from({ length: n }, () => LOOP_LINE);
+
+  it("连续相同长行到达阈值：中止本 run，digest 带 [loop]，归因为 loop", async () => {
+    const aborts: string[] = [];
+    const a = streamingAdapter("a", [...repeat(3), "never reached"], { aborts });
+    const sched = new Scheduler([a], [], { loopDetection: { threshold: 3, minLineLength: 16 } });
+    const outcomes = await sched.runBatch([task("t1", "src/a")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.logDigest).toContain("[loop]");
+    expect(outcomes[0]!.logDigest).toContain(LOOP_LINE.slice(0, 40));
+    expect(outcomes[0]!.errorClass).toBe("loop");
+    expect(aborts).toEqual(["a"]);
+  });
+
+  it("输出在推进（行不相同）不触发；loopDetection: false 显式关闭", async () => {
+    const aborts: string[] = [];
+    const lines = [1, 2, 3].map((n) => `${LOOP_LINE} (${n})`);
+    const a = streamingAdapter("a", lines, { aborts });
+    const sched = new Scheduler([a], [], { loopDetection: { threshold: 3, minLineLength: 16 } });
+    const outcomes = await sched.runBatch([task("t1", "src/a")], ".");
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(aborts).toEqual([]);
+
+    const b = streamingAdapter("b", repeat(9), { aborts });
+    const off = new Scheduler([b], [], { loopDetection: false });
+    const offOutcomes = await off.runBatch([task("t2", "src/a")], ".");
+    expect(offOutcomes[0]!.ok).toBe(true);
+    expect(aborts).toEqual([]);
+  });
+});
+
+describe("Scheduler per-agent 预算闸", () => {
+  function usageAdapter(id: string, tokens: number, dispatched?: string[]): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        dispatched?.push(id);
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "log", text: `working on ${id}`, timestamp: Date.now() };
+        yield {
+          kind: "completed",
+          text: "done",
+          timestamp: Date.now(),
+          ...(tokens > 0 ? { usage: { tokens } } : {}),
+        };
+      },
+      async abort() {},
+    };
+  }
+
+  const capped = (adapter: AgentAdapter, maxTokens: number) => ({
+    adapter,
+    manifest: { id: adapter.meta.id, limits: { maxTokens } },
+  });
+
+  it("上报用量到达 maxTokens 后，同 run 后续批次改派他人", async () => {
+    const dispatched: string[] = [];
+    const a1 = usageAdapter("a1", 100, dispatched);
+    const a2 = usageAdapter("a2", 0, dispatched);
+    const registry = new AgentRegistry([capped(a1, 100), { adapter: a2, manifest: { id: "a2" } }]);
+    const sched = new Scheduler([a1, a2], [], { registry });
+    await sched.runBatch([task("t1", "src/a")], ".");
+    await sched.runBatch([task("t2", "src/a")], ".");
+    expect(dispatched).toEqual(["a1", "a2"]);
+  });
+
+  it("池内候选全部超预算：no-agent 且 digest 写明预算闸归因", async () => {
+    const a1 = usageAdapter("a1", 100);
+    const registry = new AgentRegistry([capped(a1, 100)]);
+    const sched = new Scheduler([a1], [], { registry });
+    await sched.runBatch([task("t1", "src/a")], ".");
+    const outcomes = await sched.runBatch([task("t2", "src/a")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.errorClass).toBe("no-agent");
+    expect(outcomes[0]!.logDigest).toContain("预算闸跳过");
+    expect(outcomes[0]!.logDigest).toContain("a1");
+  });
+
+  it("点名路径不受预算闸约束——与熔断同语义：显式意图优先", async () => {
+    const a1 = usageAdapter("a1", 100);
+    const registry = new AgentRegistry([capped(a1, 100)]);
+    const sched = new Scheduler([a1], [], { registry });
+    await sched.runBatch([task("t1", "src/a")], ".");
+    const outcomes = await sched.runBatch([task("t2", "src/a")], ".", { preferredAgentId: "a1" });
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("a1");
+  });
+
+  it("onBudgetGate 在跳过时触发，带 agentId、已用量与上限", async () => {
+    const gates: Array<[string, number, number]> = [];
+    const a1 = usageAdapter("a1", 100);
+    const a2 = usageAdapter("a2", 0);
+    const registry = new AgentRegistry([capped(a1, 100), { adapter: a2, manifest: { id: "a2" } }]);
+    const sched = new Scheduler([a1, a2], [], {
+      registry,
+      onBudgetGate: (id, used, cap) => gates.push([id, used, cap]),
+    });
+    await sched.runBatch([task("t1", "src/a")], ".");
+    await sched.runBatch([task("t2", "src/a")], ".");
+    expect(gates).toEqual([["a1", 100, 100]]);
+  });
+});
+
+/**
+ * 预算闸兜底候选的两道闸缺一不可（杀 site 审计存活位点）：
+ * 兜底搜索既要「未超预算」也要「熔断可接」—— 少判任何一个，
+ * 被跳过的执行器都会换个名字混回来。
+ */
+describe("Scheduler 预算闸的兜底候选判定", () => {
+  function usageAdapter(id: string, tokens: number): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        yield {
+          kind: "completed",
+          text: "done",
+          timestamp: Date.now(),
+          ...(tokens > 0 ? { usage: { tokens } } : {}),
+        };
+      },
+      async abort() {},
+    };
+  }
+
+  it("另一个候选也超预算时，不能拿它凑数——选真正未超的第三个", async () => {
+    const a1 = usageAdapter("a1", 100);
+    const a2 = usageAdapter("a2", 100);
+    const a3 = usageAdapter("a3", 0);
+    const registry = new AgentRegistry([
+      { adapter: a1, manifest: { id: "a1", limits: { maxTokens: 100 } } },
+      { adapter: a2, manifest: { id: "a2", limits: { maxTokens: 100 } } },
+      { adapter: a3, manifest: { id: "a3" } },
+    ]);
+    const sched = new Scheduler([a1, a2, a3], [], { registry });
+    // 第一批两个任务把 a1、a2 都喂到上限（轮询：t1→a1、t1b→a2）
+    await sched.runBatch([task("t1", "src/a"), task("t1b", "src/b")], ".");
+    const outcomes = await sched.runBatch([task("t2", "src/a")], ".");
+    expect(outcomes[0]!.agentId).toBe("a3");
+  });
+
+  it("未超预算但熔断打开的候选也不能接——兜底要同时过熔断闸", async () => {
+    const a1 = usageAdapter("a1", 100);
+    const a2 = usageAdapter("a2", 0);
+    const a3 = usageAdapter("a3", 0);
+    const registry = new AgentRegistry([
+      { adapter: a1, manifest: { id: "a1", limits: { maxTokens: 100 } } },
+      { adapter: a2, manifest: { id: "a2" } },
+      { adapter: a3, manifest: { id: "a3" } },
+    ]);
+    const breaker = new CircuitBreaker();
+    // open a2 的熔断：连续 3 次失败
+    for (let i = 0; i < 3; i += 1) breaker.record("a2", false);
+    const sched = new Scheduler([a1, a2, a3], [], { registry, breaker });
+    await sched.runBatch([task("t1", "src/a")], ".");
+    const outcomes = await sched.runBatch([task("t2", "src/a")], ".");
+    expect(outcomes[0]!.agentId).toBe("a3");
+  });
+});
+
+/**
+ * breakerStatsFile 装配（2026-10-11，成功率跨 run 持久化）：给了路径就接
+ * CircuitPersistence——record 落盘、重建即恢复先验。三元反转的 mutant 表现为
+ * 「给了路径不落盘」，这里用真文件钉住。
+ */
+describe('createAgentLayer · breakerStatsFile', () => {
+  it('record 即写回总账文件；同一文件重建 layer 即恢复先验', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ox-agent-stats-'));
+    const file = path.join(dir, 'agent-stats.json');
+    const layer = createAgentLayer({ breakerStatsFile: file });
+    layer.breaker.record('a1', false);
+    layer.breaker.record('a1', true);
+    expect(JSON.parse(fs.readFileSync(file, 'utf8'))).toEqual({
+      a1: { successes: 1, failures: 1 },
+    });
+
+    const rebuilt = createAgentLayer({ breakerStatsFile: file });
+    expect(rebuilt.breaker.stats('a1').failures).toBe(1);
+    expect(rebuilt.breaker.stats('a1').successRate).toBeCloseTo(0.5);
+    // 新进程一律 closed 起步：恢复的是先验，不是上一 run 的熔断状态
+    expect(rebuilt.breaker.state('a1')).toBe('closed');
+  });
+
+  it('不给路径 = 纯内存（不落盘）', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'ox-agent-stats-'));
+    const layer = createAgentLayer();
+    layer.breaker.record('a1', true);
+    expect(fs.readdirSync(dir)).toHaveLength(0);
   });
 });

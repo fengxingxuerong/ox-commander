@@ -100,6 +100,14 @@ describe("parseAgentManifest", () => {
     expect(m.priority).toBe(-3);
   });
 
+  it("limits.maxTokens（per-agent 预算闸，2026-10-11）：可声明、可缺省、下限 1000", () => {
+    const m = parseAgentManifest({ ...validCodex(), limits: { maxTokens: 50_000 } });
+    expect(m.limits).toEqual({ maxTokens: 50_000 });
+    // 缺省 = 不限（键不存在），不给无预算的 agent 强加默认上限
+    expect(parseAgentManifest(validCodex()).limits?.maxTokens).toBeUndefined();
+    expect(() => parseAgentManifest({ ...validCodex(), limits: { maxTokens: 999 } })).toThrow(/maxTokens/);
+  });
+
   it("accepts a single object or an array, indexing the errors", () => {
     expect(parseAgentManifestList(validCodex())).toHaveLength(1);
     expect(parseAgentManifestList([validCodex(), { ...validCodex(), id: "second" }])).toHaveLength(2);

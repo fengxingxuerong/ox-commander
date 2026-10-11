@@ -22,3 +22,7 @@ scripts/.mutation-pending/
 
 # 主机侧 artifact 标记（发布产物入口用，内容仅 {"type":"artifact"}）：运行时状态，非项目内容。
 *.artifact.json
+
+# WorkBuddy 会话目录（.workbuddy/memory/ 是本机会话记忆与日志）：属运行时状态，
+# 不是项目内容。与 .box-agent/ 同性质 —— 显式忽略，避免 git add -A 误收。
+.workbuddy/

@@ -42,6 +42,7 @@ const ERROR_LABELS: Record<FailureClass, string> = {
   resource: "资源",
   "no-agent": "无可用智能体",
   contract: "契约路径违规（点名的文件没落在盘上）",
+  loop: "循环空转（同一输出反复刷，已被中止）",
   unknown: "未知",
 };
 

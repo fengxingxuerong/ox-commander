@@ -277,6 +277,13 @@ export class SensenovaApiAdapter implements AgentAdapter {
   }
 
   private async run(payload: TaskPayload, session: RunSession): Promise<void> {
+    // per-task 用量观察（2026-10-11，per-agent 预算闸的生产者侧）：chatJson
+    // 在内部把 ChatResponse 拆成纯文件数组，usage 到那一层就丢了——在
+    // client 边界包一层计数器，把本 run 每次调用的上报 token 累起来，
+    // 终态事件带回给调度器的 per-agent 用量账本。声明在 try 之外：
+    // catch 里的 failed 终态也要带上已烧掉的账。中止收口的那条路径不报
+    // （会话已 finished，log 会被丢弃，二次终态也进不去）。
+    let usedTokens = 0;
     this.gate.attach({ id: payload.runId }, () => {
       // 看门狗只说明"为什么"，真正把 run 收口的是下面 `guard()` 抛出的 TimeoutError。
       session.cancel.abort(); // 在途那一次请求一并掐掉，不再占线路池、也不再花 token
@@ -288,6 +295,13 @@ export class SensenovaApiAdapter implements AgentAdapter {
     });
     try {
       const client = this.client();
+      const observed: LlmClient = {
+        chat: async (req) => {
+          const res = await client.chat(req);
+          usedTokens += res.usageTokens ?? 0;
+          return res;
+        },
+      };
       session.push("log", `[sensenova-api] 正在调用模型生成「${payload.title}」的代码…`);
       const snapshot = this.snapshot(payload.projectRoot);
       const userParts: string[] = [
@@ -317,7 +331,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
        * 槽位跟着**真实请求**的结束释放，不跟着 `guard()` 的结束释放：超时只是
        * 不再等它，那一回合仍在途并占着一条线路，提前释放会让信号量放进更多并发。
        */
-      const work = this.generateWithCooldownRetry(client, userParts, session).finally(() =>
+      const work = this.generateWithCooldownRetry(observed, userParts, session).finally(() =>
         this.releaseSlot(),
       );
       const generated = await this.gate.guard(payload.runId, work);
@@ -337,11 +351,13 @@ export class SensenovaApiAdapter implements AgentAdapter {
       if (!session.finished) {
         // 终态里带上被拒数量与路径：重修 prompt 传的是这份摘要，只说"写入 N 个"
         // 的话，模型下一轮会原样再写一遍被沙箱拒掉的那条路径，预算空烧。
-        session.push("completed", SensenovaApiAdapter.completedNote(res, payload.runId));
+        session.push("completed", SensenovaApiAdapter.completedNote(res, payload.runId), {
+          tokens: usedTokens,
+        });
       }
     } catch (err) {
       if (!session.finished) {
-        session.push("failed", `[sensenova-api] ${(err as Error).message}`);
+        session.push("failed", `[sensenova-api] ${(err as Error).message}`, { tokens: usedTokens });
       }
     } finally {
       // 幂等：`guard()` 收口时已经解过。放这里是为了让"进 guard 之前就返回/抛出"

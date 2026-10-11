@@ -91,7 +91,7 @@
  *      三种诱因（测试路径写错 / 测试被改坏 / 源码有语法错）都会让整块覆盖静默归零，
  *      与「CI 里写错路径、从来没真正跑过的 job」同族。现在改为 exit 1 并点名。
  */
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -143,6 +143,17 @@ const TARGETS = [
   // 2026-10-01：审批门（竞品调研 P2-3）—— needsApproval / approvalDeniedReason
   // 是纯函数，ApprovalGate 是持有"本批已批准"的薄壳（fail-closed：没回调即拒绝）。
   { file: "electron/sandbox/approval-gate.ts", test: "src/approval-gate.test.ts", tier: 1 },
+  // 2026-10-11：循环输出检测（竞品刷新，闭环 loop detection 软挂起项）——纯函数
+  // 判定器，判定挂载在 scheduler 的 collectToTerminal；同轮给 contract/scheduler/
+  // circuit-breaker 加的位点随各自既有目标审计。
+  { file: "electron/sandbox/loop-detector.ts", test: "src/loop-detector.test.ts", tier: 1 },
+  // 2026-10-11：serve 定时运行的纯判定核心（竞品刷新第五轮，Orca scheduled
+  // automations 对位）——间隔/参数解析、补跑判定、忙时重试间隔；调度环接线在
+  // serve-main（注入式时钟/fetch，测试手动泵驱动）。
+  { file: "headless/schedule-core.ts", test: "src/schedule-core.test.ts", tier: 1 },
+  // 2026-10-11：交付后 git 导出（5.7 本地半边）——porcelain -z 解析、zone 过滤、
+  // 分块 add、身份兜底重试；真 git 集成用例在 src/git-export.test.ts 尾部。
+  { file: "electron/engine/git-export.ts", test: "src/git-export.test.ts", tier: 1 },
   // 2026-10-01 补挂：策略即代码（P2-2）的契约层。落地时漏登记，本次与审批门同批补上 ——
   // 它承载"只加严不放宽"这条安全语义（归一化 / 合并 / 只产出 denyMore），
   // 在执行面接线位点之外还该有自己的逐位点保护。
@@ -187,7 +198,9 @@ const TARGETS = [
   // 形状恰好是"静默回落默认值 + exit 0"——覆盖率数字完全看不出问题，
   // 只有把「回落」变异成「报错」（或反之）才会暴露断言够不够。
   // tier 1：测试是纯函数 + 少量 spawn，秒级。
-  { file: "headless/serve-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
+  // 2026-10-11：定时运行调度环（schedule-core.test.ts 的 loop 用例直接驱动
+  // startScheduleLoop）补挂 —— 触发/跳过/落盘语义的断言都在那份文件里。
+  { file: "headless/serve-main.ts", tests: ["src/headless-entries.test.ts", "src/schedule-core.test.ts"], tier: 1 },
   { file: "headless/mcp-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
   // 2026-10-05：orchestration 的 IPC 控制面。此前它的**函数**覆盖 66.7%
   // （全项目信任面最重的文件里最低），补测后 lines/functions/statements 均 100%，
@@ -263,7 +276,9 @@ const TARGETS = [
     tests: ["src/spawn-plan.test.ts", "src/sandbox-runtime.test.ts"],
     tier: 2,
   },
-  { file: "electron/sandbox/circuit-breaker.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
+  // 2026-10-11：成功率持久化（ruflo「自适应记忆」对位）补挂 breaker-persistence
+  // —— 恢复总账/写回/坏账从零/淡出封顶的断言都在那份新文件里，漏挂 = 新位点无人验证。
+  { file: "electron/sandbox/circuit-breaker.ts", tests: ["src/sandbox-runtime.test.ts", "src/breaker-persistence.test.ts"], tier: 2 },
   { file: "electron/sandbox/timeout-gate.ts", test: "src/sandbox-runtime.test.ts", tier: 2 },
   { file: "electron/sandbox/file-journal.ts", test: "src/sandbox-journal.test.ts", tier: 2 },
   // ---- 2026-09-25：原子写是**持久化唯一通道**（store / keys-store / journal
@@ -679,12 +694,12 @@ function siteMutant(source, site, op) {
 const SITE_BASELINE = {
   "electron/agents/cli-agent.ts": 21,
   "electron/agents/http-bridge.ts": 39,
-  "electron/agents/index.ts": 9,
+  "electron/agents/index.ts": 10,
   "electron/agents/manifest-loader.ts": 24,
-  "electron/agents/manifest-schema.ts": 72,
+  "electron/agents/manifest-schema.ts": 74,
   "electron/agents/registry.ts": 25,
   "electron/agents/remote-endpoint.ts": 3,
-  "electron/agents/run-session.ts": 5,
+  "electron/agents/run-session.ts": 6,
   "electron/agents/scoped-env.ts": 5,
   "electron/agents/sensenova-api.ts": 39,
   "electron/atomic-file.ts": 2,
@@ -692,9 +707,10 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
-  "electron/engine/orchestrator.ts": 57,
+  "electron/engine/git-export.ts": 27,
+  "electron/engine/orchestrator.ts": 62,
   "electron/engine/router.ts": 25,
-  "electron/engine/scheduler.ts": 33,
+  "electron/engine/scheduler.ts": 42,
   "electron/engine/verifier.ts": 23,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 17,
@@ -707,10 +723,11 @@ const SITE_BASELINE = {
   "electron/platform.ts": 26,
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
-  "electron/sandbox/circuit-breaker.ts": 18,
+  "electron/sandbox/circuit-breaker.ts": 26,
   "electron/sandbox/command-policy.ts": 15,
   "electron/sandbox/file-journal.ts": 18,
   "electron/sandbox/kill-tree.ts": 11,
+  "electron/sandbox/loop-detector.ts": 5,
   "electron/sandbox/path-policy.ts": 40,
   "electron/sandbox/snapshot-store.ts": 13,
   "electron/sandbox/spawn-plan.ts": 8,
@@ -722,7 +739,8 @@ const SITE_BASELINE = {
   "headless/protocol.ts": 90,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
-  "headless/serve-main.ts": 17,
+  "headless/schedule-core.ts": 21,
+  "headless/serve-main.ts": 28,
   "headless/serve.ts": 63,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
@@ -743,7 +761,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;;
+};;;;;;;;;
 
 /**
  * 等价变异白名单。
@@ -1311,6 +1329,13 @@ const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4"
 const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
 const listOnly = args.includes("--list");
 const recoverOnly = args.includes("--recover-only");
+// 并行度：>1 时按**目标**分进程池（每个 worker 子进程独占一个目标，复用全部
+// 单目标流程——基线/台账/还原）。worker 之间互不共享源文件，台账按文件一条，
+// 谁也顶不掉谁。默认 1 = 完全串行（与历史行为逐字节一致）；npm scripts 与 CI
+// 传 --jobs=3。--file 单目标时并行没有意义，强制走内联路径。
+const jobs = Math.max(1, Number(args.find((a) => a.startsWith("--jobs="))?.slice(7) ?? "1") || 1);
+const noReport = args.includes("--no-report");
+const resultJson = args.includes("--result-json");
 
 /**
  * 变异口径（见文件头「两种口径」）：
@@ -1411,9 +1436,8 @@ if (targets.length === 0) {
 const pending = new Map();
 let restoring = false;
 
-/** 落盘备份目录（git 已忽略，见 .gitignore）。 */
+/** 落盘备份目录（git 已忽略，见 .gitignore）。台账按文件一条：`<备份名>.json`。 */
 const PENDING_DIR = path.join(ROOT, "scripts", ".mutation-pending");
-const PENDING_INDEX = path.join(PENDING_DIR, "index.json");
 
 /** 相对路径，仅用于打印。 */
 function relFromRoot(p) {
@@ -1497,6 +1521,15 @@ function isPidAlive(pid) {
   }
 }
 
+/** 一条台账的落盘路径：按文件一条（备份名 + .json）。
+ *  旧设计是单槽 `index.json`——它从根上假设"同一时刻只有一个源文件在被变异"，
+ *  并行 worker（按目标分进程）会互相顶掉记录。按文件一条后，谁写谁都互不干扰，
+ *  残留自愈与跨会话并发也按文件判定，而不是全场互斥。
+ */
+function recordPathFor(filePath) {
+  return path.join(PENDING_DIR, `${pendingBackupName(filePath)}.json`);
+}
+
 /** 改写源文件**之前**调用：把原文落到磁盘。 */
 function armPendingRecord(filePath, original) {
   const backup = path.join(PENDING_DIR, pendingBackupName(filePath));
@@ -1508,7 +1541,7 @@ function armPendingRecord(filePath, original) {
     if (fs.readFileSync(backup, "utf8") !== original) throw new Error("备份写后校验不一致");
     // pid 让台账能分出"谁的"：PENDING_DIR 是仓库级全局路径，两轮并发时没有 pid 就分不清
     // 该谁清、该不该动别人的凭据。
-    fs.writeFileSync(PENDING_INDEX, JSON.stringify({ file: filePath, backup, pid: process.pid }, null, 2), "utf8");
+    fs.writeFileSync(recordPathFor(filePath), JSON.stringify({ file: filePath, backup, pid: process.pid }, null, 2), "utf8");
   } catch (e) {
     // 2026-10-09 改判：原为"警告后继续跑"，而那正是盲区的来源 —— `check:residue` 只认台账，
     // 没有落盘记录还照样改写源码，强杀之后留下的活体变异体就会被下一轮判成"工作区干净"。
@@ -1556,19 +1589,23 @@ function restoreSource(filePath, original) {
   return false;
 }
 
-/** 一个目标跑完、源码已确认还原后调用：**只清自己这一轮的**。
+/** 一个目标跑完、源码已确认还原后调用：**只清自己这一条**（按文件一条台账）。
  *
  * 旧实现是 `rm -rf` 整个 `PENDING_DIR`，而那个目录是仓库级全局路径 —— 另一轮变异正在跑时，
  * 这一句会把它的台账连同备份一起删掉，它那轮的启动自愈与 `check:residue` 于是同时失明
  * （正是"残留看不见"那一格的最后一格；2026-10-09 本机就有两个会话并行跑门禁的场景）。
+ * 按文件一条记录后这条纪律由结构保证：清的只是自己那份记录与备份。
  *
  * @param ownsIt 调用方已确认这份台账不属于任何活着的进程（启动自愈走这条），
  *               此时连"pid 不是我的"的旧台账也一起收 —— 否则还原完了台账还挂在原地。
  */
-function clearPendingRecord(ownsIt = false) {
+function clearPendingRecord(filePath, ownsIt = false) {
+  // 记录路径在这里就地计算（不用 recordPathFor）：按锚点抠出本函数的测试只注入
+  // fs/path/PENDING_DIR/pendingBackupName，切片区域必须自包含。
+  const record = path.join(PENDING_DIR, `${pendingBackupName(filePath)}.json`);
   let rec = null;
   try {
-    rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));
+    rec = JSON.parse(fs.readFileSync(record, "utf8"));
   } catch {
     /* 没有台账，或台账读不动：按"无可清之处"处理 */
   }
@@ -1582,7 +1619,7 @@ function clearPendingRecord(ownsIt = false) {
     }
   }
   try {
-    fs.rmSync(PENDING_INDEX, { force: true });
+    fs.rmSync(record, { force: true });
   } catch {
     /* 清不掉不影响结论 */
   }
@@ -1605,62 +1642,109 @@ function clearPendingRecord(ownsIt = false) {
  *   - `foreign-live`     —— 台账属于**还活着的另一个进程**：那不是残留，是别人正在跑的现场，
  *                           还原它、清它都是破坏证据。同一份源码上两轮互踩也没有可信结论，
  *                           所以调用方一律拒绝启动（exit 2）。
+ *
+ * `myFiles`：本轮要动的目标文件集合，或 `"all"`（`check:residue` 的卫生检查——
+ * 任何文件的活体残留都算）。**按文件判定**是并行化的前提：worker 各管各的文件，
+ * 别的文件上活着的外来台账既不动它也不判它 —— 旧的单槽台账全场互斥，两轮
+ * 连"改的是不同文件"都不允许。
  */
-function recoverPendingRecord() {
-  if (!fs.existsSync(PENDING_INDEX)) {
-    // 「没有台账」过去直接等于「干净」，那正是盲区：手工清掉台账、或 `clearPendingRecord`
-    // 的删除被杀软挡住的场合，备份还在而源码可能仍是变异体。逐份备份要证据才放行。
-    const orphans = listOrphanBackups();
-    if (orphans.length === 0) return "clean";
-    return settleOrphanBackups(orphans) ? "clean" : "unknown";
-  }
-  let rec;
-  try {
-    rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8"));
-  } catch {
-    rec = null;
-  }
-  if (rec?.pid !== undefined && rec.pid !== process.pid && isPidAlive(rec.pid)) {
+function recoverPendingRecord(myFiles) {
+  const records = fs.existsSync(PENDING_DIR)
+    ? fs
+        .readdirSync(PENDING_DIR)
+        .filter((n) => n.endsWith(".json"))
+        .map((n) => path.join(PENDING_DIR, n))
+    : [];
+  const recordedBackups = new Set();
+  let sawUnknown = false;
+  let sawAlreadyRestored = false;
+  for (const record of records) {
+    let rec;
+    try {
+      rec = JSON.parse(fs.readFileSync(record, "utf8"));
+    } catch {
+      rec = null;
+    }
+    if (rec?.pid !== undefined && rec.pid !== process.pid && isPidAlive(rec.pid)) {
+      // 别的文件上活着的外来台账：不是残留，也不是本轮的事，跳过不判。
+      // 本轮要动的文件上有 → 拒绝启动（同一份源码两轮互踩，谁的结果都不可信）。
+      if (myFiles === "all" || (rec.file && myFiles.has(rec.file))) {
+        console.error(
+          `另一轮变异正在运行（pid ${rec.pid}，目标 ${relFromRoot(rec.file ?? record)}）—— ` +
+            "那份台账是它被强杀后唯一的凭据，本轮既不动它也不判它。等它跑完再跑：" +
+            "两轮在同一份源码上互踩，谁的结果都不可信。",
+        );
+        return "foreign-live";
+      }
+      recordedBackups.add(rec.backup ?? "");
+      continue;
+    }
+    if (!rec?.file || !rec.backup || !fs.existsSync(rec.backup)) {
+      try {
+        fs.rmSync(record, { force: true });
+      } catch {
+        /* 清不掉留给下一轮 */
+      }
+      console.error(
+        "警告：变异备份台账存在但不可用（JSON 损坏或备份文件缺失）—— 已清掉台账，" +
+          "但无法确认工作区是否还留着变异体。请执行 `git status` 与 `git diff` 自查。",
+      );
+      sawUnknown = true;
+      continue;
+    }
+    recordedBackups.add(rec.backup);
+    const original = fs.readFileSync(rec.backup, "utf8");
+    const current = fs.existsSync(rec.file) ? fs.readFileSync(rec.file, "utf8") : null;
+    if (current === original) {
+      try {
+        fs.rmSync(rec.backup, { force: true });
+      } catch {
+        /* 清不掉留给下一轮的孤儿处置 */
+      }
+      try {
+        fs.rmSync(record, { force: true });
+      } catch {
+        /* 清不掉不影响结论 */
+      }
+      sawAlreadyRestored = true;
+      continue;
+    }
+    try {
+      fs.writeFileSync(rec.file, original, "utf8");
+      try {
+        fs.rmSync(rec.backup, { force: true });
+      } catch {
+        /* 清不掉留给下一轮的孤儿处置 */
+      }
+      try {
+        fs.rmSync(record, { force: true });
+      } catch {
+        /* 清不掉不影响结论 */
+      }
+    } catch (e) {
+      console.error(`严重：无法还原 ${relFromRoot(rec.file)}（${e?.message ?? e}）—— 请手动 git checkout 该文件。`);
+      process.exit(2);
+    }
     console.error(
-      `另一轮变异正在运行（pid ${rec.pid}，目标 ${relFromRoot(rec.file ?? PENDING_INDEX)}）—— ` +
-        "那份台账是它被强杀后唯一的凭据，本轮既不动它也不判它。等它跑完再跑：" +
-        "两轮在同一份源码上互踩，谁的结果都不可信。",
+      [
+        `检测到上一次变异运行被强杀：${relFromRoot(rec.file)} 残留变异体，已自动还原。`,
+        `（Windows 上进程被外部终止时 SIGINT/SIGTERM 处理器不执行，内存兜底失效）`,
+        `源码已恢复 —— 请重新运行本命令；若 CI 上出现，说明上一轮是被超时杀掉的。`,
+      ].join("\n"),
     );
-    return "foreign-live";
-  }
-  if (!rec?.file || !rec.backup || !fs.existsSync(rec.backup)) {
-    clearPendingRecord(true);
-    console.error(
-      "警告：变异备份台账存在但不可用（JSON 损坏或备份文件缺失）—— 已清掉台账，" +
-        "但无法确认工作区是否还留着变异体。请执行 `git status` 与 `git diff` 自查。",
-    );
-    return "unknown";
-  }
-  const original = fs.readFileSync(rec.backup, "utf8");
-  const current = fs.existsSync(rec.file) ? fs.readFileSync(rec.file, "utf8") : null;
-  if (current === original) {
-    clearPendingRecord(true);
-    return "already-restored";
-  }
-  try {
-    fs.writeFileSync(rec.file, original, "utf8");
-    clearPendingRecord(true);
-  } catch (e) {
-    console.error(`严重：无法还原 ${relFromRoot(rec.file)}（${e?.message ?? e}）—— 请手动 git checkout 该文件。`);
     process.exit(2);
   }
-  console.error(
-    [
-      `检测到上一次变异运行被强杀：${relFromRoot(rec.file)} 残留变异体，已自动还原。`,
-      `（Windows 上进程被外部终止时 SIGINT/SIGTERM 处理器不执行，内存兜底失效）`,
-      `源码已恢复 —— 请重新运行本命令；若 CI 上出现，说明上一轮是被超时杀掉的。`,
-    ].join("\n"),
-  );
-  process.exit(2);
-  return "restored";
+  // 没被任何台账指着的 `.orig`：上一轮丢了台账，或清目录时删除失败。
+  // 逐份向备份要证据，比"没有台账 = 干净"的旧盲区严格。
+  const orphans = listOrphanBackups().filter((b) => !recordedBackups.has(b));
+  if (records.length === 0 && orphans.length === 0) return "clean";
+  if (orphans.length > 0 && !settleOrphanBackups(orphans)) return "unknown";
+  if (sawUnknown) return "unknown";
+  return sawAlreadyRestored ? "already-restored" : "clean";
 }
 
-const recovery = recoverPendingRecord();
+const myTargetFiles = new Set(targets.map((t) => path.join(ROOT, t.file)));
+const recovery = recoverPendingRecord(recoverOnly ? "all" : myTargetFiles);
 
 // 别人正在跑：卫生检查与真跑都拒绝启动 —— 一句"工作区干净"不能拿别人的现场换。
 if (recovery === "foreign-live") {
@@ -1780,7 +1864,105 @@ function testsPass(
 
 const results = [];
 
-for (const target of targets) {
+// ---- 目标级并行池（--jobs > 1）----
+// 每个 worker 是**一个子进程**跑一个目标（testsPass 是 execFileSync，进程内并行
+// 不可行）。子进程复用全部单目标流程（基线、台账、还原、--file 过滤），只多两样：
+// `--no-report`（跳过报告/summary/漂移检查——那是父进程聚合后的事，N 份重复只会
+// 把 summary 写花）与 `--result-json`（终局打印一行机器可读结果）。
+// 子进程失败（exit 2 / 被杀）按"基线失败"计红：宁可误红不可漏绿——它的台账会让
+// 下一轮 check:residue 自愈。
+const poolEligible = jobs > 1 && !onlyFile && !listOnly && !recoverOnly;
+
+function runOneChild(target) {
+  return new Promise((resolve) => {
+    const childArgs = [
+      path.join("scripts", "mutation-check.mjs"),
+      `--mode=${mode}`,
+      auditMode ? "--audit" : `--limit=${limit}`,
+      `--tier=${maxTier}`,
+      `--file=${target.file}`,
+      "--no-report",
+      "--result-json",
+    ];
+    const child = spawn(process.execPath, childArgs, { cwd: ROOT, env: process.env });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (d) => (out += String(d)));
+    child.stderr.on("data", (d) => (err += String(d)));
+    child.on("error", (e) => {
+      console.error(`worker 启动失败：${target.file}（${e.message}）—— 按"基线失败"计红`);
+      resolve({ target, baselineFailed: true, ran: [], ms: 0 });
+    });
+    child.on("close", (code) => {
+      const marker = out.lastIndexOf("##MUTATION_RESULT##");
+      if (marker >= 0) {
+        try {
+          resolve(JSON.parse(out.slice(marker + "##MUTATION_RESULT##".length).trim()));
+          return;
+        } catch {
+          /* JSON 解析失败按 worker 失败处理 */
+        }
+      }
+      console.error(
+        `worker 异常退出（exit ${code}）：${target.file}\n${tailLines(err || out, 20)}\n` +
+          "—— 按\"基线失败\"计红。若源码被留在变异态，下一轮 check:residue 会自愈。",
+      );
+      resolve({ target, baselineFailed: true, ran: [], ms: 0 });
+    });
+  });
+}
+
+async function runTargetPool() {
+  const queue = [...targets];
+  const aggregated = [];
+  const worker = async () => {
+    while (queue.length > 0) {
+      const target = queue.shift();
+      if (!target) break;
+      aggregated.push(await runOneChild(target));
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(jobs, targets.length) }, worker));
+  // 并行下的偶发基线失败：真进程类测试（kill-tree 真杀树、dev-server 真起服务、
+  // serve 真 HTTP）会互相打架 —— 池排空后对这些目标**单跑复核**，单跑仍红才是
+  // 真红（与 smoke:gateway 偶发红"单跑复现再归因"同一处置）。复核走顺序路径，
+  // 此时已无并发，结论确定。
+  const redo = aggregated.filter((r) => r.baselineFailed).map((r) => r.target);
+  for (const t of redo) {
+    console.log(`\n[pool] ${t.file} 并行下基线失败 —— 单跑复核一次`);
+    const i = aggregated.findIndex((r) => r.target.file === t.file);
+    aggregated[i] = await runTargetSequential(t);
+  }
+  // 并行下的偶发**存活**同理（2026-10-11 全量审计实测：headless-entries 会在测试内
+  // 重建共享的 dist-headless 并 spawn 真进程——多个 worker 的 tsc -b 抢同一目录，
+  // spawn 测试可能跑到旧/半成品构建上，杀手断言空转成假存活）。有存活位点的目标
+  // 一律单跑复核，单跑仍存活才计入 FAIL——宁可多花几分钟，不可让并行把门禁变松。
+  const survivorTargets = aggregated
+    .filter((r) => !r.baselineFailed && r.ran.some((m) => !m.killed))
+    .map((r) => r.target);
+  for (const t of survivorTargets) {
+    console.log(`\n[pool] ${t.file} 并行下有存活位点 —— 单跑复核一次`);
+    const i = aggregated.findIndex((r) => r.target.file === t.file);
+    aggregated[i] = await runTargetSequential(t);
+  }
+  // 报告按 TARGETS 顺序输出：完成顺序是调度顺序，报告顺序必须是稳定顺序。
+  const order = new Map(targets.map((t, i) => [t.file, i]));
+  aggregated.sort((a, b) => (order.get(a.target.file) ?? 0) - (order.get(b.target.file) ?? 0));
+  return aggregated;
+}
+
+if (poolEligible) {
+  results.push(...(await runTargetPool()));
+}
+if (!poolEligible) {
+  for (const target of targets) {
+    results.push(await runTargetSequential(target));
+  }
+}
+
+/** 单个目标的完整判定（基线 → 逐个变异 → 还原 → 记账）。顺序路径与 worker 的
+ * 内联复核共用；pool 模式下父进程对并行基线失败的目标也会调它单跑复核。 */
+async function runTargetSequential(target) {
   const startedAt = Date.now();
   const filePath = path.join(ROOT, target.file);
   const original = fs.readFileSync(filePath, "utf8");
@@ -1872,7 +2054,7 @@ for (const target of targets) {
           .map((m) => (m.siteCount > 1 ? `${m.op}(×${m.siteCount})` : m.op))
           .join(", ")}`,
     );
-    continue;
+    return { target, baselineFailed: false, ran: [], ms: Date.now() - startedAt, siteTotal };
   }
 
   // 基线：原文件必须通过，否则后面结论不可信。这里用长超时 —— 要的是
@@ -1885,8 +2067,7 @@ for (const target of targets) {
     for (const o of baselineCapture.outputs) {
       console.error(`[baseline:${o.file}] status=${o.status ?? "ok"}\n${o.tail}`);
     }
-    results.push({ target, baselineFailed: true, ran: [], ms: Date.now() - startedAt });
-    continue;
+    return { target, baselineFailed: true, ran: [], ms: Date.now() - startedAt };
   }
 
   // 内存兜底（正常退出 / 收到信号）+ 磁盘备份（被强杀）。两者都要：
@@ -1922,11 +2103,20 @@ for (const target of targets) {
     console.error(`严重：${target.file} 未还原！`);
     process.exit(2);
   }
-  clearPendingRecord();
-  results.push({ target, baselineFailed: false, ran, ms: Date.now() - startedAt, siteTotal });
+  clearPendingRecord(filePath);
+  return { target, baselineFailed: false, ran, ms: Date.now() - startedAt, siteTotal };
 }
 
 if (listOnly) process.exit(0);
+
+// worker 模式（--no-report）：报告/summary/漂移检查全部归父进程聚合后做一次，
+// 子进程只交结果。这里打印结果行后即退，后面整段报告都不属于子进程。
+if (noReport) {
+  for (const r of results) {
+    if (resultJson) process.stdout.write(`##MUTATION_RESULT##${JSON.stringify(r)}\n`);
+  }
+  process.exit(0);
+}
 
 // ---- 报告 ----
 console.log("");
@@ -2037,6 +2227,33 @@ if (slowest.length > 0 && slowest[0].ms > 0) {
 // 为什么必须在**报告之后**判：漂移不影响"这次的变异有没有被杀死"，它说的是
 // "被验证的那批位点，和源码里现在的位点，是不是同一批"。放在存活检查之后，
 // 是为了让最严重的两个原因（存活变异 / 基线测试失败）先报出来。
+// GitHub Actions 的 job 对外只有绿/红一个 bit，而这次运行真正的产出是
+// 「杀死 N/M」和存活清单 —— 写进 $GITHUB_STEP_SUMMARY，让人在 job 页面直接
+// 读到数字，不必去翻 log（log 要登录才能取，且 job 被 timeout 掐掉时它最有用
+// 的那部分会一起丢）。
+//
+// 放在脚本里而不是 workflow 里：只有这里知道自己的口径（aggregate 的"全杀"
+// 不等价于 site 的"每处都验过"）与存活清单的格式。workflow 保持只认
+// `npm run mutation:audit`，不复制日志格式。
+function writeStepSummary(verdict, extra) {
+  const p = process.env.GITHUB_STEP_SUMMARY;
+  if (!p) return;
+  const lines = [
+    `杀死 ${totalKilled}/${totalRan}（${overall}%）· 耗时 ${fmtMs(totalMs)}`,
+    `口径 ${mode} · 本次参与 ${results.length} 个目标`,
+    ...extra,
+  ];
+  try {
+    fs.appendFileSync(
+      p,
+      `## 变异审计（${mode} 口径）\n\n**${verdict}**\n\n${lines.map((l) => `- ${l}`).join("\n")}\n\n`,
+    );
+  } catch (e) {
+    // summary 是给人读的旁证，写不进去不能反过来让门禁失明。
+    console.error(`（job summary 写入失败：${e.message} —— 不影响本次判定）`);
+  }
+}
+
 if (mode === "site") {
   const drifted = [];
   for (const r of results) {
@@ -2056,6 +2273,10 @@ if (mode === "site") {
         "处置：跑 `npm run mutation:audit` 确认新位点也全杀，\n" +
         "      然后 `node scripts/site-baseline.mjs --write` 更新基线并提交。\n",
     );
+    writeStepSummary(
+      `FAIL · ${drifted.length} 个目标的位点数比基线多`,
+      drifted.map((d) => `${d.file}  基线 ${d.was} → 当前 ${d.now}`),
+    );
     process.exit(1);
   }
 }
@@ -2073,6 +2294,10 @@ if (baselineFailures.length > 0) {
     "\n基线失败的常见原因：测试文件路径写错 / 测试被改坏 / 被测源码有语法错误。\n" +
       "不要让它跳过就算了 —— 那等于这个目标从来没有门禁。\n",
   );
+  writeStepSummary(
+    `FAIL · ${baselineFailures.length} 个目标的基线测试未通过`,
+    baselineFailures.map((r) => `${r.target.file}  ::  ${testFilesOf(r.target).join(", ")}`),
+  );
   process.exit(1);
 }
 
@@ -2088,6 +2313,10 @@ if (survivors.length > MAX_SURVIVORS) {
       (mode === "site"
         ? ""
         : "提示：这是 aggregate 口径。若存活项标着「聚合 N 处」，用 --audit 逐点定位是哪一处。\n"),
+  );
+  writeStepSummary(
+    `FAIL · ${survivors.length} 个变异存活`,
+    survivors.map((s) => `${s.file}  ::  ${s.op} ${s.line ? `@${s.line} 行` : `(聚合 ${s.siteCount} 处)`}`),
   );
   process.exit(1);
 }
@@ -2107,3 +2336,17 @@ if (mode === "site") {
     console.log(`     需要完整结论时跑：npm run mutation:site`);
   }
 }
+
+writeStepSummary(
+  "PASS · 无存活变异",
+  mode === "site"
+    ? [`全部 ${totalRan} 处位点已逐点验证（每处单独变异都被断言发现）`]
+    : [
+        "每个算子至少有一处被断言覆盖",
+        ...(unverifiedSites > 0
+          ? [
+              `⚠️ aggregate 口径：${totalSites} 处位点里约 ${unverifiedSites} 处未逐点验证，不能读成"每一处都有断言"`,
+            ]
+          : []),
+      ],
+);

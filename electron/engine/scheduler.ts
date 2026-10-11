@@ -13,6 +13,7 @@ import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
 import type { CircuitBreaker } from "../sandbox/circuit-breaker";
 import type { BatchGuard } from "./batch-guard";
+import { createLoopDetector, LoopDetector, type LoopDetectionOptions } from "../sandbox/loop-detector";
 import { classifyFailure } from "../audit-log";
 
 export interface DispatchOutcome {
@@ -131,6 +132,26 @@ export interface SchedulerOptions {
   rateLimitMaxBackoffMs?: number;
   /** 节流可观测性：实际等待了多久、连续第几次限流。 */
   onThrottle?: (waitMs: number, streak: number) => void;
+  /**
+   * 循环输出检测（2026-10-11 竞品刷新，闭环 2026-10-02 遗留的 loop detection 软挂起项）。
+   *
+   * 每**一次派发**一个 `LoopDetector`：agent 的日志流里连续出现同一条长行
+   * （默认 8 条、每条 ≥16 字符，逐字相同）即判定卡死空转——中止本 run、
+   * digest 写明 `[loop]` 与那行内容，任务进修复轮。它抓的是心跳抓不到的
+   * 那一半：idle 只管"不出声"，这里管"在出声但原地打转"。
+   *
+   * `false` 显式关闭；缺省 = 默认参数开启（threshold 8 / minLineLength 16）。
+   * `createAgentLayer` 装配即生效；直接 `new Scheduler` 的旧测试没有传它，
+   * 也吃同一默认——只是既有夹具的日志流都很短，碰不到阈值。
+   */
+  loopDetection?: LoopDetectionOptions | false;
+  /**
+   * per-agent 预算闸的可观测出口（2026-10-11 竞品刷新，学 paperclip 的
+   * per-agent budget + throttling）：某 agent 的累计上报用量到达其 manifest
+   * `limits.maxTokens` 后被跳过时触发。宿主可把它写进事件流/看板，让
+   * "为什么没人接单"从猜测变成一条可读的记录。
+   */
+  onBudgetGate?: (agentId: string, used: number, cap: number) => void;
 }
 
 /**
@@ -166,6 +187,14 @@ export class Scheduler {
   private throttleUntil = 0;
   /** 连续 rate-limit 次数（成功一次即清零）。 */
   private rateLimitStreak = 0;
+  /**
+   * per-agent 用量账本（本调度器生命周期 = 一个 run）：key 是 agentId，
+   * 值是事件流里累计的**上报** token 数。预算闸（admitBudget）的数据面。
+   * CLI/HTTP 桥不报 usage 就没有账——与 run 级预算同一口径的诚实边界。
+   */
+  private readonly usageByAgent = new Map<string, number>();
+  /** 本批 planPool 里因预算闸被跳过的 agent，按任务归档；miss digest 要说清"为什么没人"。 */
+  private budgetSkippedByTask = new Map<string, Set<string>>();
 
   constructor(
     private adapters: AgentAdapter[],
@@ -311,6 +340,7 @@ export class Scheduler {
     tasks: Task[],
     preferredAgentId?: string,
   ): Promise<Array<AgentAdapter | undefined>> {
+    this.budgetSkippedByTask = new Map();
     if (preferredAgentId) {
       const exact = this.findAdapter(preferredAgentId);
       if (!exact) return tasks.map(() => undefined);
@@ -333,7 +363,9 @@ export class Scheduler {
     if (available.length === 0) return tasks.map(() => undefined);
     const router = this.opts.router;
     if (!router) {
-      return tasks.map((_, i) => this.admitBreaker(available[i % available.length]!, available));
+      return tasks.map(
+        (task, i) => this.admitBudget(this.admitBreaker(available[i % available.length]!, available), task.id, available),
+      );
     }
 
     const inflight = new Map<string, number>();
@@ -352,7 +384,11 @@ export class Scheduler {
       const wanted =
         (decision.agentId ? available.find((a) => a.meta.id === decision.agentId) : undefined) ??
         available[i % available.length];
-      const picked = this.admitConcurrency(this.admitBreaker(wanted, available), inflight, available);
+      const picked = this.admitConcurrency(
+        this.admitBreaker(this.admitBudget(wanted, task.id, available), available),
+        inflight,
+        available,
+      );
       if (picked) inflight.set(picked.meta.id, (inflight.get(picked.meta.id) ?? 0) + 1);
       return picked;
     });
@@ -372,6 +408,47 @@ export class Scheduler {
     if (!breaker) return wanted;
     if (breaker.allow(wanted.meta.id)) return wanted;
     return available.find((a) => a.meta.id !== wanted.meta.id && breaker.allow(a.meta.id));
+  }
+
+  /**
+   * 预算闸（2026-10-11 竞品刷新，学 paperclip 的 per-agent budget + throttling）：
+   * manifest `limits.maxTokens` 声明单个执行器一个 run 里可烧的**上报**用量
+   * 上限，累计上报到达后本 run 不再接新单。节流的是**派单**，不是杀 run——
+   * 在途的自然跑完，单次调用可穿透（与 run 级 `maxTokensPerRun` 同为软上限）。
+   *
+   * 排在 `admitBreaker` 之后链式兜底：熔断选出的替代者若也已超预算，
+   * 在此再让一次位；替代候选同时要求熔断可接（不把 open 的 agent 捡回来）。
+   * 点名路径不经过本闸——与熔断同语义：显式意图优先于能力闸。
+   * 跳过动作通过 `onBudgetGate` 可观测，并记入 miss digest 的归因。
+   */
+  private admitBudget(
+    wanted: AgentAdapter | undefined,
+    taskId: string,
+    available: AgentAdapter[],
+  ): AgentAdapter | undefined {
+    if (!wanted) return undefined;
+    const capOf = (id: string): number | undefined => this.opts.registry?.get(id)?.limits.maxTokens;
+    const underCap = (id: string): boolean => {
+      const cap = capOf(id);
+      return cap === undefined || (this.usageByAgent.get(id) ?? 0) < cap;
+    };
+    if (underCap(wanted.meta.id)) return wanted;
+    this.opts.onBudgetGate?.(
+      wanted.meta.id,
+      this.usageByAgent.get(wanted.meta.id) ?? 0,
+      capOf(wanted.meta.id)!,
+    );
+    let skips = this.budgetSkippedByTask.get(taskId);
+    if (!skips) {
+      skips = new Set();
+      this.budgetSkippedByTask.set(taskId, skips);
+    }
+    skips.add(wanted.meta.id);
+    const breaker = this.opts.breaker;
+    return available.find(
+      (a) =>
+        a.meta.id !== wanted.meta.id && underCap(a.meta.id) && (!breaker || breaker.allow(a.meta.id)),
+    );
   }
 
   /**
@@ -433,10 +510,14 @@ export class Scheduler {
     const jobs = tasks.map(async (task, i) => {
       const preferred = agentPool[i];
       if (!preferred) {
+        const skips = this.budgetSkippedByTask.get(task.id);
         const miss: DispatchOutcome = {
           taskId: task.id,
           ok: false,
-          logDigest: "no agent available",
+          logDigest:
+            skips && skips.size > 0
+              ? `no agent available（预算闸跳过：${[...skips].join("、")} 的上报用量已到 limits.maxTokens）`
+              : "no agent available",
           events: [],
           errorClass: "no-agent",
         };
@@ -609,7 +690,10 @@ export class Scheduler {
       this.liveRuns.set(handle.runId, handle);
       // 活性起点：派发成功即"活着"，此后每条 agent 事件续约（见 collectToTerminal）。
       this.opts.onTaskActivity?.(task.id, startedAt);
-      const outcome = await this.collectToTerminal(handle, task.id);
+      // 循环输出检测：每**一次派发**一个检测器（作用域 = 单 run，天然不跨批、
+      // 不跨任务，无需任何 reset 接线）。`false` = 显式关闭。
+      const loopDetector = createLoopDetector(this.opts.loopDetection);
+      const outcome = await this.collectToTerminal(handle, task.id, loopDetector);
       const withMeta: DispatchOutcome = {
         ...outcome,
         agentId: agent.meta.id,
@@ -647,7 +731,11 @@ export class Scheduler {
     }
   }
 
-  private async collectToTerminal(handle: RunHandle, taskId: string): Promise<DispatchOutcome> {
+  private async collectToTerminal(
+    handle: RunHandle,
+    taskId: string,
+    loopDetector?: LoopDetector,
+  ): Promise<DispatchOutcome> {
     const adapter = this.findAdapter(handle.agentId);
     if (!adapter) {
       return { taskId, ok: false, logDigest: `agent ${handle.agentId} 已不在池中（可能已注销）`, events: [] };
@@ -657,10 +745,31 @@ export class Scheduler {
     for await (const event of adapter.collect(handle)) {
       // 每条事件都是一次"活着"的证明（含失败事件——失败了也该显示，而不是静默）。
       this.opts.onTaskActivity?.(taskId, Date.now());
+      // 用量账本：任何事件上执行器自报的 usage 都计入（终态事件带的是本 run 累计值）。
+      if (event.usage?.tokens !== undefined && event.usage.tokens > 0) {
+        this.usageByAgent.set(handle.agentId, (this.usageByAgent.get(handle.agentId) ?? 0) + event.usage.tokens);
+      }
       if (event.kind === "log") {
         // Observation surface of the cross-action state machine: what the
         // agent did (installs, publishes, pushes) betrays itself in its log.
         this.opts.actionGate?.observe(event.text);
+        // 循环输出检测：判定卡死即中止本 run（abort 是尽力而为——失败也照样
+        // 收口，适配器自己的 deadline 还在兜底）。digest 里写明 `[loop]` 与
+        // 触发的那行内容，让"为什么败"可直接读，classifyFailure 据此归 "loop"。
+        if (loopDetector) {
+          const finding = loopDetector.observe(event.text);
+          if (finding) {
+            try {
+              await adapter.abort(handle);
+            } catch {
+              // 中止被拒：不再等待，deadline/idle 仍在兜底
+            }
+            logs.push(
+              `[loop] 连续 ${finding.count} 条相同输出，判定卡死空转，已中止本 run：${finding.repeatedLine.slice(0, 120)}`,
+            );
+            break;
+          }
+        }
         logs.push(event.text);
       } else if (event.kind === "completed") {
         terminalOk = true;

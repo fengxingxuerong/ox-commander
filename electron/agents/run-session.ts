@@ -40,10 +40,13 @@ export class RunSession {
    *
    * 结束后只丢弃 `log`：`completed` / `aborted` 这类终态事件**仍要入队**，
    * 否则消费者会错过 run 的结局。
+   *
+   * `usage`（可选）跟着事件走：内置执行器在终态事件上带上本 run 累计的
+   * token 用量，调度器据此维护 per-agent 用量账本（预算闸的数据面）。
    */
-  push(kind: AgentEvent["kind"], text: string) {
+  push(kind: AgentEvent["kind"], text: string, usage?: AgentEvent["usage"]) {
     if (this.finished && kind === "log") return;
-    this.events.push({ kind, text, timestamp: Date.now() });
+    this.events.push({ kind, text, timestamp: Date.now(), ...(usage ? { usage } : {}) });
     this.wake();
   }
 

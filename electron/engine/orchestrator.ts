@@ -70,6 +70,19 @@ export interface OrchestratorDeps {
    */
   fileExists?: (root: string, rel: string) => boolean;
   /**
+   * 交付后的可选 git 导出（5.7 本地半边，2026-10-11）：把本次 run 的 zone 内
+   * 改动导出成 `git 分支 + commit`。**为什么注入**：引擎层至今零进程/文件系统
+   * 依赖（verify/journal/conflicts/usage 同一口径），spawn 属于宿主实现。
+   * 什么时候被调：`settings.exportDeliveryBranch` 为真且本回调在场 —— 两个条件
+   * 缺一不可（回调缺席 = 宿主没接，开关开着也不动）。永不 throw（实现自己的
+   * 契约是把失败折进结果对象），引擎侧再兜一层 try/catch：导出失败只写日志，
+   * **绝不影响交付结论** —— 本地硬门禁已在交付前过了，导出只是分发层。
+   */
+  exportDelivery?: (input: {
+    projectRoot: string;
+    zones: string[];
+  }) => Promise<import("./git-export").GitExportResult>;
+  /**
    * 跨动作状态机（竞品调研 §5.1，可选）：批次边界上由引擎 reset —— 批次是
    * "已发生过什么"的生命周期单位。观察面（agent 日志）与执行面（验证命令
    * 升级审查）分别由 scheduler 和 verifier 持有同一个实例。
@@ -541,6 +554,35 @@ export class OrchestratorEngine {
     );
   }
 
+  /**
+   * 交付后的可选 git 导出（5.7 本地半边）。两个开关都必须开：
+   * `settings.exportDeliveryBranch`（操作者意图）与 `deps.exportDelivery`
+   * （宿主实现）。**失败只写日志，绝不影响交付结论**——本地硬门禁在交付前
+   * 已经过了，导出只是分发层；这一层坏掉不追认门禁为假。
+   */
+  private async maybeExportDelivery(projectRoot: string, batches: Task[][]): Promise<void> {
+    if (!this.deps.settings.exportDeliveryBranch || !this.deps.exportDelivery) return;
+    const zones = [...new Set(batches.flat().map((t) => t.zone))];
+    try {
+      const result = await this.deps.exportDelivery({ projectRoot, zones });
+      if (result.ok && !result.skipped) {
+        this.cb.onLog(
+          `[git-export] 已导出分支 ${result.branch}（commit ${result.commit ?? "无"}，${result.filesCommitted ?? 0} 个文件）`,
+        );
+      } else if (result.skipped === "no-repo") {
+        this.cb.onLog("[git-export] 跳过：项目不在 git 仓库内（要导出请先 git init）");
+      } else if (result.skipped === "no-changes") {
+        this.cb.onLog("[git-export] 跳过：工作树没有可提交的改动");
+      } else if (result.skipped === "no-zone-files") {
+        this.cb.onLog("[git-export] 跳过：改动都落在任务 zone 之外，没有可归属的文件");
+      } else {
+        this.cb.onLog(`[git-export] 失败（不影响交付）：${result.reason}`);
+      }
+    } catch (err) {
+      this.cb.onLog(`[git-export] 失败（不影响交付）：${(err as Error).message}`);
+    }
+  }
+
   private async runPipeline(
     batches: Task[][],
     projectRoot: string,
@@ -851,6 +893,7 @@ export class OrchestratorEngine {
           round,
           ...this.verifiedFieldsFor(report),
         });
+        await this.maybeExportDelivery(projectRoot, batches);
         this.cb.onStage("DONE");
         return report;
       }
@@ -975,6 +1018,7 @@ export class OrchestratorEngine {
                 round,
                 ...this.verifiedFieldsFor(finalReport),
               });
+              await this.maybeExportDelivery(projectRoot, batches);
               this.cb.onStage("DONE");
               return finalReport;
             }

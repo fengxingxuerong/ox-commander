@@ -76,6 +76,8 @@ export type FailureClass =
   | "no-agent"
   /** 契约路径违规：任务点名的文件没落在盘上（交成了等价布局也算）。 */
   | "contract"
+  /** 循环空转：同一输出反复刷，被循环检测中止（不是超时——它一直在"出声"）。 */
+  | "loop"
   /** 归类不出具体原因 —— 与"没有 class"不同，这是明确的一条结论。 */
   | "unknown";
 
@@ -96,6 +98,7 @@ export const FAILURE_CLASSES = [
   "resource",
   "no-agent",
   "contract",
+  "loop",
   "unknown",
 ] as const satisfies readonly FailureClass[];
 
@@ -219,6 +222,13 @@ export interface AgentEvent {
   kind: AgentEventKind;
   text: string;
   timestamp: number;
+  /**
+   * 本 run 累计的用量上报（2026-10-11 竞品刷新，per-agent 预算闸的数据面）。
+   * 只能由执行器自己填——平台看不见 CLI 子进程 / 远端桥的 token 消耗，
+   * 与 run 级预算同一口径：只统计端点/执行器主动上报的用量。内置执行器在
+   * 终态事件上带它；HTTP 桥远端若在事件里带同名字段也会被调度器计入。
+   */
+  usage?: { tokens?: number; costMs?: number };
 }
 
 export interface RunHandle {
@@ -387,6 +397,14 @@ export interface ProjectSettings {
    * 想禁用调用应走能力路由，而不是把预算设为 0。
    */
   maxTokensPerRun?: number;
+  /**
+   * 交付后把本次 run 的 zone 内改动导出成 `git 分支 + commit`（5.7 本地半边，
+   * 2026-10-11）。缺省 = 关。分支名 `oxcommander/delivery-<时间戳>`；commit 只收
+   * 落在任务 zone 内的路径（zone 内既有未提交改动会一并进 commit —— 要干净
+   * 导出请从干净工作区起跑）；**永不 push**，PR 与 CI 回流是 5.7 的远端半边。
+   * 导出失败只写日志，不影响交付结论。
+   */
+  exportDeliveryBranch?: boolean;
   /**
    * 本次 run 的墙钟上限（毫秒）。只在批/轮边界生效，不掐断在途请求 ——
    * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。

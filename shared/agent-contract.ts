@@ -65,6 +65,18 @@ export interface AgentLimits {
   idleTimeoutMs: number;
   /** Output budget per run. */
   maxStdoutBytes: number;
+  /**
+   * 本执行器在一个 run 里可消耗的**上报** token 用量上限（2026-10-11 竞品刷新，
+   * 学 paperclip 的 per-agent budget + throttling）。缺省 = 不限。
+   *
+   * 软上限，语义与 run 级 `maxTokensPerRun` 一致：累计**上报**用量到达后，
+   * 调度器本 run 不再给它派新单（在途的自然跑完，单次调用可穿透）；
+   * 节流的是派单，不是杀 run。可见性同 run 级预算——只看得见执行器主动
+   * 上报的用量（内置执行器在终态事件上带 usage；CLI/HTTP 桥不报就无约束力，
+   * 这是事实边界，不是缺陷）。点名派发不经过这道闸（与熔断同语义：
+   * 显式意图优先于能力闸）。
+   */
+  maxTokens?: number;
 }
 
 export const DEFAULT_AGENT_LIMITS: AgentLimits = {

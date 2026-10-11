@@ -57,12 +57,19 @@ function engine(opts: {
   failFirstRound: boolean;
   maxRounds?: number;
   events: string[];
+  exportDeliveryBranch?: boolean;
+  exportDelivery?: OrchestratorDeps["exportDelivery"];
 }): OrchestratorEngine {
   const deps: OrchestratorDeps = {
     llm: fakeLlm(),
     scheduler: fakeScheduler(opts.failFirstRound),
     verify: async () => makeReport(!opts.failFirstRound || undefined as never),
-    settings: { ...DEFAULT_SETTINGS, maxRepairRounds: opts.maxRounds ?? 3 },
+    settings: {
+      ...DEFAULT_SETTINGS,
+      maxRepairRounds: opts.maxRounds ?? 3,
+      ...(opts.exportDeliveryBranch !== undefined ? { exportDeliveryBranch: opts.exportDeliveryBranch } : {}),
+    },
+    ...(opts.exportDelivery ? { exportDelivery: opts.exportDelivery } : {}),
   };
   // verify passes when scheduler's first round succeeded; else fails until repair.
   // 第 1 次调用是**基线验证**（引擎动手前跑的），它必须返回绿：基线红会往日志与
@@ -2952,5 +2959,111 @@ describe("契约路径合规 —— 多 gap 时不跳过后续任务", () => {
     expect(String(flip)).toContain("t2 缺 src/report/report.js");
     expect(String(flip)).not.toContain("t1 缺");
     expect(status).toContain("t2:failed");
+  });
+});
+
+/**
+ * 交付后的可选 git 导出（5.7 本地半边，2026-10-11）。钉的是编排侧接线：
+ * 两个开关缺一不可、成功/skip/失败四种结论各归各的日志、导出失败绝不影响交付。
+ * 结论映射里的字符串逐条断言 —— === 互换的 mutant 会把 no-repo 的输入说成
+ * no-changes 的原因，这些断言就是为它们准备的。
+ */
+describe("OrchestratorEngine · 交付后 git 导出", () => {
+  const exported = (input: { projectRoot: string; zones: string[] }) => ({
+    ok: true as const,
+    branch: "oxcommander/delivery-x",
+    commit: "abc1234",
+    filesCommitted: 1,
+    ...input,
+  });
+
+  it("开关开 + 实现在场：交付后以全部任务 zone 调用一次，日志带分支与 commit", async () => {
+    const events: string[] = [];
+    const calls: Array<{ projectRoot: string; zones: string[] }> = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      exportDelivery: async (input) => {
+        calls.push(input);
+        return exported(input);
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toEqual([{ projectRoot: ".", zones: ["src/core"] }]);
+    expect(events.some((l) => l.includes("已导出分支 oxcommander/delivery-x") && l.includes("abc1234"))).toBe(true);
+  });
+
+  it("开关开但实现缺席：什么都不发生——连失败日志都没有", async () => {
+    const events: string[] = [];
+    const eng = engine({ failFirstRound: false, events, exportDeliveryBranch: true });
+    await eng.execute([TASKS], ".");
+    expect(events.filter((l) => l.includes("[git-export]"))).toHaveLength(0);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("开关关：实现即使在场也不调用", async () => {
+    const events: string[] = [];
+    const calls: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: false,
+      exportDelivery: async (input) => {
+        calls.push(input);
+        return exported(input);
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(calls).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-export]"))).toHaveLength(0);
+  });
+
+  it("三种 skip 结论各说各的话（=== 互换的 mutant 会张冠李戴）", async () => {
+    const cases: Array<{ skipped: "no-repo" | "no-changes" | "no-zone-files"; phrase: string }> = [
+      { skipped: "no-repo", phrase: "项目不在 git 仓库内" },
+      { skipped: "no-changes", phrase: "工作树没有可提交的改动" },
+      { skipped: "no-zone-files", phrase: "改动都落在任务 zone 之外" },
+    ];
+    for (const c of cases) {
+      const events: string[] = [];
+      const eng = engine({
+        failFirstRound: false,
+        events,
+        exportDeliveryBranch: true,
+        exportDelivery: async () => ({ ok: true, skipped: c.skipped }),
+      });
+      await eng.execute([TASKS], ".");
+      expect(events.some((l) => l.includes(c.phrase))).toBe(true);
+    }
+  });
+
+  it("导出失败：日志写明原因并强调不影响交付，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      exportDelivery: async () => ({ ok: false, reason: "git checkout 失败：boom" }),
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-export] 失败（不影响交付）：git checkout 失败：boom"))).toBe(true);
+    expect(events.filter((l) => l.includes("已导出分支"))).toHaveLength(0);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("导出实现自己抛错：同一条失败日志接住，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      exportDelivery: async () => {
+        throw new Error("disk gone");
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-export] 失败（不影响交付）：disk gone"))).toBe(true);
+    expect(events).toContain("stage:DONE");
   });
 });

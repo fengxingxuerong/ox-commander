@@ -14,6 +14,10 @@
  * 最后一条是补上的盲区：旧实现只看 `index.json`，台账不在就直接宣布"工作区干净"，
  * 手工清台账、`clearPendingRecord` 的删除被杀软挡住、或并发两轮互相清台账时，
  * 活体变异体就带着一个"干净"的结论进到 `npm test`（V8 堆 4.6GB → OOM 且不退出）。
+ *
+ * 2026-10-11：台账从单槽 `index.json` 改成**按文件一条**（`<备份名>.json`）——
+ * 并行 worker（--jobs 按目标分进程）各写各的记录，谁也顶不掉谁；跨会话的
+ * 活体残留判定也从"全场互斥"收窄到"本轮要动的文件"。
  */
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
@@ -24,7 +28,6 @@ import { afterEach, describe, expect, it } from "vitest";
 const ROOT = path.resolve(__dirname, "..");
 const SCRIPT = path.join(ROOT, "scripts", "mutation-check.mjs");
 const PENDING_DIR = path.join(ROOT, "scripts", ".mutation-pending");
-const PENDING_INDEX = path.join(PENDING_DIR, "index.json");
 
 /** 一次运行的结果，测试只看这三样。 */
 interface RecoverRun {
@@ -45,11 +48,6 @@ function makeTarget(original: string, current: string): string {
   const backup = path.join(PENDING_DIR, "target.ts.orig");
   fs.writeFileSync(backup, original, "utf8");
   return file;
-}
-
-function writeIndex(record: unknown): void {
-  fs.mkdirSync(PENDING_DIR, { recursive: true });
-  fs.writeFileSync(PENDING_INDEX, typeof record === "string" ? record : JSON.stringify(record), "utf8");
 }
 
 /**
@@ -79,7 +77,6 @@ function loadPending(
     "path",
     "ROOT",
     "PENDING_DIR",
-    "PENDING_INDEX",
     "process",
     "relFromRoot",
     `${src.slice(start, end)}\nreturn { pendingBackupName, armPendingRecord };`,
@@ -89,7 +86,6 @@ function loadPending(
     path,
     ROOT,
     PENDING_DIR,
-    PENDING_INDEX,
     processImpl,
     (p: string) => path.relative(ROOT, p).split(path.sep).join("/"),
   ) as {
@@ -98,8 +94,26 @@ function loadPending(
   };
 }
 
+/** 某个目标文件的台账记录路径。makeTarget 的目标在 tmpdir（ROOT 之外），
+ *  pendingBackupName 对 ROOT 外路径会产生带 ".." 的名字，path.join 会把记录解析到
+ *  PENDING_DIR 之外——所以测试用**固定**记录名（recover 是扫描 *.json，不重算路径；
+ *  arm/clear 的名字编码一致性由 armed.ts 在 PENDING_DIR 内的那条用例钉住）。 */
+const RECORD = path.join(PENDING_DIR, "target.ts.orig.json");
+const OTHER_RECORD = path.join(PENDING_DIR, "other.ts.orig.json");
+
+/** 给指定路径写一条台账（损坏内容走 string）。记录路径由用例自己给：
+ *  recover 是扫描 *.json 不重算路径；arm/clear 的编码一致性由各自的用例钉住。 */
+function writeRecord(recordPath: string, record: unknown): void {
+  fs.mkdirSync(PENDING_DIR, { recursive: true });
+  fs.writeFileSync(
+    recordPath,
+    typeof record === "string" ? record : JSON.stringify(record),
+    "utf8",
+  );
+}
+
 /**
- * 台账已丢（没有 `index.json`）而备份仍在的现场。
+ * 台账已丢（没有任何记录文件）而备份仍在的现场。
  * 源文件放在 pending 目录**里面**：那里 git 已忽略，又能被备份名映射回来。
  */
 function makeOrphan(original: string, current: string): { file: string; backup: string } {
@@ -112,8 +126,25 @@ function makeOrphan(original: string, current: string): { file: string; backup: 
   return { file, backup };
 }
 
+/**
+ * 跑一次 `--recover-only`。
+ *
+ * ⚠️ **`status` 为 null 不等于"它退出了某个码"**：那是**子进程根本没起来**
+ * （`spawnSync` 的 `error` 才有原因）。2026-10-11 在一台受管 Windows 上实测到
+ * `spawnSync EBUSY` —— 该环境阻断子进程的 stdio 管道，直接执行同一个 node.exe
+ * 却正常。那种情况下每条断言都只看到 `expected null to be 2`，排查者会误以为
+ * 是判据脚本的退出码逻辑坏了，而真相在环境那一层。
+ *
+ * 所以 spawn 失败在这里**当场说破并带上 error**，不让它伪装成一个退出码。
+ */
 function recoverOnly(): RecoverRun {
   const r = spawnSync(process.execPath, [SCRIPT, "--recover-only"], { encoding: "utf8" });
+  if (r.error) {
+    throw new Error(
+      `无法 spawn 子进程跑判据脚本（status=null 表示它没起来，不是它退了码）：` +
+        `${r.error.message}。若 error 是 EBUSY/EPIPE 一类，先查宿主是否阻断了子进程的 stdio 管道。`,
+    );
+  }
   return { status: r.status, out: r.stdout ?? "", err: r.stderr ?? "" };
 }
 
@@ -131,18 +162,23 @@ afterEach(() => {
  *
  * 也不用"台账文件在不在"当代理指标：2026-10-09 实测到一次假红 —— 另一轮变异跑到
  * 两次改写的间隙（源码已还原、台账还在），旧断言必红，而那时并不会 OOM。
- * OOM 的直接原因是活体变异体，所以就看它。
+ * OOM 的直接原因是活体变异体，所以就看它。台账按文件一条后这里逐条扫。
  */
 function liveMutant(): string | null {
-  if (!fs.existsSync(PENDING_INDEX)) return null;
-  let rec: { file?: string; backup?: string };
-  try {
-    rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8")) as { file?: string; backup?: string };
-  } catch {
-    return "台账不可读";
+  if (!fs.existsSync(PENDING_DIR)) return null;
+  const records = fs.readdirSync(PENDING_DIR).filter((n) => n.endsWith(".json"));
+  for (const name of records) {
+    const record = path.join(PENDING_DIR, name);
+    let rec: { file?: string; backup?: string };
+    try {
+      rec = JSON.parse(fs.readFileSync(record, "utf8")) as { file?: string; backup?: string };
+    } catch {
+      return "台账不可读";
+    }
+    if (!rec.file || !rec.backup || !fs.existsSync(rec.backup)) return "台账指向的文件或备份缺失";
+    if (fs.readFileSync(rec.file, "utf8") !== fs.readFileSync(rec.backup, "utf8")) return rec.file;
   }
-  if (!rec.file || !rec.backup || !fs.existsSync(rec.backup)) return "台账指向的文件或备份缺失";
-  return fs.readFileSync(rec.file, "utf8") === fs.readFileSync(rec.backup, "utf8") ? null : rec.file;
+  return null;
 }
 
 describe("mutation-check --recover-only（verify 第 1 段）", () => {
@@ -159,33 +195,34 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
 
   it("restores the mutated file, clears the record, and exits 2 so nobody reads a dirty PASS", () => {
     const file = makeTarget('if (decision === "skip") {\n', 'if (decision !== "skip") {\n');
-    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig") });
+    writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig") });
 
     const run = recoverOnly();
 
     expect(run.status).toBe(2);
     expect(fs.readFileSync(file, "utf8")).toBe('if (decision === "skip") {\n');
     expect(run.err).toContain("已自动还原");
-    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+    expect(fs.existsSync(path.join(PENDING_DIR, "gone.ts.orig.json"))).toBe(false);
   });
 
   it("treats a stale record whose content already matches the backup as clean", () => {
     const file = makeTarget("same content\n", "same content\n");
-    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig") });
+    writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig") });
 
     const run = recoverOnly();
 
     expect(run.status).toBe(0);
     expect(run.out).toContain("台账已清理");
-    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+    expect(fs.existsSync(RECORD)).toBe(false);
   });
 
   it("refuses to start while another run is live — its ledger is not residue", () => {
     // `PENDING_DIR` 是仓库级全局路径：本机同时开两个会话跑门禁时，旧实现会把别人活着的
     // 台账连备份一起 `rm -rf`，那一轮被强杀后残留就彻底没人认得。
     // 这里 pid 用测试自己进程的 —— 子进程看它是别人的、且活着，判据是确定性的。
+    // check:residue 是全场卫生检查（myFiles=all），任何文件的活体台账都拦。
     const file = makeTarget("original\n", "MUTANT");
-    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: process.pid });
+    writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: process.pid });
 
     const run = recoverOnly();
 
@@ -194,25 +231,25 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
     // 现场一点不许动：文件、备份、台账都得留给那一轮自己收
     expect(fs.readFileSync(file, "utf8")).toBe("MUTANT");
     expect(fs.existsSync(path.join(PENDING_DIR, "target.ts.orig"))).toBe(true);
-    expect(fs.existsSync(PENDING_INDEX)).toBe(true);
+    expect(fs.existsSync(RECORD)).toBe(true);
   });
 
   it("still heals a ledger whose pid is not a live process", () => {
     // 与上一条只差 pid：无效 pid ⇒ 上一轮已经死了，还原照旧。
     const file = makeTarget('if (decision === "skip") {\n', 'if (decision !== "skip") {\n');
-    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: -1 });
+    writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: -1 });
 
     const run = recoverOnly();
 
     expect(run.status).toBe(2);
     expect(run.err).toContain("已自动还原");
     expect(fs.readFileSync(file, "utf8")).toBe('if (decision === "skip") {\n');
-    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+    expect(fs.existsSync(RECORD)).toBe(false);
   });
 
   it("refuses to call the workspace clean when the record is unreadable", () => {
     const file = makeTarget("original\n", "MUTANT");
-    writeIndex("{ this is not json");
+    writeRecord(RECORD, "{ this is not json");
 
     const run = recoverOnly();
 
@@ -225,14 +262,14 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
 
   it("refuses to call the workspace clean when the backup file is gone", () => {
     const file = makeTarget("original\n", "MUTANT");
-    writeIndex({ file, backup: path.join(PENDING_DIR, "target.ts.orig") });
+    writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig") });
     fs.rmSync(path.join(PENDING_DIR, "target.ts.orig"));
 
     const run = recoverOnly();
 
     expect(run.status).toBe(2);
     expect(run.out).not.toContain("无变异残留");
-    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+    expect(fs.existsSync(RECORD)).toBe(false);
   });
 
   it("leaves the target file untouched on the clean path", () => {
@@ -247,7 +284,7 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
   });
 
   it("refuses to call the workspace clean when a ledger-less backup disagrees with its source", () => {
-    // 这条钉住的是台账制的盲区：`index.json` 没了而活体变异体还在源码里时，
+    // 这条钉住的是台账制的盲区：台账没了而活体变异体还在源码里时，
     // 旧实现只会说"工作区干净"（2026-10-09 实弹：塞一份孤儿备份，退出码 0）。
     const { file } = makeOrphan("if (a === b) {\n", "if (a !== b) {\n");
 
@@ -280,11 +317,14 @@ describe("armPendingRecord · 没有落盘台账就不改写源码", () => {
 
     armPendingRecord(file, "ORIGINAL\n");
 
-    const rec = JSON.parse(fs.readFileSync(PENDING_INDEX, "utf8")) as { file: string; backup: string };
+    const record = path.join(PENDING_DIR, `${pendingBackupName(file)}.json`);
+    const rec = JSON.parse(fs.readFileSync(record, "utf8")) as { file: string; backup: string };
     expect(fs.readFileSync(rec.backup, "utf8")).toBe("ORIGINAL\n");
     // 名字里带路径：不同目录的同名文件不会顶掉同一份备份，台账丢了也还能反查源文件。
     expect(path.basename(rec.backup)).toBe("scripts__.mutation-pending__armed.ts.orig");
-    expect(pendingBackupName(file)).toBe(path.basename(rec.backup));
+    // 台账按文件一条：备份名 + .json —— 并行 worker 各写各的，谁也顶不掉谁。
+    expect(record.endsWith(".json")).toBe(true);
+    expect(rec.file).toBe(file);
   });
 
   it("备份写不下去时退出 2，而不是警告一声继续跑", () => {
@@ -406,12 +446,13 @@ describe("restoreSource · 还原写盘不能抛在 finally 里", () => {
   });
 });
 
-describe("clearPendingRecord · 只清自己这一轮的", () => {
+describe("clearPendingRecord · 只清自己这一条", () => {
   /**
-   * 按锚点抠出 `clearPendingRecord`，注入 fs/path/PENDING_INDEX 与一个假 pid ——
-   * 手法与本文件其它节一致（"pid"是运行时的，测试必须能决定"我是谁"）。
+   * 按锚点抠出 `clearPendingRecord`，注入 fs/path/PENDING_DIR/pendingBackupName
+   * 与一个假 pid —— 手法与本文件其它节一致（"pid"是运行时的，测试必须能决定"我是谁"）。
+   * 台账按文件一条后，"别人的"由**文件**天然隔离：清的只是传入 filePath 自己那份。
    */
-  function loadClear(myPid: number): () => void {
+  function loadClear(myPid: number): (filePath: string, ownsIt?: boolean) => void {
     const src = fs.readFileSync(SCRIPT, "utf8");
     const start = src.indexOf("/** 一个目标跑完");
     const nextDoc = src.indexOf("启动自愈：上一次运行被强杀");
@@ -419,38 +460,57 @@ describe("clearPendingRecord · 只清自己这一轮的", () => {
     if (start < 0 || end < 0 || end <= start) {
       throw new Error("无法在 mutation-check.mjs 里定位 clearPendingRecord（锚点被改名或移动了？）");
     }
+    const slice = src.slice(start, end);
     const factory = new Function(
       "fs",
       "path",
-      "PENDING_INDEX",
+      "PENDING_DIR",
+      "pendingBackupName",
       "process",
-      `${src.slice(start, end)}\nreturn { clearPendingRecord };`,
+      `${slice}\nreturn { clearPendingRecord };`,
     );
-    const { clearPendingRecord } = factory(fs, path, PENDING_INDEX, { pid: myPid });
-    return clearPendingRecord as () => void;
+    const { clearPendingRecord } = factory(
+      fs,
+      path,
+      PENDING_DIR,
+      loadPending({ exit: () => undefined }).pendingBackupName,
+      { pid: myPid },
+    );
+    return clearPendingRecord as (filePath: string, ownsIt?: boolean) => void;
   }
 
   it("台账属于别的 pid 时，备份与台账一个字节都不动", () => {
     const theirs = path.join(PENDING_DIR, "theirs.orig");
     fs.mkdirSync(PENDING_DIR, { recursive: true });
     fs.writeFileSync(theirs, "original\n", "utf8");
-    writeIndex({ file: path.join(ROOT, "gone.ts"), backup: theirs, pid: 999_999 });
+    const file = path.join(ROOT, "gone.ts");
+    writeRecord(path.join(PENDING_DIR, "gone.ts.orig.json"), { file, backup: theirs, pid: 999_999 });
 
-    loadClear(4242)();
+    loadClear(4242)(file);
 
     expect(fs.readFileSync(theirs, "utf8")).toBe("original\n");
-    expect(fs.existsSync(PENDING_INDEX)).toBe(true);
+    expect(fs.existsSync(path.join(PENDING_DIR, "gone.ts.orig.json"))).toBe(true);
   });
 
-  it("自己这一轮的备份与台账一起清掉", () => {
+  it("自己这一条的备份与台账一起清掉；别的文件的记录不受牵连", () => {
     const mine = path.join(PENDING_DIR, "mine.orig");
     fs.mkdirSync(PENDING_DIR, { recursive: true });
     fs.writeFileSync(mine, "original\n", "utf8");
-    writeIndex({ file: path.join(ROOT, "gone.ts"), backup: mine, pid: 4242 });
+    const file = path.join(ROOT, "gone.ts");
+    writeRecord(path.join(PENDING_DIR, "gone.ts.orig.json"), { file, backup: mine, pid: 4242 });
+    // 另一个文件（并行 worker 的现场）：同样 pid，但不在被清的 filePath 上
+    const other = path.join(ROOT, "other.ts");
+    const otherBackup = path.join(PENDING_DIR, "other.orig");
+    fs.writeFileSync(otherBackup, "original\n", "utf8");
+    writeRecord(OTHER_RECORD, { file: other, backup: otherBackup, pid: 4242 });
 
-    loadClear(4242)();
+    loadClear(4242)(file);
 
     expect(fs.existsSync(mine)).toBe(false);
-    expect(fs.existsSync(PENDING_INDEX)).toBe(false);
+    // clear 按它自己算出的记录路径清（gone.ts.orig.json），不是测试的固定名
+    expect(fs.existsSync(path.join(PENDING_DIR, "gone.ts.orig.json"))).toBe(false);
+    // 并行语义的核心断言：清 A 不许碰 B
+    expect(fs.existsSync(otherBackup)).toBe(true);
+    expect(fs.existsSync(OTHER_RECORD)).toBe(true);
   });
 });

@@ -6,12 +6,13 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **66 个目标** / 基线 **1379 处位点**。
-> 最近一次**全量** site 审计是 **1312/1312（100%）**（2026-10-05 本机 win32，EXIT 0）；此后基线随
-> 逐文件审计累加到 1379，**全量尚未重跑**。这两个数由 `check:doc-claims` 对实物核（基线取自
-> `mutation-check.mjs` 的 `SITE_BASELINE`）—— 它们随 TARGETS 增长，而增长是加代码的自然结果，
+> 判错逻辑本身被**逐位点**证明过：当前在册 **69 个目标** / 基线 **1469 处位点**。
+> **全量** site 审计由 CI 的 `mutation (site, every site)` job 每次 push 跑（Linux，60 分钟上限；
+> 最近一次 @ `c67d920` success，43 min），结论与数字（杀死 N/M、存活清单）写进该 job 的
+> **summary**，不用翻 log。这两个数里的"基线"由 `check:doc-claims` 对实物核（取自
+> `mutation-check.mjs` 的 `SITE_BASELINE`）—— 它随 TARGETS 增长，而增长是加代码的自然结果，
 > 所以**落笔即被检查**（上一版这里停在「881/881」那个时期的规模）。⚠️ 基线现值与全量审计结果是
-> 两个数：前者说"有多少处该被逐点验过"，后者说"上一次真跑全量是什么时候" —— 混着写就是自证。
+> 两个数：前者说"有多少处该被逐点验过"，后者说"这一批位点真跑全量是什么结果" —— 混着写就是自证。
 
 **总指挥智能体**：把项目需求拆解为 PRD → 任务 → zone 互斥批次，按能力路由并行下发给执行器
 （SenseNova API 池 / Codex 等 CLI / HTTP 桥接智能体），经 build + typecheck + test 多轮硬性验证后交付。
@@ -42,7 +43,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
 > | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀） |
-> | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、快照回滚 |
+> | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、循环输出检测（卡死空转即中止）、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算） |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）+ **反向 MCP server**（agent 生态节点：查状态/取凭据/派单/暂停继续） |
 > | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话 |
@@ -104,6 +105,15 @@ node dist-headless/headless/serve-main.js --port=8787
 # → http://127.0.0.1:8787/ 看状态与交付凭据
 #   /events 是 SSE 事件流（后连上的客户端会先补齐历史）
 #   POST /run 投递 spec（一次只跑一个，第二个拿 409）
+```
+
+**再进一步：定时运行**（2026-10-11，学 Orca 的 scheduled automations）：
+
+```bash
+node dist-headless/headless/serve-main.js --port=8787 \
+  --every=30m --spec=./nightly.json --schedule-state=./schedule-state.json
+# 到点自 POST /run（单 run 语义/409/SSE/鉴权零改动复用）；忙时跳过不积压；
+# 停机期间错过的触发点重启补跑一次（至多一次）；语义详见 docs/headless-protocol.md §8.1
 ```
 
 **或者把它接进 agent 生态**（反向 MCP，竞品调研 5.5）：
@@ -220,7 +230,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
   位点数涨了而基线没更新 = 新位点**没人逐点审计过**，此时「全部 N 处已逐点验证」是假象。
   这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道）
-→ vitest（2026-10-10 现跑 1794 通过 + 8 跳过，合计 1802 条，分布在 60 个有可执行用例的文件；
+→ vitest（2026-10-11 现跑 1865 通过 + 8 跳过，合计 1873 条，分布在 64 个有可执行用例的文件；
   真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建
@@ -244,16 +254,21 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 162/162（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | **1330/1330（100%）**（2026-10-05 本机 win32 全量，当时在册「64」个目标）；28.3 min 是目标更少那阵子的记录 |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | CI 每次 push 全量跑（`mutation (site, every site)` job）：最近 @ `c67d920` success、43 min。本机历史最好记录 1330/1330（2026-10-05 win32 全量，当时在册「64」个目标） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
-CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径 35 min 上限），
+CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径 60 min 上限），
 `release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
 （公开仓库），`verify.yml` 随每次 push 运行。**已推送到 `77bc033`：run 14 三 job 全绿；run 15 的两个
 `verify` job 已绿，它的 `mutation` job 落笔时仍在跑** —— 这类状态数字落笔即过时，CI 结论以 Actions
 页为准，别拿 README 当 CI 状态。
+
+`mutation (site, every site)` job 的结论与数字（杀死 N/M / 口径 / 存活清单 / 耗时）会由
+`mutation-check.mjs` 自己写进 job 的 **summary**（`GITHUB_STEP_SUMMARY`）：绿/红只有一个 bit，
+而真正要读的是"这次到底验了多少处、哪几处活着"。写不进去只报一行提示，**不参与判定** ——
+summary 是旁证，不能反过来让门禁失明。
 
 > 基线出处：[docs/2026-09-23-mutation-site-baseline.md](docs/2026-09-23-mutation-site-baseline.md)
 > （含 577 → 594 → 590 → 603 → 695 → 701 六轮快照、白名单行号漂移与平台相关等价的发现-处置记录，
@@ -359,6 +374,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 - [docs/2026-09-29-competitive-landscape-and-roadmap.md](docs/2026-09-29-competitive-landscape-and-roadmap.md) — 竞品地形与优化方案（GitHub API 取数 + README 关键词命中口径，含 Orca 深读）
 - [docs/2026-10-02-competitor-refresh.md](docs/2026-10-02-competitor-refresh.md) — 竞品特性刷新与吸收记录（Agent HQ//fleet 动态 + 弹性库标准特性逐条对照与落地）
 - [docs/2026-10-03-competitor-refresh.md](docs/2026-10-03-competitor-refresh.md) — 竞品刷新 2026-10-03（Vibe Kanban 停摆与差异化、Orca 心跳/OpenRig/AO 动态、MCP 2026-07-28 评估；request-id 透传与任务活性心跳落地）
+- [docs/2026-10-11-competitor-refresh.md](docs/2026-10-11-competitor-refresh.md) — 竞品刷新 2026-10-11（ADE 品类成型与 Conductor/Podium 新入、paperclip 预算面、ruflo 联邦与记忆；循环输出检测 / per-agent 预算闸 / 成功率跨 run 持久化三项落地）
 - [docs/headless-protocol.md](docs/headless-protocol.md) — headless JSONL 协议
 - [docs/2026-08-26-sensenova-smoke-defects.md](docs/2026-08-26-sensenova-smoke-defects.md) — 真实 API 接入缺陷记录
 - [docs/2026-09-19-quality-hardening.md](docs/2026-09-19-quality-hardening.md) — 质量加固（覆盖率/UI 测试/lint 门禁/产物冒烟）

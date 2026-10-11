@@ -12,7 +12,7 @@
  *   2. 否则取 `HEAD~1..HEAD`（审刚落在最后的这一笔）—— 在 `main` 上跑也不是空转。
  * 退出码：任一目标审出存活或基线失败 ⇒ 非 0（由审计器自己给）。
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -107,18 +107,54 @@ if (hits.length === 0) {
 }
 
 const failed = [];
-for (const f of hits) {
-  console.log(`\n=== site 口径审计：${f} ===`);
-  const r = spawnSync(
-    process.execPath,
-    // 传**完整相对路径**而不是 basename：mutation-check 的 --file 匹配
-    // 收紧为「全路径精确 / 路径末段」后，全路径命中唯一目标。此前传
-    // basename（如 store）会把同名/含名的其他目标拖进同一轮，任何一个
-    // 基线失败都会算到当前目标头上（2026-09-29 CI windows 教训）。
-    [path.join(ROOT, "scripts", "mutation-check.mjs"), "--mode=site", `--file=${f}`, "--limit=999"],
-    { cwd: ROOT, stdio: "inherit" },
-  );
-  if (r.status !== 0) failed.push(f);
+// 并行池（2026-10-11）：每个目标一个子进程（stdio 直通，输出天然按目标分块），
+// 同时在跑的最多 JOBS 个 —— 单目标内部仍是串行（基线 → 逐位点），台账按文件
+// 一条互不干扰。JOBS 取 3：本机 8 核实测 3 并发时 vitest 各自的多线程刚好吃满，
+// 再高只会互相抢核。失败收集与退出码语义不变。
+const JOBS = 3;
+let cursor = 0;
+const runOne = (f) =>
+  new Promise((resolve) => {
+    console.log(`\n=== site 口径审计：${f} ===`);
+    // 异步 spawn 而不是 spawnSync：spawnSync 会阻塞事件循环，"并行池"就退化成串行。
+    const child = spawn(
+      process.execPath,
+      // 传**完整相对路径**而不是 basename：mutation-check 的 --file 匹配
+      // 收紧为「全路径精确 / 路径末段」后，全路径命中唯一目标。此前传
+      // basename（如 store）会把同名/含名的其他目标拖进同一轮，任何一个
+      // 基线失败都会算到当前目标头上（2026-09-29 CI windows 教训）。
+      [path.join(ROOT, "scripts", "mutation-check.mjs"), "--mode=site", `--file=${f}`, "--limit=999"],
+      { cwd: ROOT, stdio: "inherit" },
+    );
+    child.on("close", (code) => {
+      if (code !== 0) failed.push(f);
+      resolve();
+    });
+    child.on("error", (e) => {
+      console.error(`无法启动审计子进程（${f}）：${e.message}`);
+      failed.push(f);
+      resolve();
+    });
+  });
+const workers = Array.from({ length: Math.min(JOBS, hits.length) }, async () => {
+  while (cursor < hits.length) {
+    const f = hits[cursor];
+    cursor += 1;
+    if (!f) break;
+    await runOne(f);
+  }
+});
+await Promise.all(workers);
+// 并行下的偶发失败（2026-10-11 实测：index/platform/serve-main 的测试会起真实
+// 服务/子进程，三个 worker 并发时互相打架，单跑各绿）—— 池排空后对失败目标
+// **单跑复核**，单跑仍红才是真红。复核是顺序的，结论确定。
+if (failed.length > 0) {
+  const retry = [...failed];
+  failed.length = 0;
+  console.log(`\n[pool] ${retry.length} 个目标并行下未过 —— 单跑复核（并发打架与真失败以单跑为准）`);
+  for (const f of retry) {
+    await runOne(f);
+  }
 }
 if (failed.length > 0) {
   console.error(`\nFAIL: ${failed.length} 个被改到的目标文件未通过逐位点审计：`);

@@ -343,6 +343,9 @@ export function classifyFailure(logDigest: string): FailureClass {
   if (/files-protocol|schema validation|协议自纠偏|找不到 json/.test(t)) return "protocol";
   if (/zone 越权|越权/.test(t)) return "conflict";
   if (/enospc|eacces|eperm|emfile|内存不足|磁盘/.test(t)) return "resource";
+  // 循环检测的中止标记（scheduler collectToTerminal 写入）：放在 no-agent 之前，
+  // 因为预算闸的 miss digest 也可能同时出现在同一份批量摘要里。
+  if (/\[loop\]|连续 \d+ 条相同输出/.test(t)) return "loop";
   if (/no agent available|未注册|不在池中/.test(t)) return "no-agent";
   return "unknown";
 }

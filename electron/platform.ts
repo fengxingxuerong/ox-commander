@@ -16,6 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, verifyProject } from "./engine";
+import { exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
 import type { BatchVerdict } from "./engine/batch-guard";
@@ -111,6 +112,13 @@ export interface PlatformHost {
    * 只有策略里真的配了 `approvalCommands` 才会被调用；没配时这个回调整个不被使用。
    */
   requestApproval?(command: string, args: readonly string[]): Promise<boolean>;
+  /**
+   * 成功率总账的落盘文件（2026-10-11 竞品刷新，ruflo「自适应记忆」对位）。
+   * 给了就接 `CircuitPersistence`，路由的历史成功率分跨 run 保留；缺席 =
+   * 纯内存（headless 宿主默认不给——每 run 独立进程，落哪都别扭，这是
+   * 说破的事实边界）。只对**自建** layer 生效：注入 layer 的宿主自己负责。
+   */
+  agentStatsFile?: string;
   /**
    * Extra engine callbacks the host owns (stage persistence, richer task
    * payloads, verification rendering). Merged last, so a host-supplied callback
@@ -307,6 +315,9 @@ export function createPlatform(config: PlatformConfig): Platform {
       ...(host.onTaskActivity ? { onTaskActivity: host.onTaskActivity } : {}),
       onEvent: (text) => log(`[sandbox] ${text}`),
       breakerOptions: { onEvent: (text) => log(`[breaker] ${text}`) },
+      // 成功率总账持久化（2026-10-11 竞品吸收）：宿主给了路径才接，缺席 = 纯内存。
+      // 无条件透传——createAgentLayer 对 undefined 自己兜底（键不存在 = 不接）。
+      breakerStatsFile: host.agentStatsFile,
     });
 
   /**
@@ -457,6 +468,18 @@ export function createPlatform(config: PlatformConfig): Platform {
       settings,
       usage: () => meter.snapshot(),
       conflicts: () => verdictConflicts,
+      // 5.7 本地半边（2026-10-11）：settings 开了才接——开关与实现缺一不可。
+      // 分支名/commit 信息在这里成形（引擎只给 root 与 zones）。
+      ...(settings.exportDeliveryBranch
+        ? {
+            exportDelivery: (input: { projectRoot: string; zones: string[] }) =>
+              exportDeliveryBranch({
+                ...input,
+                branch: `oxcommander/delivery-${deliveryStamp()}`,
+                message: `OxCommander delivery ${deliveryStamp()}`,
+              }),
+          }
+        : {}),
       journal: config.journal,
       // 前任履历（P1-3）：宿主给查询口，引擎只负责在重修轮把它拼进上下文。
       ...(config.priorAttempts ? { priorAttempts: config.priorAttempts } : {}),

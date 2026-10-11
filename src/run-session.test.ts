@@ -136,3 +136,27 @@ describe("RunSession · 与 collect() 消费循环对接", () => {
     expect(collected).toEqual(["log", "completed"]);
   });
 });
+
+/**
+ * usage 随事件走（2026-10-11，per-agent 预算闸的数据面）：执行器在终态事件上
+ * 带本 run 累计用量，调度器据此记账。三元一旦反转，「带 usage 的事件不带、
+ * 不带的反而带」—— 预算闸就永远看不见用量。
+ */
+describe("RunSession · usage 透传", () => {
+  it("带 usage 的事件携带它，不带的事件没有该键", () => {
+    const session = new RunSession();
+    session.push("log", "开始");
+    session.push("completed", "完成", { tokens: 42 });
+    expect(session.events[0]).not.toHaveProperty("usage");
+    expect(session.events[1]!.usage).toEqual({ tokens: 42 });
+  });
+
+  it("finished 之后 log 丢弃但终态仍入队——带 usage 的终态也不丢", () => {
+    const session = new RunSession();
+    session.finished = true;
+    session.push("log", "迟到的日志", { tokens: 5 });
+    session.push("failed", "收口", { tokens: 99 });
+    expect(session.events).toHaveLength(1);
+    expect(session.events[0]!.usage).toEqual({ tokens: 99 });
+  });
+});

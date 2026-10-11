@@ -1,10 +1,10 @@
 # `npm run verify` 的逐段机制（29 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
-1794 通过 + 8 跳过，合计 1802 条，分布在 60 个有可执行用例的文件（2026-10-10 逐段实测：链首到
+1865 通过 + 8 跳过，合计 1873 条，分布在 64 个有可执行用例的文件（2026-10-11 逐段实测：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
-变异规模实物：**66 个目标** / 基线 **1379 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**69 个目标** / 基线 **1469 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -226,6 +226,13 @@ async 门面（`text()` / `json()` / `chat()`）。
 | `mutation` | aggregate，`--limit=8` | 每算子至少一处被覆盖即算过 |
 | `mutation:site` | site，`--limit=8` | 逐位点 |
 | `mutation:audit` | `--mode=site --limit=999`：全 tier 全位点 | 最强，**本机 verify 完全不覆盖** |
+
+`--jobs=N`（2026-10-11）：>1 时按**目标**分进程池（worker 独占一个目标，子进程
+复用全部单目标流程），`quick/site/audit` 默认带 `--jobs=3`；报告按 TARGETS 顺序
+输出，与串行同序同判定（同目标数/同杀死数/同位点数）。并行下的偶发基线失败
+（kill-tree/dev-server/serve 的真进程测试并发打架）由**池排空后单跑复核**兜住——
+单跑仍红才是真红。台账按文件一条（`<备份名>.json`），跨会话的活体残留判定从
+全场互斥收窄到"本轮要动的文件"；`check:residue` 卫生检查仍是全场。
 
 `--limit=N` 是**每个目标** `all.slice(0,N)`，不是全局。aggregate 用 `replaceAll` 一次改掉某算子全部位点，
 "任一处被杀"就报杀死 → **它报的 100% 可能是假象**。

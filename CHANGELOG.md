@@ -6,6 +6,129 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 门禁提速：变异按目标并行（2026-10-11，第七轮）
+
+- **`--jobs=N`（默认 1 = 与历史逐字节同序）**：`>1` 时按**目标**分进程池——每个
+  worker 子进程独占一个目标，复用全部单目标流程（基线、台账、还原、报告）。
+  `testsPass` 是 `execFileSync`，进程内并行不可行；worker 之间互不共享源文件，
+  所以并行是安全的。实测：`mutation:quick` 顺序 109s → 并行 **48s**（含一次
+  基线复核），结果与顺序完全一致（同 29 目标 / 同杀死数 / 同位点数）。
+  `mutation:quick` / `mutation:site` / `mutation:audit` 接 `--jobs=3`（CI 的
+  43min 全量 site 审计预期降到 ~18min）；`mutation:touched` 自带同样的 3 并发池。
+- **台账从单槽 `index.json` 改成按文件一条（`<备份名>.json`）**：单槽从根上
+  假设"同一时刻只有一个源文件在被变异"，是并行化的前置改造。顺带修了一个
+  真限制：过去两个会话即使改的是**不同文件**也无法同时跑变异（全场互斥），
+  现在按文件判定——`check:residue` 的卫生检查仍是全场（任何文件的活体残留
+  都拦），worker 只对"本轮要动的文件"上的外来台账拒启动。residue 测试
+  （18 条）全部适配新形状，pid 所有权 / 备份清理 / 孤儿处置的语义逐条保留。
+- **并行下的偶发基线失败：池排空后单跑复核**。真进程类测试（kill-tree 真杀
+  树、dev-server 真起服务、serve 真 HTTP）并发时会互相打架——首跑基线失败的
+  目标在池排空后**单跑复核一次**，单跑仍红才是真红（与 smoke:gateway 偶发红
+  "单跑复现再归因"同一处置）。复核走顺序路径，结论确定。
+- **报告顺序稳定化**：池的完成顺序是调度顺序，报告按 TARGETS 顺序输出；
+  worker 异常退出（exit 2 / 被杀）按"基线失败"计红——宁可误红不可漏绿，
+  它留下的台账由下一轮 `check:residue` 自愈。
+- 门禁数字不变（本轮零生产代码改动：69 目标 / 1469 位点 / 1865+8 用例）；
+  `check:masker` 的锚点提取未受影响（31/31）。
+
+### 交付后 git 导出（2026-10-11，竞品刷新第六轮：5.7 的本地半边）
+
+- **`exportDeliveryBranch`（settings，缺省关）**：交付过硬门禁后，把本次 run 的
+  zone 内改动导出成 `git 分支 + commit`（`oxcommander/delivery-<时间戳>`），供
+  操作者自行 review / 推送 / 建 PR。`electron/engine/git-export.ts`（porcelain -z
+  解析、zone 过滤、分块 add、身份兜底、每条 git 调用过 CommandPolicy 拒绝地板、
+  元字符怪文件名单条跳过）+ orchestrator 两处交付点接线（开关与实现缺一不可）
+  + platform 注入（引擎保持零 spawn 依赖）。**永不 push**——PR 与 CI 失败回流是
+  5.7 的远端半边，需要远端凭据，明确留下。
+- **诚实边界**：commit 只收落在任务 zone 内的路径——"计划覆盖的改动"；zone 内
+  的既有未提交改动会一并进 commit，要干净导出请从干净工作区起跑。导出失败只写
+  `[git-export]` 日志并强调"不影响交付"，本地硬门禁在交付前已过，分发层坏了
+  不追认门禁为假。
+- 门禁数字：在册目标 68 → **69**（新增 git-export，tier 1）；site 基线 1437 →
+  **1469**；用例数 1843+8 → **1865+8**（git-export 15 条 + orchestrator 接线 6 条）；
+  四个改动目标 site 审计全部 100%（git-export 27/27、orchestrator 62/62、
+  platform 26/26、types 6/6）。
+
+### serve 定时运行（2026-10-11，竞品刷新第五轮）
+
+- **`--every=<间隔> --spec=<文件>` 定时触发**（学 Orca 的 scheduled automations，
+  刷新文档 §五 排定的下一候选）。`headless/schedule-core.ts` 纯判定核心
+  （间隔/参数解析、补跑判定、忙时重试间隔）+ `serve-main.ts` 调度环接线。
+  触发 = **自 `POST /run`**（127.0.0.1 自调用）：单 run 语义、409、SSE 广播、鉴权
+  零改动复用，调度环不带任何绕过既有门的路径；配了 `OX_SERVE_TOKEN` 时自调用
+  同样带 Bearer 头。语义与边界（首次触发在一个间隔后、忙时跳过不积压、
+  中断补跑至多一次、坏账不拖垮调度）见 `docs/headless-protocol.md` §8.1。
+- **两个顺手抓到的真缺陷**（site 审计逐位点逼出来的）：
+  `Number.isInteger(1e25)` 是 true——超长数字串溢出根本拦不住，改用
+  `Number.isSafeInteger` 并补了 Node setTimeout 上限（约 24.8 天）的第二道闸；
+  scheduleStateIo 里的 `Number.isFinite` 对 JSON 边界是死防御（JSON.parse 产出的
+  number 必然有限），按"能简化就简化"删除并留注。
+- 门禁数字：在册目标 67 → **68**（新增 schedule-core，tier 1）；site 基线 1405 → **1437**；
+  serve-main 的调度环位点挂进其既有目标的测试集。
+
+### 竞品刷新第四轮：三项吸收（2026-10-11）
+
+> 全文见 [docs/2026-10-11-competitor-refresh.md](docs/2026-10-11-competitor-refresh.md)。
+> 口径照旧：只吸收真空白，每条动机可追溯，全部增量叠加、不动三层架构。
+
+- **循环输出检测**（闭环 2026-10-02 遗留的 loop detection 软挂起项，学 agentguard-llm）。
+  它补的是心跳补不上的那半边盲区：idle 超时只抓「不出声的挂死」，而**在出声但原地打转**的
+  run（同一行日志反复刷）每条事件都在续约心跳、idle 永远不到、deadline 要烧满才收场。
+  `electron/sandbox/loop-detector.ts` 纯函数判定器 + scheduler `collectToTerminal` 挂载，
+  每次派发一个检测器；判据刻意保守——连续且逐字相同的长行（默认 8 条、每条 ≥16 字符）才判，
+  行内数字不抹平（带时间戳的心跳是活着的证据）。触发即中止本 run，digest 带 `[loop]` 标记，
+  `FailureClass` 新增 `loop` 档（看板标签「循环空转」）。`SchedulerOptions.loopDetection`
+  显式 `false` 可关；已知边界：交替两行的循环不判（v1 只抓单行空转，误判代价 = 进修复轮换执行器）。
+- **per-agent 预算闸**（学 paperclip 的 per-agent spending limits with automatic throttling）。
+  manifest `limits.maxTokens` 声明单个执行器一个 run 里可烧的**上报**用量上限；
+  内置执行器在 client 边界包计数器、终态事件带 `usage`（`RunSession.push` 加通路，
+  消费了契约里一直没有通路的 usage 字段）；scheduler 按 agent 记账，`admitBudget` 链在
+  熔断之后：到限的 agent 本 run 不再接新单——**节流的是派单，不是杀 run**（与 run 级
+  maxTokensPerRun 同为软上限）。跳过经 `onBudgetGate` 可观测，no-agent 的 digest 写明
+  「预算闸跳过：谁、到了多少」。诚实边界：只看得见执行器主动上报的用量（内置执行器真报；
+  CLI/HTTP 桥不报就无约束力）；点名派发不过闸（与熔断同语义：显式意图优先）。
+- **成功率跨 run 持久化**（ruflo「自适应记忆」的对位物）。路由给历史成功率打分，而这份账
+  此前只活在进程内存里（headless 每 run 归零）。`CircuitBreaker` 接 `CircuitPersistence`：
+  只恢复总账（successes/failures），consecutiveFailures 归零、一律 closed 起步——恢复的是
+  「历史上靠不靠谱」的先验，不是「上一 run 挂没挂」的结论。每次 record 写回，总账超 500
+  按比例淡出（先验要能被新事实改写）。桌面端落 `userData/agent-stats.json`（原子写，
+  坏账从零开始）；headless 经 `PlatformHost.agentStatsFile` 显式给路径才接。
+- **门禁数字同步**：在册目标 66 → 67（新增 loop-detector，tier 1）；site 基线 1379 → 1405
+  （新增 26 处位点全部逐点全杀）；用例数 1794+8 → 1827+8（合计 1835）。本机按 `--file=` 分档对
+  12 个改动目标逐点审计全绿，全量仍交 CI。
+
+### 门禁失败信息指向正确的那一格（2026-10-11）
+
+- **`src/sandbox-journal.test.ts` 的 `afterEach` 补 30s 超时**。性能用例（300×4KB）
+  自己已经因为"写盘再扫两遍"拿到 30s，清盘的 hook 却还是默认的 10s —— 全量并行跑
+  （60 个测试文件）时 `rmSync` 递归删 300 个文件撞上 hook 上限，而 vitest 把超时记在
+  **那条用例头上**，报出来的是"性能断言失败"，真相是"清盘没赶上"。两处量级必须一致。
+- **`src/mutation-residue.test.ts` 的 `recoverOnly()`：spawn 失败当场说破**。`status === null`
+  不等于"它退了某个码"，那是**子进程根本没起来**（原因只在 `error` 里）。此前 10 条断言
+  一律显示 `expected null to be 2`，读起来像判据脚本的退出码逻辑坏了。
+  2026-10-11 在一台受管 Windows 上实测到 `spawnSync … EBUSY`：该环境阻断 `spawnSync` 的
+  stdio 管道（同一个 node.exe 直接执行正常，`stdio: 'inherit'` 正常，异步 `spawn` 也正常），
+  于是这 10 条在本机必红 —— **属环境限制，不是判据缺陷**，现在错误信息直接把它点出来。
+
+### 门禁可观测（2026-10-11）
+
+- **site 全量审计的结论与数字现在会写进 CI job 的 summary**：此前 `mutation (site, every site)`
+  job 对外只有绿/红一个 bit，"这次到底验了多少处"要翻 log 才看得到，而 log 需要登录才能取。
+  现在 `mutation-check.mjs` 检测到 `GITHUB_STEP_SUMMARY` 就把口径、杀死 N/M、耗时、
+  存活清单（或漂移/基线失败清单）追加进去 —— PASS 与三种 FAIL 各有各的内容。
+  **写失败只报一行提示、不影响判定**：summary 是给人读的旁证，不能反过来让门禁失明。
+  放在脚本里而不是 workflow 里，是因为只有这里知道自己的口径（aggregate 的"全杀"不等于
+  site 的"每处都验过"）。实测（同一个目标跑两遍）：PASS 写入 `杀死 3/3（100%）· 耗时 10.1s`；
+  把路径指成目录 ⇒ 打印"EISDIR … 不影响本次判定"且退出码不变。
+- **README 里"全量审计"那两处表述改为以 CI 为准**：原文停在「1312/1312 @ 2026-10-05，全量尚未重跑」，
+  而 CI 每次 push 都跑全量（最近 @ `c67d920` success，43 min），只是那个数字没人能读到 ——
+  表述落后于事实，等于把已经闭合的账记成欠账。现在分开写：基线 1379 是"有多少处该被逐点验过"，
+  CI 那次是"这一批位点真跑全量的结果"。
+- ⚠️ **本机 Windows 已跑不动 site 全量**：2026-10-11 实跑 54 分钟后崩在
+  `EPERM: operation not permitted, open 'headless/serve-main.ts'` —— 还原源文件被本机杀软拦写，
+  变异体留在工作区（`git diff` 一看就是三元算子被换），靠 `check:residue` 自愈才清掉。
+  **结论：全量交 CI，本机只做单目标 `--audit`**（后者 10 秒级，稳定）。
+
 ### 加固（门禁盲区 · 2026-10-09）
 
 - **`check:residue` 的台账盲区补上**：它过去只认 `scripts/.mutation-pending/index.json`，台账不在

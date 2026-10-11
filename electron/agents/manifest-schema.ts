@@ -279,10 +279,14 @@ function parseLimits(raw: unknown, issues: string[]): Partial<AgentLimits> | und
   const runDeadlineMs = num(raw, "runDeadlineMs", issues, "limits.", 1000);
   const idleTimeoutMs = num(raw, "idleTimeoutMs", issues, "limits.", 1000);
   const maxStdoutBytes = num(raw, "maxStdoutBytes", issues, "limits.", 1024);
+  // per-agent 预算闸（2026-10-11）：可选字段，最小 1000 tokens——低于它的
+  // 上限连一次最小调用都容不下，只会造成"派了就熔"的假闸。
+  const maxTokens = num(raw, "maxTokens", issues, "limits.", 1000);
   return {
     ...(runDeadlineMs !== undefined ? { runDeadlineMs } : {}),
     ...(idleTimeoutMs !== undefined ? { idleTimeoutMs } : {}),
     ...(maxStdoutBytes !== undefined ? { maxStdoutBytes } : {}),
+    ...(maxTokens !== undefined ? { maxTokens } : {}),
   };
 }
 
