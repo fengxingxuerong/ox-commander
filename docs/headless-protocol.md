@@ -63,7 +63,7 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | 形态 | 入口 | 适合 |
 | --- | --- | --- |
 | **管道**（一次跑完） | `node dist-headless/headless/main.js` —— stdin 收 spec，stdout 吐 JSONL，结束给退出码 | CI、被别的 Agent 当子进程驱动 |
-| **服务**（常驻） | `node dist-headless/headless/serve-main.js [--port=8787]` —— HTTP + SSE | 人在浏览器里看、远程机器上挂着看 |
+| **服务**（常驻） | `node dist-headless/headless/serve-main.js [--port=8787] [--host=127.0.0.1]` —— HTTP + SSE | 人在浏览器里看、远程机器上挂着看 |
 
 服务形态的三个端点（详见 §8）：`GET /`（状态页）、`GET /events`（SSE 事件流，含历史补齐）、
 `POST /run`（投递 spec，一次只跑一个，第二个拿 409）。
@@ -278,6 +278,21 @@ node dist-headless/headless/serve-main.js --port=8787
 # → OxCommander serve: http://127.0.0.1:8787/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec）
 ```
 
+**绑定地址（2026-10-13 修正）**：默认只绑 **回环 `127.0.0.1`**。以前 `listen` 不传 host，
+实际绑的是**所有网卡**，而启动信息印的是 127.0.0.1 —— 同局域网任何人都能 `POST /run`。
+现在要对外必须显式 `--host=<地址>`，且：
+
+| 绑定 | 鉴权要求 |
+| --- | --- |
+| `--host=127.0.0.1`（默认）/ `localhost` / `::1` | 免鉴权（本机/CI 调试面不变） |
+| 任何非回环地址（`0.0.0.0`、具体网卡 IP…） | **必须设 `OX_SERVE_TOKEN`，否则拒绝启动**（fail-closed） |
+
+`startServe`（库入口）有一道同样的守卫：非回环 + 无 token 直接抛错，不给"绕过入口层"的路。
+启动信息打印的是**真实绑定地址**（`srv.host`），并在非回环时附一行暴露面提醒。
+
+**请求边界**：`/run` 与 `/approve` 的 body 上限 2 MiB（超限 `413` 且不交给下游），
+收到完整请求的时限 60s（长跑的 run 与 SSE 订阅不受影响）。
+
 | 端点 | 方法 | 返回 |
 | --- | --- | --- |
 | `/` | GET | 一页自包含 HTML：状态 + 最近一份交付凭据 + 最近 30 条事件（页面活着时经 SSE 追加） |
@@ -292,7 +307,8 @@ node dist-headless/headless/serve-main.js --port=8787
 2. **一次只跑一个 run**，第二个 POST 拿 409 且响应体写明原因。并发编排是引擎内部
    的事（批次与并发闸），这里再叠一层队列只会让"到底哪个在跑"变成猜谜。
 3. **后连上的客户端能拿到完整历史**：断线重连靠 `id:` 序号，不是"只推新的"。
-4. **无鉴权、无 TLS**：这是本机 / 内网 / SSH 隧道后的观察面。要放到公网前面，自己挂一层。
+4. **默认只绑回环；要对外必须显式 `--host` 且设 token（否则拒绝启动）**。无 TLS：
+   要放到公网前面，自己挂一层。SSH 隧道仍是远程访问的默认主张。
 
 ### 8.1 定时运行（2026-10-11 新增，学 Orca 的 scheduled automations）
 
@@ -309,7 +325,8 @@ node dist-headless/headless/serve-main.js --port=8787 \
 
 语义（刻意简单，边界说破）：
 
-1. **触发 = 自 `POST /run`**（127.0.0.1 自调用）：单 run 语义、409、SSE 广播、鉴权全部
+1. **触发 = 自 `POST /run`**（自调用地址跟着绑定地址走：`0.0.0.0`/`::` 换算成回环，
+   具体网卡地址原样 —— 绑到具体地址时回环上没有监听）：单 run 语义、409、SSE 广播、鉴权全部
    零改动复用——调度环不自带任何"绕过既有门"的路径。配了 `OX_SERVE_TOKEN` 时
    自调用同样带 Bearer 头。
 2. **首次触发在一个间隔之后**，不是启动即跑。要立刻跑一次，自己 POST 就行。

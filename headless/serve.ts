@@ -15,7 +15,11 @@ import type { HeadlessEvent } from "./protocol";
  *     要远程就走 SSH 隧道（默认主张不变）。**例外**（2026-10-10）：设了
  *     `OX_SERVE_TOKEN`（或注入 `authToken`）就启用 opt-in 的 Bearer 校验 ——
  *     给"确实要直接暴露"的用法留一道门，只做 token 校验，不发散成登录系统；
- *   · 不做任务队列 —— 一次只跑一个 run，第二个 POST 拿 409。并发编排是引擎
+ *   · **默认只绑回环**（2026-10-13 补）：`listen` 不传 host 会绑到**所有网卡**，
+ *     而启动信息印的是 `127.0.0.1` —— 同一局域网的任何人都能 POST /run。
+ *     现在默认 `127.0.0.1`；要对外必须显式 `host`，且**非回环 + 无 token 直接拒绝**
+ *     （fail-closed：宁可不启动，也不默默把控制面挂到网上）；
+ *   · **不做任务队列** —— 一次只跑一个 run，第二个 POST 拿 409。并发编排是引擎
  *     内部的事（批次与并发闸），这里重复做一层只会让"到底哪个在跑"变成猜谜；
  *   · 不内嵌完整 React 看板 —— 那需要把 renderer 的构建产物塞进来，体积与
  *     构建链都不是这个入口该背的。这里给一页自包含 HTML：能看状态、能看凭据。
@@ -24,6 +28,35 @@ import type { HeadlessEvent } from "./protocol";
  * 前半部分进变异门禁。
  */
 export type ServeStatus = "idle" | "running" | "delivered" | "failed";
+
+/**
+ * 默认绑定地址（2026-10-13）。`server.listen(port)` 不传 host 时 Node 绑的是
+ * **所有网卡**（IPv6 可用则 `::`），而同期的启动信息、文档、状态页链接写的都是
+ * `127.0.0.1` —— 读者据此以为"只有本机能连"，实际局域网任何一台机器都能
+ * `POST /run`（触发 LLM 调用、往任意 projectRoot 写盘、跑验证命令）。
+ * 默认值必须与"说出去的地址"一致：这里定为回环。
+ */
+export const DEFAULT_HOST = "127.0.0.1";
+
+/**
+ * 请求体上限的默认值（2026-10-13）。spec 是纯 JSON（几 KB 量级，含 agents/prompts
+ * 也远小于 1MiB），2MiB 给的是一到两个数量级的余量；没有上限时一条慢连接就能
+ * 把服务内存打满（`/run` 与 `/approve` 都在 `req.on("data")` 里无界拼接）。
+ */
+export const DEFAULT_MAX_BODY_BYTES = 2 * 1024 * 1024;
+
+/** 收到完整请求（含 body）的时限。SSE 的 GET 无 body，不受影响。 */
+export const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
+/**
+ * 回环口径（纯函数，逐档可测）：只有这三个写法算"只有本机能连"。
+ *
+ * 刻意不做 DNS 解析（`localhost` 之外的名字一律按"对外"处理）—— 这里要的是
+ * **保守**：判断不了就当它是暴露面，宁可多要一个 token。
+ */
+export function isLoopbackHost(host: string): boolean {
+  return host === "127.0.0.1" || host === "localhost" || host === "::1";
+}
 
 export interface ServeState {
   status: ServeStatus;
@@ -321,6 +354,13 @@ async function cancelRun() {
 
 export interface ServeServer {
   port: number;
+  /**
+   * 真实的绑定地址（2026-10-13）。打印/拼链接必须用它而不是常量 ——
+   * "打印 127.0.0.1、实际绑 0.0.0.0" 正是这次要消灭的那个错。
+   */
+  host: string;
+  /** 生效中的边界值（默认值或注入值的**实际结果**，测试据此断言默认没被改掉）。 */
+  limits: { maxBodyBytes: number; requestTimeoutMs: number };
   close(): Promise<void>;
   state: ServeState;
   /**
@@ -341,6 +381,15 @@ export interface ServeServer {
  */
 export function startServe(opts: {
   port?: number;
+  /**
+   * 绑定地址。缺省 = `DEFAULT_HOST`（回环）。**非回环且没有 token 时拒绝启动**
+   * （见下方 fail-closed 守卫）：暴露面必须是显式选择的结果，不能是默认值的副作用。
+   */
+  host?: string;
+  /** 请求体上限，缺省 2MiB；超限的请求回 413 且不交给 run（没有上限 = 慢连接打满内存）。 */
+  maxBodyBytes?: number;
+  /** 收到完整请求的时限，缺省 60s。 */
+  requestTimeoutMs?: number;
   now?: () => string;
   /**
    * Pre-flight spec validation, run **before** the 202 is written.
@@ -374,8 +423,23 @@ export function startServe(opts: {
   const state = createServeState();
   const clients = new Set<http.ServerResponse>();
   const now = opts.now;
+  /** 绑定地址与两道边界：注入优先，其次默认。三者的实际结果都回传给宿主（`ServeServer`）。 */
+  const host = opts.host ?? DEFAULT_HOST;
+  const maxBodyBytes = opts.maxBodyBytes ?? DEFAULT_MAX_BODY_BYTES;
+  const requestTimeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   /** opt-in 鉴权 token：注入优先，其次环境变量；空/未设 = 免鉴权（旧行为）。 */
   const authToken = opts.authToken ?? process.env.OX_SERVE_TOKEN;
+  // fail-closed：非回环 = 暴露面，没有 token 就**不启动**。
+  // 为什么放在这里而不是只放在 serve-main：`startServe` 是库入口，任何宿主
+  // （测试替身、第三方集成）都从这里进来 —— 门装在使用面才叫门。
+  if (!isLoopbackHost(host) && !authToken) {
+    return Promise.reject(
+      new Error(
+        `拒绝启动：绑定 ${host} 会让同网络的机器可达，但没有设鉴权 token。` +
+          `要么改回 --host=${DEFAULT_HOST}，要么设 OX_SERVE_TOKEN（或注入 authToken）。`,
+      ),
+    );
+  }
   /** 一次只跑一个 run：第二个 POST 拿 409，而不是悄悄排队。 */
   let busy = false;
   /** 当前 run 的引擎控制面；没有 run 在跑时为 undefined。 */
@@ -383,6 +447,39 @@ export function startServe(opts: {
   /** 等待人工审批的 resolver（P2-3）：requestId -> 是否放行。 */
   const pendingResolvers = new Map<string, (granted: boolean) => void>();
   let approvalSeq = 0;
+
+  /**
+   * 带上限地读请求体（2026-10-13）：`/run` 与 `/approve` 走同一条读取路径。
+   *
+   * 旧写法是 `raw += c` 无界拼接 —— 一条慢连接持续发 body 就能把进程内存打满，
+   * 而这两条路径恰恰**不需要鉴权**（回环之外的部署里 /approve 也是同一道门）。
+   * 超限的处置是"说清楚 + 不再交给下游"：回 413 之后即使还有后续分片也直接丢弃，
+   * 不会在半截 body 上跑 JSON.parse（那会把攻击面变成"解析异常"的噪声源）。
+   */
+  const readBody = (
+    req: http.IncomingMessage,
+    res: http.ServerResponse,
+    onDone: (raw: string) => void,
+  ): void => {
+    let raw = "";
+    let size = 0;
+    let tooLarge = false;
+    req.on("data", (chunk: Buffer) => {
+      if (tooLarge) return;
+      size += chunk.length;
+      if (size > maxBodyBytes) {
+        tooLarge = true;
+        res.writeHead(413, { "Content-Type": "text/plain; charset=utf-8" });
+        res.end(`body 超过上限（${maxBodyBytes} 字节）；拒绝继续读取。`);
+        return;
+      }
+      raw += chunk;
+    });
+    req.on("end", () => {
+      if (tooLarge) return;
+      onDone(raw);
+    });
+  };
 
   const broadcast = (evt: HeadlessEvent): void => {
     serveEmit(state, evt, now);
@@ -460,11 +557,7 @@ export function startServe(opts: {
     const method = req.method ?? "GET";
 
     if (url === "/run" && method === "POST") {
-      let raw = "";
-      req.on("data", (c) => {
-        raw += c;
-      });
-      req.on("end", () => {
+      readBody(req, res, (raw) => {
         // 正在跑就拒绝，并且把原因写进响应体 —— 409 一个数字说不清"为什么不行"。
         if (busy) {
           res.writeHead(409, { "Content-Type": "text/plain; charset=utf-8" });
@@ -510,11 +603,7 @@ export function startServe(opts: {
 
     // 审批答复（P2-3）：POST /approve，body { requestId, granted }。
     if (url === "/approve" && method === "POST") {
-      let raw = "";
-      req.on("data", (c) => {
-        raw += c;
-      });
-      req.on("end", () => {
+      readBody(req, res, (raw) => {
         let body: { requestId?: unknown; granted?: unknown };
         try {
           body = JSON.parse(raw) as { requestId?: unknown; granted?: unknown };
@@ -626,13 +715,18 @@ export function startServe(opts: {
   });
 
   return new Promise((resolve) => {
+    // 请求超时：Node 默认 300s 且这是"收到完整请求"的时限（不含响应时长），
+    // 所以长跑的 run、SSE 订阅都不受影响 —— 收得住的是"发一半不发了"的连接。
+    server.requestTimeout = requestTimeoutMs;
     // 端口 0 = 让系统分配，测试因此不会撞上固定端口（项目 smoke 的固定端口
-    // 被占是历史上偶发红的根因之一）。
-    server.listen(opts.port ?? 0, () => {
+    // 被占是历史上偶发红的根因之一）。host 必须显式传（默认回环，见常量注释）。
+    server.listen(opts.port ?? 0, host, () => {
       const addr = server.address();
       const port = (typeof addr === "object" ? addr?.port : undefined) ?? 0;
       resolve({
         port,
+        host,
+        limits: { maxBodyBytes, requestTimeoutMs },
         state,
         approvalRequester,
         close: () =>

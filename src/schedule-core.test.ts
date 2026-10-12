@@ -132,6 +132,7 @@ describe("startScheduleLoop", () => {
     status: () => number;
     token?: string;
     nowStart?: number;
+    host?: string;
   }) {
     let clock = input.nowStart ?? 1_000_000;
     const timers: TimerRec[] = [];
@@ -144,6 +145,7 @@ describe("startScheduleLoop", () => {
       args: { everyMs: input.everyMs ?? 60_000, specFile: "spec.json" },
       specPayload: { requirement: "x" },
       port: 8787,
+      ...(input.host !== undefined ? { host: input.host } : {}),
       ...(input.token ? { token: input.token } : {}),
       log: (t) => logs.push(t),
       loadState: () => state,
@@ -194,6 +196,14 @@ describe("startScheduleLoop", () => {
     expect(h.saved).toEqual([{ lastFiredMs: 1_060_000 }]);
     // 下一个触发点从**触发时刻**起算（漂移自校正），不是固定节拍
     expect(h.timers.some((t) => t.at === 1_120_000)).toBe(true);
+  });
+
+  it("[10b] 自调用地址跟着绑定地址走：绑到具体网卡时连它，而不是写死的回环", async () => {
+    // 绑 192.168.1.5 时回环上没有监听 —— 写死 127.0.0.1 的定时环会每次触发都静默失败。
+    const h = harness({ status: () => 200, host: "192.168.1.5" });
+    h.at(1_060_000);
+    await h.pump();
+    expect(h.fires[0]!.url).toBe("http://192.168.1.5:8787/run");
   });
 
   it("[11] 补跑：重启时已越过触发点 → 启动立即触发一次，然后恢复正常节拍", async () => {

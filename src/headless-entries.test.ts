@@ -24,7 +24,7 @@ import {
   type DeliveryReceipt,
   type ReceiptCheck,
 } from "../shared/delivery-receipt";
-import { onEngineOption, portFromArgv } from "../headless/serve-main";
+import { exposureProblem, hostFromArgv, onEngineOption, portFromArgv, selfCallHost } from "../headless/serve-main";
 import { serveArgv } from "../headless/mcp-main";
 
 const tmpdir = () => os.tmpdir();
@@ -208,6 +208,57 @@ describe("serve-main · --port 参数解析", () => {
     const zero = portFromArgv(["--port=0"]);
     expect("port" in zero).toBe(true);
     expect(zero.port).toBe(0);
+  });
+});
+
+/**
+ * `--host` 与暴露面判据（2026-10-13）。
+ *
+ * 这一组守的是"印出来的地址就是绑到的地址"：以前 `listen` 不传 host（绑全域）
+ * 而启动信息印 127.0.0.1。三个纯函数合起来构成那条纪律的判定核心 ——
+ * 解析（hostFromArgv）、自调用地址换算（selfCallHost）、启动前 fail-closed
+ * （exposureProblem）。判错的形态全是静默的，所以逐档钉住。
+ */
+describe("serve-main · --host 与暴露面判据", () => {
+  it("hostFromArgv：= 形式与空格形式都认", () => {
+    expect(hostFromArgv(["--host=0.0.0.0"])).toEqual({ host: "0.0.0.0" });
+    expect(hostFromArgv(["--host", "192.168.1.5"])).toEqual({ host: "192.168.1.5" });
+  });
+
+  it("hostFromArgv：不给就是「没给」（键不存在，由 serve 落默认回环）", () => {
+    const none = hostFromArgv([]);
+    expect("host" in none).toBe(false);
+    expect(none.error).toBeUndefined();
+    expect(hostFromArgv(["--port=8787"]).host).toBeUndefined();
+  });
+
+  it("hostFromArgv：空值 / 带空白 → 报错，不静默回落", () => {
+    for (const argv of [["--host="], ["--host", ""], ["--host=0.0.0.0 extra"]]) {
+      expect(hostFromArgv(argv).error, JSON.stringify(argv)).toMatch(/--host/);
+      expect(hostFromArgv(argv).host, JSON.stringify(argv)).toBeUndefined();
+    }
+  });
+
+  it("hostFromArgv：拼错的 --hosts= 不许被静默忽略", () => {
+    expect(hostFromArgv(["--hosts=0.0.0.0"]).error).toContain("--hosts=0.0.0.0");
+  });
+
+  it("selfCallHost：通配地址换回环（那不是可连地址），具体地址原样", () => {
+    expect(selfCallHost("0.0.0.0")).toBe("127.0.0.1");
+    expect(selfCallHost("::")).toBe("[::1]");
+    expect(selfCallHost("127.0.0.1")).toBe("127.0.0.1");
+    expect(selfCallHost("192.168.1.5")).toBe("192.168.1.5");
+  });
+
+  it("exposureProblem：回环放行；非回环有 token 放行；非回环无 token 拒绝且给出整句修法", () => {
+    expect(exposureProblem("127.0.0.1", undefined)).toBeUndefined();
+    expect(exposureProblem("localhost", undefined)).toBeUndefined();
+    expect(exposureProblem("::1", undefined)).toBeUndefined();
+    expect(exposureProblem("0.0.0.0", "tok")).toBeUndefined();
+    const p = exposureProblem("0.0.0.0", undefined);
+    expect(p).toContain("0.0.0.0");
+    expect(p).toContain("OX_SERVE_TOKEN");
+    expect(p).toContain("--host=127.0.0.1");
   });
 });
 

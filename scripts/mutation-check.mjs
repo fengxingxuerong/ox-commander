@@ -750,8 +750,8 @@ const SITE_BASELINE = {
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
   "headless/schedule-core.ts": 21,
-  "headless/serve-main.ts": 28,
-  "headless/serve.ts": 63,
+  "headless/serve-main.ts": 43,
+  "headless/serve.ts": 68,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
   "shared/deliverable-format.ts": 23,
@@ -771,7 +771,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;;;;;;;
+};;;;;;;;;;;;
 
 /**
  * 等价变异白名单。

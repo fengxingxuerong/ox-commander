@@ -9,12 +9,15 @@
  * 先看运行时（`runtimeGap`），理由同另一个入口：宿主可能连上就不管了，
  * 那时"跑到一半才崩"会变成"一个永远不给结论的服务"。
  *
- * ⚠️ 无鉴权、无 TLS：这是本机 / 内网 / SSH 隧道后的观察面，不是公网服务。
+ * ⚠️ 默认只绑 **回环**（`127.0.0.1`，2026-10-13 修正）：以前不传 host，Node 绑的是
+ * 所有网卡，而启动信息印的是 127.0.0.1 —— 局域网可达却人以为只有本机。要对外
+ * 必须显式 `--host=<地址>`，且**非回环 + 无 OX_SERVE_TOKEN 一律拒绝启动**。
+ * 无 TLS：远程走 SSH 隧道（默认主张不变）。
  */
 import * as fs from "node:fs";
 import { parseSpec, runtimeGap, type HeadlessEvent } from "./protocol";
 import { runSpec } from "./run-spec";
-import { startServe } from "./serve";
+import { DEFAULT_HOST, isLoopbackHost, startServe } from "./serve";
 import {
   busyRetryMs,
   decideStartupCatchup,
@@ -67,6 +70,61 @@ export function portFromArgv(argv: string[]): { port?: number; error?: string } 
     }
   }
   return {};
+}
+
+/**
+ * `--host=0.0.0.0` / `--host 0.0.0.0` 都认；不给就是回环（`startServe` 的默认）。
+ *
+ * 与 `portFromArgv` 同一纪律：给了但非法/拼错**当场报错**，不静默回落 ——
+ * 地址写错而服务照常起来，意味着"我以为暴露在哪"和"实际暴露在哪"分叉了，
+ * 那正是这一轮要修掉的那类失败（打印 127.0.0.1 实际绑全域）。
+ *
+ * 校验宽松（只挡空白与显然的注入面）：地址形态的最终裁决属于 Node 的 listen，
+ * 它给的错误比我们手写的正则更准；这里负责的是"说清楚哪个参数错了"。
+ */
+export function hostFromArgv(argv: string[]): { host?: string; error?: string } {
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i] ?? "";
+    const m = /^--host(?:=(.*))?$/.exec(a);
+    if (!m) continue;
+    const raw = m[1] ?? argv[i + 1];
+    if (raw === undefined || raw === "" || /\s/.test(raw)) {
+      return { error: `--host 需要一个地址（如 127.0.0.1 / 0.0.0.0），实际收到：${JSON.stringify(raw)}` };
+    }
+    return { host: raw };
+  }
+  // 拼写错的 --host* 同样不许静默忽略（`--port` 那条注释里的 `--serve=` 教训）。
+  for (const a of argv) {
+    if (/^--?host/i.test(a) && !/^--host(?:=(.*))?$/.test(a)) {
+      return { error: `无法识别的地址参数：${JSON.stringify(a)}（正确写法：--host=<地址>）` };
+    }
+  }
+  return {};
+}
+
+/**
+ * 定时环自调用该连哪个地址（纯函数）。
+ *
+ * 通配地址（`0.0.0.0` / `::`）不是可连的地址，自调用必须换成回环；
+ * 绑到某个具体网卡地址时就得连那个地址（此刻回环上没有监听）。
+ */
+export function selfCallHost(host: string): string {
+  if (host === "0.0.0.0") return "127.0.0.1";
+  if (host === "::") return "[::1]";
+  return host;
+}
+
+/**
+ * 非回环 + 没 token = 拒绝启动的判据（纯函数，入口与库共用同一句话的来源）。
+ * 返回 `undefined` = 可以启动。
+ */
+export function exposureProblem(host: string, token: string | undefined): string | undefined {
+  if (isLoopbackHost(host) || token) return undefined;
+  return (
+    `拒绝启动：--host=${host} 会让同网络的机器访问到本服务，但没有设置 OX_SERVE_TOKEN。\n` +
+    `要么用默认的 --host=127.0.0.1，要么设一个 token 再绑：\n` +
+    `  OX_SERVE_TOKEN=<你自己生成的一串随机值> node dist-headless/headless/serve-main.js --host=${host}`
+  );
 }
 
 /**
@@ -125,6 +183,12 @@ export interface ScheduleLoopOptions {
   specPayload: unknown;
   /** startServe 返回的真实端口（--port=0 时是系统分配的那个）。 */
   port: number;
+  /**
+   * 自调用该连的地址（2026-10-13）。缺省 `127.0.0.1`；宿主用 `selfCallHost`
+   * 把通配地址换成回环、把具体网卡地址原样传入 —— 绑到具体地址时回环上没有
+   * 监听，写死 127.0.0.1 的定时环会静默每次触发都失败。
+   */
+  host?: string;
   /** OX_SERVE_TOKEN：自调用也要过鉴权，不能因为是自己人就绕开。 */
   token?: string;
   log: (text: string) => void;
@@ -157,7 +221,7 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
   /** 返回 true = 触发被接受（时间戳已落盘）；false = 跳过/失败（时间戳不动）。 */
   const attemptFire = async (): Promise<boolean> => {
     try {
-      const res = await doFetch(`http://127.0.0.1:${opts.port}/run`, {
+      const res = await doFetch(`http://${opts.host ?? "127.0.0.1"}:${opts.port}/run`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -238,6 +302,22 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  const parsedHost = hostFromArgv(process.argv.slice(2));
+  if (parsedHost.error) {
+    process.stderr.write(`${parsedHost.error}\n`);
+    process.exitCode = 1;
+    return;
+  }
+  // 绑定地址的 fail-closed 判据：非回环 = 暴露面，没有 token 就不许起。
+  // `startServe` 里还有同一道守卫（库入口那道），这里先拦是为了给出一句
+  // 人类可读的启动错误，而不是让异常以栈的形式掉出来。
+  const token = process.env.OX_SERVE_TOKEN;
+  const problem = exposureProblem(parsedHost.host ?? DEFAULT_HOST, token);
+  if (problem) {
+    process.stderr.write(`${problem}\n`);
+    process.exitCode = 1;
+    return;
+  }
   // 定时参数（2026-10-11，Orca scheduled automations 对位）：与 --port 同一纪律，
   // 拼写错误/缺对/间隔过小都当场报错，而不是静默当"没配定时"。
   const schedule = parseScheduleArgs(process.argv.slice(2));
@@ -268,6 +348,8 @@ async function main(): Promise<void> {
   }
   const srv = await startServe({
     ...(parsedArgv.port !== undefined ? { port: parsedArgv.port } : {}),
+    // host 不注入时由 startServe 落到回环默认（单一真源在 serve.ts）。
+    ...(parsedHost.host !== undefined ? { host: parsedHost.host } : {}),
     // 同一个 parseSpec 同时服务两个宿主：这里只取"错在哪"，spec 本身仍由 run
     // 重新解析一次 —— 让 /run 的 400 与 CLI 的 exit 1 说出**同一句话**。
     validate: (payload) => {
@@ -297,8 +379,14 @@ async function main(): Promise<void> {
       });
     },
   });
+  // 打印**真实的绑定地址**（srv.host），不是常量 —— 这一行以前永远写 127.0.0.1，
+  // 而实际绑的是所有网卡；"印出来的就是绑到的"是这轮修的事（2026-10-13）。
+  const exposure = isLoopbackHost(srv.host)
+    ? ""
+    : `\n⚠️ 已绑定 ${srv.host}：同网络的机器可达（已启用 Bearer 鉴权，token 来自 OX_SERVE_TOKEN）。` +
+      (srv.host === "0.0.0.0" || srv.host === "::" ? `本机可直接用 http://127.0.0.1:${srv.port}/` : "");
   process.stdout.write(
-    `OxCommander serve: http://127.0.0.1:${srv.port}/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec，POST /pause · /resume 暂停继续）\n`,
+    `OxCommander serve: http://${srv.host}:${srv.port}/ （/state 看状态，/events 订阅事件流，POST /run 投递 spec，POST /pause · /resume 暂停继续）${exposure}\n`,
   );
   if (schedule.schedule) {
     const io = scheduleStateIo(schedule.schedule.stateFile);
@@ -306,6 +394,9 @@ async function main(): Promise<void> {
       args: schedule.schedule,
       specPayload: scheduledSpec,
       port: srv.port,
+      // 自调用地址跟着绑定地址走（通配换成回环；具体网卡地址原样）——
+      // 写死 127.0.0.1 时，绑到具体地址的部署会让定时环每次触发都连不上。
+      host: selfCallHost(srv.host),
       // 无条件透传：token 缺席就是 undefined，调度环对它自己兜底（不带头）。
       token: process.env.OX_SERVE_TOKEN,
       log: (text) => process.stdout.write(`${text}\n`),

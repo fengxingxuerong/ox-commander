@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { JSDOM, type DOMWindow } from "jsdom";
 import {
   createServeState,
+  isLoopbackHost,
   routeRequest,
   serveEmit,
   serveFinish,
@@ -868,5 +869,102 @@ describe("serve · opt-in token 鉴权（2026-10-10）", () => {
     open.push(srv);
     const res = await fetch(`http://127.0.0.1:${srv.port}/state`);
     expect(res.status).toBe(200);
+  });
+});
+
+/**
+ * 绑定地址与请求边界（2026-10-13）。
+ *
+ * 修的是一个"印出来的和绑到的不一样"的错：`listen(port)` 不传 host = 绑所有网卡，
+ * 而启动信息/文档都写 127.0.0.1。这批断言钉住三件事：
+ *   1. 默认值是回环（`srv.host` 与真实可连性都验，不是只看对象里的字段）；
+ *   2. 非回环 + 无 token **拒绝启动**（fail-closed，宁可不启动）；
+ *   3. `/run` 与 `/approve` 的 body 有上限、超限 413 且不交给下游。
+ *
+ * ⚠️ 非回环那两条用 `127.0.0.2`（127/8 整段都是回环，Linux/Windows 都可绑）：
+ * 既能真实走到"非回环"分支，又不会真的把服务开到局域网 —— 测试不该改变本机的暴露面。
+ */
+describe("serve · 绑定地址与请求边界", () => {
+  it("isLoopbackHost 真值表：三个回环写法算回环，其余一律算对外（保守）", () => {
+    // 逐档钉住：把 `||` 改写成 `&&`（`A || B && C` 的结合性陷阱）时，
+    // "localhost" 会被判成对外 —— 而它就是本机最常见的写法，降级成"要 token"
+    // 只是多一道门，反向（对外判成回环）才是事故；两个方向都必须被这条断言锁住。
+    expect(isLoopbackHost("127.0.0.1")).toBe(true);
+    expect(isLoopbackHost("localhost")).toBe(true);
+    expect(isLoopbackHost("::1")).toBe(true);
+    expect(isLoopbackHost("0.0.0.0")).toBe(false);
+    expect(isLoopbackHost("127.0.0.2")).toBe(false);
+    expect(isLoopbackHost("192.168.1.5")).toBe(false);
+  });
+
+  it("默认只绑回环，并把生效边界回传给宿主（字面量断言：默认值就是契约）", async () => {
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    expect(srv.host).toBe("127.0.0.1");
+    expect(srv.limits).toEqual({ maxBodyBytes: 2 * 1024 * 1024, requestTimeoutMs: 60_000 });
+    // 回环上真的能连 —— 默认值不是写在对象里的装饰。
+    expect((await fetch(`http://127.0.0.1:${srv.port}/state`)).status).toBe(200);
+  });
+
+  it("非回环 + 没 token → 拒绝启动（宁可不启动，也不默默挂到网上）", async () => {
+    await expect(startServe({ host: "0.0.0.0", run: async () => 0 })).rejects.toThrow(
+      /OX_SERVE_TOKEN/,
+    );
+  });
+
+  it("非回环 + token → 放行启动，但未带凭证的请求仍被 401 拦下", async () => {
+    const srv = await startServe({ host: "127.0.0.2", authToken: "s3cret", run: async () => 0 });
+    open.push(srv);
+    expect(srv.host).toBe("127.0.0.2");
+    // 绑定地址不是装饰：请求打到 127.0.0.2 上确实被 401 拦住（authToken 生效）。
+    expect((await fetch(`http://127.0.0.2:${srv.port}/state`)).status).toBe(401);
+    expect((await fetch(`http://127.0.0.2:${srv.port}/state?token=s3cret`)).status).toBe(200);
+  });
+
+  it("POST /run 的 body 上限：限内通过、超限 413 且 run 一次都不被调用", async () => {
+    let ran = 0;
+    const srv = await startServe({
+      maxBodyBytes: 64,
+      run: async () => {
+        ran += 1;
+        return 0;
+      },
+    });
+    open.push(srv);
+    expect(srv.limits.maxBodyBytes).toBe(64); // 注入值真的生效（不是只回显）
+    const over = await fetch(`http://127.0.0.1:${srv.port}/run`, {
+      method: "POST",
+      body: "x".repeat(65),
+    });
+    expect(over.status).toBe(413);
+    expect(await over.text()).toContain("上限");
+    expect(ran).toBe(0); // 超限的 body 绝不进 run
+    // 恰好 64 字节：过尺寸闸、倒在校验（400）—— 边界是 `>` 而不是 `>=`。
+    const atLimit = await fetch(`http://127.0.0.1:${srv.port}/run`, {
+      method: "POST",
+      body: "x".repeat(64),
+    });
+    expect(atLimit.status).toBe(400);
+    const spec = JSON.stringify({ requirement: "x", projectRoot: "." });
+    expect(spec.length).toBeLessThan(64);
+    const ok = await fetch(`http://127.0.0.1:${srv.port}/run`, { method: "POST", body: spec });
+    expect(ok.status).toBe(202);
+    expect(ran).toBe(1);
+  });
+
+  it("POST /approve 同样受上限（413，而不是把半截 body 丢给 JSON.parse）", async () => {
+    const srv = await startServe({ maxBodyBytes: 32, run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/approve`, {
+      method: "POST",
+      body: JSON.stringify({ requestId: "a".repeat(64), granted: true }),
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it("requestTimeoutMs 可注入并回传（默认 60s 由上一组断言钉住）", async () => {
+    const srv = await startServe({ requestTimeoutMs: 1234, run: async () => 0 });
+    open.push(srv);
+    expect(srv.limits.requestTimeoutMs).toBe(1234);
   });
 });
