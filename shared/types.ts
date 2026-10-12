@@ -419,7 +419,9 @@ export interface ProjectSettings {
    * 规划前的只读外部上下文（P2-1 本地半边，2026-10-12）：从本机 `gh` 拉 GitHub
    * 的 issue / PR 文本，作为**背景**喂给规划大脑。缺省 = 不拉（提示与历史一致）。
    *
-   * ⚠️ 只读：只认 `gh issue list/view` 与 `gh pr view`；绝不评论、绝不建 PR。
+   * ⚠️ 只读：只认 `gh issue list` / `gh pr view`，外加唯一一条 GET 路径
+   * `gh api …/pulls/N/comments`（diff 行批注，方法强制 GET、路径由字符集校验过的
+   * repo 与安全整数 PR 号拼成）；绝不评论、绝不建 PR。
    * 需要本机 `gh` 已登录（我们不碰凭据）；拉不到就如实说"没拿到"，**不退化成
    * "当作没有这项需求"**。拉到的内容来自远端仓库 —— 提示里会被声明为不可信数据
    * （issue 正文里写"忽略上述规则"是免费的），真正的强制力在 schema 校验与沙箱。
@@ -427,8 +429,8 @@ export interface ProjectSettings {
   contextSources?: Array<{
     /** 显示在上下文块里的名字（也进日志，便于追责"这段是谁给的"）。 */
     name?: string;
-    /** `"issues"` = issue 列表；`"pr"` = 指定 PR 的描述。 */
-    kind: "issues" | "pr";
+    /** `"issues"` = issue 列表；`"pr"` = 指定 PR 的描述；`"pr-comments"` = 指定 PR 的 diff 行批注。 */
+    kind: "issues" | "pr" | "pr-comments";
     /** `owner/repo`；缺省 = 交给 `gh` 自己认当前仓库。 */
     repo?: string;
     /** issues：搜索条件（原样传 `--search`）。 */

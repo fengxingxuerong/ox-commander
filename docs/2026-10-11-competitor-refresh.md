@@ -86,8 +86,8 @@
 
 | 项 | 状态 |
 | --- | --- |
-| 5.7 PR/CI 折中版 | ✅ 本地半边同日第六轮落地（分支 + commit，settings `exportDeliveryBranch`）；push/PR/CI 回流留作远端半边 |
-| P2-1 GitHub/Linear 只读集成 | P2 层待办 |
+| 5.7 PR/CI 折中版 | ✅ **全完（2026-10-12）**：本地半边（分支 + commit，`exportDeliveryBranch`）+ 远端半边（push / PR / CI 回流，`settings.deliveryRemote`，见 `8470fdb`） |
+| P2-1 GitHub/Linear 只读集成 | ✅ **读半边已完（2026-10-12）**：本地半边 `bb76289`（issue 列表 / PR 描述进规划背景）；远端半边（diff 行批注进上下文，kind `"pr-comments"`）。⏸ "从 issue 建任务"（摄入）留待 —— 需要任务创建面，Linear 侧无本机 CLI 可借 |
 | 定时/触发自动化（Orca scheduled automations） | ✅ 同日第五轮落地（见 §六） |
 | loop detection 专项 | ✅ 本轮闭环 |
 | Omnigent YAML 导入 | 条件触发（维持） |

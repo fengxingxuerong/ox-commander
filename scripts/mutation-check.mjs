@@ -713,7 +713,7 @@ const SITE_BASELINE = {
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
-  "electron/context/github-readonly.ts": 32,
+  "electron/context/github-readonly.ts": 54,
   "electron/engine/batch-guard.ts": 16,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,

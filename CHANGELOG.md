@@ -30,6 +30,34 @@
   报告出现两行，审计实跑总数（1550）与 `SITE_BASELINE`（按文件去重计数）对不上。已删去
   旧条目并把来由并入保留条目；修复后 TARGETS 71 条目 / 71 唯一文件。
 
+### diff 行批注回传（P2-1 远端半边，2026-10-12）
+
+- **`settings.contextSources` 新 kind `"pr-comments"`**：竞品口径里"在 diff 行留批注
+  回传给 agent"的**读半边** —— 人在 GitHub PR 的 diff 行留的批注（review comments），
+  在下一轮规划/重修时作为**背景**进上下文（本地半边只拉了 issue 列表与 PR 描述，
+  人留下的反馈此前没有通路）。复用同一层：`githubArgs` 多一种形态、`parsePrComments`
+  / `renderPrComments` 两个纯函数、`fetchGithubContext` 多一个分支；platform 装配
+  原样透传（新 kind 自动生效，桌面与 headless 同一口径）。
+- **白名单里唯一一条 `gh api`**：`gh api --method GET repos/{repo}/pulls/{N}/comments`。
+  路径每一段都由我们拼 —— repo 要么过 `REPO_RE`，要么缺席时用 gh 自己的
+  `{owner}/{repo}` 占位符（它按 cwd 的仓库填）；PR 号是安全整数；`--method GET`
+  显式钉死方法，不靠 gh 的默认值。用户串进不了路径，也不出这条命令以外的形态。
+- **"没有批注"和"拉取失败"是两件事**：空数组是合法空结果（`ok=true, items=0`），
+  渲染成一句"（该 PR 没有 diff 行批注）"的实话 —— 不返回空字符串（那会被引擎按
+  "没拿到"记日志）；坏 JSON / 非数组 / `gh` 非零退出才折进 `reason`。失败原因里的
+  命令名按 kind 映射成人话（api 形态下 argv[1] 是 `"--method"`，不能拿来当命令名）。
+- **信任面不变**：批注内容和 issue 正文一样，是任何人都能写的不可信数据 ——
+  围栏仍在 `externalContextBlock`（提示层声明为数据）+ schema 校验 + 沙箱三处，
+  本层只如实标注来源与截断。"从 issue 建任务"（P2-1 的摄入半边）仍未做：
+  它需要一个任务创建面（桌面表单或 serve/headless 的 spec 字段），已连同设计
+  约束记进路线图文档，说破留着。
+- **门禁**：`github-readonly.ts` 逐位点审计 **54/54 全杀 100%**（本机用一次性 fd
+  绕法跑通 site 口径，原来的 32 处 + 新增 22 处）。审计逼出一处真缺口：
+  `parsePrComments` 取 `user.login` 的 `user && typeof user === "object"` 被变异成
+  `||` 时存活 —— 因为 `typeof null === "object"`，`user: null` 会去取 `null["login"]`
+  抛错；补了 `user: null` 的断言（不是加等价白名单）。site 基线 1554 → **1576**，
+  目标数 71 不变，漂移 0。用例 +17（合计 1965 条收集）。
+
 ### 规划前只读外部上下文（P2-1 本地半边，2026-10-12）
 
 - **`settings.contextSources`（缺省不配 = 不拉）**：规划之前从本机已登录的 `gh`

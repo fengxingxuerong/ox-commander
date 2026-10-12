@@ -9,8 +9,10 @@ import {
   githubArgs,
   MAX_ITEMS_CEILING,
   parseIssues,
+  parsePrComments,
   renderIssues,
   renderPr,
+  renderPrComments,
   REPO_RE,
   type GithubContextKind,
 } from "../electron/context/github-readonly";
@@ -111,6 +113,36 @@ describe("github-readonly · 仓库名与命令构造（githubArgs）", () => {
   it("未知 kind：不被接受（返回 null，靠调用方说清原因）", () => {
     expect(githubArgs({ kind: "nope" as unknown as GithubContextKind })).toBeNull();
   });
+
+  it("pr-comments：repo 在场 → 字面路径；缺席 → gh 的 {owner}/{repo} 占位符（不猜仓库）", () => {
+    expect(githubArgs({ kind: "pr-comments", pr: 7, repo: "o/r" })).toEqual([
+      "api",
+      "--method",
+      "GET",
+      "repos/o/r/pulls/7/comments",
+    ]);
+    expect(githubArgs({ kind: "pr-comments", pr: 7 })).toEqual([
+      "api",
+      "--method",
+      "GET",
+      "repos/{owner}/{repo}/pulls/7/comments",
+    ]);
+  });
+
+  it("pr-comments：方法强制 GET（不靠 gh 默认值）；PR 号非法一律拒绝", () => {
+    const args = githubArgs({ kind: "pr-comments", pr: 3, repo: "o/r" });
+    expect(args).toContain("--method");
+    expect(args).toContain("GET");
+    expect(githubArgs({ kind: "pr-comments", repo: "o/r" })).toBeNull();
+    expect(githubArgs({ kind: "pr-comments", pr: 0, repo: "o/r" })).toBeNull();
+    expect(githubArgs({ kind: "pr-comments", pr: -2, repo: "o/r" })).toBeNull();
+    expect(githubArgs({ kind: "pr-comments", pr: 2.5, repo: "o/r" })).toBeNull();
+  });
+
+  it("pr-comments：非法 repo 同样出不去命令（调用方忘了校验也出不去）", () => {
+    expect(githubArgs({ kind: "pr-comments", pr: 7, repo: "bad;rm" })).toBeNull();
+    expect(githubArgs({ kind: "pr-comments", pr: 7, repo: "no-slash" })).toBeNull();
+  });
 });
 
 describe("github-readonly · 解析（parseIssues）", () => {
@@ -137,6 +169,58 @@ describe("github-readonly · 解析（parseIssues）", () => {
     ]);
     // 非 object 的标量同样跳过
     expect(parseIssues('[7,{"number":9}]')).toEqual([{ number: 9, title: "", body: "", state: "" }]);
+  });
+});
+
+describe("github-readonly · 解析（parsePrComments）", () => {
+  const sample = JSON.stringify([
+    {
+      path: "src/a.ts",
+      line: 42,
+      side: "RIGHT",
+      body: "这里少了一个空值检查",
+      user: { login: "reviewer" },
+    },
+  ]);
+
+  it("空串 / 坏 JSON / 非数组 → null（拿不到就说拿不到）", () => {
+    expect(parsePrComments("")).toBeNull();
+    expect(parsePrComments("   ")).toBeNull();
+    expect(parsePrComments("{not json")).toBeNull();
+    expect(parsePrComments("{}")).toBeNull();
+    expect(parsePrComments("42")).toBeNull();
+    expect(parsePrComments("null")).toBeNull();
+  });
+
+  it("空数组 → []（合法空结果：\"没有批注\"不是\"拉取失败\"）", () => {
+    expect(parsePrComments("[]")).toEqual([]);
+  });
+
+  it("数组：字段归一（user.login 提成 author，CRLF 不动留给渲染层）", () => {
+    expect(parsePrComments(sample)).toEqual([
+      { path: "src/a.ts", line: 42, side: "RIGHT", author: "reviewer", body: "这里少了一个空值检查" },
+    ]);
+  });
+
+  it("line 缺席回落到 original_line，再缺席为 0（不编行号）", () => {
+    expect(parsePrComments('[{"path":"f","original_line":9,"body":"b"}]')).toEqual([
+      { path: "f", line: 9, side: "", author: "", body: "b" },
+    ]);
+    expect(parsePrComments('[{"path":"f","body":"b"}]')).toEqual([{ path: "f", line: 0, side: "", author: "", body: "b" }]);
+  });
+
+  it("user 缺席 / 非对象 → author 空串（不当机）", () => {
+    expect(parsePrComments('[{"path":"f","line":1,"body":"b"}]')![0]!.author).toBe("");
+    expect(parsePrComments('[{"path":"f","line":1,"body":"b","user":"ghost"}]')![0]!.author).toBe("");
+    // `user: null` 是 JSON 的合法值，而 `typeof null === "object"` —— 少了 `user &&`
+    // 这一步（变异把 && 换成 || 时）就会去取 `null["login"]` 直接抛错。
+    expect(parsePrComments('[{"path":"f","line":1,"body":"b","user":null}]')![0]!.author).toBe("");
+  });
+
+  it("非对象元素跳过、不中断循环", () => {
+    expect(parsePrComments('[null,{"path":"after","line":2,"body":"b"}]')).toEqual([
+      { path: "after", line: 2, side: "", author: "", body: "b" },
+    ]);
   });
 });
 
@@ -182,6 +266,32 @@ describe("github-readonly · 渲染与裁剪（renderIssues / renderPr / clipTex
     const clipped = clipText("y".repeat(30), 20);
     expect(clipped.truncated).toBe(true);
     expect(clipped.text).toBe(`\n…（已截断，省略 30 字符）`);
+  });
+
+  it("批注渲染成 `- path:line（side）@author: body`，CRLF 归一为 LF", () => {
+    const { text, truncated } = renderPrComments(
+      [{ path: "src/a.ts", line: 42, side: "RIGHT", author: "reviewer", body: "第一行\r\n第二行" }],
+      1000,
+    );
+    expect(truncated).toBe(false);
+    expect(text).toBe("- src/a.ts:42（RIGHT）@reviewer: 第一行\n第二行");
+  });
+
+  it("空批注列表给一句实话（不返回空字符串 —— 那会被引擎当成\"没拿到\"）", () => {
+    expect(renderPrComments([], 1000)).toEqual({ text: "（该 PR 没有 diff 行批注）", truncated: false });
+  });
+
+  it("多条批注用空行分隔，超出预算如实截断", () => {
+    const many = Array.from({ length: 5 }, (_, i) => ({
+      path: `f${i}.ts`,
+      line: i,
+      side: "RIGHT",
+      author: "r",
+      body: "b".repeat(50),
+    }));
+    const { text, truncated } = renderPrComments(many, 100);
+    expect(truncated).toBe(true);
+    expect(text).toContain("已截断");
   });
 });
 
@@ -280,5 +390,54 @@ describe("github-readonly · fetchGithubContext（注入 runner）", () => {
     const r = await fetchGithubContext({ kind: "pr", pr: 7, run });
     expect(r.ok).toBe(false);
     expect(r.reason).toContain("不是对象");
+  });
+
+  it("pr-comments 快乐路径：批注成文、条数如实、命令是白名单那条 GET", async () => {
+    const { run, calls } = recorder([
+      okJson('[{"path":"src/a.ts","line":42,"side":"RIGHT","body":"意见","user":{"login":"rev"}}]'),
+    ]);
+    const r = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", run });
+    expect(r.ok).toBe(true);
+    expect(r.items).toBe(1);
+    expect(r.text).toBe("- src/a.ts:42（RIGHT）@rev: 意见");
+    expect(r.truncated).toBeUndefined();
+    expect(calls).toEqual([
+      { command: "gh", args: ["api", "--method", "GET", "repos/o/r/pulls/7/comments"] },
+    ]);
+  });
+
+  it("pr-comments：空数组是合法空结果（ok=true, items=0，话说\"没有批注\"）", async () => {
+    const { run } = recorder([okJson("[]")]);
+    const r = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", run });
+    expect(r.ok).toBe(true);
+    expect(r.items).toBe(0);
+    expect(r.text).toBe("（该 PR 没有 diff 行批注）");
+  });
+
+  it("pr-comments：gh 非零退出，原因带人话命令名（不是 argv 片段）", async () => {
+    const { run } = recorder([{ code: 1, stderr: "gh: not logged in" }]);
+    const r = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", run });
+    expect(r.ok).toBe(false);
+    expect(r.reason).toContain("gh api pulls comments 失败");
+    expect(r.reason).toContain("not logged in");
+  });
+
+  it("pr-comments：输出解析不了（坏 JSON / 非数组）→ ok=false", async () => {
+    const bad = recorder([okJson("<html>")]);
+    const r1 = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", run: bad.run });
+    expect(r1.ok).toBe(false);
+    expect(r1.reason).toContain("解析不了");
+    const scalar = recorder([okJson("123")]);
+    const r2 = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", run: scalar.run });
+    expect(r2.ok).toBe(false);
+    expect(r2.reason).toContain("解析不了");
+  });
+
+  it("pr-comments：超预算截断如实上报", async () => {
+    const long = JSON.stringify([{ path: "f", line: 1, side: "RIGHT", body: "z".repeat(300), user: { login: "r" } }]);
+    const { run } = recorder([okJson(long)]);
+    const r = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", maxChars: 50, run });
+    expect(r.ok).toBe(true);
+    expect(r.truncated).toBe(true);
   });
 });
