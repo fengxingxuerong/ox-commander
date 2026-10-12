@@ -155,6 +155,26 @@ Omnigent 的 agent YAML 定义格式**作为导入路径 —— 它 9k+★ 的�
 预设（标注"未在本机实测，接入前 --help 核对"）；Omnigent YAML 兼容导入暂不做
 （YAML 解析引入新依赖，价值未到）。
 
+⏸ **2026-10-13 复核：维持不做 —— 触发条件仍未成立**（不是"忘了"，是查过）：
+- **格式还在动**：项目至今仍是 alpha（2026-06 开源，Roadmap 里的 Server MCP 未发货）；
+  官方 `docs/AGENT_YAML_SPEC.md` 里已出现 legacy 与 back-compat 别名 ——
+  `executor.profile` 明写"legacy，新 spec 别用"、`llm.reasoning_effort` 只是兼容别名。
+  迁移一个仍在弃用字段的格式，等于替它背版本债。
+- **语义对不上**：它那份 YAML 描述的是**一个 agent 的大脑与边界**
+  （`prompt` / `instructions` / `executor` / `tools`（function·mcp·agent）/ `policies` /
+  `os_env` / `terminals` / `params`），而 `agents.d/` 是**CLI/HTTP 适配器的启动清单**
+  （怎么 spawn、怎么对话、能力声明）。两边只在 `executor.harness` 那一行上重合，
+  其余字段在我们这边没有落点 —— 兼容它不是"导入"，是"重新长一套执行模型"。
+- **生态引用是单向的**：目前见到的是别人**生成** Omnigent YAML（如 MetaHarness 的
+  backend 生成 `.metaharness/omnigent_agent/config.yaml`），没见到第二个工具**消费**
+  这个格式。"事实标准"要有消费方，光是生成方不构成标准。
+- **成本没变**：YAML 解析仍是新依赖；为零散的一行 harness 映射引入它不值。
+
+**复触发条件（三条同时成立再动）**：① 出 1.0 且 schema 冻结（spec 文档里不再有
+legacy / back-compat 别名，且 `spec_version` 有稳定语义）；② 出现 ≥2 个**独立消费方**
+（不是生成器）；③ 映射不再失真 —— 要么 `agents.d` 长出了 prompt/policies 一类字段，
+要么只取 `executor` 子集就能表达我们 adapter 的全部能力。
+
 ### 5.7 远期：PR/CI 生命周期的折中版（学 AO）
 
 共享工作区路线下不做"每 agent 一个 worktree/PR"，但可以：交付过硬门禁后**可选**导出

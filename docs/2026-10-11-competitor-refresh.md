@@ -90,7 +90,7 @@
 | P2-1 GitHub/Linear 只读集成 | ✅ **读半边已完（2026-10-12）**：本地半边 `bb76289`（issue 列表 / PR 描述进规划背景）；远端半边（diff 行批注进上下文，kind `"pr-comments"`）。⏸ "从 issue 建任务"（摄入）留待 —— 需要任务创建面，Linear 侧无本机 CLI 可借 |
 | 定时/触发自动化（Orca scheduled automations） | ✅ 同日第五轮落地（见 §六） |
 | loop detection 专项 | ✅ 本轮闭环 |
-| Omnigent YAML 导入 | 条件触发（维持） |
+| Omnigent YAML 导入 | ⏸ **维持（2026-10-13 复核过，不是忘了）**：Omnigent 仍 alpha、官方 YAML spec 里已有 legacy/别名（格式在动）；它的 YAML 描述"agent 大脑+工具+策略"，与 `agents.d` 的"CLI 适配器启动清单"只在 `executor.harness` 一行重合；生态引用是单向生成、无独立消费方。三条复触发条件见 `2026-09-29-competitor-research.md` §5.6 |
 | 云 agent / 原生移动端 | 远期（维持） |
 
 ## 六、同日加轮：serve 定时运行（第五轮，2026-10-11）
