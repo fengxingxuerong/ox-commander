@@ -184,6 +184,20 @@ describe("CommandPolicy", () => {
       ["npm", ["x", "node", "--print", "1"]],
       ["pnpm", ["dlx", "node", "-e", "1"]],
       ["yarn", ["dlx", "python", "-c", "import os"]],
+      // 2026-10-12 独立审计实测：旗标拼写无法穷举，下面三种等价写法原本全被放行
+      // （而 `-c` / `--call` / `--package X -c` 都拦得住）——
+      //   `npx --c '<cmd>'`      ：`--call` 的别名，精确匹配漏了它
+      //   `npx -p X -c '<cmd>'`  ：`-p` 是 `--package` 别名，值选项表漏了它
+      //   `npx --pac X -c '<cmd>'`：`--package` 的不规范缩写，同样漏
+      // 后两者靠"值选项表 + 带空格 token 形态"两条一起兜住。
+      ["npx", ["--c", "node -e 1"]],
+      ["npx", ["-p", "cowsay", "-c", "node -e 1"]],
+      ["npx", ["-p", "cowsay", "node", "-e", "1"]],
+      ["npx", ["--pac", "cowsay", "-c", "node -e 1"]],
+      // 值不带空格时，whitespace 兜底不生效 —— 只有旗标识别本身能拦住。
+      // 这两条钉住 `isShellCallFlag` 的两个 `||`（否则会被兜底遮蔽而存活）。
+      ["npx", ["-c", "node"]],
+      ["npx", ["--call", "node"]],
     ] as const) {
       const d = p.check(cmd, [...args]);
       expect(d.ok, `${cmd} ${args.join(" ")} should be rejected`).toBe(false);
@@ -194,6 +208,8 @@ describe("CommandPolicy", () => {
     // must stay allowed or every lint run through npx breaks.
     expect(p.check("npx", ["eslint", "-c", ".eslintrc.json"]).ok).toBe(true);
     expect(p.check("npx", ["-y", "tsc", "-b"]).ok).toBe(true);
+    // `-p <pkg> <bin> <args>` 是 npx 的常规用法：值选项只吞掉紧跟的包名，不能误伤。
+    expect(p.check("npx", ["-p", "cowsay", "cowsay", "hello"]).ok).toBe(true);
     expect(p.check("npm", ["exec", "vitest", "run", "--coverage"]).ok).toBe(true);
     // A non-launcher subcommand keeps its arguments opaque: that argv is npm's
     // own, not a nested command line.

@@ -211,11 +211,6 @@ const TARGETS = [
   // startScheduleLoop）补挂 —— 触发/跳过/落盘语义的断言都在那份文件里。
   { file: "headless/serve-main.ts", tests: ["src/headless-entries.test.ts", "src/schedule-core.test.ts"], tier: 1 },
   { file: "headless/mcp-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
-  // 2026-10-05：orchestration 的 IPC 控制面。此前它的**函数**覆盖 66.7%
-  // （全项目信任面最重的文件里最低），补测后 lines/functions/statements 均 100%，
-  // 2026-10-05 接入 tier 2 复核。守卫分支（update-prd 的两条 fail-closed）
-  // 是这批补测的主要目标。
-  { file: "electron/ipc/orchestration.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
   // 2026-10-10：桌面侧的交付凭据复核（receipt:verify，欠账 #7）。与命令行入口
   // `headless/receipt-verify-main.ts` 共用 `shared/delivery-receipt` 的判据，
   // 但本文件自己有承判逻辑（指纹三档门、canReplay 合取、BOM 剥离、裁决装配）——
@@ -319,8 +314,12 @@ const TARGETS = [
   { file: "shared/graph.ts", test: "src/graph.test.ts", tier: 2 },
 
   // ---- 2026-09-22 第四批：IPC handler 层试点（C1 拆分后行为测试补齐） ----
-  // orchestration.ts 是任务下发主链路（规划/启动/取消/仲裁回流）。
+  // orchestration.ts 是任务下发主链路（规划/启动/取消/仲裁回流），也是全项目
+  // 信任面最重的文件之一（2026-10-05 补测后 lines/functions/statements 均 100%，
+  // update-prd 的两条 fail-closed 守卫分支是那批的主要目标）。
   // 挂行为测试 + 通道契约两个文件：前者杀行为变异，后者守住 handler 注册面。
+  // ⚠️ 本文件在 TARGETS 里**只能出现这一处**：2026-10-12 全量审计发现曾有第二个
+  //    条目（单测试的旧写法），导致该目标被审计两遍、审计总数与 SITE_BASELINE 对不上。
   {
     file: "electron/ipc/orchestration.ts",
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],

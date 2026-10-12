@@ -171,12 +171,30 @@ const EXEC_SUBCOMMANDS: ReadonlySet<string> = new Set(["exec", "x", "dlx"]);
  * `npm exec --package cowsay -c 'node -e …'` (a shell string) apart from
  * `npm exec eslint -c config.json` (eslint's own flag). Read off
  * `npm exec --help` on npm 11.16.
+ *
+ * `-p` is `--package`'s short alias. `npx --help` does not list it, but
+ * `npx -p <pkg>` accepts it (2026-10-12 实测)，而漏掉它会让 `-p` 后面的值被误读成
+ * 嵌套程序：那一步把 `flags` 置成 `[]`，于是更靠后的 `-c`（shell 串）就溜过去了。
+ * `npm exec -p` 会 EUSAGE 拒绝，但 npx 与 npm exec 共用这张表 —— 补上不会有副作用。
  */
-const EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set(["--package", "-w", "--workspace"]);
+const EXEC_VALUE_OPTIONS: ReadonlySet<string> = new Set(["--package", "-p", "-w", "--workspace"]);
 
 /** The launcher's own shell-string option: one string, handed to a shell. */
 function isShellCallFlag(token: string): boolean {
   return token === "-c" || token === "--call" || token.startsWith("--call=");
+}
+
+/**
+ * A forwarded token that is really a whole command line, not one argv element.
+ *
+ * 合法的 launcher 调用里 shell 早已把命令行拆成 argv，不会把整条命令（含空格）
+ * 塞进单个参数；出现这种 token 就意味着有一段 shell 串被交了出去。旗标**拼写**
+ * 无法穷举来判：实测 `npx --c '…'` / `npx -p X -c '…'` / `npx --pac X -c '…'`
+ * 都能执行，而 `--cal` / `--pack` 反而报错 —— nopt 的缩写不成前缀规律（2026-10-12）。
+ * 所以判据落在"形态"上，而不是"拼写"上。
+ */
+function isWholeCommandLine(token: string): boolean {
+  return /\s/.test(token);
 }
 
 const NO_EVAL_FLAGS: readonly string[] = [];
@@ -205,6 +223,10 @@ function launcherEvalHit(base: string, args: readonly string[]): string | null {
     if (isShellCallFlag(token)) return token;
     if (EXEC_VALUE_OPTIONS.has(tail[i - 1] ?? "")) continue;
     if (!token.startsWith("-")) flags = EVAL_FLAGS[baseName(token)] ?? NO_EVAL_FLAGS;
+  }
+  // 拼写无关的兜底：任何一段被整条塞进单个 argv 的命令行都判为可疑（见 isWholeCommandLine）。
+  for (const token of tail) {
+    if (isWholeCommandLine(token)) return token;
   }
   return null;
 }
@@ -299,7 +321,9 @@ export class CommandPolicy {
       if (forwarded) {
         return {
           ok: false,
-          reason: `拒绝经 ${base} 转发的内联求值参数 ${forwarded}（把代码放进脚本文件再执行）`,
+          reason:
+            `拒绝经 ${base} 转发的可疑参数 ${forwarded}` +
+            `（内联求值，或整条命令行被塞进单个参数；把代码放进脚本文件再执行）`,
         };
       }
     }
