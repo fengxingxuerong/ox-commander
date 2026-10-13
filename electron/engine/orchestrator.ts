@@ -257,6 +257,13 @@ export class RunWallClockError extends Error {
 
 export class OrchestratorEngine {
   private cancelled = false;
+  /**
+   * 本次 run 的中止闸（2026-10-13）：cancel() 时 abort，让 brain 层的在途 HTTP
+   * 与 combo 间退避睡眠立刻结束（fetch 侧 req.signal 早已并进 AbortSignal.any，
+   * 缺的只是"有人去 abort"和退避睡眠听不听）。执行期（agent 适配器）不在本轮
+   * 范围内 —— 那条链更深，另记。
+   */
+  private readonly abort = new AbortController();
   /** 计时起点＝引擎构造那一刻（两个宿主都是每次 run 现构造引擎）。 */
   private readonly runStartedAt = Date.now();
   private paused = false;
@@ -280,6 +287,9 @@ export class OrchestratorEngine {
 
   cancel(): void {
     this.cancelled = true;
+    // 在途的 brain 调用（PRD/规划）随闸一起断 —— 标志位只拦下一个检查点，
+    // abort 拦的是"正在飞的那一个"。
+    this.abort.abort();
     /*
      * 标志位只拦得住下一个检查点。已经在跑的 run 必须被真的掐掉 —— 否则用户点了
      * 取消之后，外部 CLI 智能体还会跑满自己的 runDeadline（默认 600s）继续改文件。
@@ -311,16 +321,23 @@ export class OrchestratorEngine {
    * the call for the cooldown window and retry instead of killing the pipeline.
    */
   private async brainCall<T>(what: string, fn: () => Promise<T>): Promise<T> {
-    return withCooldownRetry(fn, {
+    try {
+      return await withCooldownRetry(fn, {
       shouldStop: () => this.cancelled,
       // 等待被 cancel 时以 CancelledError 收尾（2026-10-13）：冷却错是 provider
       // 的结局，取消是用户的结局 —— 等待不再睡满封顶，cancel 最迟 1s 内落地。
       stopError: () => new CancelledError(),
-      onWait: (ms, n) =>
-        this.cb.onLog(
-          `${what}：全部 LLM 路由冷却中，第 ${n} 次等待约 ${Math.ceil(ms / 1000)}s 后重试`,
-        ),
-    });
+        onWait: (ms, n) =>
+          this.cb.onLog(
+            `${what}：全部 LLM 路由冷却中，第 ${n} 次等待约 ${Math.ceil(ms / 1000)}s 后重试`,
+          ),
+      });
+    } catch (e) {
+      // 已取消的 run：在途 abort / 冷却错一律以 CancelledError 收尾 —— 否则
+      // "用户叫停"会被报成 AbortError/限流失败（两种结局分开，2026-10-13）。
+      if (this.cancelled) throw new CancelledError();
+      throw e;
+    }
   }
 
   /** 见 `runWallClockMs`：只在批/轮边界检查，不掐在途请求。 */
@@ -341,7 +358,10 @@ export class OrchestratorEngine {
       () =>
         chatJson(
           this.deps.llm,
-          { messages: [{ role: "user", content: buildPrdPrompt(userRequirement, context) }] },
+          {
+            messages: [{ role: "user", content: buildPrdPrompt(userRequirement, context) }],
+            signal: this.abort.signal,
+          },
           { schemaName: "PRD", validate: parsePrd },
         ),
     );
@@ -407,6 +427,7 @@ export class OrchestratorEngine {
                     (feedback ? `\n\n【上一次规划未通过 zone 覆盖校验，必须修正】\n${feedback}` : ""),
                 },
               ],
+              signal: this.abort.signal,
             },
             { schemaName: "decompose plan", validate: parseDecompose },
           ),

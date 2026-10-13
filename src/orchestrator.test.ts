@@ -102,6 +102,38 @@ function engine(opts: {
   });
 }
 
+describe("取消在途 brain 调用（2026-10-13 signal 透传）", () => {
+  it("cancel 断在途的 PRD 生成：abort 即收 CancelledError（不是等 fetch 超时）", async () => {
+    // 挂起直到 req.signal 被 abort —— cancel() 现在会 abort 引擎的闸。
+    const eng = new OrchestratorEngine(
+      {
+        llm: {
+          async chat(req: { signal?: AbortSignal }): Promise<never> {
+            return new Promise((_resolve, reject) => {
+              req.signal?.addEventListener("abort", () =>
+                reject(req.signal?.reason ?? new DOMException("aborted", "AbortError")),
+              );
+            });
+          },
+        } as unknown as LlmClient,
+        scheduler: fakeScheduler(false),
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS },
+      },
+      {
+        onStage: () => undefined,
+        onLog: () => undefined,
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    const pending = eng.generatePrd("x");
+    setTimeout(() => eng.cancel(), 50);
+    await expect(pending).rejects.toThrow(CancelledError);
+  });
+});
+
 describe("取消时延（2026-10-13 活测修复的真实链路回归）", () => {
   it("brainCall 撞全路由冷却时 cancel → ~1s 内 CancelledError，不等满 120s 封顶", async () => {
     // 活测实录：/cancel 在全路由 429 风暴里 7 分钟没落地 —— withCooldownRetry 的

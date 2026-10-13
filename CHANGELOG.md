@@ -6,6 +6,26 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（liveness：LLM 调用链透传 AbortSignal · 2026-10-13）
+
+cancel 时延三分支的最后一支（在途请求）：
+
+- `ChatRequest.signal` 的**设计本来就在**（providers.ts：取消是 run 级的，
+  挂在请求上而不是客户端上），`chat()` 也早已把它并进 `AbortSignal.any` ——
+  但**没人去 abort**：orchestrator 只有标志位。现在引擎持有本次 run 的
+  `AbortController`，`cancel()` 同时 abort —— PRD/规划的在途 HTTP 立刻断。
+- 补上 `sleepUnlessAborted`：combo 间的退避睡眠（封顶 80s）此前整段
+  setTimeout 不听 signal，一次 cancel 要拖满一个 backoff。已 aborted 立即抛
+  `signal.reason`（与 fetch 的 abort 同形，走"不计入冷却"那条处置）。
+- `brainCall` 包一层取消翻译：已取消的 run 里，在途 abort / 冷却错一律以
+  `CancelledError` 收尾 —— "用户叫停"不再被报成 AbortError/限流失败。
+- **测试**：failover 新增"退避睡眠听 signal"（abort 即抛且**不换下一条
+  线路** —— 取消不是重发的理由）；orchestrator 新增"cancel 断在途 PRD 生成"
+  （50ms 取消 → CancelledError，不等 fetch 超时）。http-clients /
+  orchestrator 逐位点重审；基线不变。全量 2007 通过 + 8 跳过 = 2015 条零失败。
+- 仍未覆盖：**执行期**（agent 适配器的 LLM 调用）没有外部 signal 可接 ——
+  那条链要穿过 AgentAdapter，更深，另记。
+
 ### 修复（liveness：调度器节流等待也听取消了 · 2026-10-13）
 
 cancel 时延修复的执行期半边（规划期已修，这是最后一处）：

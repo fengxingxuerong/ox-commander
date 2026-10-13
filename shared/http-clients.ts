@@ -607,7 +607,10 @@ export class FailoverLlmClient implements LlmClient {
       if (k < attempts.length - 1) {
         const retryAfterMs = lastErr instanceof HttpLlmError ? lastErr.retryAfterMs : undefined;
         const backoff = Math.min(this.baseBackoffMs * 2 ** k, this.maxBackoffMs);
-        await this.sleep(retryAfterMs !== undefined ? Math.max(backoff, retryAfterMs) : backoff);
+        await this.sleepUnlessAborted(
+          retryAfterMs !== undefined ? Math.max(backoff, retryAfterMs) : backoff,
+          req.signal,
+        );
       }
     }
     throw lastErr;
@@ -621,6 +624,30 @@ export class FailoverLlmClient implements LlmClient {
     if (status === 429) s.rateLimitHits += 1;
     this.stats.set(comboKey, s);
     this.onHealth?.(this.health());
+  }
+
+  /**
+   * 带 abort 的睡眠（2026-10-13 活测修复）：combo 间的退避睡眠此前整段 setTimeout
+   * 不听 signal —— fetch 本身可取消（req.signal 已并进 AbortSignal.any），但两次
+   * 尝试之间的等待照样能把一次 cancel 拖满一个 backoff（封顶 80s）。已 aborted
+   * 立即抛 signal.reason（与 fetch 的 abort 同形，调用方 561 行那段"不计入冷却"
+   * 的处置因此同样生效）。
+   */
+  protected async sleepUnlessAborted(ms: number, signal?: AbortSignal): Promise<void> {
+    if (ms <= 0) return;
+    if (!signal) return this.sleep(ms);
+    if (signal.aborted) throw signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = (): void => {
+        clearTimeout(timer);
+        reject(signal.reason ?? new DOMException("The operation was aborted.", "AbortError"));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener("abort", onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener("abort", onAbort, { once: true });
+    });
   }
 
   private setCooldown(comboKey: string, e: unknown): number {

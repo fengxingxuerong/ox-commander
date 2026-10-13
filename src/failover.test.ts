@@ -139,6 +139,24 @@ describe("FailoverLlmClient", () => {
     expect(sleeps).toEqual([500]);
   });
 
+  it("combo 间退避睡眠听 signal：abort 立刻抛，且不换下一条线路（2026-10-13 活测修复）", async () => {
+    // 在途 fetch 本就听 signal（req.signal 并进 AbortSignal.any），但两次尝试
+    // 之间的退避睡眠整段 setTimeout —— 一次 cancel 要拖满一个 backoff（封顶 80s）。
+    const attempted: string[] = [];
+    const rate = (): LlmClient => ({
+      async chat(): Promise<ChatResponse> {
+        attempted.push("rate");
+        throw new HttpLlmError(429, "limited");
+      },
+    });
+    const ok = stub([async () => OK("m")()]);
+    const client = new FailoverLlmClient([group("g1", [rate(), ok])], async () => {});
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 50); // 500ms 退避的中途
+    await expect(client.chat({ ...REQ, signal: ac.signal })).rejects.toThrow(/abort/i);
+    expect(attempted).toEqual(["rate"]); // 取消不是"换条线重发"的理由
+  });
+
   it("throws the last error when every group is exhausted", async () => {
     const mk = (name: string): LlmClient =>
       stub([async () => { throw new HttpLlmError(429, `${name} limited`); }]);
