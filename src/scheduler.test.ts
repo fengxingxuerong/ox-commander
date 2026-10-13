@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { admitConcurrency, digest, Scheduler } from "../electron/engine/scheduler";
+import { CancelledError } from "../electron/engine/orchestrator";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
 import { CircuitBreaker } from "../electron/sandbox/circuit-breaker";
@@ -678,6 +679,25 @@ describe("Scheduler · 429 感知派发节流", () => {
     await sched.runBatch([task("t3", "src/c")], "."); // t2 成功已清零 → 不再节流
     expect(throttled.length).toBe(1);
   });
+
+  it("节流等待期间取消 → 立刻 CancelledError，不等满封顶（2026-10-13 活测修复）", async () => {
+    // 活测实录：/cancel 在限流风暴里 7 分钟没落地 —— 规划期（brainCall）已修，
+    // 这是执行期的同一处病：节流封顶 5min 的整段睡眠不听取消。
+    const state = { failNext: true };
+    const throttled: number[] = [];
+    const sched = new Scheduler([rateLimitAdapter(state, [])], [], {
+      maxParallelRuns: 1,
+      rateLimitBackoffMs: 60_000, // 名义 60s
+      onThrottle: (ms) => throttled.push(ms),
+    });
+    await sched.runBatch([task("t1", "z1")], "."); // 429 → 记账 60s 节流
+    expect(throttled.length).toBe(0);
+    sched.setShouldStop(() => true);
+    const t0 = Date.now();
+    await expect(sched.runBatch([task("t2", "z2")], ".")).rejects.toThrow(CancelledError);
+    expect(Date.now() - t0).toBeLessThan(3_000); // 不是 60s
+    expect(throttled.length).toBe(1); // onThrottle 照旧上报（可观测性不丢）
+  }, 8_000);
 
   it("连续限流指数退避（第二次等待翻倍）", async () => {
     const state = { failNext: true };

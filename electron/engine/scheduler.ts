@@ -15,6 +15,7 @@ import type { CircuitBreaker } from "../sandbox/circuit-breaker";
 import type { BatchGuard } from "./batch-guard";
 import { createLoopDetector, LoopDetector, type LoopDetectionOptions } from "../sandbox/loop-detector";
 import { classifyFailure } from "../audit-log";
+import { CancelledError, isCancelled } from "./orchestrator";
 
 export interface DispatchOutcome {
   taskId: string;
@@ -130,6 +131,11 @@ export interface SchedulerOptions {
   rateLimitBackoffMs?: number;
   /** 节流上限（默认 5 分钟）。 */
   rateLimitMaxBackoffMs?: number;
+  /**
+   * 取消探针（2026-10-13 活测修复）：节流等待分片检查它，叫停就抛 CancelledError。
+   * 引擎在构造时用 `setShouldStop` 把自己的 cancelled 标志接进来。
+   */
+  shouldStop?: () => boolean;
   /** 节流可观测性：实际等待了多久、连续第几次限流。 */
   onThrottle?: (waitMs: number, streak: number) => void;
   /**
@@ -187,6 +193,12 @@ export class Scheduler {
   private throttleUntil = 0;
   /** 连续 rate-limit 次数（成功一次即清零）。 */
   private rateLimitStreak = 0;
+  private shouldStop: () => boolean = () => false;
+
+  /** 引擎接线用：把"本次 run 是否已被取消"接进节流等待（orchestrator 构造时调用）。 */
+  setShouldStop(fn: () => boolean): void {
+    this.shouldStop = fn;
+  }
   /**
    * per-agent 用量账本（本调度器生命周期 = 一个 run）：key 是 agentId，
    * 值是事件流里累计的**上报** token 数。预算闸（admitBudget）的数据面。
@@ -280,7 +292,16 @@ export class Scheduler {
     const wait = this.throttleUntil - Date.now();
     if (wait > 0) {
       this.opts.onThrottle?.(wait, this.rateLimitStreak);
-      await new Promise((r) => setTimeout(r, wait));
+      // 分片等 + 每片检查取消（2026-10-13 活测修复）：节流指数退避封顶 5min，
+      // 整段睡眠时一次 /cancel 要等满封顶才落地（实测 cancel 7 分钟没生效；
+      // 规划期已修 brainCall，这里是执行期的同一处病）。
+      let remaining = wait;
+      while (remaining > 0) {
+        if (this.shouldStop()) throw new CancelledError();
+        const slice = Math.min(remaining, 1_000);
+        await new Promise((r) => setTimeout(r, slice));
+        remaining -= slice;
+      }
     }
   }
 
@@ -707,6 +728,10 @@ export class Scheduler {
       }
       return withMeta;
     } catch (err) {
+      // 取消不是派发失败（2026-10-13）：awaitThrottle 在节流等待期间被叫停时抛
+      // CancelledError。把它当成任务失败会污染 breaker 与限流账，还会让 runBatch
+      // 以"任务全失败"收尾而不是以取消收尾 —— 原样上抛，交给引擎的取消路径。
+      if (isCancelled(err)) throw err;
       const failed: DispatchOutcome = {
         taskId: task.id,
         ok: false,

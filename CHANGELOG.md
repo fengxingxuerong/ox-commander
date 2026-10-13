@@ -6,6 +6,22 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（liveness：调度器节流等待也听取消了 · 2026-10-13）
+
+cancel 时延修复的执行期半边（规划期已修，这是最后一处）：
+
+- `Scheduler` 的 429 节流等待是整段 setTimeout（指数退避**封顶 5min**），
+  一次 `/cancel` 在执行期要等满封顶才落地。修为分片等待（1s 粒度）+
+  `setShouldStop` 探针，orchestrator 构造时把自己的 `cancelled` 接进来。
+- **顺带修一个真吞点**：`dispatchOne` 的 catch 把一切错误转成"任务失败" ——
+  取消上抛后会被它变成一条 failed outcome（污染 breaker/限流账，runBatch
+  以"任务全失败"而不是取消收尾）。现在 `isCancelled(err)` 原样上抛。
+- **测试**：429 节流 describe 新增用例（名义 60s、取消即达 → CancelledError
+  < 3s，onThrottle 可观测性不丢）。scheduler.ts 42/42、orchestrator.ts
+  72/72 逐位点全杀；基线不变（位点数未变）。
+- 至此三处睡眠（brain 冷却 / 调度节流）全部听取消；仅剩 http-clients
+  combo 间退避睡眠（`chat()` 全链无外部 signal，需另开一轮做透传）。
+
 ### 测试（cancel 时延真实链路回归 + testTimeout 余量 · 2026-10-13）
 
 - **orchestrator 真实链路回归**：上一条修复此前只有单元级覆盖

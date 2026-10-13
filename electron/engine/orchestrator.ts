@@ -271,7 +271,12 @@ export class OrchestratorEngine {
    */
   private readonly repairsSeen = new Map<string, RepairRecord[]>();
 
-  constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {}
+  constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {
+    // 取消探针接进调度器的节流等待（2026-10-13）：节流指数退避封顶 5min 的整段
+    // 睡眠曾让 /cancel 在执行期也等满封顶（实测 cancel 7 分钟没生效）。
+    // fake scheduler 没有这个方法，可选调用；字段初始化先于构造函数体，闭包安全。
+    deps.scheduler.setShouldStop?.(() => this.cancelled);
+  }
 
   cancel(): void {
     this.cancelled = true;
