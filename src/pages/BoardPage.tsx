@@ -2,7 +2,7 @@ import { memo, useEffect, useRef, useState } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
-import type { ReceiptTaskStatus } from "../../shared/delivery-receipt";
+import type { ReceiptTaskStatus, ReceiptVerdict } from "../../shared/delivery-receipt";
 import { usageFact } from "../../shared/usage-meter";
 
 /**
@@ -86,6 +86,18 @@ const LogView = memo(function LogView() {
   );
 });
 
+/**
+ * 复核裁决的操作员语言（五档刻意不并档 —— 每档该做的事完全不同）。
+ * "verified" 是唯一能说"凭据可信"的档；其余四档各有各的处置。
+ */
+const RECEIPT_VERDICT_LABELS: Record<ReceiptVerdict, string> = {
+  verified: "✅ 复现（指纹一致 + 复跑全对）",
+  "not-replayed": "🧾 未复跑（指纹一致，只查了完整性）",
+  tampered: "🚨 内容被改过（指纹对不上，别再比对它）",
+  unsigned: "⚠️ 未盖章，无从判断完整性",
+  contradicted: "❌ 与环境观察矛盾（指纹一致但复跑对不上）",
+};
+
 /** 凭据任务账的状态图标（与看板任务状态同色系，但这里是**结论**不是进度）。 */
 const RECEIPT_TASK_ICON: Record<ReceiptTaskStatus, string> = {
   done: "✅",
@@ -115,6 +127,8 @@ export function BoardPage() {
   }, []);
   const lastActivityTs = useApp((s) => s.lastActivityTs);
   const runStartedAt = useApp((s) => s.runStartedAt);
+  const verifyReceiptAction = useApp((s) => s.verifyReceipt);
+  const receiptVerdict = useApp((s) => s.receiptVerdict);
   const loadRecovery = useApp((s) => s.loadRecovery);
   const start = useApp((s) => s.confirmAndExecute);
   const activeProjectId = useApp((s) => s.activeProjectId);
@@ -321,6 +335,20 @@ export function BoardPage() {
                   <pre>{receipt.fingerprint}</pre>
                 </details>
               ) : null}
+              {/* 第三半：**就地复核**（2026-10-13 把 receipt:verify 接上 UI）。此前
+                  五档裁决只有 receipt-verify CLI 能出 —— 现在凭据卡一键可查。
+                  默认 replay:false：先只查完整性与指纹，不执行凭据里的命令。 */}
+              <div className="btn-row">
+                <button onClick={() => void verifyReceiptAction()} title="本机复核：比对指纹与验证历史（默认不执行凭据里的命令）">
+                  🔍 复核凭据
+                </button>
+              </div>
+              {receiptVerdict && (
+                <p className="task-meta">
+                  复核裁决：{RECEIPT_VERDICT_LABELS[receiptVerdict.audit.verdict] ?? receiptVerdict.audit.verdict}
+                  {receiptVerdict.replayed ? " · 已复跑" : " · 未复跑"}
+                </p>
+              )}
               {receipt.tasks.length > 0 && (
                 <details className="failure-details">
                   <summary>任务账 {receipt.tasks.length} 条</summary>

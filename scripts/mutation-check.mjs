@@ -770,7 +770,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
-  "src/store.ts": 33,
+  "src/store.ts": 34,
 };
 
 /**

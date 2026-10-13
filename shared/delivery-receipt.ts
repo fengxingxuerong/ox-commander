@@ -18,6 +18,19 @@ import type { UsageSnapshot } from "./usage-meter";
  * 不给宿主"0 是不是真的 0"这种歧义。
  */
 
+/**
+ * `receipt:verify`（桌面 IPC）与 receipt-verify CLI 共用的复核结果形状。
+ * 2026-10-13 从 `electron/ipc/receipt.ts` 上移到 shared：渲染层要把五档裁决
+ * 摆上凭据卡，类型不能只住在主进程一侧。
+ */
+export interface ReceiptVerifyResult {
+  audit: ReceiptAudit;
+  /** 凭据里带命令、因此可被独立复跑的那些命令（默认模式也要给：界面要摆出来）。 */
+  commands: Array<{ kind: VerificationKind; command: string; args: string[] }>;
+  /** 本次是否真的执行了命令。false = 只查了完整性。 */
+  replayed: boolean;
+}
+
 /** 本次运行的结局。只有两档，因为"成功/失败"之外的状态不具备对外结论价值。 */
 export type ReceiptOutcome = "delivered" | "blocked";
 

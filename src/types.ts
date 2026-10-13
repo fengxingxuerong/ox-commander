@@ -1,4 +1,5 @@
 import type { EscalationAction, FailureClass, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
+import type { ReceiptVerifyResult } from "../shared/delivery-receipt";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { UsageSnapshot } from "../shared/usage-meter";
@@ -170,6 +171,8 @@ export interface AppState {
   lastActivityTs?: string;
   /** 本次 run 的开始时刻（confirmAndExecute 落的；看板据此显示已耗时）。 */
   runStartedAt?: number;
+  /** 凭据复核的五档裁决（凭据卡的"复核"按钮发起；新 run 开始时清掉）。 */
+  receiptVerdict?: ReceiptVerifyResult;
   escalations: EscalationView[];
   approvals: ApprovalView[];
   conflicts: ConflictView[];
@@ -206,6 +209,8 @@ export interface AppState {
   resolveApproval(requestId: string, granted: boolean): Promise<void>;
   /** Rebuilds the board from audit facts on mount (facts/derived split). */
   loadRecovery(): Promise<void>;
+  /** 凭据卡"复核"按钮：默认 replay:false（fail-safe，不执行凭据里的命令）。 */
+  verifyReceipt(): Promise<void>;
   handleEvent(payload: Record<string, unknown>): void;
 }
 
@@ -230,6 +235,7 @@ declare global {
       resume(): Promise<void>;
       resolveEscalation(taskId: string, action: EscalationAction): Promise<boolean>;
       resolveApproval(requestId: string, granted: boolean): Promise<boolean>;
+      verifyReceipt(projectId: string, replay?: boolean): Promise<ReceiptVerifyResult>;
       listAgents(): Promise<AgentListResult>;
       exampleManifest(): Promise<AgentManifest>;
       registerAgent(manifest: unknown): Promise<AgentMutationResult>;

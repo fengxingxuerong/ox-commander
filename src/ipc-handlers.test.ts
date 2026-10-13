@@ -195,7 +195,7 @@ h.builtAdapter = {
 import type { FakeIpcMain } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
-import type { ReceiptVerifyResult } from "../electron/ipc/receipt";
+import type { ReceiptVerifyResult } from "../shared/delivery-receipt";
 import {
   abortAllApprovals,
   abortAllEscalations,

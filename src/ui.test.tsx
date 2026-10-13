@@ -117,6 +117,14 @@ function makeBridge(): Bridge {
     recentAudit: vi.fn(async () => []),
     auditFiles: vi.fn(async () => []),
     exportAudit: vi.fn(async () => ({ ok: true, path: "/x/out.jsonl" })),
+    // 2026-10-13 补盲区：这两个此前不在 fake 里 —— 看板恢复的成功路径与
+    // interrupted 横幅因此**从未被断言过**（loadRecovery 的 catch 恒被走到）。
+    boardRecovery: vi.fn(async () => ({ tasks: {}, interrupted: false })),
+    verifyReceipt: vi.fn(async () => ({
+      audit: { verdict: "not-replayed" },
+      commands: [],
+      replayed: false,
+    })),
     onEvent: vi.fn(() => () => undefined),
   } as unknown as Bridge;
 }
@@ -412,6 +420,69 @@ describe("BoardPage", () => {
       useApp.setState({ stage: "DONE" });
     });
     expect(screen.queryByText(/已耗时/)).toBeNull();
+  });
+
+  it("verifyReceipt 的守卫：没凭据或没项目就不打桥（2026-10-13）", async () => {
+    // 杀 `!pid || !receipt` → `&&`：变异后两个负例都会继续调桥 —— 守卫失效
+    // 的形态是"没有凭据也能点复核"，桥上会拿到一次注定失败的调用。
+    const RECIPT = {
+      outcome: "delivered" as const,
+      verified: true,
+      rounds: 0,
+      headline: "交付完成",
+      counts: { total: 1, done: 1, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 0, preexisting: 0 },
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    };
+    useApp.setState({ activeProjectId: "p-1", receipt: undefined });
+    await useApp.getState().verifyReceipt();
+    expect(window.oxCommander.verifyReceipt).not.toHaveBeenCalled();
+    useApp.setState({ activeProjectId: undefined, receipt: RECIPT });
+    await useApp.getState().verifyReceipt();
+    expect(window.oxCommander.verifyReceipt).not.toHaveBeenCalled();
+  });
+
+  it("恢复路径上板：interrupted 横幅、恢复日志与恢复的任务都出现（2026-10-13 补盲区）", async () => {
+    // 此前 fake bridge 没有 boardRecovery，loadRecovery 的 catch 恒被走到 ——
+    // "恢复成功"这条主线（被杀进程后重开看板）零断言。
+    useApp.setState({ activeProjectId: "p-1" });
+    (window.oxCommander.boardRecovery as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      tasks: {
+        t1: { taskId: "t1", title: "实现任务列表", zone: "src/todo", status: "done", attempts: 1, agentId: "sensenova-api" },
+      },
+      stage: "VERIFICATION",
+      interrupted: true,
+      lastActivityTs: "2026-10-13T00:00:00.000Z",
+    });
+    render(<BoardPage />);
+    await waitFor(() => expect(screen.getByText(/上一次运行未正常收尾/)).toBeTruthy());
+    expect(screen.getByText(/已从审计日志恢复上次运行的进度/)).toBeTruthy();
+    expect(screen.getByText("实现任务列表")).toBeTruthy();
+    expect(screen.getByText(/最后活动时间/)).toBeTruthy();
+  });
+
+  it("凭据卡一键复核并摆出五档裁决（2026-10-13：把 receipt:verify 接上 UI）", async () => {
+    seedBoard();
+    useApp.setState({
+      receipt: {
+        outcome: "delivered",
+        verified: true,
+        rounds: 0,
+        headline: "交付完成",
+        counts: { total: 1, done: 1, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 0, preexisting: 0 },
+        checks: [],
+        tasks: [],
+        conflicts: [],
+        fingerprint: "fp-abc",
+      },
+    });
+    render(<BoardPage />);
+    fireEvent.click(screen.getByRole("button", { name: /复核凭据/ }));
+    await waitFor(() => expect(screen.getByText(/复核裁决/)).toBeTruthy());
+    // 默认 replay:false —— 裁决与"未复跑"标注一起摆
+    expect(window.oxCommander.verifyReceipt).toHaveBeenCalledWith("p-1", false);
+    expect(screen.getByText(/未复跑/)).toBeTruthy();
   });
 
   it("本次运行用量上板：可信边界与预算盲区都念出来", () => {

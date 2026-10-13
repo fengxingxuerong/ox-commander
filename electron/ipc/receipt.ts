@@ -25,18 +25,12 @@ import {
   type CheckComparison,
   type CheckObservation,
   type DeliveryReceipt,
-  type ReceiptAudit,
+  type ReceiptVerifyResult,
 } from "../../shared/delivery-receipt";
-import type { VerificationKind } from "../../shared/types";
 import { buildPlatformLayer, logLine, settingsStore, stores, workspaceRoot } from "./context";
 
-export interface ReceiptVerifyResult {
-  audit: ReceiptAudit;
-  /** 凭据里带命令、因此可被独立复跑的那些命令（默认模式也要给：界面要摆出来）。 */
-  commands: Array<{ kind: VerificationKind; command: string; args: string[] }>;
-  /** 本次是否真的执行了命令。false = 只查了完整性。 */
-  replayed: boolean;
-}
+// ReceiptVerifyResult 已上移 shared/delivery-receipt.ts（2026-10-13）：渲染层的
+// 凭据卡要摆五档裁决，类型不能只住在主进程一侧。
 
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
 

@@ -187,6 +187,7 @@ export const useApp = create<AppState>((set, get) => ({
       // 会让"这次跑到哪了"读不出真假，也和按钮的运行态联动相互依赖（2026-10-13）。
       verification: undefined,
       receipt: undefined,
+      receiptVerdict: undefined,
       runStartedAt: Date.now(),
     });
     try {
@@ -269,6 +270,19 @@ export const useApp = create<AppState>((set, get) => ({
         approvals: s.approvals.map((a) => (a.requestId === requestId ? (before ?? a) : a)),
         logs: [...s.logs, `[错误] 审批回传失败: ${message}`],
       }));
+    }
+  },
+
+  verifyReceipt: async () => {
+    const { activeProjectId, receipt } = get();
+    if (!activeProjectId || !receipt) return;
+    try {
+      // 默认 replay:false（fail-safe）：复核先只做完整性与指纹判定，不执行凭据里
+      // 的命令 —— 要复跑走 receipt-verify CLI（--replay 有它自己的警示）。
+      const result = await api().verifyReceipt(activeProjectId, false);
+      set({ receiptVerdict: result });
+    } catch (err) {
+      set((s) => ({ logs: [...s.logs, `[错误] 凭据复核失败: ${(err as Error).message}`] }));
     }
   },
 

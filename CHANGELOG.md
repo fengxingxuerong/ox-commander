@@ -6,6 +6,23 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（前端：恢复路径上测试 + 凭据卡一键复核 · 2026-10-13）
+
+评价报告的两个 P2 收尾项：
+
+- **boardRecovery 测试盲区补齐**：ui.test 的 fake bridge 此前没有 `boardRecovery`
+  —— `loadRecovery` 的 catch 恒被走到，"被杀进程后重开看板"这条主线的恢复成功
+  路径、`interrupted` 横幅、恢复日志**零断言**。fake 补齐后新增正例：
+  横幅、恢复日志行、恢复的任务行、最后活动时间全部上板。
+- **`receipt:verify` 接上 UI**：凭据卡新增"🔍 复核凭据"按钮（默认 replay:false，
+  fail-safe 不执行凭据里的命令），五档裁决（复现/未复跑/被改过/未盖章/矛盾）
+  用操作员语言就地展示。`ReceiptVerifyResult` 类型从 `electron/ipc/receipt.ts`
+  上移 shared（渲染层要消费）；`src/types.ts` 的 Window 桥声明补上缺失的
+  `verifyReceipt`（此前 preload 有通道、渲染层类型没有 = "有接口没界面"的根因之一）。
+- **测试**：src/store.ts 逐位点 **34/34 全杀**（33→34，复核守卫的 `||`→`&&`
+  由两个负例杀死）；基线 1646 → **1647**。用例 2001 通过 + 8 跳过 = 2009 条。
+  遗留：`taskTrail`（audit:trail）仍是 preload 有通道、UI 未消费，留待下轮。
+
 ### 修复（headless + 前端：protocolVersion 闸门 / 已耗时 / 渲染性能 · 2026-10-13）
 
 评价报告的 P2 第一条 + P1 的性能与耗时项：
