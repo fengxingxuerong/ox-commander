@@ -82,7 +82,10 @@ export function send(payload: Record<string, unknown>): void {
 }
 
 export function logLine(text: string): void {
-  send({ type: "log", text });
+  // 实时日志流也要过脱敏（2026-10-13）：logDigest / receipt / audit detail 三处
+  // 已过闸，唯独这条直发渲染层的通道漏了 —— agent/沙箱/熔断的报错文本若回显
+  // token，会原样出现在看板上且可复制。与其它三处用同一把梳子。
+  send({ type: "log", text: redactSecrets(text) });
 }
 
 export function getRunningProjectId(): string | null {

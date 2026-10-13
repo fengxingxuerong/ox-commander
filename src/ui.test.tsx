@@ -8,7 +8,7 @@
  * mapping that store.test.ts covers only up to the store boundary.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
@@ -337,6 +337,9 @@ describe("BoardPage", () => {
 
   it("starts orchestration and resolves escalations through the bridge", async () => {
     seedBoard();
+    // 2026-10-13 起"开始"在 run 运行中禁用（runActive）：seedBoard 是 VERIFICATION，
+    // 这里回到未开工的 PRD 态再点 —— 用例意图（桥接转发）不变。
+    useApp.setState({ stage: "PRD" });
     render(<BoardPage />);
     fireEvent.click(screen.getByRole("button", { name: "开始" }));
     await waitFor(() => expect(window.oxCommander.startOrchestration).toHaveBeenCalledWith("p-1"));
@@ -345,6 +348,57 @@ describe("BoardPage", () => {
       expect(window.oxCommander.resolveEscalation).toHaveBeenCalledWith("t9", "skip");
       expect(screen.getByText("已处理")).toBeTruthy();
     });
+  });
+
+  it("控制按钮按运行态联动：跑的时候不能重新开始，有结论后不能取消（2026-10-13）", () => {
+    seedBoard(); // VERIFICATION 且无凭据 = 运行态
+    render(<BoardPage />);
+    expect((screen.getByRole("button", { name: "开始" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "暂停" }) as HTMLButtonElement).disabled).toBe(false);
+    // 凭据出现 = 本 run 有结论（failed 也是结论）→ 控制面收回、开始解锁。
+    // render 之后改 store 要包 act：zustand 的订阅在 React 18 里走微任务批处理，
+    // 不包 act 时 DOM 还没刷，断言会读到旧帧。
+    act(() => {
+      useApp.setState({
+        stage: "DONE",
+        receipt: {
+          outcome: "blocked",
+          verified: false,
+          rounds: 0,
+          headline: "未交付",
+          counts: { total: 2, done: 1, failed: 1, skipped: 0, pending: 0, conflicts: 0, checksFailed: 1, preexisting: 0 },
+          checks: [],
+          tasks: [],
+          conflicts: [],
+        },
+      });
+    });
+    expect((screen.getByRole("button", { name: "开始" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "取消" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "暂停" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("重新开始会清掉上一轮的凭据与验证结论（它们属于上一次运行，2026-10-13）", async () => {
+    seedBoard();
+    useApp.setState({
+      verification: VERIFICATION,
+      receipt: {
+        outcome: "blocked",
+        verified: false,
+        rounds: 0,
+        headline: "未交付",
+        counts: { total: 0, done: 0, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 0, preexisting: 0 },
+        checks: [],
+        tasks: [],
+        conflicts: [],
+      },
+    });
+    await useApp.getState().confirmAndExecute();
+    const s = useApp.getState();
+    expect(s.stage).toBe("DEVELOPMENT");
+    expect(s.receipt).toBeUndefined();
+    expect(s.verification).toBeUndefined();
   });
 
   it("本次运行用量上板：可信边界与预算盲区都念出来", () => {

@@ -1020,8 +1020,12 @@ const EQUIVALENT_SITES = [
    *   （`taskTrail, trailBriefForRepair`）→ 208 → 209。论证不变；行号锚点的
    *   fail-safe 正常生效（漂移即自动暴露，不静默放过）。
    */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 209 },
-  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 230 },
+  /* 2026-10-13 校回：logLine 脱敏注释（+3 行）→ 209 → 212，锚点漂移在逐位点
+   * 审计里以"存活"形式重新暴露（fail-safe 又立功）。187 的同型位点（第二处
+   * 签名行）已在此前的装配收敛中消失，条目保留作历史锚；现存的
+   * enableRouter: … !== false（216/274）是真行为、被用例杀死，不入表。 */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 212 },
+  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 232 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
   /*

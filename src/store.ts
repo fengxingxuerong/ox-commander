@@ -178,7 +178,16 @@ export const useApp = create<AppState>((set, get) => ({
     if (!activeProjectId) return;
     // A new run supersedes any recovered history: the interrupted flag belongs
     // to the *previous* run and must not survive into this one.
-    set({ page: "board", stage: "DEVELOPMENT", interrupted: undefined, lastActivityTs: undefined });
+    set({
+      page: "board",
+      stage: "DEVELOPMENT",
+      interrupted: undefined,
+      lastActivityTs: undefined,
+      // 上一轮的结论（凭据/验证）属于**上一次**运行，不许带进新 run：混在板子上
+      // 会让"这次跑到哪了"读不出真假，也和按钮的运行态联动相互依赖（2026-10-13）。
+      verification: undefined,
+      receipt: undefined,
+    });
     try {
       await api().startOrchestration(activeProjectId);
     } catch (err) {

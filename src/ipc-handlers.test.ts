@@ -997,6 +997,13 @@ describe("orchestration handlers", () => {
     cfg.host.log("hello from engine");
     expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", { type: "log", text: "hello from engine" });
 
+    // 实时日志流同样过脱敏（2026-10-13）：报错文本回显 token 不许原样上屏可复制。
+    cfg.host.log("调用失败 sk-abc123def456ghi789 请重试");
+    expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", {
+      type: "log",
+      text: "调用失败 sk-[REDACTED] 请重试",
+    });
+
     cb.onTaskStatus("t1", "running", 2);
     expect(win.webContents.send).toHaveBeenLastCalledWith("ox:event", {
       type: "taskStatus",

@@ -16,6 +16,7 @@ import {
   enginesOf,
   ensureAudit,
   getRunningProjectId,
+  logLine,
   resolveApproval,
   resolveEscalation,
   send,
@@ -106,7 +107,9 @@ export function buildEngine(projectId: string): OrchestratorEngine {
     save: (snapshot: RunSnapshot): void => writeJournal(projectId, snapshot),
   };
   const platform = buildPlatformLayer(settings, {
-    log: (text) => send({ type: "log", text }),
+    // 走 logLine（2026-10-13）：实时日志流统一过脱敏 —— 这条通路若绕开，
+    // agent/沙箱/熔断报错里的 token 会原样上屏。
+    log: logLine,
     journal,
     projectId,
     callbacks: {

@@ -6,6 +6,26 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（前端：实时日志脱敏 + 控制按钮运行态联动 · 2026-10-13）
+
+全栈评价的 P1 前两条：
+
+- **实时日志流统一过脱敏**：`redactSecrets` 原本只盖 logDigest / receipt / audit
+  detail 三处，`logLine` 直发渲染层的通道漏了 —— agent/沙箱/熔断报错里回显的
+  token 会原样上屏且可复制。现在 `logLine` 统一过闸，且
+  `orchestration` 的 `host.log` 回调改走 `logLine`（此前它绕开直发 `send`）。
+- **看板控制按钮按运行态联动**：四个按钮此前恒可点 —— 没跑的时候取消/暂停是
+  必报错的无效操作，跑的时候还能再点一次开始。运行态判据 =
+  `stage ∈ {PLANNING, DEVELOPMENT, VERIFICATION, DELIVERY} && 无凭据`
+  （凭据出现 = 本 run 已有结论，failed 也是结论）。配套把 `confirmAndExecute`
+  补成**清掉上一轮的 receipt/verification**（它们属于上一次运行，混在板子上
+  会让"这次跑到哪了"读不出真假）。
+- **测试**：ui.test 55/55（新增按钮联动 + 重开清结论两条；"开始"用例按新语义
+  改到未开工态点击）；ipc-handlers 102/102（新增 logLine 脱敏断言）。
+  src/store.ts 33/33、electron/ipc/context.ts 23/23（白名单锚点
+  209→212 校回，漂移由 fail-safe 依约暴露）、orchestration.ts 5/5 逐位点全杀；
+  基线 1644 不变。用例 1997 通过 + 8 跳过 = 2005 条。
+
 ### 修复（安全：IPC 控制面零校验写入 · 2026-10-13）
 
 全栈评价的 P0-3：渲染层来的三个写入口此前不做形状校验。

@@ -130,6 +130,13 @@ export function BoardPage() {
   };
 
   const taskList = Object.values(tasks);
+  // 运行态判据（2026-10-13）：引擎只在 run 活着时把 PLANNING→DELIVERY 推过来；
+  // 凭据出现 = 本 run 已有结论（failed 也是结论）。confirmAndExecute 会清掉上一轮的
+  // receipt/verification，所以"重新开始"也能正确回到运行态。此前四个控制按钮
+  // 恒可点 —— 没跑的时候取消/暂停是必报错的无效操作，跑的时候还能再点一次开始。
+  const runActive =
+    (stage === "PLANNING" || stage === "DEVELOPMENT" || stage === "VERIFICATION" || stage === "DELIVERY") &&
+    receipt === undefined;
 
   return (
     <div className="page board">
@@ -209,12 +216,21 @@ export function BoardPage() {
           <section className="card">
             <h3>控制</h3>
             <div className="btn-row">
-              <button className="primary" onClick={() => void start()}>
+              <button
+                className="primary"
+                onClick={() => void start()}
+                disabled={runActive}
+                title={runActive ? "已有 run 在跑；要重来先取消" : undefined}
+              >
                 开始
               </button>
-              <button onClick={pause}>暂停</button>
-              <button onClick={resume}>继续</button>
-              <button className="danger" onClick={cancel}>
+              <button onClick={pause} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
+                暂停
+              </button>
+              <button onClick={resume} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
+                继续
+              </button>
+              <button className="danger" onClick={cancel} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
                 取消
               </button>
             </div>
