@@ -630,6 +630,57 @@ button.small {
   overflow-y: auto;
 }
 
+/* 任务运行履历（audit:trail 的界面出口）——与失败详情同一套展开语言，
+   但它是**中性事实**（"经历过什么"），所以用主色而不是告警色。 */
+.trail-details {
+  flex-basis: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.trail-details summary {
+  cursor: pointer;
+  color: var(--info);
+  user-select: none;
+  letter-spacing: 0.03em;
+}
+
+.trail-details summary:hover {
+  text-shadow: 0 0 10px rgba(89, 194, 255, 0.5);
+}
+
+.trail-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 8px;
+  background: #05070b;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.trail-list li {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: baseline;
+}
+
+/* 未收尾的那一次单列：`endedAt` 缺席 = 被腰斩，不是"失败"（别折进失败计数） */
+.trail-list li.trail-open {
+  color: var(--warn);
+}
+
+.trail-index {
+  color: #6b7684;
+}
+
+.trail-line {
+  color: #b8c2d0;
+}
+
 .log-card {
   height: 100%;
   display: flex;

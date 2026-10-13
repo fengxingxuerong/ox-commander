@@ -4,7 +4,7 @@ import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/ag
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
-import type { BoardRecoveryView } from "../electron/board-derive";
+import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
 export interface AgentSummary {
@@ -244,6 +244,16 @@ declare global {
       probeAgents(id?: string): Promise<Record<string, boolean>>;
       getAgentStats(): Promise<{ circuits: Record<string, AgentCircuitStats> }>;
       recentAudit(limit?: number): Promise<AuditRecordView[]>;
+      /**
+       * 一个任务的**运行履历**（P1-3 上下文回溯的界面出口）：
+       * `deriveBoardView` 回答"现在是什么状态"，它回答"经历过什么" ——
+       * 重修轮里同一个任务会被派给不同执行器，前一次为什么失败、换谁重派的。
+       *
+       * 2026-10-14 补：主进程的 `audit:trail` handler 与 preload 的转发**早就有了**，
+       * 但渲染层的桥接类型里一直没声明这个方法 ⇒ 界面拿不到有类型的句柄、从没调用过
+       * ⇒ 功能静默不可用（不报错、不留日志，只是"这个能力没人用得上"）。
+       */
+      taskTrail(taskId: string): Promise<TaskTrail>;
       auditFiles(): Promise<string[]>;
       exportAudit(): Promise<AuditExportResult>;
       /** Board view derived from the audit trail (durable facts). */

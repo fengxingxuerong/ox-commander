@@ -102,6 +102,60 @@ if (dupes.length > 0) {
   process.exit(1);
 }
 
+/*
+ * ---- 判定 4：preload 暴露的函数 ⇔ 渲染层桥接类型声明的方法 --------------------
+ *
+ * 补这道边的原因（2026-10-14）：判定 1/2/3 管的是 preload ⇔ ipcMain.handle，而那个
+ * 三角形还差一条边 —— **preload ⇔ `src/types.ts` 的 `oxCommander` 接口**。缺了它，
+ * "preload 暴露了、类型里没声明"这种缺口完全无声：
+ *   · `taskTrail`（`audit:trail`）就是这么死的 —— 主进程 handler 在、preload 转发在，
+ *     但渲染层拿不到有类型的句柄，于是**从来没有人调用过它**。不报错、不留日志，
+ *     只是"这个能力没人用得上"，直到有人逐条比对才发现。
+ *   · 反方向（类型里声明了、preload 没有）更坏：渲染端一调就是 `undefined is not
+ *     a function`，而那行代码在类型检查下**完全合法**（断言的是接口，不是实现）。
+ *
+ * 判据是**两个集合相等**，不是"每个函数的实现对不对" —— 与判定 1/2 同一思路。
+ * 断言的对象是 `src/types.ts` 而不是 `electron/preload.ts` 导出的 `OxCommanderApi`：
+ * 后者由 `typeof api` 自动得出，与 api 恒等，等于什么都没查。
+ */
+const TYPES_FILE = path.join(ROOT, "src", "types.ts");
+const typesText = fs.readFileSync(TYPES_FILE, "utf8");
+const blockStart = typesText.indexOf("oxCommander: {");
+if (blockStart < 0) fail("src/types.ts 里找不到 `oxCommander: {` —— 判据失配（改过写法？）");
+const blockEnd = typesText.indexOf("\n    };", blockStart);
+if (blockEnd < 0) fail("src/types.ts 的 oxCommander 块没有预期的收尾 `\\n    };` —— 判据失配");
+const bridgeBlock = typesText.slice(blockStart, blockEnd);
+// 块内方法固定在 6 空格缩进（`      name(...)`）；注释与折行参数不会命中这个形状。
+const typed = new Set();
+for (const m of bridgeBlock.matchAll(/^ {6}([A-Za-z_$][\w$]*)\s*\(/gm)) typed.add(m[1]);
+if (typed.size === 0) {
+  fail("没从 oxCommander 桥接类型里解析出任何方法 —— 判据失配（缩进或写法变了？）");
+}
+// 顶层属性固定 2 空格缩进；更深的行（4 空格起）在第 2 列不是标识符，不会误命中。
+const exposed = new Set();
+for (const m of preloadText.matchAll(/^ {2}([A-Za-z_$][\w$]*)\s*:/gm)) exposed.add(m[1]);
+if (exposed.size === 0) {
+  fail("没从 electron/preload.ts 的 api 里解析出任何属性 —— 判据失配（缩进或写法变了？）");
+}
+
+const notTyped = [...exposed].filter((n) => !typed.has(n));
+const notExposed = [...typed].filter((n) => !exposed.has(n));
+if (notTyped.length > 0 || notExposed.length > 0) {
+  console.error("\nFAIL: preload 暴露的函数与渲染层桥接类型对不上 —— 功能会**静默不可用**：");
+  for (const n of notTyped) {
+    console.error(`  ${n}：preload 暴露了，src/types.ts 的 oxCommander 没声明 ⇒ 界面拿不到有类型的句柄`);
+  }
+  for (const n of notExposed) {
+    console.error(`  ${n}：oxCommander 声明了，preload 没暴露 ⇒ 渲染端一调就 undefined is not a function`);
+  }
+  console.error(
+    "\n处置：在 electron/preload.ts 的 api 与 src/types.ts 的 oxCommander 里补成对的一条。\n" +
+      "      两边都改完再跑本门禁 —— 只改一边正是它要拦的情形。\n",
+  );
+  process.exit(1);
+}
+
 console.log(
-  `PASS: IPC 通道两侧一致 —— preload ${invoked.size} 个 invoke ⇔ ipcMain.handle ${handled.size} 个注册，无悬空、无未暴露、无重复`,
+  `PASS: IPC 通道三边一致 —— preload ${invoked.size} 个 invoke ⇔ ipcMain.handle ${handled.size} 个注册，` +
+    `渲染层桥接 ${typed.size} 个方法无缺口`,
 );

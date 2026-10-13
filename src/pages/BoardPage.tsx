@@ -4,6 +4,7 @@ import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
 import type { ReceiptTaskStatus, ReceiptVerdict } from "../../shared/delivery-receipt";
 import { usageFact } from "../../shared/usage-meter";
+import type { TaskTrail, TrailRun } from "../../electron/board-derive";
 
 /**
  * 阶段标签。键是 `Record<Stage, string>`（2026-10-09 盲区补扫收口）：此前是
@@ -106,6 +107,62 @@ const RECEIPT_TASK_ICON: Record<ReceiptTaskStatus, string> = {
   pending: "⏸",
 };
 
+/**
+ * 一次派发在界面上的一句话：谁跑的 · 多久 · 结局。
+ *
+ * 结局是**四档**而不是两档，因为 `TrailRun` 的两个布尔字段各自可以缺席，而缺席
+ * 是唯一诚实的表达（`board-derive.ts` 的原话）：`endedAt` 缺席 = 这次派发没有
+ * 收尾（进程被腰斩 / 重派时前一次还没回来），`ok` 缺席 = run-end 里没带裁决。
+ * 把这两种都折进"失败"，就是替审计**编造因果**。
+ */
+export function TRAIL_RUN_LINE(run: TrailRun): string {
+  const who = run.agentId ?? "未知执行器";
+  const how = run.durationMs !== undefined ? `${(run.durationMs / 1000).toFixed(1)}s` : "时长未知";
+  const verdict =
+    run.endedAt === undefined
+      ? "⚠️ 未收尾"
+      : run.ok === true
+        ? "✅ 成功"
+        : run.ok === false
+          ? "❌ 失败"
+          : "结局未知";
+  return `${who} · ${how} · ${verdict}`;
+}
+
+/**
+ * 履历的取数状态。四档分开是为了让界面能如实说清"为什么这里是空的" ——
+ * 取不到和"审计里本来就没记录"是两件事，前者要能被看见（IPC 挂了会静默失败）。
+ */
+type TrailState =
+  | { kind: "loading" }
+  | { kind: "ready"; trail: TaskTrail }
+  | { kind: "error"; message: string };
+
+/** 任务运行履历（`audit:trail` 的界面出口）。 */
+function TrailView({ state }: { state?: TrailState }) {
+  if (state?.kind === "loading") return <p className="muted">正在读取履历…</p>;
+  if (state?.kind === "error") return <p className="muted">读不到履历：{state.message}</p>;
+  if (!state || state.trail.runs.length === 0) {
+    return <p className="muted">审计里没有这个任务的派发记录</p>;
+  }
+  return (
+    <ol className="trail-list">
+      {state.trail.runs.map((run, i) => (
+        // 键用「开始时间 + 序号」：同一毫秒重派的两次都留着，序号兜住同 ts 的碰撞
+        <li key={`${run.startedAt ?? "?"}#${i}`} className={run.endedAt === undefined ? "trail-open" : ""}>
+          <span className="trail-index">#{i + 1}</span>
+          <span className="trail-line">{TRAIL_RUN_LINE(run)}</span>
+          {run.errorClass !== undefined && (
+            <span className="task-meta error-class">
+              错误类型：{ERROR_LABELS[run.errorClass] ?? run.errorClass}
+            </span>
+          )}
+        </li>
+      ))}
+    </ol>
+  );
+}
+
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
@@ -125,6 +182,35 @@ export function BoardPage() {
     const timer = setInterval(() => setTickNow(Date.now()), 5_000);
     return () => clearInterval(timer);
   }, []);
+
+  /*
+   * 任务运行履历（P1-3 `audit:trail` 的界面出口，2026-10-14 接线）。
+   *
+   * 懒加载 + 每任务只取一次：履历是**归档事实**，不会在本次 run 里变；而任务行
+   * 可能有几十条，挂载时逐个打 IPC（每个 handler 都要 `read({limit:5000})` 全量
+   * 审计）会成为看板打开时的固定成本。所以取数时机 = 操作者真的展开那一条。
+   *
+   * `requested` 用 ref 而不是从 state 派生：它记的是"**已经承诺过**取数"，
+   * 而 state 的更新是异步的 —— 连点两下展开会在两次渲染之间重复打 IPC。
+   * 失败时从表里摘掉，让"再展开一次"能真的重试（失败不是终态）。
+   */
+  const [trails, setTrails] = useState<Record<string, TrailState>>({});
+  const trailRequested = useRef(new Set<string>());
+  const loadTrail = (taskId: string): void => {
+    if (trailRequested.current.has(taskId)) return;
+    trailRequested.current.add(taskId);
+    setTrails((prev) => ({ ...prev, [taskId]: { kind: "loading" } }));
+    void window.oxCommander
+      .taskTrail(taskId)
+      .then((trail) => setTrails((prev) => ({ ...prev, [taskId]: { kind: "ready", trail } })))
+      .catch((e: unknown) => {
+        trailRequested.current.delete(taskId);
+        setTrails((prev) => ({
+          ...prev,
+          [taskId]: { kind: "error", message: (e as Error).message },
+        }));
+      });
+  };
   const lastActivityTs = useApp((s) => s.lastActivityTs);
   const runStartedAt = useApp((s) => s.runStartedAt);
   const verifyReceiptAction = useApp((s) => s.verifyReceipt);
@@ -227,6 +313,18 @@ export function BoardPage() {
                     <pre>{t.failureDigest}</pre>
                   </details>
                 )}
+                {/* 上面那行 `第 N 次 / agentId / 耗时` 只反映**最后一次**派发
+                    （看板视图是"现在是什么状态"）；要回答"它经历过什么" ——
+                    前几次换过谁、各自怎么没成的 —— 得读归档履历。 */}
+                <details
+                  className="trail-details"
+                  onToggle={(e) => {
+                    if (e.currentTarget.open) loadTrail(t.taskId);
+                  }}
+                >
+                  <summary>📜 运行履历</summary>
+                  <TrailView state={trails[t.taskId]} />
+                </details>
               </div>
             ))}
           </section>

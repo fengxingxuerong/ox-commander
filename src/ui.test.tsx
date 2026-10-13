@@ -116,17 +116,24 @@ function makeBridge(): Bridge {
     getAgentStats: vi.fn(async () => ({ circuits: {} })),
     recentAudit: vi.fn(async () => []),
     auditFiles: vi.fn(async () => []),
-    exportAudit: vi.fn(async () => ({ ok: true, path: "/x/out.jsonl" })),
+    exportAudit: vi.fn(async () => ({ ok: true as const, path: "/x/out.jsonl" })),
     // 2026-10-13 补盲区：这两个此前不在 fake 里 —— 看板恢复的成功路径与
     // interrupted 横幅因此**从未被断言过**（loadRecovery 的 catch 恒被走到）。
     boardRecovery: vi.fn(async () => ({ tasks: {}, interrupted: false })),
     verifyReceipt: vi.fn(async () => ({
-      audit: { verdict: "not-replayed" },
+      audit: {
+        verdict: "not-replayed" as const,
+        fingerprint: { ok: true as const, reason: "match" as const },
+        replayable: 0,
+        comparisons: [],
+        summary: "指纹一致，未复跑。",
+      },
       commands: [],
       replayed: false,
     })),
     onEvent: vi.fn(() => () => undefined),
-  } as unknown as Bridge;
+    taskTrail: vi.fn(async () => ({ taskId: "t1", runs: [] })),
+  };
 }
 
 function resetStore() {
@@ -330,6 +337,131 @@ describe("BoardPage", () => {
     expect(SILENCE_LABEL(now - 29_000, now)).toBeUndefined(); // 29s：阈值内
     expect(SILENCE_LABEL(now - 30_000, now)).toBe("⏸ 静默 30s");
     expect(SILENCE_LABEL(now - 125_000, now)).toBe("⏸ 静默 125s");
+  });
+
+  /**
+   * 任务运行履历（`audit:trail` 的界面出口，2026-10-14 接线）。
+   *
+   * 这条通道此前是**静默不可用**的：主进程 handler 与 preload 转发都在，但渲染层
+   * 桥接类型里没声明它 ⇒ 界面拿不到有类型的句柄、从没调用过。所以这里除了钉 UI
+   * 行为，还钉住"它真的被调用了"。
+   */
+  describe("任务运行履历（audit:trail）", () => {
+    /**
+     * 展开某一条任务行的履历。
+     *
+     * 直接置 `open` 再派发 `toggle`，不靠 `fireEvent.click(summary)`：jsdom 对
+     * `<details>` 的点击→展开行为支持不稳定，而**我们的契约**是 `onToggle` 里读
+     * `currentTarget.open`（"展开了就去取数"），不是"点击一定展开" —— 后者是浏览器
+     * 的行为，不该由本仓库的用例替它担保。
+     *
+     * 用 `fireEvent(el, new Event("toggle"))` 而不是 `fireEvent.toggle`：后者在这个
+     * 版本的 testing-library 里不存在；而 React 把 `toggle` 归在非委托事件里
+     * （直接挂元素，不走根容器），所以派发到元素本身就够。
+     *
+     * ⚠️ **jsdom 会为同一次 `open` 变更自己再补发一个 `toggle`**（按 spec，toggle 是
+     * 异步排队的）。所以一次 `openTrail` 大概率会让 `onToggle` 跑两遍 —— 真实浏览器里
+     * 用户展开只派发一次，这是脚手架的产物。两个后果必须知道：
+     *   1. 桩要用**持久**实现（`mockResolvedValue` / `mockRejectedValue`），
+     *      不能用 `…Once`：第一发被第二次事件覆盖，断言会看到"另一个结局"。
+     *   2. 正好顺带证明了 `loadTrail` 的去重是必要的 —— 没有 `trailRequested`，
+     *      每次展开都会打两次全量审计读。
+     */
+    function openTrail(container: HTMLElement, index = 0): void {
+      const details = container.querySelectorAll<HTMLDetailsElement>(".trail-details")[index]!;
+      details.open = true;
+      fireEvent(details, new Event("toggle"));
+    }
+
+    it("TRAIL_RUN_LINE 打表：四档结局分开，缺席不许折进失败", async () => {
+      const { TRAIL_RUN_LINE } = await import("./pages/BoardPage");
+      expect(
+        TRAIL_RUN_LINE({ startedAt: "s", endedAt: "e", agentId: "a", ok: true, durationMs: 1200 }),
+      ).toBe("a · 1.2s · ✅ 成功");
+      expect(
+        TRAIL_RUN_LINE({ startedAt: "s", endedAt: "e", agentId: "b", ok: false, durationMs: 2000 }),
+      ).toBe("b · 2.0s · ❌ 失败");
+      // endedAt 缺席 = 这次派发没有收尾（进程被腰斩 / 重派时前一次还没回来）
+      expect(TRAIL_RUN_LINE({ startedAt: "s", agentId: "c" })).toBe("c · 时长未知 · ⚠️ 未收尾");
+      // ok 缺席 = run-end 里没带裁决。把它算作失败就是替审计编造因果
+      expect(TRAIL_RUN_LINE({ startedAt: "s", endedAt: "e" })).toBe("未知执行器 · 时长未知 · 结局未知");
+    });
+
+    it("挂载时不打 IPC；展开才取数，同一任务只取一次", async () => {
+      seedBoard();
+      const { container } = render(<BoardPage />);
+
+      // 挂载即取数的话，几十条任务行会在看板打开时各打一次全量审计读 —— 那是固定成本
+      expect(window.oxCommander.taskTrail).not.toHaveBeenCalled();
+
+      openTrail(container);
+      await waitFor(() => expect(window.oxCommander.taskTrail).toHaveBeenCalledWith("t1"));
+
+      // 折叠再展开：履历是**归档事实**，本次 run 里不会变，没必要再问一遍
+      openTrail(container);
+      expect(vi.mocked(window.oxCommander.taskTrail)).toHaveBeenCalledTimes(1);
+    });
+
+    it("多条派发按序列出，并给出执行器、耗时与结局", async () => {
+      seedBoard();
+      vi.mocked(window.oxCommander.taskTrail).mockResolvedValue({
+        taskId: "t1",
+        runs: [
+          { startedAt: "t1", endedAt: "t2", agentId: "cli-a", ok: false, durationMs: 900, errorClass: "timeout", digest: "超时" },
+          { startedAt: "t3", agentId: "cli-b" },
+        ],
+      });
+      const { container } = render(<BoardPage />);
+      openTrail(container);
+
+      await waitFor(() => expect(screen.getByText(/#1/)).toBeTruthy());
+      expect(screen.getByText("cli-a · 0.9s · ❌ 失败")).toBeTruthy();
+      expect(screen.getByText("错误类型：超时")).toBeTruthy();
+      expect(screen.getByText("cli-b · 时长未知 · ⚠️ 未收尾")).toBeTruthy();
+      // 未收尾那一条要被单独标出来（CSS 上有区分），不能和失败混成一样
+      expect(container.querySelectorAll(".trail-list li.trail-open")).toHaveLength(1);
+    });
+
+    it("取不到要说得清，并且允许再展开一次重试", async () => {
+      seedBoard();
+      vi.mocked(window.oxCommander.taskTrail).mockRejectedValue(new Error("审计目录不可读"));
+      const { container } = render(<BoardPage />);
+
+      openTrail(container);
+      // 持久失败（不是 …Once）：见 openTrail 的注释 —— 一次展开可能触发两次 toggle
+      await waitFor(() =>
+        expect(container.querySelector(".trail-details")!.textContent).toContain(
+          "读不到履历：审计目录不可读",
+        ),
+      );
+
+      // 失败不是终态：再展开一次要真的重试（IPC 抖一下不该让履历永久空白）
+      vi.mocked(window.oxCommander.taskTrail).mockResolvedValue({
+        taskId: "t1",
+        runs: [{ startedAt: "s", endedAt: "e", agentId: "cli-a", ok: true }],
+      });
+      openTrail(container);
+      await waitFor(() => expect(screen.getByText("cli-a · 时长未知 · ✅ 成功")).toBeTruthy());
+    });
+
+    it("没有记录时如实说没有记录，不装成空白加载态", async () => {
+      seedBoard();
+      vi.mocked(window.oxCommander.taskTrail).mockResolvedValue({ taskId: "t1", runs: [] });
+      const { container } = render(<BoardPage />);
+      openTrail(container);
+      await waitFor(() => expect(screen.getByText("审计里没有这个任务的派发记录")).toBeTruthy());
+    });
+
+    it("不同任务各取各的（履历按 taskId 分开，不串行）", async () => {
+      seedBoard();
+      vi.mocked(window.oxCommander.taskTrail).mockResolvedValue({ taskId: "x", runs: [] });
+      const { container } = render(<BoardPage />);
+
+      openTrail(container, 0);
+      openTrail(container, 1);
+      await waitFor(() => expect(window.oxCommander.taskTrail).toHaveBeenCalledTimes(2));
+      expect(vi.mocked(window.oxCommander.taskTrail).mock.calls.map((c) => c[0])).toEqual(["t1", "t2"]);
+    });
   });
 
   it("forwards control actions to the bridge", () => {
