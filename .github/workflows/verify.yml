@@ -67,7 +67,14 @@ jobs:
     # （如 `process.platform === "win32"` 在本机恒真），在另一个 OS 上跑一次
     # 才能把它们和真缺口分开。CI 用 Linux，本机是 Windows，两边合起来才是全集。
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    # 2026-10-13：60 → 100。旧值按 1576 位点 / 全并行约 43min 留的 1.85× 余量；
+    # 位点涨到 1647 后，--jobs=3 在 2 vCPU 上互撞，大量目标"并行下基线失败 →
+    # 单跑复核"（job 日志实证：types/board-derive/github-readonly/manifest-schema/
+    # orchestrator/receipt-verify/schema 都走了串行复核 = 双倍耗时），总时长越过
+    # 60min 被 job 超时杀掉（今天 4 个代码提交的 site job 全部 cancelled 于此）。
+    # 若后续仍吃紧，下一步是把 TARGETS 按 tier 拆成并行 job（shard），而不是
+    # 继续抬超时。
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 
