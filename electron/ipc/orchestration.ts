@@ -26,6 +26,7 @@ import {
   writeJournal,
 } from "./context";
 import type { EscalationAction, PrdDocument, SmokeCheck, Task } from "../../shared/types";
+import { parsePrd } from "../../shared/schema";
 import { deriveBoardView } from "../board-derive";
 
 /**
@@ -177,11 +178,14 @@ export function registerOrchestrationHandlers(): void {
     const rec = stores().get(projectId);
     if (!rec) throw new Error(`project ${projectId} not found`);
     if (getRunningProjectId() === projectId) throw new Error("项目正在执行中，请先取消再修改 PRD");
-    stores().update(projectId, { prdJson: JSON.stringify(prd), batchesJson: undefined, smokeJson: undefined });
+    // 入参校验（2026-10-13）：PRD 从渲染层来（用户在 PRD 页编辑过），直接落盘=
+    // 坏形状带进 decompose。守卫在前（项目不存在/执行中先说），形状在后。
+    const checked = parsePrd(prd);
+    stores().update(projectId, { prdJson: JSON.stringify(checked), batchesJson: undefined, smokeJson: undefined });
     const engine = buildEngine(projectId);
-    const { batches, smoke } = await engine.decompose(prd, settingsStore().load().verificationCommands);
+    const { batches, smoke } = await engine.decompose(checked, settingsStore().load().verificationCommands);
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
-    return { prd, batches };
+    return { prd: checked, batches };
   });
 
   // Board recovery (facts/derived split): the renderer asks for the board view

@@ -1,4 +1,11 @@
-import type { PrdDocument, SmokeCheck, Task } from "./types";
+import type {
+  ProjectSettings,
+  PrdDocument,
+  SmokeCheck,
+  Task,
+  VerificationKind,
+} from "./types";
+import { ARBITRATION_MODES, ESCALATION_POLICY_SETTINGS, isArbitrationMode, isEscalationPolicySetting } from "./types";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
 
@@ -181,7 +188,10 @@ export function parseDecompose(raw: unknown): DecomposePlan {
         const stdin = typeof s.stdin === "string" ? s.stdin : undefined;
         const expectContains =
           s.expectContains === undefined ? [] : requireStringArray(s, "expectContains", issues);
-        if (!title || !command) return;
+        // （2026-10-13）此处原本有 `if (!title || !command) return;` —— 冗余分支：
+        // requireString 在缺字段时**已经**把 issue 推进同一个数组，函数末尾必然
+        // 抛错，"跳过 push 与否"不可观察。冗余分支在逐位点审计里长出等价变异
+        // （`||`→`&&` 存活），按"首次遇到优先重构消除"的纪律删掉。
         smoke.push({
           title,
           command,
@@ -194,4 +204,191 @@ export function parseDecompose(raw: unknown): DecomposePlan {
   }
   if (issues.length) throw new SchemaValidationError(issues);
   return { tasks, smoke };
+}
+
+// ---- ProjectSettings 的入参校验（IPC settings:save，2026-10-13）-----------------
+//
+// 背景：渲染层来的 settings 此前 `as ProjectSettings` 后直接落盘 —— 控制面零校验，
+// 畸形类型会一路带进引擎（switch + default 静默吞掉）。本函数只做**形状校验**：
+//
+// · **认识的字段必须是合法形状**（类型 + 轻量值域 + 枚举）；
+// · **缺席 ≠ 非法**：可选字段缺席就是缺席，绝不补默认值 —— 补默认值会把"部分保存"
+//   变成"用默认值覆盖"（`SettingsStore.load` 本来就会把缺席字段并上默认值）；
+// · **未知键原样放行**（刻意不建白名单）：手写白名单与 `ProjectSettings` 之间没有
+//   自动同步，漏登记一个字段的后果是**保存时静默丢字段** —— 比"多了个引擎不认识
+//   的键"严重得多（后者只是没人读它）。这条取舍与 headless 协议的"未知顶层字段
+//   仅警告不报错"同向：宁可放过一个无害键，不冒丢数据的风险。
+
+const VERIFICATION_KINDS: Record<VerificationKind, true> = {
+  build: true,
+  typecheck: true,
+  test: true,
+  smoke: true,
+};
+
+const CONTEXT_SOURCE_KINDS: Record<"issues" | "pr" | "pr-comments", true> = {
+  issues: true,
+  pr: true,
+  "pr-comments": true,
+};
+
+const DELIVERY_REMOTE_MODES: Record<"off" | "push" | "pr", true> = {
+  off: true,
+  push: true,
+  pr: true,
+};
+
+function finiteNumber(o: Record<string, unknown>, key: string, issues: string[]): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (typeof v !== "number" || !Number.isFinite(v)) issues.push(`${key} must be a finite number`);
+}
+
+/** 非负整数（maxRepairRounds / maxParallelRuns 这类"次数"语义的字段）。 */
+function nonNegativeInt(o: Record<string, unknown>, key: string, issues: string[]): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (typeof v !== "number" || !Number.isInteger(v) || v < 0) {
+    issues.push(`${key} must be an integer >= 0`);
+  }
+}
+
+function stringOpt(o: Record<string, unknown>, key: string, issues: string[]): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (typeof v !== "string") issues.push(`${key} must be a string`);
+}
+
+function boolOpt(o: Record<string, unknown>, key: string, issues: string[]): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (typeof v !== "boolean") issues.push(`${key} must be a boolean`);
+}
+
+function stringArrayOpt(o: Record<string, unknown>, key: string, issues: string[]): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) {
+    issues.push(`${key} must be an array of strings`);
+  }
+}
+
+function enumOpt<V>(
+  o: Record<string, unknown>,
+  key: string,
+  is: (v: unknown) => v is V,
+  label: string,
+  issues: string[],
+): void {
+  const v = o[key];
+  if (v === undefined) return;
+  if (!is(v)) issues.push(`${key} must be one of: ${label}`);
+}
+
+export function parseSettings(raw: unknown): ProjectSettings {
+  if (!isObject(raw as JsonValue)) throw new SchemaValidationError(["root must be an object"]);
+  const o = raw as unknown as Record<string, unknown>;
+  const issues: string[] = [];
+
+  nonNegativeInt(o, "maxRepairRounds", issues);
+  nonNegativeInt(o, "maxParallelRuns", issues);
+  nonNegativeInt(o, "raceRedundancy", issues);
+  finiteNumber(o, "maxTokensPerRun", issues);
+  finiteNumber(o, "runWallClockMs", issues);
+  finiteNumber(o, "brainTimeoutMs", issues);
+  finiteNumber(o, "executorTimeoutMs", issues);
+
+  stringOpt(o, "llmProvider", issues);
+  stringOpt(o, "snapshotRoot", issues);
+  stringOpt(o, "manifestDir", issues);
+  boolOpt(o, "agentRouter", issues);
+  boolOpt(o, "exportDeliveryBranch", issues);
+  stringArrayOpt(o, "enabledAgents", issues);
+  stringArrayOpt(o, "llmPool", issues);
+  stringArrayOpt(o, "disabledKeyVars", issues);
+  enumOpt(o, "arbitration", isArbitrationMode, Object.keys(ARBITRATION_MODES).join("/"), issues);
+  enumOpt(
+    o,
+    "escalationPolicy",
+    isEscalationPolicySetting,
+    Object.keys(ESCALATION_POLICY_SETTINGS).join("/"),
+    issues,
+  );
+
+  const cmds = o["verificationCommands"];
+  if (cmds !== undefined) {
+    if (!Array.isArray(cmds)) {
+      issues.push("verificationCommands must be an array");
+    } else {
+      for (const c of cmds) {
+        const e = c as Record<string, unknown> | null;
+        if (!e || typeof e !== "object") {
+          issues.push("verificationCommands entries must be objects");
+          continue;
+        }
+        if (typeof e["kind"] !== "string" || !(e["kind"] in VERIFICATION_KINDS)) {
+          issues.push(`verificationCommands[].kind must be one of: ${Object.keys(VERIFICATION_KINDS).join("/")}`);
+        }
+        if (typeof e["command"] !== "string" || (e["command"] as string).trim() === "") {
+          issues.push("verificationCommands[].command must be a non-empty string");
+        }
+        if (!Array.isArray(e["args"]) || (e["args"] as unknown[]).some((x) => typeof x !== "string")) {
+          issues.push("verificationCommands[].args must be an array of strings");
+        }
+      }
+    }
+  }
+
+  const sources = o["contextSources"];
+  if (sources !== undefined) {
+    if (!Array.isArray(sources)) {
+      issues.push("contextSources must be an array");
+    } else {
+      for (const s of sources) {
+        const e = s as Record<string, unknown> | null;
+        if (!e || typeof e !== "object") {
+          issues.push("contextSources entries must be objects");
+          continue;
+        }
+        if (typeof e["kind"] !== "string" || !(e["kind"] in CONTEXT_SOURCE_KINDS)) {
+          issues.push(`contextSources[].kind must be one of: ${Object.keys(CONTEXT_SOURCE_KINDS).join("/")}`);
+        }
+        stringOpt(e, "name", issues);
+        stringOpt(e, "repo", issues);
+        stringOpt(e, "search", issues);
+        finiteNumber(e, "limit", issues);
+        finiteNumber(e, "pr", issues);
+        finiteNumber(e, "maxChars", issues);
+      }
+    }
+  }
+
+  const remote = o["deliveryRemote"];
+  if (remote !== undefined) {
+    const r = remote as Record<string, unknown> | null;
+    if (!r || typeof r !== "object") {
+      issues.push("deliveryRemote must be an object");
+    } else {
+      if (typeof r["mode"] !== "string" || !(r["mode"] in DELIVERY_REMOTE_MODES)) {
+        issues.push(`deliveryRemote.mode must be one of: ${Object.keys(DELIVERY_REMOTE_MODES).join("/")}`);
+      }
+      stringOpt(r, "remote", issues);
+      stringOpt(r, "base", issues);
+      boolOpt(r, "draft", issues);
+      finiteNumber(r, "timeoutMs", issues);
+      const ac = r["awaitChecks"];
+      if (ac !== undefined) {
+        const a = ac as Record<string, unknown> | null;
+        if (!a || typeof a !== "object") {
+          issues.push("deliveryRemote.awaitChecks must be an object");
+        } else {
+          finiteNumber(a, "intervalMs", issues);
+          finiteNumber(a, "maxPolls", issues);
+        }
+      }
+    }
+  }
+
+  if (issues.length) throw new SchemaValidationError(issues);
+  return raw as ProjectSettings;
 }

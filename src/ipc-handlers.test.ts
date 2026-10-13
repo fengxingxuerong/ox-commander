@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { dialog } from "electron";
 import { buildReceipt, sealReceipt } from "../shared/delivery-receipt";
+import { SchemaValidationError } from "../shared/schema";
 
 /**
  * Behavioural tests for the per-domain IPC handlers under `electron/ipc/*`.
@@ -399,6 +400,31 @@ describe("settings & key handlers", () => {
     const value = { llmProvider: "sensenova" };
     expect((h.ipcMain as FakeIpcMain).invoke("settings:save", value)).toBe(true);
     expect(settings.save).toHaveBeenCalledWith(value);
+  });
+
+  it("settings:save 形状不过关 → 拒绝且不落盘（控制面不再零校验，2026-10-13）", () => {
+    const settings = inst(h.settingsInstances);
+    // handler 是同步的：fake 的 invoke 直调，同步抛错就地可见（真 Electron 里
+    // ipcRenderer.invoke 会把它变成 reject —— 渲染层 settingsError 横幅同一句话）。
+    // 用相对计数而不是 not.toHaveBeenCalled：实例跨用例共享，前面的用例可能已调过。
+    const callsBefore = (settings.save as Mock).mock.calls.length;
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("settings:save", { maxRepairRounds: -1 })).toThrow(
+      SchemaValidationError,
+    );
+    expect((settings.save as Mock).mock.calls.length).toBe(callsBefore); // 畸形的绝不落盘
+    // 部分合法对象照旧通过（旧调用方的兼容面不收窄）
+    expect((h.ipcMain as FakeIpcMain).invoke("settings:save", { llmProvider: "sensenova" })).toBe(true);
+    expect((settings.save as Mock).mock.calls.length).toBe(callsBefore + 1); // 合法的只有这一次进 store
+  });
+
+  it("keys:save 非数组 / 项缺字段 → 明确报错而不是 TypeError", () => {
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("keys:save", "GOOD_1=x")).toThrow(/数组/);
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("keys:save", [{ envVar: 7, value: "a" }])).toThrow(
+      /每项都需要/,
+    );
+    // 用具体消息而非 /envVar/：TypeError("Cannot read … envVar") 也能匹配 /envVar/，
+    // 会放过 `!item || …` → `&&` 的存活变异（null 漏进解引用）。
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("keys:save", [null])).toThrow(/每项都需要/);
   });
 
   it("counts only the key entries the store accepted", () => {
@@ -834,7 +860,9 @@ describe("orchestration handlers", () => {
 
   it("resets stale batches when the PRD is edited", async () => {
     const store = inst(h.projectInstances);
-    const prd = { title: "Todo v2" };
+    // PRD 从渲染层来，入口会过 parsePrd（2026-10-13）—— 用一份合法的，
+    // 并断言落盘/返回的都是**校验后的形状**（不是把原样 unknown 写进盘）。
+    const prd = { goal: "Todo v2", features: ["f"], techStack: ["ts"], acceptanceCriteria: ["a"] };
     const batches = [[task({ id: "t2" })]];
     (store.get as Mock).mockReturnValue({ id: "p1", prdJson: "{}", batchesJson: "[[]]", stage: "PLANNING" });
     h.decompose.mockResolvedValue({ batches, smoke: [] });
@@ -915,6 +943,15 @@ describe("orchestration handlers", () => {
     // 守卫必须发生在任何写入之前：项目都没找到，绝不能先 update 再报错
     expect(store.update).not.toHaveBeenCalled();
     expect(h.decompose).not.toHaveBeenCalled();
+  });
+
+  it("update-prd 的 PRD 形状不过关 → SchemaValidationError（渲染层编辑也要过闸，2026-10-13）", async () => {
+    const store = inst(h.projectInstances);
+    (store.get as Mock).mockReturnValue({ id: "p1", stage: "PLANNING" });
+    await expect(
+      (h.ipcMain as FakeIpcMain).invoke("orchestration:update-prd", "p1", { title: "x" }),
+    ).rejects.toThrow(SchemaValidationError);
+    expect(store.update).not.toHaveBeenCalled();
   });
 
   it("update-prd 在该项目执行中时拒绝（批次与 PRD 会不一致）", async () => {

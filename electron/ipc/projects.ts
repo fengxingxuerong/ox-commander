@@ -5,8 +5,8 @@
  */
 import { ipcMain, shell } from "electron";
 import fs from "node:fs";
+import { parseSettings } from "../../shared/schema";
 import { HttpLlmError } from "../../shared/http-clients";
-import type { ProjectSettings } from "../../shared/types";
 import { buildLlm, keysStore, settingsStore, stores, workspaceRoot } from "./context";
 
 export function registerProjectHandlers(): void {
@@ -42,7 +42,10 @@ export function registerSettingsHandlers(): void {
   ipcMain.handle("settings:get", () => settingsStore().load());
 
   ipcMain.handle("settings:save", (_e, settings: unknown) => {
-    settingsStore().save(settings as ProjectSettings);
+    // 入参校验（2026-10-13）：以前 `as ProjectSettings` 直接落盘 = 控制面零校验，
+    // 畸形类型会一路带进引擎。形状不过关就抛 SchemaValidationError（invoke 会把
+    // 它带到渲染层的 settingsError 横幅），**不落盘**。
+    settingsStore().save(parseSettings(settings));
     return true;
   });
 
@@ -54,9 +57,18 @@ export function registerSettingsHandlers(): void {
     plaintextCount: keysStore().plaintextCount(),
   }));
 
-  ipcMain.handle("keys:save", (_e, entries: Array<{ envVar: string; value: string }>) => {
+  ipcMain.handle("keys:save", (_e, entries: unknown) => {
+    if (!Array.isArray(entries)) {
+      throw new Error("keys:save 需要一个数组：[{ envVar, value }]");
+    }
     let savedCount = 0;
-    for (const { envVar, value } of entries) {
+    for (const raw of entries) {
+      const item = raw as { envVar?: unknown; value?: unknown } | null;
+      if (!item || typeof item !== "object" || typeof item.envVar !== "string" || typeof item.value !== "string") {
+        throw new Error("keys:save 的每项都需要 { envVar: string, value: string }");
+      }
+      const envVar = item.envVar;
+      const value = item.value;
       if (!keysStore().set(envVar, value)) continue;
       savedCount++;
       // 账号热切换（P1-5）：保存动作是**最新的意图**，必须立刻反映到进程环境 ——
