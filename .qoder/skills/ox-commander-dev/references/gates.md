@@ -1,10 +1,10 @@
 # `npm run verify` 的逐段机制（29 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
-1971 通过 + 8 跳过，合计 1979 条，分布在 66 个有可执行用例的文件（2026-10-13 逐段实测：链首到
+1982 通过 + 8 跳过，合计 1990 条，分布在 66 个有可执行用例的文件（2026-10-13 逐段实测：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
-变异规模实物：**71 个目标** / 基线 **1596 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**71 个目标** / 基线 **1599 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -39,12 +39,15 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 10 | `check:ipc-channels` | `scripts/check-ipc-channels.mjs`：preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道 | 悬空通道（一调就 reject）→ 红；注册了但没暴露（**静默不可用**）→ 红；同通道 invoke/handle 两次 → 红；**任一侧解析为空也红**（解析失配当通过 = 永远绿的摆设）。反向注入 6/6 |
 | 11 | `check:mutation-targets` | `scripts/check-mutation-targets.mjs`：本次改动的生产文件必须已在 `TARGETS` 或显式豁免里 | 漏挂 → 红。漏挂的文件**不参与**变异统计，那个 PASS 对它没有含义（2026-10-05 三个漏挂文件入表后一次暴露 9 处存活位点）。反向注入 4/4 |
 | 12 | `check:doc-claims` | `scripts/check-doc-claims.mjs --selftest`：本表 / README / SKILL.md 里那几个数字对**实物**（`package.json` 的段数、`vitest list` 的收集数） | 段数任一处不等 → 红；链里某段在两处清单都没行 → 红；声明的用例数 ≠ 现跑收集数 → 红；**读不到声明也红**（措辞改了却不匹配 = 门禁空转）。36 例判据自测 |
-| 13 | `mutation:baseline` | `scripts/site-baseline.mjs`：逐目标重算位点数并与 `SITE_BASELINE` 比（**不跑变异**，约 1s） |
- 漂移 → 红。为什么现在进链：漂移判定此前**只写在 site 口径里**，而 site 口径本机 verify 从不跑
+| 13 | `mutation:baseline` | `scripts/site-baseline.mjs --selftest`：逐目标重算位点数并与 `SITE_BASELINE` 比（**不跑变异**，约 1s） | 漂移 → 红。为什么现在进链：漂移判定此前**只写在 site 口径里**，而 site 口径本机 verify 从不跑
  ⇒「全部 N 处位点已逐点验证」这句话在本机绿的时候，N 可能已经不是现在那个 N 了（2026-10-05 才把
  这个常量从注释里的承诺变成真判据，见 `mutation-check.mjs` 文件头）。
  ⚠️ 与 site 口径**刻意不对称**：site 只在位点**变多**时报（那才是"没人验证过"），本段对
- 任何不等都红 —— 基线要始终是实物的镜像，位点变少也得显式 `--write` 认一次。 |
+ 任何不等都红 —— 基线要始终是实物的镜像，位点变少也得显式 `--write` 认一次。
+ ⚠️ `--selftest` 判的是**写回这一步本身**（`withBaselineBlock`）：连写两次必须逐字节相同、
+ 块尾攒出的空语句一次收敛、无漂移的源码写回后不动。旧写法从 `}` 处接回自带 `};` 的新块，
+ 于是每 `--write` 一次多一个空语句（HEAD 上曾攒到 12 个），而 `check:scripts` 按语法解析、
+ 空语句合法 ⇒ 静默累积。摘掉那行吞分号的 `while` 会让自测里 5/7 条红（现场已核）。 |
 | 14 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
 | 15 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
 | 16 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |

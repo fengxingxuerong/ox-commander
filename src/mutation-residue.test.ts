@@ -23,11 +23,44 @@ import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 
-const ROOT = path.resolve(__dirname, "..");
+const REPO = path.resolve(__dirname, "..");
+
+/** 真实台账目录：本文件**只读**它（那条前置卫生用例要看真实工作区有没有活体变异体）。 */
+const REAL_PENDING_DIR = path.join(REPO, "scripts", ".mutation-pending");
+const REAL_SCRIPT = path.join(REPO, "scripts", "mutation-check.mjs");
+
+/**
+ * 用例的现场放在一个**与仓库同形的临时根**上：
+ * `<ROOT>/scripts/mutation-check.mjs`（每次用前从真实脚本重新拷一份）+
+ * `<ROOT>/scripts/.mutation-pending/` + `<ROOT>/target.ts`。
+ *
+ * 为什么非要同形：备份名编码的是**相对仓库根的路径**（`pendingBackupName`），孤儿处置靠它
+ * 映射回源文件。同形布局下这些语义与真实仓库逐字节一致 —— `target.ts` 编出来就是
+ * `target.ts.orig`，那条 `scripts__.mutation-pending__armed.ts.orig` 的字面断言也不需要
+ * 长出第二份编码实现。
+ *
+ * 为什么必须搬出真实目录（2026-10-13 实测）：这些用例原本直接往 `scripts/.mutation-pending/`
+ * 造现场，正常收尾靠 afterEach 把整目录删掉。一旦 `npm test` 被中途打断，现场就留在**门禁
+ * 脚本自己扫描的那个目录**里：
+ *   - 留一枚映射不回的 `.orig` ⇒ `check:residue`（verify 链首）退出 2 并要人工 rm；
+ *   - 「备份写不下去时退出 2」那条更狠，它把一个**普通文件**放在台账目录位上 ⇒ 链首读目录时
+ *     ENOTDIR 崩。
+ * 也就是说：用来防残留的那套用例，自己就是链首被锁死的来源。现场挪到 OS 临时目录后，
+ * 最坏的泄漏落在仓库外面，一次打断不再能锁死唯一验收入口。
+ */
+const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ox-residue-root-"));
 const SCRIPT = path.join(ROOT, "scripts", "mutation-check.mjs");
 const PENDING_DIR = path.join(ROOT, "scripts", ".mutation-pending");
+fs.mkdirSync(PENDING_DIR, { recursive: true });
+
+/** 每次用之前把真实判据脚本按字节拷进同形根：判据改了立刻可见，不留陈旧副本。 */
+function syncGate(): void {
+  fs.copyFileSync(REAL_SCRIPT, SCRIPT);
+}
+// 采集期就有用例体外的 `readFileSync(SCRIPT)`（锚点常量），所以先拷一次。
+syncGate();
 
 /** 一次运行的结果，测试只看这三样。 */
 interface RecoverRun {
@@ -38,11 +71,10 @@ interface RecoverRun {
 
 const scratch: string[] = [];
 
-/** 目标文件放在 pending 目录**之外**：还原后内容必须仍然可观察。 */
+/** 目标文件放在 pending 目录**之外**：还原后内容必须仍然可观察。
+ *  放在同形根下（而不是 OS 临时目录）是为了让备份名按真实编码规则映射得回来。 */
 function makeTarget(original: string, current: string): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ox-residue-"));
-  scratch.push(dir);
-  const file = path.join(dir, "target.ts");
+  const file = path.join(ROOT, "target.ts");
   fs.writeFileSync(file, current, "utf8");
   fs.mkdirSync(PENDING_DIR, { recursive: true });
   const backup = path.join(PENDING_DIR, "target.ts.orig");
@@ -94,10 +126,10 @@ function loadPending(
   };
 }
 
-/** 某个目标文件的台账记录路径。makeTarget 的目标在 tmpdir（ROOT 之外），
- *  pendingBackupName 对 ROOT 外路径会产生带 ".." 的名字，path.join 会把记录解析到
- *  PENDING_DIR 之外——所以测试用**固定**记录名（recover 是扫描 *.json，不重算路径；
- *  arm/clear 的名字编码一致性由 armed.ts 在 PENDING_DIR 内的那条用例钉住）。 */
+/** 某个目标文件的台账记录路径。目标现在落在同形根下，所以
+ *  `pendingBackupName(path.join(ROOT,"target.ts"))` 算出来就是 `target.ts.orig`，
+ *  这两个固定名**等于**编码规则的输出，不是绕过它（`armed.ts` 那条用例仍然直接拿门禁自己的
+ *  `pendingBackupName` 断言一次，防的就是这里哪天与规则分叉）。 */
 const RECORD = path.join(PENDING_DIR, "target.ts.orig.json");
 const OTHER_RECORD = path.join(PENDING_DIR, "other.ts.orig.json");
 
@@ -148,9 +180,36 @@ function recoverOnly(): RecoverRun {
   return { status: r.status, out: r.stdout ?? "", err: r.stderr ?? "" };
 }
 
+/** 真实台账目录在每个用例开始时的内容快照 —— 本文件一个字节都不许往那里写。 */
+let realDirBefore: string[] = [];
+
+beforeEach(() => {
+  syncGate();
+  realDirBefore = fs.existsSync(REAL_PENDING_DIR) ? fs.readdirSync(REAL_PENDING_DIR) : [];
+});
+
 afterEach(() => {
+  // 类守卫（2026-10-13）：现场在同形临时根里造，真实台账目录若在本用例期间多出任何一项，
+  // 就是有人把 fixture 又写回了门禁自己扫描的那个目录 —— 一次被打断的 `npm test` 于是
+  // 留下一枚映射不回的备份，`check:residue`（verify 链首）从此退出 2 并要求人工 rm。
+  // 判据不放宽：并发跑着另一轮真变异时它写的台账名映射得回源文件，请先等它收工再复跑本文件。
+  const now = fs.existsSync(REAL_PENDING_DIR) ? fs.readdirSync(REAL_PENDING_DIR) : [];
+  const added = now.filter((n) => !realDirBefore.includes(n));
+  if (added.length > 0) {
+    throw new Error(
+      `本用例往真实台账目录 scripts/.mutation-pending/ 落了东西：${added.join(", ")}。` +
+        "fixture 只许落在同形临时根里 —— 留在这里而映射不回源文件的备份，" +
+        "会让 verify 链首（check:residue）退出 2 并要求人工删除。",
+    );
+  }
   fs.rmSync(PENDING_DIR, { recursive: true, force: true });
   for (const dir of scratch.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+});
+
+// 同形根是整个文件共用一个（备份名的编码规则要它稳定），所以在这里一次删掉：
+// 正常收尾不留 OS 临时目录，被中途打断时留下的也只是仓库外的垃圾。
+afterAll(() => {
+  fs.rmSync(ROOT, { recursive: true, force: true });
 });
 
 /**
@@ -165,8 +224,8 @@ afterEach(() => {
  * OOM 的直接原因是活体变异体，所以就看它。台账按文件一条后这里逐条扫。
  */
 function liveMutant(): string | null {
-  if (!fs.existsSync(PENDING_DIR)) return null;
-  const records = fs.readdirSync(PENDING_DIR).filter((n) => n.endsWith(".json"));
+  if (!fs.existsSync(REAL_PENDING_DIR)) return null;
+  const records = fs.readdirSync(REAL_PENDING_DIR).filter((n) => n.endsWith(".json"));
   for (const name of records) {
     const record = path.join(PENDING_DIR, name);
     let rec: { file?: string; backup?: string };

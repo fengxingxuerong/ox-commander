@@ -18,7 +18,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { existsSync } from "node:fs";
-import { describe, expect, it, beforeAll, vi } from "vitest";
+import { describe, expect, it, beforeAll, afterAll, vi } from "vitest";
 import {
   sealReceipt,
   type DeliveryReceipt,
@@ -689,4 +689,246 @@ describe("headless-main · 空 stdin 的退出契约", () => {
     expect(valid.stdout).toContain('"type":"error"');
     expect(valid.stdout).toContain("requirement");
   });
+});
+
+/**
+ * `serve-main.ts` 的 `main()` 里，定时那一支（`--every` / `--spec` /
+ * `--schedule-state`）此前**一条端到端都没有**：`parseScheduleArgs` 与
+ * `decideStartupCatchup` 各有纯函数用例，而"启动即预校验 spec"和"补跑真的把 spec
+ * 投进自己的 /run"这两段只在真启动服务时才求值 —— 正是本文件反复钉的那类盲区
+ * （只测被调函数，入口坏着报绿）。
+ *
+ * 症状各不相同：spec 坏了却把服务起起来 = 每次触发都 400，操作者以为定时在跑；
+ * 补跑链路断在任何一环（时间戳读不出 / 自调用地址错 / 落盘没做）= 服务照常应答、
+ * 日志一句 `[schedule]` 也没有，而 README 承诺的是"停机期间错过的触发点重启补跑一次"。
+ */
+describe("serve-main · 定时运行（--every/--spec）的真接线", () => {
+  const tmpDirs: string[] = [];
+  const makeTmp = (): string => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ox-schedule-e2e-"));
+    tmpDirs.push(dir);
+    return dir;
+  };
+  afterAll(() => {
+    for (const dir of tmpDirs) fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("--spec 指向读不到的文件 → 启动即 exit 1，服务根本不起来", () => {
+    ensureFreshDist();
+    const missing = path.join(os.tmpdir(), "ox-no-such-schedule-spec.json");
+    const r = runEntry(
+      "serve-main.js",
+      ["--port=18791", "--every=1h", `--spec=${missing}`],
+      15_000,
+    );
+    expect(r.code).toBe(1);
+    // 承重断言：不许出现启动横幅。带着坏 spec 把服务起起来，症状是"看起来正常、
+    // 每次触发都 400"，而 exit 1 + 一句读取失败才是可诊断的。
+    expect(r.stdout).not.toContain("OxCommander serve:");
+    expect(r.stderr).toContain("--spec 读取失败");
+  });
+
+  it("--spec 是合法 JSON 但过不了 parseSpec → exit 1，且说清校验失败", () => {
+    ensureFreshDist();
+    const bad = path.join(makeTmp(), "spec.json");
+    fs.writeFileSync(
+      bad,
+      JSON.stringify({ requirement: "x", projectRoot: ".", arbitration: "bogus" }),
+      "utf8",
+    );
+    const r = runEntry("serve-main.js", ["--port=18792", "--every=1h", `--spec=${bad}`], 15_000);
+    expect(r.code).toBe(1);
+    expect(r.stdout).not.toContain("OxCommander serve:");
+    expect(r.stderr).toContain("--spec 校验失败");
+    // 同一句话由 /run 的 400 说：预校验与运行期共用一个 parseSpec，不许两份口径。
+    expect(r.stderr).toContain("arbitration");
+  });
+
+  it("错过触发点 → 启动补跑真的 POST /run 并把时间戳落盘（且至多一次）", async () => {
+    ensureFreshDist();
+    const dir = makeTmp();
+    const projectRoot = path.join(dir, "project");
+    fs.mkdirSync(projectRoot);
+    const specFile = path.join(dir, "spec.json");
+    const stateFile = path.join(dir, "state.json");
+    // projectRoot 指向临时目录：run 的 journal 落在**它自己的** projectRoot 里。
+    // 这里写 "." 会把 ox-run-journal.json 造进本仓库 —— 用例全绿而工作树被写脏，
+    // 那正是"没有测试能抓"的一族（CI 靠 git diff --exit-code 也只在它被跟踪时才逮得到）。
+    fs.writeFileSync(
+      specFile,
+      JSON.stringify({ requirement: "定时样例", projectRoot }),
+      "utf8",
+    );
+    const stale = Date.now() - 3_600_000;
+    fs.writeFileSync(stateFile, JSON.stringify({ lastFiredMs: stale }), "utf8");
+
+    const port = 18793;
+    const child = spawn(
+      process.execPath,
+      [
+        path.join(HEADLESS_DIST, "serve-main.js"),
+        `--port=${port}`,
+        // 间隔给 1h：补跑之后下一次在一小时后，所以"至多一次"在本用例的窗口里是确定的，
+        // 不需要赌一个短间隔的时序。
+        "--every=1h",
+        `--spec=${specFile}`,
+        `--schedule-state=${stateFile}`,
+      ],
+      { stdio: ["ignore", "pipe", "pipe"] },
+    );
+    let out = "";
+    child.stdout!.on("data", (c: Buffer | string) => {
+      out += c.toString();
+    });
+    const waitFor = async (pred: () => boolean, ms: number, what: string): Promise<void> => {
+      const until = Date.now() + ms;
+      while (Date.now() < until) {
+        if (pred()) return;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(`等${what}超时（${ms}ms）。stdout 尾部：${JSON.stringify(out.slice(-600))}`);
+    };
+    try {
+      await waitFor(
+        () => out.includes("OxCommander serve:"),
+        15_000,
+        "启动横幅（没有它说明服务没起来，后面一切都不成立）",
+      );
+      await waitFor(
+        () => out.includes("[schedule] 定时触发"),
+        12_000,
+        "定时环的补跑触发日志",
+      );
+      expect(out, "启动时应说明这是错过的触发点被补跑").toContain("启动补跑一次");
+      // 差分断言：时间戳必须从"一小时前的陈旧值"移动到"刚才"。这一步只有整条链
+      // （读状态 → 判错过 → POST /run → serve 回 2xx → saveState）全通才做得到。
+      await waitFor(() => {
+        let s: { lastFiredMs?: number } | undefined;
+        try {
+          s = JSON.parse(fs.readFileSync(stateFile, "utf8")) as { lastFiredMs?: number };
+        } catch {
+          return false;
+        }
+        return typeof s?.lastFiredMs === "number" && s.lastFiredMs > stale;
+      }, 10_000, "状态文件里的 lastFiredMs 被刷新");
+
+      // 至多一次：接受日志只该出现一遍（第二次说明间隔推算坏了）。
+      const fired = (out.match(/定时触发：run 已接受/g) ?? []).length;
+      expect(fired, `补跑应恰好一次，实际日志里有 ${fired} 次：${JSON.stringify(out.slice(-400))}`).toBe(1);
+    } finally {
+      child.kill();
+    }
+  }, 60_000);
+});
+
+/**
+ * 310e6a7（serve 默认只绑回环 + 非回环强制 token）新加的分支，本机 site 口径实测**四处存活**
+ * —— 那笔提交没跑过 `mutation:audit`，而 CI 最后一次绿的是它之前的 `8d24511`。
+ * 存活位点的意思不是"代码错了"，而是"这段行为没有任何断言看着它"：绑定地址与暴露提示
+ * 恰好都是**只在真启动、真绑定**时才求值的那一类，纯函数用例够不到。
+ *
+ * 下面三条逐个把它们钉住（第三条同时覆盖 `三元分支互换` 与 `=== → !==` 两个算子）。
+ */
+describe("serve-main · 绑定地址与暴露提示（310e6a7 的存活位点）", () => {
+  it("hostFromArgv：非 --host 的参数被跳过，不是终止扫描（continue 的语义）", () => {
+    // 变异成 break 时，`verbose` 之后的 --host 永远不会被看到 ⇒ 这里必红。
+    expect(hostFromArgv(["verbose", "--host", "127.0.0.1"])).toEqual({ host: "127.0.0.1" });
+    expect(hostFromArgv(["verbose", "--port=1", "--host=localhost"])).toEqual({ host: "localhost" });
+  });
+
+  it("显式 --host 真的进 startServe：横幅印的是给的那个地址，而不是回环默认", async () => {
+    ensureFreshDist();
+    const port = 18794;
+    const child = spawn(process.execPath, [path.join(HEADLESS_DIST, "serve-main.js"), `--port=${port}`, "--host=localhost"], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const line = await firstLine(child.stdout!, 15_000);
+      // 条件展开被写反（!== → === / 三元分支互换）时，host 根本不注入，
+      // startServe 落回默认回环 —— 横幅于是变成 127.0.0.1，正是这条断言要逮的。
+      expect(line).toContain(`http://localhost:${port}/`);
+      expect(line).not.toContain("http://127.0.0.1:");
+    } finally {
+      child.kill();
+    }
+  }, 40_000);
+
+  it("绑到 0.0.0.0（带 token）时横幅必须补一句「本机用回环连」", async () => {
+    ensureFreshDist();
+    const port = 18795;
+    // 那句提示在**第二行**：`exposure` 以换行开头（它是追加给告警行的），所以这里
+    // 只能读整段输出，firstLine 会把它截掉 —— 我第一版就是这么误判成产品缺陷的。
+    const readAll = (child: ReturnType<typeof spawn>, want: (text: string) => boolean, ms: number) =>
+      new Promise<string>((resolve, reject) => {
+        let text = "";
+        const timer = setTimeout(() => reject(new Error(`等输出超时，已收到：${JSON.stringify(text)}`)), ms);
+        child.stdout!.on("data", (c: Buffer | string) => {
+          text += c.toString();
+          if (want(text)) {
+            clearTimeout(timer);
+            resolve(text);
+          }
+        });
+        child.stderr!.on("data", (c: Buffer | string) => {
+          text += c.toString();
+        });
+      });
+
+    const wildcard = spawn(
+      process.execPath,
+      [path.join(HEADLESS_DIST, "serve-main.js"), `--port=${port}`, "--host=0.0.0.0"],
+      { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, OX_SERVE_TOKEN: "probe-token" } },
+    );
+    let wildcardOut = "";
+    try {
+      wildcardOut = await readAll(wildcard, (t) => t.includes("OxCommander serve:") && t.includes("已绑定"), 15_000);
+      expect(wildcardOut).toContain(`http://0.0.0.0:${port}/`);
+      // 这句提示是 fail-closed 那轮的"暴露面要说破"半边：通配地址上没有回环可点，
+      // 少了这句，操作者会以为 0.0.0.0 不能本机连。
+      expect(wildcardOut).toContain(`本机可直接用 http://127.0.0.1:${port}`);
+    } finally {
+      wildcard.kill();
+    }
+
+    // IPv6 通配（`::`）：那句提示的条件是"0.0.0.0 **或** ::"，第二个操作数只有真绑过
+    // 才杀得死。宿主没有 IPv6 时服务会明确报绑定失败 —— 那种情况下这里认的是那句
+    // 错误，而不是装作这一档通过（本机 win32 与 CI ubuntu 的差异就写在这条断言里）。
+    const v6Port = port + 2;
+    const v6 = spawn(
+      process.execPath,
+      [path.join(HEADLESS_DIST, "serve-main.js"), `--port=${v6Port}`, "--host=::"],
+      { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, OX_SERVE_TOKEN: "probe-token" } },
+    );
+    let v6Out = "";
+    try {
+      v6Out = await readAll(
+        v6,
+        (t) => t.includes("OxCommander serve:") || t.includes("EADDR") || /listen|bind|失败/i.test(t),
+        15_000,
+      );
+    } finally {
+      v6.kill();
+    }
+    if (v6Out.includes("OxCommander serve:")) {
+      expect(v6Out).toContain("已绑定");
+      expect(v6Out).toContain(`本机可直接用 http://127.0.0.1:${v6Port}`);
+    } else {
+      console.warn(`本机无法绑定 ::（IPv6 不可用），这一档位点由 CI ubuntu 覆盖：${v6Out.slice(0, 200)}`);
+    }
+
+    // 对照：回环绑定不该出现这两句（否则"补一句"退化成无条件打印，三元分支就白写了）。
+    const loopback = spawn(process.execPath, [path.join(HEADLESS_DIST, "serve-main.js"), `--port=${port + 1}`], {
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    try {
+      const out2 = await readAll(loopback, (t) => t.includes("OxCommander serve:"), 15_000);
+      expect(out2).not.toContain("已绑定");
+      expect(out2).not.toContain("本机可直接用");
+      // 反向对照还有一层含义：wildcard 那轮真的等到"已绑定"才继续，
+      // 所以这里 0 命中不是"输出没来"，而是"确实不打这句"。
+      expect(out2).toContain(`http://127.0.0.1:${port + 1}/`);
+    } finally {
+      loopback.kill();
+    }
+  }, 60_000);
 });

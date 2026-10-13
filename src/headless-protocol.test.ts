@@ -1646,3 +1646,61 @@ describe("runtimeGap · headless 的运行时前置条件", () => {
     expect(gap).toMatch(/node/i);
   });
 });
+
+/**
+ * `parseSpec` 必须**幂等**：serve 的定时环把解析后的对象原样再投给自己的 /run，
+ * 不幂等就等于每一次触发都 400。
+ *
+ * 2026-10-13 端到端实测抓到的正是这一格：`agents` 缺省时输出里带着 `agents: []`，
+ * 而再投一次被 `parseAgentManifestList` 以「manifest 列表为空」拒绝 —— 于是 README
+ * 承诺的 `--every` 定时运行在任何一次触发上都没成功过，而纯函数用例与启动预校验
+ * 都看不见它（它们各自只解析一次）。
+ */
+describe("parseSpec · 幂等（解析结果能原样再投）", () => {
+  it("解析结果再投一次仍然合法，且载荷字段不变", () => {
+    const first = parseSpec(JSON.stringify(LEGACY_SPEC));
+    expect(first.ok, first.ok ? "" : first.message).toBe(true);
+    if (!first.ok) return;
+    const again = parseSpec(JSON.stringify(first.spec));
+    expect(again.ok, again.ok ? "" : again.message).toBe(true);
+    if (!again.ok) return;
+    // 载荷字段必须原样：定时/重试这类"把同一份 spec 再投一次"的路径靠它
+    for (const key of ["requirement", "projectRoot", "agents", "protocolVersion", "escalationPolicy"] as const) {
+      expect(again.spec[key], key).toEqual(first.spec[key]);
+    }
+  });
+
+  it("说破代价：归一化输出不是输入形状，settings 再投回去会被当未知字段丢掉", () => {
+    // 这条不是"期望产品改成幂等"，而是把 serve 定时环**必须投 spec 原文**的理由钉住：
+    // 投归一化结果 = 用户写在 spec 里的 settings 静默消失（当场实测到的行为）。
+    const withSettings = parseSpec(JSON.stringify({ ...LEGACY_SPEC, maxParallelRuns: 3 }));
+    expect(withSettings.ok, withSettings.ok ? "" : withSettings.message).toBe(true);
+    if (!withSettings.ok) return;
+    const resubmit = parseSpec(JSON.stringify(withSettings.spec));
+    expect(resubmit.ok).toBe(true);
+    if (!resubmit.ok) return;
+    expect(JSON.stringify(resubmit.spec.settings)).not.toEqual(JSON.stringify(withSettings.spec.settings));
+    expect(resubmit.spec.warnings.join("\n")).toContain("未知字段");
+  });
+
+  it("显式给空数组的 agents 与没给同义（不是「清单为空」那种错误）", () => {
+    const omitted = parseSpec(JSON.stringify(LEGACY_SPEC));
+    const empty = parseSpec(JSON.stringify({ ...LEGACY_SPEC, agents: [] }));
+    expect(empty.ok, empty.ok ? "" : empty.message).toBe(true);
+    if (!omitted.ok || !empty.ok) return;
+    expect(empty.spec.agents).toEqual([]);
+    expect(empty.spec.requirement).toEqual(omitted.spec.requirement);
+  });
+
+  it("对照：agents 给非数组仍然报错 —— 放宽只针对空数组这一种形状", () => {
+    const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, agents: { id: "x" } }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("agents 声明校验失败");
+  });
+
+  it("对照：非空数组里的坏 manifest 照样报错，没被这道放宽洗白", () => {
+    const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, agents: [{ id: "bad id!", adapter: "cli" }] }));
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("agents 声明校验失败");
+  });
+});

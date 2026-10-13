@@ -6,7 +6,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **71 个目标** / 基线 **1596 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **71 个目标** / 基线 **1599 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, every site)` job 每次 push 跑（Linux，60 分钟上限；
 > 最近一次 @ `c67d920` success，43 min），结论与数字（杀死 N/M、存活清单）写进该 job 的
 > **summary**，不用翻 log。这两个数里的"基线"由 `check:doc-claims` 对实物核（取自
@@ -230,10 +230,15 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   用例数是否等于 `vitest list` 的收集结果、变异规模是否等于 `site-baseline --json`）
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
   位点数涨了而基线没更新 = 新位点**没人逐点审计过**，此时「全部 N 处已逐点验证」是假象。
-  这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道）
-→ vitest（2026-10-13 现跑 1971 通过 + 8 跳过，合计 1979 条，分布在 66 个有可执行用例的文件；
-  本机另有 17 条真进程用例因 spawnSync EBUSY 红（git-export 2 / headless-entries 5 /
-  mutation-residue 10）—— 上面的 1971 是 CI（Linux）口径，本机差异见「本机环境」一节；
+  这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道。
+  它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
+  空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
+  空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
+→ vitest（2026-10-13 现跑 1982 通过 + 8 跳过，合计 1990 条，分布在 66 个有可执行用例的文件；
+  同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
+  ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
+  mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
+  2026-10-13 本机这三个文件全绿。别把间歇红当本地基线 —— 判据是当场重跑那三个文件看是否复现。
   真实 API smoke 由 OX_SMOKE=1 + SENSENOVA_API_KEY 门控，默认跳过）
 → mutation:quick（tier 1 目标，每目标 1 个 aggregate 变异——最弱档，别读成"变异全过"）
 → vite build + tsc headless 构建

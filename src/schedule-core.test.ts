@@ -143,7 +143,7 @@ describe("startScheduleLoop", () => {
     let timerSeq = 0;
     const loop = startScheduleLoop({
       args: { everyMs: input.everyMs ?? 60_000, specFile: "spec.json" },
-      specPayload: { requirement: "x" },
+      specPayload: JSON.stringify({ requirement: "x" }),
       port: 8787,
       ...(input.host !== undefined ? { host: input.host } : {}),
       ...(input.token ? { token: input.token } : {}),
@@ -240,7 +240,7 @@ describe("startScheduleLoop", () => {
     const logs: string[] = [];
     const loop = startScheduleLoop({
       args: { everyMs: 60_000, specFile: "spec.json" },
-      specPayload: { requirement: "x" },
+      specPayload: JSON.stringify({ requirement: "x" }),
       port: 8787,
       log: (t) => logs.push(t),
       loadState: () => undefined,

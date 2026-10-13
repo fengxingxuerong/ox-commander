@@ -9,6 +9,8 @@
  * Usage:
  *   node scripts/site-baseline.mjs --write    # rewrite the constant in place
  *   node scripts/site-baseline.mjs            # report drift, exit 1 if drifted
+ *   node scripts/site-baseline.mjs --selftest # 先自测"写回"这一步，再照常报漂移
+ *                                             # （verify 的 `mutation:baseline` 带这个）
  *
  * Exits 1 on drift when not writing — that is the point: `npm run mutation:site`
  * (and CI's `mutation-full` job) is what proves each site individually, so a
@@ -178,6 +180,90 @@ function sliceTopLevelObject(source, constName) {
   return null;
 }
 
+const BASELINE_DECL = "const SITE_BASELINE = {";
+
+/**
+ * 把新的 `SITE_BASELINE` 块换回门禁源码，返回整份新文本（不落盘，纯字符串）。
+ *
+ * ⚠️ 替换区间必须**吃过块尾之后那一串分号**再接回自带的 `};`。
+ * `sliceTopLevelObject` 返回的区间止于 `}`，不含结尾分号；旧写法从那个位置接回
+ * 自己带 `};` 的新块 ⇒ 每跑一次 `--write` 就多一个空语句。HEAD 上的
+ * `};;;;;;;;;;;;` 就是这么攒起来的，而 `check:scripts` 按语法解析、空语句合法，
+ * 所以它一路静默累积。少吞一个分号是脏，多吞一个换行就是把下一段代码吃了。
+ */
+function withBaselineBlock(text, block) {
+  const start = text.indexOf(BASELINE_DECL);
+  if (start < 0) return null;
+  const slice = sliceTopLevelObject(text, "SITE_BASELINE");
+  if (!slice || !text.startsWith(BASELINE_DECL, start)) return null;
+  let end = start + slice.length;
+  while (text[end] === ";") end += 1;
+  return text.slice(0, start) + block + text.slice(end);
+}
+
+/** `--write` 与自测共用同一个块构造器 —— 不留第二份实现（它会漂）。 */
+function buildBaselineBlock(counts) {
+  const entries = [...counts.entries()]
+    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
+    .map(([f, n]) => `  ${JSON.stringify(f)}: ${n},`)
+    .join("\n");
+  return `const SITE_BASELINE = {\n${entries}\n};`;
+}
+
+/**
+ * 判据自测：真源码 + 合成靶点两头都跑，走的就是 `--write` 那条分支的同一个
+ * `withBaselineBlock`，不是第二份实现（只测一个被抠出来的小函数会让真入口坏着报绿）。
+ *
+ * 每条断言都标明"什么输入会让它红"。
+ */
+function selfTestBaselineWrite(text, counts) {
+  const block = buildBaselineBlock(counts);
+
+  /** 块尾跟着几枚分号（-1 = 定位不到块）。 */
+  const tailSemicolons = (source) => {
+    const slice = sliceTopLevelObject(source, "SITE_BASELINE");
+    if (!slice) return -1;
+    let i = source.indexOf(slice) + slice.length;
+    let n = 0;
+    while (source[i + n] === ";") n += 1;
+    return n;
+  };
+
+  const checks = [];
+  const once = withBaselineBlock(text, block);
+  checks.push(["门禁源码里定位得到 SITE_BASELINE", once !== null]);
+  checks.push([
+    "真源码连写两次与写一次逐字节相同（漏吞块尾分号会红）",
+    once !== null && withBaselineBlock(once, block) === once,
+  ]);
+  checks.push([
+    "真源码块尾恰好一枚分号（多于 1 枚 = 历史脏没收敛）",
+    once !== null && tailSemicolons(once) === 1,
+  ]);
+
+  // 合成靶点：HEAD 上真存在过的脏形态（块尾多攒了 3 枚空语句），块后还有别的源码。
+  const after = "\n\nconst AFTER = 1;\n";
+  const cleaned = withBaselineBlock(`${block};;;${after}`, block);
+  checks.push([
+    "攒了额外空语句的块尾一次收敛，且不吃掉块后的源码",
+    cleaned === `${block}${after}`,
+  ]);
+  checks.push(["脏块收敛后再写一次逐字节相同", cleaned !== null && withBaselineBlock(cleaned, block) === cleaned]);
+
+  // 正向对照：本来就该长这样的源码，写回必须**不动它**（判据不误伤）。
+  checks.push(["无漂移的源码写回后逐字节不变", withBaselineBlock(`${block}${after}`, block) === `${block}${after}`]);
+
+  checks.push(["找不到声明时返回 null 而不是产出坏文件", withBaselineBlock("export const X = 1;\n", block) === null]);
+
+  const failed = checks.filter(([, ok]) => !ok);
+  for (const [name, ok] of checks) console.log(`  ${ok ? "ok  " : "FAIL"} ${name}`);
+  if (failed.length > 0) {
+    console.error(`\nFAIL: SITE_BASELINE 写回判据自测 ${failed.length}/${checks.length} 条不通过`);
+    process.exit(1);
+  }
+  console.log(`PASS: SITE_BASELINE 写回判据自测 ${checks.length} 条（幂等 + 历史脏收敛 + 正向对照）`);
+}
+
 // ---- Compare against the committed baseline ----
 const baselineBlock = sliceTopLevelObject(src, "SITE_BASELINE");
 if (!baselineBlock) {
@@ -198,6 +284,9 @@ for (const file of Object.keys(SITE_BASELINE)) {
 
 const json = process.argv.includes("--json");
 
+// 判据自测只在人读的那一面跑：--json 的输出喂给 check:doc-claims，多一行就把它砸了。
+if (process.argv.includes("--selftest") && !json) selfTestBaselineWrite(src, counts);
+
 if (json) {
   // 机器可读的那一面：给 check:doc-claims 用，让它能把 README 里那句
   // 「N 个目标 / N 处位点」对**实物**核，而不是对上一版文档核。
@@ -214,14 +303,14 @@ if (json) {
   );
   if (drifted.length > 0) process.exit(1);
 } else if (write) {
-  const entries = [...counts.entries()]
-    .sort((a, b) => (a[0] < b[0] ? -1 : 1))
-    .map(([f, n]) => `  ${JSON.stringify(f)}: ${n},`)
-    .join("\n");
   const total = [...counts.values()].reduce((a, b) => a + b, 0);
-  const block = `const SITE_BASELINE = {\n${entries}\n};`;
-  const start = src.indexOf("const SITE_BASELINE = {");
-  const next = src.slice(0, start) + block + src.slice(start + baselineBlock.length);
+  const next = withBaselineBlock(src, buildBaselineBlock(counts));
+  if (next === null) {
+    // 定位不到声明块时必须**什么都不写**：写出一份坏文件等于把门禁脚本本身砸了，
+    // 而下一个人看到的第一个症状会是 typecheck/lint 全绿但 mutation 报读不到常量。
+    console.error(`无法在 ${GATE} 里定位 SITE_BASELINE 声明 —— 拒绝写出半个坏文件。`);
+    process.exit(2);
+  }
   writeFileSync(GATE, next, "utf8");
   console.log(`已写入 SITE_BASELINE：${counts.size} 个目标 / ${total} 处位点`);
 } else if (drifted.length === 0) {

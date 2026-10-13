@@ -746,7 +746,7 @@ const SITE_BASELINE = {
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
-  "headless/protocol.ts": 90,
+  "headless/protocol.ts": 93,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
   "headless/schedule-core.ts": 21,
@@ -771,7 +771,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
   "src/store.ts": 33,
-};;;;;;;;;;;;
+};
 
 /**
  * 等价变异白名单。

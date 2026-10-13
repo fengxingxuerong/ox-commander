@@ -290,6 +290,11 @@ function isObj(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 
+/** 空数组在这里与「没有这个键」同义。parseSpec 的输出总带 agents 键，幂等性靠这条判定。 */
+function isEmptyArray(v: unknown): boolean {
+  return Array.isArray(v) && v.length === 0;
+}
+
 function isNonEmptyString(v: unknown): v is string {
   return typeof v === "string" && v.trim() !== "";
 }
@@ -482,7 +487,12 @@ export function parseSpec(rawText: string): ParseResult {
   const verificationCommands = parseCommands(raw.verificationCommands, issues);
 
   let agents: AgentManifest[] = [];
-  if (raw.agents !== undefined) {
+  // `agents` 显式给空数组 = 没给。本函数的**输出**永远带这个键（缺省就是空数组），
+  // 所以拒绝空数组会让 parseSpec 不幂等：把解析结果原样再投一次就必失败。
+  // 这条不是假想 —— serve 的定时环投的正是解析后的那个对象，于是每次触发都被自己的
+  // /run 判 400，`--every` 承诺的定时运行从来没真跑过一次（2026-10-13 端到端实测抓到）。
+  // 清单文件那一路"给了文件却是空列表"仍由 parseAgentManifestList 拒绝，这里不放宽它。
+  if (raw.agents !== undefined && !isEmptyArray(raw.agents)) {
     try {
       agents = parseAgentManifestList(raw.agents, "declared");
     } catch (err) {

@@ -179,8 +179,15 @@ export function scheduleStateIo(stateFile?: string): {
 
 export interface ScheduleLoopOptions {
   args: ScheduleArgs;
-  /** 启动时已通过 parseSpec 预校验的 spec 对象（每次触发原样自投递）。 */
-  specPayload: unknown;
+  /**
+   * 每次触发原样自投递的 spec —— **spec 文件的原文**，不是 `parseSpec` 的归一化结果。
+   *
+   * 2026-10-13 端到端实测为什么这一条必须写死：投归一化结果时，输出里带着派生字段
+   * `settings` 与 `warnings`，它们**不是**输入形状，再投回去会被 /run 报成"未知字段已忽略"，
+   * 用户写在 spec 里的 settings 于是静默丢掉；而 `agents` 那个派生的空数组当时更直接被
+   * 校验判成"manifest 列表为空"，每一次触发都是 400。投原文 = 定时跑的就是你看的那份文件。
+   */
+  specPayload: string;
   /** startServe 返回的真实端口（--port=0 时是系统分配的那个）。 */
   port: number;
   /**
@@ -227,7 +234,7 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
           "Content-Type": "application/json",
           ...(opts.token ? { Authorization: `Bearer ${opts.token}` } : {}),
         },
-        body: JSON.stringify(opts.specPayload),
+        body: opts.specPayload,
       });
       if (res.status === 409) {
         opts.log(
@@ -328,7 +335,7 @@ async function main(): Promise<void> {
   }
   // 定时 spec 启动即读取并预校验：带着坏 spec 起来的定时服务，最坏的不是
   // "起不来"，而是"看起来正常、每次触发都 400"。fail fast，说出同一句话。
-  let scheduledSpec: unknown | undefined;
+  let scheduledSpecRaw = "";
   if (schedule.schedule) {
     let raw: string;
     try {
@@ -344,7 +351,8 @@ async function main(): Promise<void> {
       process.exitCode = 1;
       return;
     }
-    scheduledSpec = parsed.spec;
+    // 预校验只取"错在哪"；投递用的是**原文**（理由见 specPayload 的注释）。
+    scheduledSpecRaw = raw;
   }
   const srv = await startServe({
     ...(parsedArgv.port !== undefined ? { port: parsedArgv.port } : {}),
@@ -392,7 +400,7 @@ async function main(): Promise<void> {
     const io = scheduleStateIo(schedule.schedule.stateFile);
     startScheduleLoop({
       args: schedule.schedule,
-      specPayload: scheduledSpec,
+      specPayload: scheduledSpecRaw,
       port: srv.port,
       // 自调用地址跟着绑定地址走（通配换成回环；具体网卡地址原样）——
       // 写死 127.0.0.1 时，绑到具体地址的部署会让定时环每次触发都连不上。
