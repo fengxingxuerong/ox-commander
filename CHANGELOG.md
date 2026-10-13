@@ -6,6 +6,20 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 测试（cancel 时延真实链路回归 + testTimeout 余量 · 2026-10-13）
+
+- **orchestrator 真实链路回归**：上一条修复此前只有单元级覆盖
+  （withCooldownRetry 的 tick）。新增 `generatePrd`（公开的 brainCall 入口）用例：
+  llm 全路由冷却 → cancel 在 100ms 时到达 → 必须 ~1s 内以 `CancelledError`
+  收尾（实测 1012ms），钉住 brainCall → withCooldownRetry → stopError 整条链。
+  顺带补 fakeScheduler 的 `abortInFlight`（真实 Scheduler 有、fake 没有，
+  cancel() 会调它 —— 不补就是未处理错误）。
+- **vitest testTimeout 5s → 20s**：CI site 审计 `--jobs=3` 在 2 vCPU 上互撞时，
+  重集成文件（orchestrator/gateway/import 那一档）超 5s 被判"基线失败"，
+  fail-safe 串行复核一遍 = 双倍耗时（今天把 site job 顶破超时的直接推手）。
+  给足余量后重文件在并行下不再假红。
+- 用例 2004 通过 + 8 跳过 = 2012 条。
+
 ### 修复（liveness：LLM 冷却等待现在听取消 · 2026-10-13）
 
 CLI 真进程实测抓到的真 bug：一次 `POST /cancel` 在全路由 429 风暴里

@@ -30,6 +30,11 @@ const TASKS: Task[] = [
 function fakeScheduler(failFirstRound: boolean): Scheduler {
   let round = 0;
   return {
+    // cancel() 会调它（真实 Scheduler 于 2026-09-20 接入；见 orchestrator.ts:283）。
+    // fake 里补上，否则取消链在测试里抛"not a function"的未处理错误。
+    async abortInFlight() {
+      return 0;
+    },
     async runBatch(tasks: Task[]) {
       round += 1;
       return tasks.map((t: Task) => ({
@@ -96,6 +101,40 @@ function engine(opts: {
     onEscalation: (_id, s) => opts.events.push(`escalation:${s.slice(0, 20)}`),
   });
 }
+
+describe("取消时延（2026-10-13 活测修复的真实链路回归）", () => {
+  it("brainCall 撞全路由冷却时 cancel → ~1s 内 CancelledError，不等满 120s 封顶", async () => {
+    // 活测实录：/cancel 在全路由 429 风暴里 7 分钟没落地 —— withCooldownRetry 的
+    // 整段睡眠不听 shouldStop。这条钉住 orchestrator.brainCall → withCooldownRetry
+    // → stopError(CancelledError) 的整条链：generatePrd 是公开的 brainCall 入口，
+    // 冷却错由 llm.chat 抛出（模拟 FailoverPool 全路由冷却的终态）。
+    const eng = new OrchestratorEngine(
+      {
+        llm: {
+          async chat(): Promise<never> {
+            throw new AllRoutesCoolingError(60_000);
+          },
+        } as unknown as LlmClient,
+        scheduler: fakeScheduler(false),
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS },
+      },
+      {
+        onStage: () => undefined,
+        onLog: () => undefined,
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+    const t0 = Date.now();
+    const pending = eng.generatePrd("x");
+    // 第一次 chat 立即抛冷却 → 进入 60s 等待；100ms 后 cancel 必须被 tick 看见
+    setTimeout(() => eng.cancel(), 100);
+    await expect(pending).rejects.toThrow(CancelledError);
+    expect(Date.now() - t0).toBeLessThan(3_000); // 不是 60s
+  }, 8_000);
+});
 
 describe("OrchestratorEngine.execute", () => {
   it("happy path passes verification and reaches DONE", async () => {
