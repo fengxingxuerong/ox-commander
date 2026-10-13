@@ -170,6 +170,10 @@ const TARGETS = [
   { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
   { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
+  // 2026-10-14 摄入半边：issue → 需求文本的成文模板。住 shared 是因为两个宿主
+  // （桌面项目种子 / headless spec.issue）共用它，各写一份会让 journal 的需求
+  // 匹配悄悄失配。位点少但它是"两处对同一句话"的唯一事实源，值得逐点盯着。
+  { file: "shared/github-issue.ts", test: "shared/github-issue.test.ts", tier: 1 },
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
   // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
@@ -216,6 +220,11 @@ const TARGETS = [
   // 但本文件自己有承判逻辑（指纹三档门、canReplay 合取、BOM 剥离、裁决装配）——
   // 逻辑密集、可测，故独立挂表（挂 ipc-handlers.test.ts 的那组 receipt:verify 用例）。
   { file: "electron/ipc/receipt.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
+  // 2026-10-14 摄入半边：github:list-issues 的承判逻辑（入参形状校验 ——
+  // 渲染层传来的 repo/search/limit 是不可信输入，与 settings:save 同一条
+  // P0-3 规矩）。测试文件与 projects/receipt 共用 ipc-handlers.test.ts
+  // （单跑 ~20s，故 tier 2）。
+  { file: "electron/ipc/github.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
   // 2026-10-05（D11 同批）：receipt-verify 是**退出码即 CI 判定**的那个入口，
   // 判据密集（它决定"这次重放到底算不算通过"）。此前完全不在表内 ——
   // 由 scripts/check-mutation-targets.mjs 查出来：那道门禁比对 git diff 与本表，
@@ -713,7 +722,7 @@ const SITE_BASELINE = {
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
-  "electron/context/github-readonly.ts": 54,
+  "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
@@ -725,6 +734,7 @@ const SITE_BASELINE = {
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 17,
   "electron/ipc/context.ts": 24,
+  "electron/ipc/github.ts": 22,
   "electron/ipc/orchestration.ts": 5,
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
@@ -746,9 +756,9 @@ const SITE_BASELINE = {
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
-  "headless/protocol.ts": 95,
+  "headless/protocol.ts": 114,
   "headless/receipt-verify-main.ts": 8,
-  "headless/run-spec.ts": 26,
+  "headless/run-spec.ts": 30,
   "headless/schedule-core.ts": 21,
   "headless/serve-main.ts": 43,
   "headless/serve.ts": 68,
@@ -756,6 +766,7 @@ const SITE_BASELINE = {
   "shared/build-llm.ts": 12,
   "shared/deliverable-format.ts": 23,
   "shared/delivery-receipt.ts": 43,
+  "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,
   "shared/http-clients.ts": 61,
@@ -770,7 +781,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 29,
-  "src/store.ts": 34,
+  "src/store.ts": 35,
 };
 
 /**

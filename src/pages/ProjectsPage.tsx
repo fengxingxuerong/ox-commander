@@ -1,4 +1,5 @@
 import { useApp } from "../store";
+import { IssuePicker } from "../components/IssuePicker";
 
 export function ProjectsPage() {
   const projects = useApp((s) => s.projects);
@@ -60,6 +61,8 @@ export function ProjectsPage() {
           创建并进入看板
         </button>
       </section>
+
+      <IssuePicker />
 
       <section className="card">
         <h2>历史项目</h2>

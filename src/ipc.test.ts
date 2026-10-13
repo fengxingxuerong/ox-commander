@@ -145,6 +145,7 @@ describe("registerIpc · channel contract", () => {
       "audit:recent",
       "audit:trail",
       "board:recovery",
+      "github:list-issues",
       "keys:save",
       "keys:security",
       "keys:status",

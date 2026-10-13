@@ -28,7 +28,8 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 
 | 字段 | 类型 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- | --- |
-| `requirement` | string | ✅ | — | 自然语言需求。提供 `prd` 时仍必填（用于日志/回显） |
+| `requirement` | string | ✅* | — | 自然语言需求。提供 `prd` 时仍必填（用于日志/回显/断点续跑匹配）。*与 `issue` 二选一：给了 `issue` 就可缺席 |
+| `issue` | object | | — | 摄入半边（2026-10-14）：需求取自 GitHub 的一条 issue，`{repo?, number}`。`repo` 缺席 = `gh` 按 cwd 认仓库；`number` 是正整数。与 `requirement` 同时给会被拒（两个需求来源说不清哪句算数）。runner 开跑前用 `gh issue view`（只读）取标题+正文当需求；**取不到整轮不启动**（exit 1），不会带着空需求烧 token |
 | `projectRoot` | string | ✅ | — | 目标项目根目录；相对路径按 runner 的 cwd 解析 |
 | `protocolVersion` | string | | `ox-headless/1` | 宿主声明自己按哪个版本写的，会在 `hello` 事件里回显 |
 | `prd` | object | | — | 已确认的 PRD（`goal` / `features` / `techStack` / `acceptanceCriteria`）；提供则跳过 PRD 生成阶段 |
@@ -166,6 +167,7 @@ Windows 上信号投不进子进程（`kill()` 即 TerminateProcess），走的�
 
 1. **未知字段只 warning，不报错** —— 宿主提前使用新字段，旧 runner 不会拒绝整份 spec。
 2. **除两个必填字段外都有默认值** —— 只写 `{requirement, projectRoot}` 也能跑。
+   （2026-10-14 起 `requirement` 可用 `issue` 替代：`{issue: {number: 42}, projectRoot}` 同样能跑。）
 3. **事件是增量追加的** —— 现有事件类型与字段名不会改；新事件类型宿主可以忽略。
 4. **`hello.protocolVersion` 是握手点** —— 宿主可据此拒绝过旧的 runner，而不是靠猜。
 

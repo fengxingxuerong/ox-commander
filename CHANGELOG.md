@@ -6,6 +6,39 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 新增（从 GitHub issue 建任务：摄入半边 · 2026-10-14）
+
+竞品清单 P2-1 一直只有"读半边"：issue/PR 文本能进规划背景、diff 行批注能回传进上下文，
+但**"从 issue 建任务"这条摄入通路始终是空的** —— 操作者得把 issue 的标题正文手抄进
+新建项目框。本轮补上，两个创建面：
+
+- **桌面**：项目页新增「从 GitHub Issue 创建」选择器（`github:list-issues` IPC，
+  只读 `gh issue list`，白名单与字符集校验同 contextSources 那条通路）。选中一条 →
+  `createProject(标题, 标题+正文)` → 与手填创建走同一条 `beginProject → runPlanning` 链路。
+- **headless / serve**：spec 新增 `issue: {repo?, number}`（与 `requirement` **二选一**，
+  同时给会被拒）。runner 开跑前用 `gh issue view`（只读）取回标题+正文当需求；
+  **取不到整轮不启动**（exit 1 + error 事件），不会带着空需求烧 token。解析放在
+  hello 之后、journal 之前 —— journal 拿**解析后的文本**做"需求匹配"，断点续跑才
+  对得上一次。
+
+三条设计纪律：
+
+1. **一个成文模板**：`renderIssueRequirement` 住 `shared/github-issue.ts`，桌面种子与
+   headless 解析共用。两处各写一串字符串，journal 的需求匹配就会因为一处标点改动而
+   悄悄失配 —— 断点续跑从此认不出上一次运行。
+2. **失败与空结果是两件事**：gh 没装 / 没登录 / 仓库不存在折进 reason 由选择器摆出来；
+   "没有符合条件的 issue"是另一句。混为一谈，就是把"没拿到"演成了"没有需求"。
+3. **IPC 入口过形状校验**（P0-3 同规矩）：repo/search/limit 在 handler 层校验，非法值
+   一个都不进 gh；入参 null / 整个缺席按全部缺席处理（不炸 TypeError）。
+
+**测试**：新增 23 条（成文模板 2 · 只读通路 6 · 协议校验与端到端 8 · IPC 守卫 4 ·
+选择器 3）。六个生产文件逐位点审计全杀：`github-readonly` 54→**65**、`ipc/github`
+（新）**22**、`store` 34→**35**、`protocol` 95→**114**、`run-spec` 26→**30**、
+`github-issue`（新）**1**；其中 `run-spec` 首轮 3 个存活（`!== → ===` 与两处三元
+互换）逼出两条缺省解析器的真路径用例 —— 注入假 resolver 的用例覆盖不到
+`defaultResolveIssue`，这是"有注入缝就会漏默认路"的标准形态。基线 1652 → **1710**
+（71 → **73** 个目标）。全量 2060 通过 + 8 跳过 = 2068 条零失败；verify 29 段全过。
+
 ### 修复（混合态要点名：回滚/隔离没做成的路径 · 2026-10-14）
 
 **先确认了现状，再改**（这一项此前只记了一句"需确认现状"）：`SnapshotStore.revert`

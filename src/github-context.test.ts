@@ -7,13 +7,16 @@ import {
   DEFAULT_MAX_ITEMS,
   fetchGithubContext,
   githubArgs,
+  listGithubIssues,
   MAX_ITEMS_CEILING,
+  parseIssue,
   parseIssues,
   parsePrComments,
   renderIssues,
   renderPr,
   renderPrComments,
   REPO_RE,
+  viewGithubIssue,
   type GithubContextKind,
 } from "../electron/context/github-readonly";
 
@@ -439,5 +442,110 @@ describe("github-readonly · fetchGithubContext（注入 runner）", () => {
     const r = await fetchGithubContext({ kind: "pr-comments", pr: 7, repo: "o/r", maxChars: 50, run });
     expect(r.ok).toBe(true);
     expect(r.truncated).toBe(true);
+  });
+});
+
+/**
+ * 摄入半边（2026-10-14）：单条 issue 视图 + 两个结构化出口。
+ *
+ * 与上下文出口的分工：那边产出**成文文本**（给大脑），这边产出**字段**
+ * （给选择器与 spec.issue）。判据重点是"失败不说成空结果"—— 空数组是
+ * "没有 issue"，reason 是"没拿到"，两件事不能互相冒充。
+ */
+describe("github-readonly · 摄入半边（issue 单条 + 结构化出口）", () => {
+  it("githubArgs issue：合法 → gh issue view；number 非安全正整数 / repo 非法 → null", () => {
+    expect(githubArgs({ kind: "issue", number: 42 })).toEqual([
+      "issue",
+      "view",
+      "42",
+      "--json",
+      "number,title,body,state",
+    ]);
+    expect(githubArgs({ kind: "issue", number: 42, repo: "owner/repo" })).toEqual([
+      "issue",
+      "view",
+      "42",
+      "--repo",
+      "owner/repo",
+      "--json",
+      "number,title,body,state",
+    ]);
+    // 守卫与 pr / pr-comments 同族：0 / 负数 / 非整数 / 缺席都拒
+    expect(githubArgs({ kind: "issue", number: 0 })).toBeNull();
+    expect(githubArgs({ kind: "issue", number: -1 })).toBeNull();
+    expect(githubArgs({ kind: "issue", number: 1.5 })).toBeNull();
+    expect(githubArgs({ kind: "issue" })).toBeNull();
+    expect(githubArgs({ kind: "issue", number: 42, repo: "bad;rm" })).toBeNull();
+  });
+
+  it("parseIssue：单对象 → 字段收敛；坏 JSON / 数组 / 标量 / 空 → null", () => {
+    expect(parseIssue('{"number":7,"title":"t","body":"b","state":"OPEN"}')).toEqual({
+      number: 7,
+      title: "t",
+      body: "b",
+      state: "OPEN",
+    });
+    expect(parseIssue("not json")).toBeNull();
+    expect(parseIssue("[]")).toBeNull(); // 数组不是单对象（与 list 出口分工）
+    expect(parseIssue('"str"')).toBeNull();
+    expect(parseIssue("null")).toBeNull();
+    expect(parseIssue("")).toBeNull();
+    // 缺字段按空处理，不抛错 —— 与 parseIssues 同口径
+    expect(parseIssue("{}")).toEqual({ number: 0, title: "", body: "", state: "" });
+  });
+
+  it("viewGithubIssue：成功回 issue；gh 非零 / 坏输出 → reason", async () => {
+    const good = recorder([okJson('{"number":9,"title":"暗色模式","body":"夜间不刺眼","state":"OPEN"}')]);
+    const r = await viewGithubIssue({ number: 9, run: good.run });
+    expect(r).toEqual({ ok: true, issue: { number: 9, title: "暗色模式", body: "夜间不刺眼", state: "OPEN" } });
+    expect(good.calls[0]).toEqual({
+      command: "gh",
+      args: ["issue", "view", "9", "--json", "number,title,body,state"],
+    });
+
+    const failed = recorder([{ code: 1, stderr: "not logged in" }]);
+    const r2 = await viewGithubIssue({ number: 9, run: failed.run });
+    expect(r2.ok).toBe(false);
+    expect(r2.ok === false && r2.reason).toContain("gh issue view 失败");
+
+    const broken = recorder([okJson("nope")]);
+    const r3 = await viewGithubIssue({ number: 9, run: broken.run });
+    expect(r3.ok).toBe(false);
+    expect(r3.ok === false && r3.reason).toContain("解析不了");
+  });
+
+  it("viewGithubIssue：repo 非法 → 一个命令都不出（守卫在调用方之前）", async () => {
+    const rec = recorder([okJson("{}")]);
+    const r = await viewGithubIssue({ number: 1, repo: "bad;rm", run: rec.run });
+    expect(r).toMatchObject({ ok: false });
+    expect(rec.calls.length).toBe(0);
+  });
+
+  it("listGithubIssues：成功回**结构化**列表（不渲染成文本，界面要摆编号/状态）", async () => {
+    const rec = recorder([
+      okJson(
+        '[{"number":1,"title":"a","body":"x","state":"OPEN"},{"number":2,"title":"b","body":"y","state":"CLOSED"}]',
+      ),
+    ]);
+    const r = await listGithubIssues({ run: rec.run });
+    expect(r).toEqual({
+      ok: true,
+      issues: [
+        { number: 1, title: "a", body: "x", state: "OPEN" },
+        { number: 2, title: "b", body: "y", state: "CLOSED" },
+      ],
+    });
+    expect(rec.calls[0]!.args.slice(0, 2)).toEqual(["issue", "list"]);
+  });
+
+  it("listGithubIssues：gh 失败 / 坏 JSON → reason（不返回空列表冒充'没有 issue'）", async () => {
+    const failed = recorder([{ code: 128, stderr: "no repo" }]);
+    const r1 = await listGithubIssues({ run: failed.run });
+    expect(r1).toMatchObject({ ok: false });
+    expect(r1.ok === false && r1.reason).toContain("gh issue list 失败");
+    const broken = recorder([okJson("<html>")]);
+    const r2 = await listGithubIssues({ run: broken.run });
+    expect(r2).toMatchObject({ ok: false });
+    expect(r2.ok === false && r2.reason).toContain("解析不了");
   });
 });

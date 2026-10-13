@@ -87,7 +87,7 @@
 | 项 | 状态 |
 | --- | --- |
 | 5.7 PR/CI 折中版 | ✅ **全完（2026-10-12）**：本地半边（分支 + commit，`exportDeliveryBranch`）+ 远端半边（push / PR / CI 回流，`settings.deliveryRemote`，见 `8470fdb`） |
-| P2-1 GitHub/Linear 只读集成 | ✅ **读半边已完（2026-10-12）**：本地半边 `bb76289`（issue 列表 / PR 描述进规划背景）；远端半边（diff 行批注进上下文，kind `"pr-comments"`）。⏸ "从 issue 建任务"（摄入）留待 —— 需要任务创建面，Linear 侧无本机 CLI 可借 |
+| P2-1 GitHub/Linear 只读集成 | ✅ **读写半边全完**：读半边（2026-10-12，本地 issue/PR 进规划背景 + 远端 diff 行批注 kind `"pr-comments"`）；**摄入半边（2026-10-14）**：桌面"从 GitHub Issue 创建"选择器 + headless `spec.issue` 字段（只读 `gh issue view` 解析，成文模板两个宿主共用）。⏸ Linear 侧无本机 CLI 可借，维持不做 |
 | 定时/触发自动化（Orca scheduled automations） | ✅ 同日第五轮落地（见 §六） |
 | loop detection 专项 | ✅ 本轮闭环 |
 | Omnigent YAML 导入 | ⏸ **维持（2026-10-13 复核过，不是忘了）**：Omnigent 仍 alpha、官方 YAML spec 里已有 legacy/别名（格式在动）；它的 YAML 描述"agent 大脑+工具+策略"，与 `agents.d` 的"CLI 适配器启动清单"只在 `executor.harness` 一行重合；生态引用是单向生成、无独立消费方。三条复触发条件见 `2026-09-29-competitor-research.md` §5.6 |

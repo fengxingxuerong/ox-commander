@@ -5,6 +5,7 @@ import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
 import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
+import type { GithubIssue, GithubIssueListResult } from "../electron/context/github-readonly";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
 export interface AgentSummary {
@@ -198,6 +199,14 @@ export interface AppState {
   refreshProjects(): Promise<void>;
   deleteProject(projectId: string): Promise<void>;
   createAndOpen(): Promise<void>;
+  /**
+   * 摄入半边（2026-10-14）：从 GitHub issue 建项目。名字取标题、需求取
+   * 标题+正文（成文模板与 headless 的 spec.issue 共用），之后与手填创建
+   * 走同一条 beginProject → runPlanning 链路。
+   */
+  createFromIssue(issue: GithubIssue): Promise<void>;
+  /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
+  beginProject(projectId: string): void;
   runPlanning(): Promise<void>;
   retryPlanning(): Promise<void>;
   updatePrd(prd: PrdDocument): Promise<void>;
@@ -256,6 +265,12 @@ declare global {
       taskTrail(taskId: string): Promise<TaskTrail>;
       auditFiles(): Promise<string[]>;
       exportAudit(): Promise<AuditExportResult>;
+      /**
+       * 摄入半边（2026-10-14）：列 GitHub issue 给"从 issue 建任务"的选择器。
+       * 只读（`gh issue list`，白名单在 electron/context/github-readonly.ts）；
+       * gh 没装/没登录折进结果的 reason —— "没拿到"与"没有 issue"是两件事。
+       */
+      listGithubIssues(input: { repo?: string; search?: string; limit?: number }): Promise<GithubIssueListResult>;
       /** Board view derived from the audit trail (durable facts). */
       boardRecovery(): Promise<BoardRecoveryView>;
       onEvent(handler: (payload: unknown) => void): () => void;

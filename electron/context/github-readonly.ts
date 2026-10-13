@@ -12,9 +12,11 @@
  *
  * ## 硬边界
  *
- * - **只读，且是命令白名单意义上的只读**：只认 `gh issue list`、`gh pr view`，
+ * - **只读，且是命令白名单意义上的只读**：只认 `gh issue list`、`gh pr view`、
  *   外加唯一一条 `gh api --method GET repos/{repo}/pulls/{N}/comments`（diff 行
  *   批注；路径由字符集校验过的 repo 与安全整数 PR 号拼成，方法强制 GET）。
+ *   摄入半边（2026-10-14）追加第四种只读形态 `gh issue view <N>`（单条 issue 的
+ *   标题与正文，给"从 issue 建任务"取种子用）。
  *   其余一律拒绝（不是"尽量只读"，是枚举）。绝不评论、绝不建 PR —— 写操作在
  *   别处也不该有。
  * - **仓库名/PR 号走字符集**：`owner/repo` 与数字编号，不接受任意字符串。
@@ -26,6 +28,15 @@
  * - **失败 ≠ 空上下文**：`gh` 不在 / 未登录 / 网络失败，如实报"没拿到"，
  *   绝不退化成"当作没有这项需求"。但"PR 没有批注"是合法的空结果（ok=true,
  *   items=0）—— 没反馈和拿不到是两件事，不能说破前者冒充后者。
+ *
+ * ## 两个消费者，两种出口（2026-10-14 摄入半边之后）
+ *
+ * - **规划背景**（contextSources）：`fetchGithubContext` 出口，产出**成文文本**
+ *   （截断/标注都在这一层做完），kind 只有三种。
+ * - **任务创建面**（桌面 issue 选择器 / headless `spec.issue`）：`listGithubIssues`
+ *   与 `viewGithubIssue` 出口，产出**结构化数据**（界面要摆编号/标题/状态，
+ *   渲染成文本就没法选了）。命令仍只从 `githubArgs` 一个地方出 —— 白名单不因为
+ *   多了个消费者而多一份。
  */
 import { makeGitRunner } from "../engine/git-export";
 
@@ -38,6 +49,16 @@ export const DEFAULT_MAX_ITEMS = 10;
 export const MAX_ITEMS_CEILING = 50;
 
 export type GithubContextKind = "issues" | "pr" | "pr-comments";
+
+/**
+ * 一条 issue 的结构化形态（摄入半边的数据单位）。
+ *
+ * 定义在 shared/github-issue.ts：桌面端（项目种子）与 headless（spec.issue
+ * 解析）都要用它，而成文模板 `renderIssueRequirement` 也住那里 —— 本文件
+ * 再导出一遍，让"只读通路"的消费者从一个入口拿全。
+ */
+import { type GithubIssue, renderIssueRequirement } from "../../shared/github-issue";
+export { renderIssueRequirement, type GithubIssue };
 
 export interface GithubContextInput {
   /** `"issues"` = 拉 issue 列表；`"pr"` = 拉指定 PR 的描述与 diff；`"pr-comments"` = 拉指定 PR 的 diff 行批注。 */
@@ -92,10 +113,24 @@ export function clampChars(maxChars: number | undefined): number {
 }
 
 /**
- * 命令构造（纯函数，便于逐点审计）：只产出白名单里的三种形态。
+ * `githubArgs` 的入参：比 `GithubContextInput` 宽一个 `"issue"` 档。
+ *
+ * 摄入半边（2026-10-14，单条 issue 视图）不走 contextSources 那条路 —— 那个
+ * kind 联合是**规划背景**的契约，加一档要动 schema 与设置 UI；而"取一条需求"
+ * 是另一个消费者。但命令仍然只从 `githubArgs` 这一个出口出：白名单不因为
+ * 多了个消费者而出现第二份。
+ */
+export type GithubArgsInput = Omit<GithubContextInput, "kind"> & {
+  kind: GithubContextKind | "issue";
+  /** `issue`：issue 号（安全正整数；其余 kind 忽略此字段）。 */
+  number?: number;
+};
+
+/**
+ * 命令构造（纯函数，便于逐点审计）：只产出白名单里的四种形态。
  * 返回 `null` = 这个 kind/参数组合不被接受（调用方报"不支持"，不猜）。
  */
-export function githubArgs(input: GithubContextInput): readonly string[] | null {
+export function githubArgs(input: GithubArgsInput): readonly string[] | null {
   // 这里是**守住**（不是提示）：哪怕调用方忘了校验，非法 repo 也出不去命令。
   // 上面那一步负责把话说清楚（"仓库名不合法"），这一步负责不出事。
   if (input.repo !== undefined && !REPO_RE.test(input.repo)) return null;
@@ -117,11 +152,16 @@ export function githubArgs(input: GithubContextInput): readonly string[] | null 
     const slug = input.repo ?? "{owner}/{repo}";
     return ["api", "--method", "GET", `repos/${slug}/pulls/${input.pr}/comments`];
   }
+  // 摄入半边：单条 issue 的标题与正文。repo 缺席 = gh 按 cwd 的仓库认。
+  if (input.kind === "issue") {
+    if (input.number === undefined || !Number.isSafeInteger(input.number) || input.number <= 0) return null;
+    return ["issue", "view", String(input.number), ...repo, "--json", "number,title,body,state"];
+  }
   return null;
 }
 
 /** 解析 `gh issue list --json …` 的输出（数组，缺字段按空处理；坏 JSON → null）。 */
-export function parseIssues(raw: string): Array<{ number: number; title: string; body: string; state: string }> | null {
+export function parseIssues(raw: string): GithubIssue[] | null {
   const text = raw.trim();
   if (text === "") return null;
   let parsed: unknown;
@@ -131,18 +171,40 @@ export function parseIssues(raw: string): Array<{ number: number; title: string;
     return null;
   }
   if (!Array.isArray(parsed)) return null;
-  const out: Array<{ number: number; title: string; body: string; state: string }> = [];
+  const out: GithubIssue[] = [];
   for (const item of parsed) {
     if (!item || typeof item !== "object") continue; // null / 非对象跳过，不抛错
     const o = item as Record<string, unknown>;
-    out.push({
-      number: typeof o["number"] === "number" ? o["number"] : 0,
-      title: String(o["title"] ?? ""),
-      body: String(o["body"] ?? ""),
-      state: String(o["state"] ?? ""),
-    });
+    out.push(toIssue(o));
   }
   return out;
+}
+
+/**
+ * 解析 `gh issue view --json …` 的输出（**单对象**，不是数组）。
+ * 坏 JSON / 非对象 → null（拿不到就说拿不到）。
+ */
+export function parseIssue(raw: string): GithubIssue | null {
+  const text = raw.trim();
+  if (text === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  return toIssue(parsed as Record<string, unknown>);
+}
+
+/** 两条 parse 共用的字段收敛：缺字段按空处理，类型不对不强转（`String(null)` 会是 "null"）。 */
+function toIssue(o: Record<string, unknown>): GithubIssue {
+  return {
+    number: typeof o["number"] === "number" ? o["number"] : 0,
+    title: String(o["title"] ?? ""),
+    body: String(o["body"] ?? ""),
+    state: String(o["state"] ?? ""),
+  };
 }
 
 /** 把 issue 列表渲染成给大脑看的文本（含来源标注与截断标记）。 */
@@ -231,19 +293,15 @@ export function clipText(text: string, maxChars: number): { text: string; trunca
  * 主入口。永不 throw：失败折进结果对象。**拿不到就是拿不到**，不返回空文本。
  */
 export async function fetchGithubContext(input: GithubContextInput): Promise<GithubContextResult> {
-  if (input.repo !== undefined && !REPO_RE.test(input.repo)) {
-    return { ok: false, reason: `仓库名不合法：${JSON.stringify(input.repo)}` };
-  }
+  const bad = repoProblem(input.repo);
+  if (bad) return { ok: false, reason: bad };
   const args = githubArgs(input);
   if (!args) {
     return { ok: false, reason: `不支持的拉取方式：kind=${input.kind} pr=${String(input.pr)}` };
   }
   const maxChars = clampChars(input.maxChars);
-  const run: Runner =
-    input.run ??
-    ((command, argv) => makeGitRunner(input.timeoutMs ?? 60_000, input.cwd ?? process.cwd())(command, argv));
 
-  const r = await run("gh", args);
+  const r = await runGh(input, args);
   if (r.code !== 0) {
     // 失败原因里带上人话命令名（不是 argv[0..1] —— api 形态下那是 "--method"）
     const label = input.kind === "issues" ? "issue list" : input.kind === "pr" ? "pr view" : "api pulls comments";
@@ -292,4 +350,84 @@ export async function fetchGithubContext(input: GithubContextInput): Promise<Git
     items: issues.length,
     ...(rendered.truncated ? { truncated: true } : {}),
   };
+}
+
+/** repo 字符集守卫（三个入口共用）：非法时给一句人话，合法给 null。 */
+function repoProblem(repo: string | undefined): string | null {
+  return repo !== undefined && !REPO_RE.test(repo) ? `仓库名不合法：${JSON.stringify(repo)}` : null;
+}
+
+/**
+ * 三个入口共用的 gh 执行器：同一套注入缝（`run`）、超时与 cwd 口径。
+ * 抽出来是因为摄入半边多了两个入口 —— 各写一份 `makeGitRunner(...)` 的兜底
+ * 表达式，超时默认值就会有三份可以各自漂移。
+ */
+async function runGh(
+  input: { run?: GithubContextInput["run"]; timeoutMs?: number; cwd?: string },
+  args: readonly string[],
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  const run: Runner =
+    input.run ??
+    ((command, argv) => makeGitRunner(input.timeoutMs ?? 60_000, input.cwd ?? process.cwd())(command, argv));
+  return run("gh", args);
+}
+
+/* ── 摄入半边：结构化出口（2026-10-14）───────────────────────────────
+ *
+ * 给"任务创建面"用：桌面 issue 选择器要摆编号/标题/状态，headless 的
+ * `spec.issue` 要拿标题+正文铺成需求 —— 两者都要**字段**，渲染成文本就
+ * 没法选了。失败语义与 fetchGithubContext 同族：拿不到就说拿不到，
+ * 绝不返回空列表冒充"没有 issue"。
+ */
+
+export type GithubIssueListResult = { ok: true; issues: GithubIssue[] } | { ok: false; reason: string };
+
+/**
+ * 列 issue 给选择器（`gh issue list`，只读白名单同上下文入口）。
+ *
+ * `limit` 收敛（clampLimit）与 `--search` 原样透传都不在这里重复 —— 命令
+ * 构造只有 githubArgs 一个出口，这里只做"失败了怎么说话"。
+ */
+export async function listGithubIssues(
+  input: Omit<GithubContextInput, "kind" | "pr">,
+): Promise<GithubIssueListResult> {
+  const bad = repoProblem(input.repo);
+  if (bad) return { ok: false, reason: bad };
+  const args = githubArgs({ ...input, kind: "issues" });
+  if (!args) return { ok: false, reason: "拉取参数不合法" };
+  const r = await runGh(input, args);
+  if (r.code !== 0) {
+    return { ok: false, reason: `gh issue list 失败（gh 未安装 / 未登录 / 仓库不存在？）:${tail(r.stderr)}` };
+  }
+  const issues = parseIssues(r.stdout);
+  if (!issues) return { ok: false, reason: `gh issue list 的输出解析不了：${tail(r.stdout)}` };
+  return { ok: true, issues };
+}
+
+export type GithubIssueResult = { ok: true; issue: GithubIssue } | { ok: false; reason: string };
+
+/**
+ * 取单条 issue（`gh issue view`，只读白名单同上下文入口）。
+ *
+ * headless 的 `spec.issue` 与桌面"按编号直接建"都用它；拿不到时 reason 里
+ * 带 gh 的 stderr 尾部 —— "issue 不存在"与"没登录"在 gh 的话里能分清。
+ */
+export async function viewGithubIssue(input: {
+  repo?: string;
+  number: number;
+  run?: GithubContextInput["run"];
+  timeoutMs?: number;
+  cwd?: string;
+}): Promise<GithubIssueResult> {
+  const bad = repoProblem(input.repo);
+  if (bad) return { ok: false, reason: bad };
+  const args = githubArgs({ ...input, kind: "issue" });
+  if (!args) return { ok: false, reason: `issue 号不合法：${JSON.stringify(input.number)}` };
+  const r = await runGh(input, args);
+  if (r.code !== 0) {
+    return { ok: false, reason: `gh issue view 失败（gh 未安装 / 未登录 / issue 不存在？）:${tail(r.stderr)}` };
+  }
+  const issue = parseIssue(r.stdout);
+  if (!issue) return { ok: false, reason: `gh issue view 的输出解析不了：${tail(r.stdout)}` };
+  return { ok: true, issue };
 }

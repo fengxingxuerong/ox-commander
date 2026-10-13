@@ -3,6 +3,7 @@ import type { AppState, TaskView } from "./types";
 import type { Stage, TaskStatus } from "../shared/types";
 import { isFailureClass } from "../shared/types";
 import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
+import { renderIssueRequirement, type GithubIssue } from "../shared/github-issue";
 
 const api = () => window.oxCommander;
 
@@ -94,23 +95,7 @@ export const useApp = create<AppState>((set, get) => ({
         newProjectName.trim() || "未命名项目",
         newRequirement.trim(),
       );
-      set({
-        activeProjectId: rec.id,
-        page: "prd-review",
-        stage: "PLANNING",
-        logs: [],
-        tasks: {},
-        escalations: [],
-        approvals: [],
-        conflicts: [],
-        verification: undefined,
-        receipt: undefined,
-        prd: undefined,
-        batches: undefined,
-        planning: true,
-        planningError: undefined,
-        projectsError: undefined,
-      });
+      get().beginProject(rec.id);
     } catch (err) {
       // Staying on the projects page is deliberate: navigating to the PRD page
       // first and failing afterwards would leave an empty review screen with no
@@ -122,6 +107,48 @@ export const useApp = create<AppState>((set, get) => ({
       }));
       return;
     }
+  },
+
+  /**
+   * 从 GitHub issue 建项目（摄入半边，2026-10-14）：名字取标题、需求取
+   * 标题+正文（成文模板与 headless 的 spec.issue 共用一份，见
+   * shared/github-issue.ts）。之后与手填创建没有任何区别 —— 这条链路不复用
+   * 规划，只换种子；搬家与开跑走共同的 beginProject。
+   */
+  createFromIssue: async (issue: GithubIssue) => {
+    const name = issue.title.trim() || `GitHub Issue #${issue.number}`;
+    try {
+      const rec = await api().createProject(name, renderIssueRequirement(issue));
+      get().beginProject(rec.id);
+    } catch (err) {
+      // 与 createAndOpen 同一条规矩：失败留在项目页说，不带着空看板跳走。
+      const message = (err as Error).message;
+      set((s) => ({
+        projectsError: message,
+        logs: [...s.logs, `[错误] 从 issue 创建项目失败: ${message}`],
+      }));
+    }
+  },
+
+  /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
+  beginProject: (projectId: string) => {
+    set({
+      activeProjectId: projectId,
+      page: "prd-review",
+      stage: "PLANNING",
+      logs: [],
+      tasks: {},
+      escalations: [],
+      approvals: [],
+      conflicts: [],
+      verification: undefined,
+      receipt: undefined,
+      prd: undefined,
+      batches: undefined,
+      planning: true,
+      planningError: undefined,
+      projectsError: undefined,
+    });
     void get().runPlanning();
   },
 

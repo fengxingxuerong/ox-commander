@@ -45,6 +45,8 @@ const h = vi.hoisted(() => ({
   cancelEngine: null as any,
   pauseEngine: null as any,
   resumeEngine: null as any,
+  /** 摄入半边：github:list-issues 的供数替身（不真跑 gh）。 */
+  listGithubIssues: null as any,
 }));
 
 vi.mock("electron", async () => {
@@ -93,6 +95,13 @@ vi.mock("../electron/keys-store", () => ({
   },
   createSafeStorageCrypto: vi.fn(() => ({})),
 }));
+
+// 摄入半边：listGithubIssues 换替身（不真 spawn gh），其余原样 —— 处理器的
+// repo 守卫用的 REPO_RE 必须是真那个，mock 一份正则等于给判据放假。
+vi.mock("../electron/context/github-readonly", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../electron/context/github-readonly")>();
+  return { ...mod, listGithubIssues: (h.listGithubIssues = vi.fn(async () => ({ ok: true, issues: [] }))) };
+});
 
 vi.mock("../electron/audit-log", () => ({
   AuditLog: class {
@@ -485,6 +494,61 @@ describe("settings & key handlers", () => {
     h.llmChat.mockRejectedValue(new HttpLlmError(429, "rate limited"));
     const res = await (h.ipcMain as FakeIpcMain).invoke("llm:test");
     expect(res).toEqual({ ok: false, error: "LLM HTTP 429: rate limited", status: 429 });
+  });
+});
+
+/**
+ * 摄入半边（2026-10-14）：github:list-issues 的入参守卫。
+ *
+ * 与 settings:save 同一条规矩（P0-3）：**触发外部命令的入口**不能直落 ——
+ * 渲染层传来的 repo/search 是不可信输入，白名单与字符集校验在
+ * github-readonly，形状校验在这一层。gh 侧的失败（没登录等）不走异常，
+ * 折进结果对象的 reason，由选择器摆出来。
+ */
+describe("github handlers（摄入半边）", () => {
+  it("合法入参原样透传给 listGithubIssues（三个字段都可缺席）", async () => {
+    const res = await (h.ipcMain as FakeIpcMain).invoke("github:list-issues", {
+      repo: "owner/repo",
+      search: "label:bug",
+      limit: 5,
+    });
+    expect(res).toEqual({ ok: true, issues: [] });
+    expect(h.listGithubIssues).toHaveBeenCalledWith({ repo: "owner/repo", search: "label:bug", limit: 5 });
+    // 空对象 = 三个都缺席（gh 按 cwd 认仓库），不补默认键
+    await (h.ipcMain as FakeIpcMain).invoke("github:list-issues", {});
+    expect(h.listGithubIssues).toHaveBeenLastCalledWith({});
+  });
+
+  it("入参 null / 整个缺席 → 按全部缺席处理，不炸 TypeError", async () => {
+    // 判据不只是"别崩"：`input !== null && typeof input === "object"` 换成 `||`
+    // 时，null 会走进 `null["repo"]` 抛 TypeError —— 这条用例就是钉那个变异的。
+    const res = await (h.ipcMain as FakeIpcMain).invoke("github:list-issues", null);
+    expect(res).toEqual({ ok: true, issues: [] });
+    expect(h.listGithubIssues).toHaveBeenLastCalledWith({});
+    // 一个参数都不给（preload 侧漏传）同理
+    await (h.ipcMain as FakeIpcMain).invoke("github:list-issues");
+    expect(h.listGithubIssues).toHaveBeenLastCalledWith({});
+  });
+
+  it("repo 不合法 / search 非字符串 / limit 非正 → 拒绝且不碰 gh", () => {
+    const callsBefore = (h.listGithubIssues as Mock).mock.calls.length;
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("github:list-issues", { repo: "bad;rm" })).toThrow(
+      /owner\/repo/,
+    );
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("github:list-issues", { search: 7 })).toThrow(/字符串/);
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("github:list-issues", { limit: 0 })).toThrow(/正整数/);
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("github:list-issues", { limit: 1.5 })).toThrow(/正整数/);
+    expect((h.listGithubIssues as Mock).mock.calls.length).toBe(callsBefore);
+  });
+
+  it("gh 侧失败折进结果对象（没登录 / 仓库不存在），不抛异常", async () => {
+    (h.listGithubIssues as Mock).mockImplementationOnce(async () => ({
+      ok: false,
+      reason: "gh issue list 失败（gh 未安装 / 未登录 / 仓库不存在？）:not logged in",
+    }));
+    const res = await (h.ipcMain as FakeIpcMain).invoke("github:list-issues", {});
+    expect(res).toMatchObject({ ok: false });
+    expect((res as { reason: string }).reason).toContain("未登录");
   });
 });
 

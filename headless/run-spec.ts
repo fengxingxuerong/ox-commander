@@ -40,6 +40,7 @@ import type { AgentLayer } from "../electron/agents";
 import type { PlatformHost } from "../electron/platform";
 import { createFileJournal, createPlatform } from "../electron/platform";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
+import { renderIssueRequirement, viewGithubIssue } from "../electron/context/github-readonly";
 import type { LlmClient } from "../shared/llm-client";
 import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
 import { pairConflict } from "../shared/delivery-receipt";
@@ -161,7 +162,27 @@ export interface RunSpecIo {
   requestApproval?: (command: string, args: readonly string[]) => Promise<boolean>;
   /** 任务活性心跳（2026-10-03 竞品吸收）：宿主转发给事件流，缺省不发。 */
   onTaskActivity?: (taskId: string, at: number) => void;
+  /**
+   * 摄入半边（2026-10-14）：`spec.issue` 的需求解析器。缺省走真实的
+   * `gh issue view`（只读白名单）；测试注入替身 —— 与 llm/layer/verify
+   * 同一套"注入了就用注入的"规矩，headless 的真进程测试不该依赖 gh 登录态。
+   */
+  resolveIssue?: IssueResolver;
 }
+
+/**
+ * `spec.issue` → 需求文本。失败折进结果（不抛）："issue 不存在"与"gh 没登录"
+ * 都要能上事件流说给人听，而不是一个栈。
+ */
+export type IssueResolver = (
+  issue: { repo?: string; number: number },
+) => Promise<{ ok: true; requirement: string } | { ok: false; reason: string }>;
+
+/** 缺省解析器：只读通路取单条 issue，成文模板与桌面端共用一份。 */
+const defaultResolveIssue: IssueResolver = async (issue) => {
+  const r = await viewGithubIssue({ ...(issue.repo !== undefined ? { repo: issue.repo } : {}), number: issue.number });
+  return r.ok ? { ok: true, requirement: renderIssueRequirement(r.issue) } : { ok: false, reason: r.reason };
+};
 
 /**
  * Exit codes: 0 = delivered, 2 = repair rounds exhausted, 1 = fatal
@@ -258,9 +279,26 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       return "abort";
     };
   }
+  // 摄入半边（2026-10-14）：spec.issue 把"需求从哪来"指向 GitHub 的一条 issue。
+  // 解析放在 hello 之后、journal 之前：journal 拿**解析后的文本**做"需求匹配"，
+  // 断点续跑才对得上一次；而 hello 必须先发（宿主的协议用法是先读 hello）。
+  // 拿不到就整轮不启动 —— 不知道要造什么的时候跑起来只是烧 token。
+  let requirement = spec.requirement;
+  if (spec.issue) {
+    const resolved = await (io.resolveIssue ?? defaultResolveIssue)(spec.issue);
+    if (!resolved.ok) {
+      io.emit({ type: "error", message: `从 GitHub issue 取需求失败：${resolved.reason}` });
+      return 1;
+    }
+    requirement = resolved.requirement;
+    io.emit({
+      type: "log",
+      text: `[issue] 需求取自 GitHub issue #${spec.issue.number}${spec.issue.repo ? `（${spec.issue.repo}）` : ""}`,
+    });
+  }
   // 断点续跑：projectRoot 下的运行日志（若与本需求匹配）恢复进度状态，
   // 跳过 PRD/分解，直接从保存的轮次继续 —— 被杀的长运行不再从零开始。
-  const journal = createFileJournal(spec.projectRoot, spec.requirement);
+  const journal = createFileJournal(spec.projectRoot, requirement);
   let resume: RunSnapshot | undefined;
   const loaded = journal.load();
   if (loaded) {
@@ -352,7 +390,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       smoke = resume.smoke ?? [];
       io.emit({ type: "tasks", batches });
     } else {
-      const prd = spec.prd ?? (await engine.generatePrd(spec.requirement));
+      // 需求文本用解析后的（issue 形态下 spec.requirement 是空串占位）。
+      const prd = spec.prd ?? (await engine.generatePrd(requirement));
       io.emit({ type: "prd", prd });
       // 把宿主的验证命令一并交给 zone 覆盖校验：它引用的文件若不被任何任务
       // 的 zone 覆盖，重修多少轮都造不出来 —— 早失败，别烧掉整个重修预算。

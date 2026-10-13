@@ -17,6 +17,7 @@
 import * as path from "node:path";
 import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import { parseAgentManifestList } from "../electron/agents/manifest-schema";
+import { REPO_RE } from "../electron/context/github-readonly";
 import type { AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import {
@@ -71,6 +72,15 @@ export interface HeadlessSpec {
   protocolVersion?: string;
   /** Natural-language requirement (required unless a `prd` is supplied). */
   requirement: string;
+  /**
+   * 摄入半边（2026-10-14）：需求取自 GitHub 的一条 issue，与 `requirement`
+   * **二选一**（同时给 = 哪句算数说不清，直接拒）。runner 在开跑前用
+   * `gh issue view`（只读白名单，与 contextSources 同一条通路）把标题+正文
+   * 取回来当需求 —— 拉取失败整轮不启动（拿不到需求就不知道要造什么）。
+   *
+   * `repo` 缺席 = `gh` 按 cwd 的仓库认；`number` 是安全正整数。
+   */
+  issue?: { repo?: string; number: number };
   /** Target project root (absolute, or relative to the runner's cwd). */
   projectRoot: string;
   /** Pre-approved PRD; when present the PRD stage is skipped. */
@@ -137,6 +147,12 @@ export interface HeadlessSpec {
 export interface ParsedSpec {
   protocolVersion: string;
   requirement: string;
+  /**
+   * 摄入半边：从 GitHub issue 取需求（与 `requirement` 二选一）。runSpec 负责
+   * 在开跑前解析成文本；解析前 `requirement` 是空串占位（类型不肯缺席，
+   * 而空串在解析成功后永不被读到 —— journal 与 PRD 用的是解析后的文本）。
+   */
+  issue?: { repo?: string; number: number };
   /** Absolute path. */
   projectRoot: string;
   prd?: PrdDocument;
@@ -218,6 +234,7 @@ export type HeadlessEvent =
 const KNOWN_FIELDS = new Set<string>([
   "protocolVersion",
   "requirement",
+  "issue",
   "projectRoot",
   "prd",
   "llmProvider",
@@ -370,7 +387,38 @@ export function parseSpec(rawText: string): ParseResult {
     }
   }
 
-  if (!isNonEmptyString(raw.requirement)) issues.push("requirement 必须是非空字符串");
+  // 摄入半边（2026-10-14）：issue 与 requirement 是**需求的两个来源**，二选一。
+  // 校验口径与 contextSources 同源：repo 走字符集（REPO_RE），number 是安全
+  // 正整数 —— 这里放行一个形状不对的值，runner 那边就会拿它去拼 gh 命令。
+  let issue: { repo?: string; number: number } | undefined;
+  if (raw.issue !== undefined) {
+    if (!isObj(raw.issue)) {
+      issues.push("issue 必须是对象（{ repo?, number }）");
+    } else {
+      const repo = raw.issue["repo"];
+      const n = raw.issue["number"];
+      const repoOk = repo === undefined || (isNonEmptyString(repo) && REPO_RE.test(repo));
+      if (!repoOk) issues.push("issue.repo 必须是 owner/repo 形态（或省略，让 gh 按 cwd 认）");
+      if (typeof n !== "number" || !Number.isSafeInteger(n) || n <= 0) {
+        issues.push("issue.number 必须是正整数");
+      } else if (repoOk) {
+        issue = { number: n, ...(repo !== undefined ? { repo: repo as string } : {}) };
+      }
+    }
+  }
+  // "需求有着落"的三条路：requirement（手写）/ issue（从 GitHub 取）/ 都不给但
+  // 有 prd（预制品，此时 requirement 仍必填 —— 日志与断点续跑要拿它匹配，
+  // 这条旧语义不变）。同时给 requirement 与 issue 直接拒：两个来源说不清
+  // 哪句算数，猜一个就是替宿主决定它要什么。
+  if (raw.requirement !== undefined && issue !== undefined) {
+    issues.push("requirement 与 issue 只能给一个（两个都是需求来源）");
+  }
+  if (raw.requirement === undefined && issue === undefined) {
+    issues.push("requirement 必须是非空字符串，或改用 issue 从 GitHub 取");
+  }
+  if (raw.requirement !== undefined && !isNonEmptyString(raw.requirement)) {
+    issues.push("requirement 必须是非空字符串");
+  }
   if (!isNonEmptyString(raw.projectRoot)) issues.push("projectRoot 必须是非空字符串");
 
   let maxRepairRounds: number | undefined;
@@ -578,7 +626,10 @@ export function parseSpec(rawText: string): ParseResult {
     ok: true,
     spec: {
       protocolVersion,
-      requirement: (raw.requirement as string).trim(),
+      // issue 形态下这里是空串占位（见 ParsedSpec.issue 的注释）—— runner 在
+      // 开跑前把它换成从 GitHub 取到的需求文本，journal 与 PRD 用的都是后者。
+      requirement: isNonEmptyString(raw.requirement) ? (raw.requirement as string).trim() : "",
+      ...(issue ? { issue } : {}),
       projectRoot: path.resolve(raw.projectRoot as string),
       ...(prd ? { prd } : {}),
       llmProvider: brainProvider,

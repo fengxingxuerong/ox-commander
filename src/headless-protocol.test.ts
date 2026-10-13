@@ -1,10 +1,11 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { PROTOCOL_VERSION, parseSpec, runtimeGap, type HeadlessEvent, type ParsedSpec } from "../headless/protocol";
 import { runSpec, requiredCredentialVars, missingCredentials, pruneStaleBackups, optionalHostHooks } from "../headless/run-spec";
 import { createAgentLayer } from "../electron/agents";
+import { viewGithubIssue } from "../electron/context/github-readonly";
 import { BRAIN_POOL_TIMEOUT_MS, brainTimeoutMsFor, createPlatform, executorTimeoutMsFor } from "../electron/platform";
 import { DEFAULT_SETTINGS } from "../shared/types";
 import { EXECUTOR_TIMEOUT_MS } from "../shared/http-clients";
@@ -12,6 +13,16 @@ import type { LlmClient } from "../shared/llm-client";
 import type { AgentAdapter, Task, TaskPayload, VerificationReport } from "../shared/types";
 import type { AgentCapabilities } from "../shared/agent-contract";
 import type { PrdDocument } from "../shared/types";
+
+/*
+ * 摄入半边：`viewGithubIssue` 换替身（不真 spawn gh），其余原样 ——
+ * `renderIssueRequirement` 必须是真的，缺省解析器的成文模板要由它产出。
+ * 没有这个 mock，`defaultResolveIssue` 那条路在测试里会去打真的 gh。
+ */
+vi.mock("../electron/context/github-readonly", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("../electron/context/github-readonly")>();
+  return { ...mod, viewGithubIssue: vi.fn() };
+});
 
 const dirs: string[] = [];
 
@@ -63,6 +74,62 @@ describe("parseSpec", () => {
     expect(spec.maxParallelRuns).toBe(4);
     expect(spec.snapshotRoot).toContain("ox-commander-snapshots");
     expect(spec.warnings).toEqual([]);
+  });
+
+  /*
+   * 摄入半边（2026-10-14）：issue 与 requirement 是**需求的两个来源**，二选一。
+   * 三条判据：合法的进 spec；两个都给 / 都不给 → 拒；形状不对（number/repo/
+   * 非对象）→ 拒。空串占位是刻意的 —— runner 开跑前把它换成 issue 文本，
+   * journal 与 PRD 用的都是解析后的值。
+   */
+  it("issue：合法形态进 spec，requirement 可缺席（空串占位）", () => {
+    const withRepo = parse(
+      JSON.stringify({ ...LEGACY_SPEC, requirement: undefined, issue: { repo: "owner/repo", number: 42 } }),
+    );
+    expect(withRepo.issue).toEqual({ repo: "owner/repo", number: 42 });
+    expect(withRepo.requirement).toBe("");
+    const bare = parse(JSON.stringify({ ...LEGACY_SPEC, requirement: undefined, issue: { number: 7 } }));
+    expect(bare.issue).toEqual({ number: 7 }); // repo 缺席 = gh 按 cwd 认，不补键
+  });
+
+  it("issue：与 requirement 同时给 / 都不给 → 拒", () => {
+    const both = parseSpec(JSON.stringify({ ...LEGACY_SPEC, issue: { number: 1 } }));
+    expect(both.ok).toBe(false);
+    expect(both.ok === false && both.message).toContain("只能给一个");
+    const neither = parseSpec(JSON.stringify({ projectRoot: "." }));
+    expect(neither.ok).toBe(false);
+    // 旧文案的前缀保留（serve 的 400 断言钉着它），后半句指点新出路
+    expect(neither.ok === false && neither.message).toContain("requirement 必须是非空字符串");
+    expect(neither.ok === false && neither.message).toContain("issue");
+  });
+
+  it("issue：形状不对（number / repo / 非对象）→ 拒", () => {
+    for (const bad of [0, -1, 1.5, "42", Number.NaN]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, requirement: undefined, issue: { number: bad } }));
+      expect(r.ok, JSON.stringify(bad)).toBe(false);
+      expect(r.ok === false && r.message).toContain("issue.number");
+    }
+    const badRepo = parseSpec(
+      JSON.stringify({ ...LEGACY_SPEC, requirement: undefined, issue: { number: 1, repo: "bad;rm" } }),
+    );
+    expect(badRepo.ok).toBe(false);
+    expect(badRepo.ok === false && badRepo.message).toContain("owner/repo");
+    const notObj = parseSpec(JSON.stringify({ ...LEGACY_SPEC, requirement: undefined, issue: "x" }));
+    expect(notObj.ok).toBe(false);
+    expect(notObj.ok === false && notObj.message).toContain("issue 必须是对象");
+  });
+
+  it("issue 与 prd 可以同场（预制品与外部来源各管各的）", () => {
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        requirement: undefined,
+        prd: { goal: "g", features: [], techStack: [], acceptanceCriteria: [] },
+        issue: { number: 3 },
+      }),
+    );
+    expect(spec.prd).toBeDefined();
+    expect(spec.issue).toEqual({ number: 3 });
   });
 
   it("显式 protocolVersion 只认 ox-headless/1（2026-10-13 收紧）", () => {
@@ -1143,6 +1210,131 @@ describe("runSpec", () => {
     expect(code).toBe(0);
     expect(events.some((e) => e.type === "log" && e.text.includes("需求不匹配"))).toBe(true);
     expect(events.some((e) => e.type === "prd")).toBe(true); // 走了全新规划
+  });
+
+  /*
+   * 摄入半边（2026-10-14）：spec.issue 的端到端。判据不是"解析器被调了"，
+   * 而是**解析出的文本真的流到了该去的地方**：事件流里说出来源；journal 里
+   * 落的不是空串占位 —— 断点续跑按它匹配，落错值 = 续跑认不出上一次运行。
+   */
+  it("spec.issue：解析成功 → 需求文本进 journal 与事件流", async () => {
+    const root = scratch("headless-issue-ok");
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        requirement: undefined,
+        projectRoot: root,
+        verificationCommands: [],
+        issue: { repo: "owner/repo", number: 42 },
+      }),
+    );
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+      resolveIssue: async () => ({ ok: true, requirement: "GitHub Issue #42：暗色模式\n\n夜间不刺眼" }),
+    });
+    expect(code, JSON.stringify(events.filter((e) => e.type === "error"))).toBe(0);
+    expect(events.some((e) => e.type === "log" && e.text.includes("GitHub issue #42"))).toBe(true);
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "ox-run-journal.json"), "utf8"));
+    expect(saved.requirement).toBe("GitHub Issue #42：暗色模式\n\n夜间不刺眼");
+  });
+
+  it("spec.issue：取不到需求 → exit 1 + error 事件，规划都不开始", async () => {
+    const root = scratch("headless-issue-fail");
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        requirement: undefined,
+        projectRoot: root,
+        verificationCommands: [],
+        issue: { number: 404 },
+      }),
+    );
+    const { events, emit } = collect();
+    let llmCalled = 0;
+    const code = await runSpec(spec, {
+      emit,
+      llm: {
+        async chat() {
+          llmCalled += 1;
+          throw new Error("不应被调用");
+        },
+      },
+      resolveIssue: async () => ({ ok: false, reason: "gh issue view 失败：issue 不存在" }),
+    });
+    expect(code).toBe(1);
+    const err = events.find((e) => e.type === "error") as { message: string } | undefined;
+    expect(err?.message).toContain("从 GitHub issue 取需求失败");
+    expect(err?.message).toContain("issue 不存在");
+    expect(llmCalled).toBe(0); // 没开跑：一个 token 都不烧
+    expect(events.some((e) => e.type === "prd")).toBe(false);
+  });
+
+  /*
+   * 缺省解析器（不注入 resolveIssue 的那条路）：逐位点审计在这里抓出三个存活
+   * 变异（`!== → ===` 与两处三元互换）—— 用例都注入假 resolver，
+   * `defaultResolveIssue` 从未被执行。这两条钉真路径的两头：成功（repo 原样
+   * 进 gh 调用、真成文模板进 journal）与失败（exit 1，一个 token 都不烧）。
+   */
+  it("spec.issue：缺省解析器走 gh issue view，成文模板进 journal", async () => {
+    const root = scratch("headless-issue-default-ok");
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        requirement: undefined,
+        projectRoot: root,
+        verificationCommands: [],
+        issue: { repo: "owner/repo", number: 42 },
+      }),
+    );
+    vi.mocked(viewGithubIssue).mockResolvedValue({
+      ok: true,
+      issue: { number: 42, title: "暗色模式", body: "夜间不刺眼", state: "OPEN" },
+    });
+    const { events, emit } = collect();
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+    expect(code, JSON.stringify(events.filter((e) => e.type === "error"))).toBe(0);
+    expect(viewGithubIssue).toHaveBeenCalledWith({ repo: "owner/repo", number: 42 });
+    const saved = JSON.parse(fs.readFileSync(path.join(root, "ox-run-journal.json"), "utf8"));
+    expect(saved.requirement).toBe("GitHub Issue #42：暗色模式\n\n夜间不刺眼");
+  });
+
+  it("spec.issue：缺省解析器取不到 → exit 1 + error，不开跑", async () => {
+    const root = scratch("headless-issue-default-fail");
+    const spec = parse(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        requirement: undefined,
+        projectRoot: root,
+        verificationCommands: [],
+        issue: { number: 404 },
+      }),
+    );
+    vi.mocked(viewGithubIssue).mockResolvedValue({ ok: false, reason: "gh issue view 失败：issue 不存在" });
+    const { events, emit } = collect();
+    let llmCalled = 0;
+    const code = await runSpec(spec, {
+      emit,
+      llm: {
+        async chat() {
+          llmCalled += 1;
+          throw new Error("不应被调用");
+        },
+      },
+    });
+    expect(code).toBe(1);
+    const err = events.find((e) => e.type === "error") as { message: string } | undefined;
+    expect(err?.message).toContain("从 GitHub issue 取需求失败");
+    expect(err?.message).toContain("issue 不存在");
+    expect(llmCalled).toBe(0);
   });
 
   it("journal 快照解析失败 → 忽略并按全新运行", async () => {

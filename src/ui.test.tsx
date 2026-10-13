@@ -133,6 +133,8 @@ function makeBridge(): Bridge {
     })),
     onEvent: vi.fn(() => () => undefined),
     taskTrail: vi.fn(async () => ({ taskId: "t1", runs: [] })),
+    // 2026-10-14 摄入半边：issue 选择器的供数替身（不真跑 gh）。
+    listGithubIssues: vi.fn(async () => ({ ok: true as const, issues: [] })),
   };
 }
 
@@ -241,6 +243,57 @@ describe("ProjectsPage", () => {
     fireEvent.click(create);
     expect(await screen.findByText("规划进行中")).toBeTruthy();
     expect(vi.mocked(window.oxCommander.createProject)).toHaveBeenCalledWith("未命名项目", "待办应用");
+  });
+
+  /*
+   * 摄入半边（2026-10-14）：从 GitHub issue 建项目。
+   * 判据三条：拉取 → 列表上板；选中 → 创建时名字取标题、需求取标题+正文
+   * （成文模板与 headless 共用，这里钉"用对了字段"）；没选中 → 不可点。
+   * "空结果"与"失败"是两种话说法 —— 与审计面板同一条规矩。
+   */
+  describe("从 GitHub Issue 创建（摄入半边）", () => {
+    const ISSUE = { number: 42, title: "支持暗色模式", body: "用户希望夜间使用不刺眼", state: "OPEN" };
+
+    it("拉取 → 选中 → 创建：名字取标题、需求取标题+正文，然后进规划", async () => {
+      vi.mocked(window.oxCommander.listGithubIssues).mockResolvedValue({ ok: true, issues: [ISSUE] });
+      render(<ProjectsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+      await waitFor(() => expect(screen.getByText(/#42 \[OPEN\] 支持暗色模式/)).toBeTruthy());
+      fireEvent.click(screen.getByRole("radio"));
+      fireEvent.click(screen.getByRole("button", { name: "用这条 issue 创建" }));
+      await waitFor(() =>
+        expect(window.oxCommander.createProject).toHaveBeenCalledWith(
+          "支持暗色模式",
+          "GitHub Issue #42：支持暗色模式\n\n用户希望夜间使用不刺眼",
+        ),
+      );
+      // 与手填创建同一条链路：建完即进 PRD 复核页并开跑规划
+      await waitFor(() => expect(window.oxCommander.runPlanning).toHaveBeenCalled());
+    });
+
+    it("没选中时创建按钮不可点（不能建一个空需求项目）", async () => {
+      vi.mocked(window.oxCommander.listGithubIssues).mockResolvedValue({ ok: true, issues: [ISSUE] });
+      render(<ProjectsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+      await waitFor(() => expect(screen.getByText(/#42/)).toBeTruthy());
+      expect(screen.getByRole("button", { name: "用这条 issue 创建" })).toHaveProperty("disabled", true);
+    });
+
+    it("空列表与失败是两种话说法（'没有 issue' ≠ '没拿到'）", async () => {
+      vi.mocked(window.oxCommander.listGithubIssues).mockResolvedValue({ ok: true, issues: [] });
+      render(<ProjectsPage />);
+      fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+      await waitFor(() => expect(screen.getByText("没有符合条件的 issue。")).toBeTruthy());
+      expect(screen.queryByRole("alert")).toBeNull();
+
+      vi.mocked(window.oxCommander.listGithubIssues).mockResolvedValue({
+        ok: false,
+        reason: "gh issue list 失败（gh 未安装 / 未登录 / 仓库不存在？）:not logged in",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+      await waitFor(() => expect(screen.getByRole("alert")?.textContent).toContain("not logged in"));
+      expect(screen.queryByText("没有符合条件的 issue。")).toBeNull();
+    });
   });
 
   it("renders projects with stage chips and deletes after confirm", async () => {
