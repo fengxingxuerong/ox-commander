@@ -36,6 +36,22 @@ export class RunSession {
   readonly cancel = new AbortController();
 
   /**
+   * 传输层真正该挂的那个 signal = 本 run 的 `cancel` ∪ 调用方带进来的外部 signal。
+   *
+   * `cancel` 只覆盖"有人调了 `abort(handle)`"这一条路径；外部 signal 覆盖"引擎在中途
+   * 叫停、而这个 run 还没来得及被 `abortInFlight()` 枚举到"的那条。两者取并集，
+   * 任一路先响都算中止。没有外部 signal 时直接复用 `cancel.signal`，不为每个 run
+   * 多造一个 `AbortSignal.any` 对象。
+   */
+  readonly abortSignal: AbortSignal;
+
+  constructor(external?: AbortSignal) {
+    this.abortSignal = external
+      ? AbortSignal.any([this.cancel.signal, external])
+      : this.cancel.signal;
+  }
+
+  /**
    * 入队一个事件并唤醒等待者。
    *
    * 结束后只丢弃 `log`：`completed` / `aborted` 这类终态事件**仍要入队**，

@@ -194,10 +194,27 @@ export class Scheduler {
   /** 连续 rate-limit 次数（成功一次即清零）。 */
   private rateLimitStreak = 0;
   private shouldStop: () => boolean = () => false;
+  /**
+   * 引擎的中止闸（2026-10-13 执行期 liveness）。`shouldStop` 只覆盖"下一次检查点"，
+   * 而这个 signal 覆盖"已经在飞的那一跳"——两者互补，缺一不可：
+   *
+   * - `shouldStop` 是**轮询**：只在 acquireSlot / awaitThrottle / 分片睡眠里被问到，
+   *   已经派发出去的 run 不会再回头问。
+   * - `abortSignal` 是**中断**：随载荷一起交给适配器，run 从诞生那刻起就挂在闸上。
+   *
+   * 少了它，`cancel()` 里那一次性的 `abortInFlight()` 就成了唯一的收口手段，
+   * "取消之后才排到的任务"和"派发返回后才取消"的任务都吃不到那一枪。
+   */
+  private abortSignal?: AbortSignal;
 
   /** 引擎接线用：把"本次 run 是否已被取消"接进节流等待（orchestrator 构造时调用）。 */
   setShouldStop(fn: () => boolean): void {
     this.shouldStop = fn;
+  }
+
+  /** 引擎接线用：把中止闸挂进来，随每次派发的载荷下发给适配器。 */
+  setAbortSignal(signal: AbortSignal): void {
+    this.abortSignal = signal;
   }
   /**
    * per-agent 用量账本（本调度器生命周期 = 一个 run）：key 是 agentId，
@@ -579,6 +596,8 @@ export class Scheduler {
         zone: task.zone,
         projectRoot,
         repairContext: repair,
+        // 中止闸随载荷下发：run 一诞生就挂在引擎的 cancel 上，不等 abortInFlight 补枪。
+        signal: this.abortSignal,
       });
 
       if (members.length === 1) {

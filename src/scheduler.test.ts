@@ -1665,3 +1665,73 @@ describe('createAgentLayer · breakerStatsFile', () => {
     expect(fs.readdirSync(dir)).toHaveLength(0);
   });
 });
+
+/**
+ * 执行期 liveness（2026-10-13）：引擎的中止闸经 `setAbortSignal` 进调度器，
+ * 随**每一条** TaskPayload 下发给适配器。
+ *
+ * 它与既有的 `setShouldStop` 是两条互补的路，缺一不可：
+ * - `shouldStop` 是**轮询**，只在检查点被问到，已派发的 run 不会回头再问；
+ * - `abortSignal` 是**中断**，run 从诞生那刻起就挂在闸上。
+ *
+ * 少掉下发这一步，`cancel()` 里那一次性的 `abortInFlight()` 就是唯一收口手段 ——
+ * 实测一次 /cancel 要等满 run 时限（默认 600s）才落地。
+ */
+describe("Scheduler · 中止闸下发（执行期 liveness）", () => {
+  /** 记录自己收到的载荷，跑完一条任务即可。 */
+  function capturingAdapter(seen: TaskPayload[], id = "a1"): AgentAdapter {
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        seen.push(payload);
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect(handle) {
+        yield { kind: "log", text: `working on ${handle.taskId}`, timestamp: Date.now() };
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  it("挂了闸 ⇒ 每条派发的载荷都带着它", async () => {
+    const seen: TaskPayload[] = [];
+    const sched = new Scheduler([capturingAdapter(seen)]);
+    const ctl = new AbortController();
+    sched.setAbortSignal(ctl.signal);
+
+    await sched.runBatch([task("t1", "src/a")], ".");
+
+    expect(seen).toHaveLength(1);
+    // 必须是同一个对象：适配器把它并进 fetch 的 signal，换了引用就掐不断在途请求
+    expect(seen[0]!.signal).toBe(ctl.signal);
+  });
+
+  it("没挂闸 ⇒ 载荷不带 signal（直接 new Scheduler 的旧调用方不受影响）", async () => {
+    const seen: TaskPayload[] = [];
+    const sched = new Scheduler([capturingAdapter(seen)]);
+
+    await sched.runBatch([task("t1", "src/a")], ".");
+
+    expect(seen).toHaveLength(1);
+    // 载荷里留着 signal 这个键没关系，值必须是 undefined —— 适配器据此决定是否并入
+    expect(seen[0]!.signal).toBeUndefined();
+  });
+
+  it("赛马组：每个成员各自拿到同一个闸（赢家确定时才能掐掉还在飞的输家）", async () => {
+    const seen: TaskPayload[] = [];
+    const sched = new Scheduler([capturingAdapter(seen, "a1"), capturingAdapter(seen, "a2")], [], {
+      raceRedundancy: 2,
+    });
+    const ctl = new AbortController();
+    sched.setAbortSignal(ctl.signal);
+
+    await sched.runBatch([task("t1", "src/a")], ".");
+
+    expect(seen).toHaveLength(2);
+    expect(seen.every((p) => p.signal === ctl.signal)).toBe(true);
+  });
+});

@@ -3418,3 +3418,57 @@ describe("orchestrator · 远端分发接线（5.7 远端半边，2026-10-12）"
     expect(events).toContain("stage:DONE");
   });
 });
+
+/**
+ * 执行期中止闸的接线（2026-10-13）：引擎构造时把自己的 `abort.signal` 交给
+ * 调度器，调度器随每条 TaskPayload 下发给适配器。
+ *
+ * 这两条断言守的是"接线本身"，不是 signal 的语义（那部分在 scheduler 与
+ * run-session 的用例里）。接线漏掉的后果很隐蔽：cancel() 照常返回、日志照常
+ * 打印"[取消] 已请求中止 N 个"，但取消之后才派发出来的 run 会一路跑到自己的
+ * 时限 —— 实测一次 /cancel 拖满整条流水线。
+ */
+describe("执行期中止闸的接线（2026-10-13）", () => {
+  it("构造即把 abort.signal 交给调度器", () => {
+    let handed: AbortSignal | undefined;
+    const scheduler = {
+      abortInFlight: async () => 0,
+      runBatch: async () => [],
+      setShouldStop: () => {},
+      setAbortSignal: (s: AbortSignal) => {
+        handed = s;
+      },
+    };
+    const eng = new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler: scheduler as unknown as Scheduler, verify: async () => makeReport(true), settings: { ...DEFAULT_SETTINGS } },
+      {
+        onStage: () => {},
+        onLog: () => {},
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+      },
+    );
+
+    expect(handed, "构造时没把闸交给调度器").toBeDefined();
+    expect(handed!.aborted).toBe(false);
+    eng.cancel();
+    // 交给调度器的必须是**引擎自己那个**闸，cancel 之后它要真的落下
+    expect(handed!.aborted).toBe(true);
+  });
+
+  it("调度器没有 setAbortSignal（老的 fake）⇒ 构造与 cancel 都不抛", () => {
+    const scheduler = { abortInFlight: async () => 0, runBatch: async () => [] };
+    const eng = new OrchestratorEngine(
+      { llm: fakeLlm(), scheduler: scheduler as unknown as Scheduler, verify: async () => makeReport(true), settings: { ...DEFAULT_SETTINGS } },
+      {
+        onStage: () => {},
+        onLog: () => {},
+        onTaskStatus: () => {},
+        onVerification: () => {},
+        onEscalation: () => {},
+      },
+    );
+    expect(() => eng.cancel()).not.toThrow();
+  });
+});

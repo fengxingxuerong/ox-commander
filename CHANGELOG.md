@@ -24,7 +24,62 @@ cancel 时延三分支的最后一支（在途请求）：
   （50ms 取消 → CancelledError，不等 fetch 超时）。http-clients /
   orchestrator 逐位点重审；基线不变。全量 2007 通过 + 8 跳过 = 2015 条零失败。
 - 仍未覆盖：**执行期**（agent 适配器的 LLM 调用）没有外部 signal 可接 ——
-  那条链要穿过 AgentAdapter，更深，另记。
+  那条链要穿过 AgentAdapter，更深，另记。（→ 已在本版下一条收口）
+
+### 修复（liveness 收官：执行期 agent 调用也接上中止闸 · 2026-10-13）
+
+上一条末尾记的"执行期没有外部 signal 可接"在此收口。引擎 → 调度器 → 适配器
+三个适配器，一条链从上到下打通：
+
+- `TaskPayload` 新增可选 `signal`：引擎的 `AbortController` 经
+  `Scheduler.setAbortSignal()` 下发，随**每一条**派发载荷交给适配器。
+- `RunSession` 新增 `abortSignal` = 本 run 的 `cancel` ∪ 调用方外部 signal
+  （`AbortSignal.any`）。此前只有 `cancel`，而它只在 `abort(handle)` 被调用时
+  才 abort —— 而 `abortInFlight()` 是一次性枚举，只掐当下已登记的句柄。
+- 三个适配器各自接线：
+  - `sensenova-api`：在途 `chatJson` 请求改挂 `session.abortSignal`。
+  - `http-bridge`：投递那一跳与轮询每一跳都并入 `AbortSignal.any`（此前各自只有
+    `AbortSignal.timeout`，取消只能等它自己超时）；轮询被中止时**收口**成
+    `aborted`，而不是按"瞬时故障"继续重试到 run 时限。
+  - `cli-agent`：进程适配器没有在途 HTTP 可掐，改为闸一落就杀进程树。
+- **中止不是失败**（三个适配器同一口径）：`sensenova-api` catch 里的判据用
+  `payload.signal?.aborted`，**不能**用 `session.abortSignal.aborted` ——
+  后者是并集，看门狗超时走的也是 `session.cancel.abort()`，而超时是**失败**、
+  不是"用户叫停"。判据取错会把超时误报成中止，修复轮与预算闸从此看不见超时
+  这一类（本机实测：换错判据一次性打红 3 条既有用例）。
+- `http-bridge` 的请求体不再带着 `signal` 上线（活对象不属于线路协议，JSON 里
+  置 `undefined` 即不出现该字段）。
+
+**为什么必须补这一层**：`abortInFlight()` 是"取消那一刻枚举一遍"，有两个窗口
+它永远补不上 —— ① 派发已返回、句柄尚未入表时被取消；② 取消之后才排到的任务。
+这两个窗口里的 run 会一路跑到自己的时限（默认 600s）还在改文件、还在烧 token。
+
+**测试**（新增 15 条）：run-session 5 条钉住并集语义（内部中止不外溢、外部中止
+不误触内部、构造时已中止则立刻是中止态）；三个适配器各覆盖"派发时闸已落下 /
+派发后才叫停 / 不接闸不受影响"；scheduler 3 条（单派发、赛马组全员拿到同一个
+闸、不挂闸则为 `undefined`）；orchestrator 2 条（接线本身 + 老 fake 没有
+`setAbortSignal` 时构造与 cancel 都不抛）。
+
+**逐位点审计**（本机 221/221 全杀）：新增位点 run-session 7/7、sensenova-api
+40/40；改动文件回归 http-bridge 39/39、cli-agent 21/21、scheduler 42/42、
+orchestrator 72/72。位点基线 1647 → **1649**（71 目标不变）。
+全量 2025 通过 + 8 跳过 = 2033 条零失败。
+
+### 修复（测试基建：清盘 hook 的预算 · 2026-10-13）
+
+全量 67 个测试文件并行时，一堆文件的 `afterEach`/`afterAll` 要删自己造的临时目录，
+实测撞破 vitest 的 10s hook 预算报 `Hook timed out in 10000ms` —— 而**单独跑那些文件
+466ms 就全绿**。红的不是判据，是"清盘没赶上"。
+
+代价被 `verify` 的串接方式放大：它是 `&&` 串联、首段失败即中断，所以一条清盘 flake
+会让后面 14 段（`mutation:quick` / `mutation:touched` / 两个 build / 8 个 smoke）
+**一次都跑不到**。本机连着三次全量分别红在 policy-dir / store / atomic-store /
+main-wiring 四个**不同**文件 —— 逐个文件改是打地鼠，所以在 `vitest.config.mts` 里
+一次性把 `hookTimeout` 放到 60s。
+
+**判据**：这些 hook 里只有清盘、没有一条断言，放长预算不削弱任何判据 —— 它只是
+不再让"卫生问题"有能力掐断链条。与上面 `testTimeout` 20s 同源（都是并行下的机器
+负载），落在不同位置而已。
 
 ### 修复（liveness：调度器节流等待也听取消了 · 2026-10-13）
 

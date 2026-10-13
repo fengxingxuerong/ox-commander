@@ -149,6 +149,44 @@ describe("CliAgentAdapter", () => {
     expect(result?.status).toBe("aborted");
   });
 
+  /**
+   * 执行期 liveness（2026-10-13）：引擎的中止闸随 `TaskPayload.signal` 进来，
+   * cli-agent 必须据此杀掉进程树。
+   *
+   * `abort(handle)` 是一次性枚举 —— 取消之后才排到的任务根本不会被 `abortInFlight()`
+   * 看见，那个子进程会一直跑到看门狗时限（默认 600s）还在改文件。signal 下发之后，
+   * run 从 spawn 那一刻起就挂在闸上。
+   *
+   * 两个分支都要钉：已中止的 signal 不会再触发 abort 事件（必须查当前状态），
+   * 派发之后才叫停的走事件监听。
+   */
+  it("派发时闸已落下 ⇒ 立刻杀掉进程树，终态是 aborted", async () => {
+    const adapter = cli(["-e", "setTimeout(() => {}, 30000)"]);
+    const handle = await adapter.dispatch(payload({ signal: AbortSignal.abort() }));
+    const events = await drainEvents(adapter, handle);
+    expect(events.at(-1)!.kind).toBe("aborted");
+    expect((await adapter.lastResult(handle))?.status).toBe("aborted");
+  });
+
+  it("派发之后才叫停 ⇒ 事件监听把子进程一起带走", async () => {
+    const ctl = new AbortController();
+    const adapter = cli(["-e", "setTimeout(() => {}, 30000)"]);
+    const handle = await adapter.dispatch(payload({ signal: ctl.signal }));
+    expect(adapter.activeRunCount()).toBe(1);
+
+    ctl.abort();
+    const events = await drainEvents(adapter, handle);
+    expect(events.at(-1)!.kind).toBe("aborted");
+    expect((await adapter.lastResult(handle))?.status).toBe("aborted");
+  });
+
+  it("未接闸的正常 run 不受影响（闸是可选的）", async () => {
+    const adapter = cli(["-e", "console.log('finished')"]);
+    const handle = await adapter.dispatch(payload());
+    const events = await drainEvents(adapter, handle);
+    expect(events.at(-1)!.kind).toBe("completed");
+  });
+
   it("aborts an unknown run id without crashing", async () => {
     // The guard is `!run || run.session.finished`. With `&&` instead, a missing
     // run falls through to `run.session.finished` and throws a TypeError —

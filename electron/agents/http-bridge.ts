@@ -131,7 +131,8 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
   }
 
   async dispatch(payload: TaskPayload): Promise<RunHandle> {
-    const session = new RunSession();
+    // 引擎的中止闸在派发时就接进 session：晚一步接，取消那一枪可能已经打完。
+    const session = new RunSession(payload.signal);
     const handle: RunHandle = { runId: payload.runId, agentId: this.meta.id, taskId: payload.taskId };
     let resolveDone: () => void = () => undefined;
     const done = new Promise<void>((resolve) => {
@@ -173,6 +174,8 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
     const runsPath = this.opts.runsPath ?? "/v1/runs";
     const request: TaskRequest = {
       ...payload,
+      // 中止闸是本进程的活对象，不上线路（JSON 里 undefined 字段会被直接丢掉）。
+      signal: undefined,
       protocolVersion: AGENT_PROTOCOL_VERSION,
       deadlineMs: this.limits.runDeadlineMs,
     };
@@ -181,7 +184,8 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
         method: "POST",
         headers: { "content-type": "application/json", ...(await this.authHeaders()) },
         body: JSON.stringify(request),
-        signal: AbortSignal.timeout(30_000),
+        // 投递这一跳同样挂闸：run 时限之外，引擎叫停也要能立刻断掉（不再占线路池）。
+        signal: AbortSignal.any([AbortSignal.timeout(30_000), run.session.abortSignal]),
       });
       if (!res.ok) {
         this.finish(run, "failed", `[${this.meta.id}] 投递失败：HTTP ${res.status} ${await safeText(res)}`);
@@ -205,6 +209,12 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
       }
       this.startPolling(run, remoteId);
     } catch (err) {
+      // 中止不是失败：取消导致的投递中断若记成 failed，会污染 breaker 与限流账，
+      // 还会让引擎把"用户叫停"当成"任务做砸了"。
+      if (run.session.abortSignal.aborted) {
+        this.finish(run, "aborted", `[${this.meta.id}] run 已被中止`);
+        return;
+      }
       this.finish(run, "failed", `[${this.meta.id}] 投递异常：${(err as Error).message}`);
     }
   }
@@ -217,7 +227,11 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
         try {
           const res = await this.fetch(
             `${this.baseUrl}${runsPath}/${encodeURIComponent(remoteRunId)}/events?since=${run.cursor}`,
-            { method: "GET", headers: await this.authHeaders(), signal: AbortSignal.timeout(15_000) },
+            {
+              method: "GET",
+              headers: await this.authHeaders(),
+              signal: AbortSignal.any([AbortSignal.timeout(15_000), run.session.abortSignal]),
+            },
           );
           if (!res.ok) {
             this.finish(run, "failed", `[${this.meta.id}] 拉取事件失败：HTTP ${res.status}`);
@@ -235,6 +249,12 @@ export class HttpBridgeAdapter implements AgentAdapterV2 {
           else if (body.status === "aborted") this.finish(run, "aborted", `[${this.meta.id}] 远端已中止`);
         } catch (err) {
           run.lastError = (err as Error).message;
+          // 中止不是瞬时故障：这时重试毫无意义，必须收口成 aborted —— 否则
+          // 轮询器会一直跳到 run 时限为止，一次 /cancel 拖满整条流水线。
+          if (run.session.abortSignal.aborted) {
+            this.finish(run, "aborted", `[${this.meta.id}] run 已被中止`);
+            return;
+          }
           // Transient poll failures are ignored: the next tick retries.
         }
       })();

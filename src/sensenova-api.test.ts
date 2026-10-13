@@ -570,6 +570,61 @@ describe("SensenovaApiAdapter", () => {
     expect(kinds[kinds.length - 1]).toBe("aborted");
   });
 
+  /**
+   * 执行期 liveness（2026-10-13）：引擎的中止闸随 `TaskPayload.signal` 进来，
+   * 适配器必须把它并进在途 HTTP 请求的 signal。
+   *
+   * 只靠 `abort(handle)` 不够 —— 那是一次性枚举，"取消之后才排到的任务"根本
+   * 不会被 `abortInFlight()` 看见，那一笔请求会照常发出、照常烧 token。
+   */
+  it("派发时闸已落下 ⇒ 在途请求的 signal 立刻是中止态", async () => {
+    const root = tmpRoot();
+    let sawSignal: AbortSignal | undefined;
+    const client: LlmClient = {
+      async chat(req: ChatRequest) {
+        sawSignal = req.signal;
+        throw new Error("aborted by caller");
+      },
+    };
+    const adapter = new SensenovaApiAdapter(client);
+    const handle = await adapter.dispatch({
+      runId: `r-${Math.random().toString(36).slice(2)}`,
+      taskId: "t1",
+      title: "加法模块",
+      description: "实现 src/add.js",
+      zone: "z1",
+      projectRoot: root,
+      signal: AbortSignal.abort(),
+    });
+    for (let i = 0; i < 200 && !sawSignal; i++) await new Promise((r) => setTimeout(r, 1));
+
+    expect(sawSignal, "请求压根没发出去，这条用例就什么也没测到").toBeDefined();
+    expect(sawSignal!.aborted).toBe(true);
+    // 中止不是失败：记成 failed 会让 breaker 与限流账把"用户叫停"当成"任务做砸了"
+    const kinds: string[] = [];
+    for await (const ev of adapter.collect(handle)) kinds.push(ev.kind);
+    expect(kinds.at(-1)).toBe("aborted");
+  });
+
+  it("未接闸的正常请求：signal 存在但未中止，出错仍按失败记账", async () => {
+    const root = tmpRoot();
+    let sawSignal: AbortSignal | undefined;
+    const client: LlmClient = {
+      async chat(req: ChatRequest) {
+        sawSignal = req.signal;
+        throw new Error("boom");
+      },
+    };
+    const adapter = new SensenovaApiAdapter(client);
+    const handle = await run(adapter, root);
+    for (let i = 0; i < 200 && !sawSignal; i++) await new Promise((r) => setTimeout(r, 1));
+
+    expect(sawSignal!.aborted).toBe(false);
+    const kinds: string[] = [];
+    for await (const ev of adapter.collect(handle)) kinds.push(ev.kind);
+    expect(kinds.at(-1)).toBe("failed");
+  });
+
   it("probe reflects key availability and constructor injection", async () => {
     const injected = new SensenovaApiAdapter(fakeClient("{}"));
     expect(await injected.probe()).toBe(true);

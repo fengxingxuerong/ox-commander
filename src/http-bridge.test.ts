@@ -18,6 +18,8 @@ function fakeFetch(
   calls: Call[] = [],
 ): FetchLike {
   return async (url, init) => {
+    // 与真实 fetch 同语义：signal 已中止就直接抛，不发出这一跳。
+    init?.signal?.throwIfAborted?.();
     const method = init?.method ?? "GET";
     const headers = (init?.headers as Record<string, string>) ?? {};
     const call: Call = { url, method, headers, ...(typeof init?.body === "string" ? { body: init.body } : {}) };
@@ -655,5 +657,85 @@ describe("HttpBridgeAdapter · drain 的宽限期收敛", () => {
     await adapter.dispatch(payload());
     expect(await adapter.drain(120)).toBe("timeout");
     expect(calls.some((c) => c.url.includes("/abort")), "超时未中止在跑的 run").toBe(true);
+  });
+});
+
+/**
+ * 执行期 liveness（2026-10-13）：引擎的中止闸随 `TaskPayload.signal` 进来，
+ * 适配器必须让它在**投递那一跳**和**轮询每一跳**上都生效。
+ *
+ * 背景：`abortInFlight()` 是一次性枚举，只掐当下已登记的句柄。"取消之后才排到的
+ * 任务"和"派发返回后才取消"的两个窗口都吃不到那一枪 —— 实测一次 /cancel 要等满
+ * run 时限才落地。signal 下发之后，run 从诞生那刻起就挂在闸上。
+ *
+ * 这里的三条断言各守一个不同的失败模式：
+ * 1. 派发前已取消 ⇒ 必须收口成 aborted，而不是 failed（否则 breaker 与限流账
+ *    会把"用户叫停"记成"任务做砸了"）。
+ * 2. 轮询途中取消 ⇒ 必须停止轮询并收口（否则轮询器一直跳到 run 时限）。
+ * 3. 闸是本进程的活对象，**不得**随请求体上线（线路上没有它的位置）。
+ */
+describe("HttpBridgeAdapter · 引擎中止闸", () => {
+  it("派发前就已取消 ⇒ 收口成 aborted，不按失败记账", async () => {
+    const calls: Call[] = [];
+    const adapter = bridge(
+      fakeFetch([{ match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) }], calls),
+    );
+
+    const handle = await adapter.dispatch(payload({ signal: AbortSignal.abort() }));
+    const events = await collect(adapter, handle);
+
+    expect(events.at(-1)!.kind).toBe("aborted");
+    expect(events.some((e) => e.kind === "failed"), "取消被记成了失败").toBe(false);
+    expect((await adapter.lastResult(handle))!.status).toBe("aborted");
+    // 闸已落下，这一跳根本不该发出去
+    expect(calls).toHaveLength(0);
+  });
+
+  it("轮询途中取消 ⇒ 停止轮询并收口成 aborted", async () => {
+    const ctl = new AbortController();
+    let polls = 0;
+    const fetchImpl = fakeFetch([
+      {
+        match: "/v1/runs/42/events",
+        reply: () => {
+          polls += 1;
+          // 第一次轮询借机叫停：下一次就该收口，不再问远端
+          ctl.abort();
+          return { status: 200, body: { events: [{ kind: "log", text: "working" }], status: "running" } };
+        },
+      },
+      { match: "/v1/runs", method: "POST", reply: () => ({ status: 200, body: { runId: "42" } }) },
+    ]);
+
+    const adapter = bridge(fetchImpl);
+    const handle = await adapter.dispatch(payload({ signal: ctl.signal }));
+    const events = await collect(adapter, handle);
+
+    expect(events.at(-1)!.kind).toBe("aborted");
+    expect((await adapter.lastResult(handle))!.status).toBe("aborted");
+    // 中止之后不该再有第二次轮询
+    expect(polls).toBe(1);
+  });
+
+  it("中止闸不随请求体上线（线路上没有活对象的位置）", async () => {
+    const calls: Call[] = [];
+    const adapter = bridge(
+      fakeFetch([
+        {
+          match: "/v1/runs",
+          method: "POST",
+          reply: () => ({ status: 200, body: { events: [], status: "completed" } }),
+        },
+      ], calls),
+    );
+
+    const handle = await adapter.dispatch(payload({ signal: new AbortController().signal }));
+    await collect(adapter, handle);
+
+    const sent = JSON.parse(calls[0]!.body!);
+    expect(sent).not.toHaveProperty("signal");
+    // 任务本体字段照常送达，别为了摘 signal 把载荷摘坏了
+    expect(sent.taskId).toBe("t1");
+    expect(sent.protocolVersion).toBeDefined();
   });
 });

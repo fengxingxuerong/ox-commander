@@ -270,7 +270,9 @@ export class SensenovaApiAdapter implements AgentAdapter {
   }
 
   async dispatch(payload: TaskPayload): Promise<RunHandle> {
-    const session = new RunSession();
+    // 派发时就把引擎的中止闸接进 session（执行期 liveness，2026-10-13）：
+    // 晚一步接，取消那一枪可能已经打完，这个 run 就没人管了。
+    const session = new RunSession(payload.signal);
     this.sessions.set(payload.runId, session);
     void this.run(payload, session);
     return { runId: payload.runId, agentId: this.meta.id, taskId: payload.taskId };
@@ -357,7 +359,22 @@ export class SensenovaApiAdapter implements AgentAdapter {
       }
     } catch (err) {
       if (!session.finished) {
-        session.push("failed", `[sensenova-api] ${(err as Error).message}`, { tokens: usedTokens });
+        /*
+         * 中止不是失败（2026-10-13）：取消掐断在途请求后若记成 failed，会污染
+         * breaker 与限流账，还会让引擎把"用户叫停"当成"任务做砸了" —— 与
+         * http-bridge 的投递/轮询两条收口路径、以及调度器对 CancelledError 的
+         * 处理保持同一口径。
+         *
+         * 判据只能是 `payload.signal`（调用方那个闸），不能用 `session.abortSignal`：
+         * 后者是并集，看门狗超时走的也是 `session.cancel.abort()`，而超时是**失败**
+         * （run 没能在时限内做完），不是"用户叫停"。两条路都落到同一个布尔上就
+         * 会把超时误报成中止，修复轮与预算闸从此看不见超时这一类。
+         */
+        session.push(
+          payload.signal?.aborted ? "aborted" : "failed",
+          `[sensenova-api] ${(err as Error).message}`,
+          { tokens: usedTokens },
+        );
       }
     } finally {
       // 幂等：`guard()` 收口时已经解过。放这里是为了让"进 guard 之前就返回/抛出"
@@ -404,7 +421,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
           ],
           temperature: 0.2,
           jsonMode: true,
-          signal: session.cancel.signal,
+          signal: session.abortSignal,
         },
         { schemaName: "files-protocol", validate: parseFilePayload, maxRetries: 2 },
       );

@@ -160,3 +160,53 @@ describe("RunSession · usage 透传", () => {
     expect(session.events[0]!.usage).toEqual({ tokens: 99 });
   });
 });
+
+/**
+ * 中止信号的**合并语义**（2026-10-13 执行期 liveness）。
+ *
+ * `abortSignal` = 本 run 的 `cancel` ∪ 引擎带来的外部 signal，交给传输层。
+ * 为什么要并集：`cancel` 只覆盖"有人调了 `abort(handle)`"这一条路径（一次性枚举，
+ * 取消之后才派发出来的 run 吃不到），外部 signal 覆盖另一条。取错一边或取成交集，
+ * 症状是"取消之后还在烧钱"或"正常 run 被误杀" —— 两者都不报错、只在账单和时延上
+ * 显形，所以三条路径必须分别钉死。
+ */
+describe("RunSession · abortSignal 合并", () => {
+  it("没有外部 signal 时直接复用 cancel.signal（不为每个 run 多造对象）", () => {
+    const s = new RunSession();
+    expect(s.abortSignal).toBe(s.cancel.signal);
+    expect(s.abortSignal.aborted).toBe(false);
+  });
+
+  it("外部 signal 存在但未中止 ⇒ 合并结果未中止，且不是原样透传外部那个", () => {
+    const ctl = new AbortController();
+    const s = new RunSession(ctl.signal);
+    expect(s.abortSignal.aborted).toBe(false);
+    // 本 run 自己的 cancel 必须还在链上 —— 否则 `abort(handle)` 就掐不动在途请求了
+    expect(s.abortSignal).not.toBe(ctl.signal);
+    s.cancel.abort();
+    expect(s.abortSignal.aborted).toBe(true);
+  });
+
+  it("内部 cancel.abort() 让合并结果中止，且不反向污染调用方那个 signal", () => {
+    const ctl = new AbortController();
+    const s = new RunSession(ctl.signal);
+    s.cancel.abort();
+    expect(s.abortSignal.aborted).toBe(true);
+    // 引擎的闸还要管别的 run，不能被单个 run 的内部中止带崩
+    expect(ctl.signal.aborted).toBe(false);
+  });
+
+  it("外部 signal 中止 ⇒ 合并结果中止，且本 run 的 cancel 未被误触", () => {
+    const ctl = new AbortController();
+    const s = new RunSession(ctl.signal);
+    ctl.abort();
+    expect(s.abortSignal.aborted).toBe(true);
+    expect(s.cancel.signal.aborted).toBe(false);
+  });
+
+  it("构造时就已中止的外部 signal ⇒ 合并结果立刻是中止态", () => {
+    // 取消之后才排到的任务就是这一档：派发时闸已经落下了
+    const s = new RunSession(AbortSignal.abort());
+    expect(s.abortSignal.aborted).toBe(true);
+  });
+});

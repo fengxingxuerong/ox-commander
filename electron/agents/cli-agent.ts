@@ -207,7 +207,7 @@ export class CliAgentAdapter implements AgentAdapterV2 {
       extraKeys: envTemplateKeys,
     });
 
-    const session = new RunSession();
+    const session = new RunSession(payload.signal);
     const handle: RunHandle = { runId: payload.runId, agentId: this.meta.id, taskId: payload.taskId };
     const plan = buildSpawnSpec(this.opts.command, args);
     let child: ChildProcess;
@@ -249,6 +249,11 @@ export class CliAgentAdapter implements AgentAdapterV2 {
       done: Promise.resolve(),
     };
     this.runs.set(payload.runId, run);
+    // 引擎叫停 = 直接杀进程树（2026-10-13 执行期 liveness）：`abort(handle)` 是一次性
+    // 动作，取消之后才派发出来的子进程吃不到那一枪，只能干等到看门狗时限。已中止的
+    // signal 不会再触发 abort 事件，所以要先查一次当前状态。
+    if (payload.signal?.aborted) void this.abort(handle);
+    else payload.signal?.addEventListener("abort", () => void this.abort(handle), { once: true });
 
     if (dropped.length > 0) {
       session.push("log", `[${this.meta.id}] 已从子进程环境裁掉 ${dropped.length} 个密钥变量（只记名字）：${dropped.join(", ")}`);

@@ -259,6 +259,15 @@ export interface TaskPayload {
   zone: string;
   projectRoot: string;
   repairContext?: { round: number; errorLogDigest: string };
+  /**
+   * 调用方（引擎）的中止闸（2026-10-13 执行期 liveness）。
+   *
+   * 适配器把 run 的在途传输挂到这个 signal 上。为什么不能只靠 `abort(handle)`：
+   * 那是一次性动作 —— 引擎 cancel 时调 `abortInFlight()`，只枚举**当下**已登记的
+   * 句柄，"派发返回之后才取消"和"取消之后才排到的任务"都吃不到这一枪，只能
+   * 干等到 run 自己的时限。signal 在派发时就带进来，run 从诞生那刻起就挂上闸。
+   */
+  signal?: AbortSignal;
 }
 
 /** User decision for an escalated (repair-exhausted) task. */

@@ -260,8 +260,10 @@ export class OrchestratorEngine {
   /**
    * 本次 run 的中止闸（2026-10-13）：cancel() 时 abort，让 brain 层的在途 HTTP
    * 与 combo 间退避睡眠立刻结束（fetch 侧 req.signal 早已并进 AbortSignal.any，
-   * 缺的只是"有人去 abort"和退避睡眠听不听）。执行期（agent 适配器）不在本轮
-   * 范围内 —— 那条链更深，另记。
+   * 缺的只是"有人去 abort"和退避睡眠听不听）。
+   *
+   * 同闸也下发给执行期：调度器把它写进每条 TaskPayload，适配器据此掐断在途请求
+   * 或杀掉子进程。`abortInFlight()` 是一次性枚举，补不上"取消之后才派发"的那些 run。
    */
   private readonly abort = new AbortController();
   /** 计时起点＝引擎构造那一刻（两个宿主都是每次 run 现构造引擎）。 */
@@ -283,6 +285,9 @@ export class OrchestratorEngine {
     // 睡眠曾让 /cancel 在执行期也等满封顶（实测 cancel 7 分钟没生效）。
     // fake scheduler 没有这个方法，可选调用；字段初始化先于构造函数体，闭包安全。
     deps.scheduler.setShouldStop?.(() => this.cancelled);
+    // 同一个闸也下发给执行期（2026-10-13）：调度器随载荷转交适配器，让取消能掐断
+    // 在途的 agent 请求。fake scheduler 没有这些方法，一律可选调用。
+    deps.scheduler.setAbortSignal?.(this.abort.signal);
   }
 
   cancel(): void {
