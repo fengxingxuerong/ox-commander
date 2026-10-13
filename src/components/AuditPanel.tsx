@@ -28,6 +28,12 @@ const PATH_PREVIEW = 3;
  * 它是要拿去做证据的，重新序列化会抹掉那些让人 grep 原始文件的细节。
  *
  * 不做分页 —— 记录上限本来就在主进程被夹住，翻页的价值低于它带来的状态复杂度。
+ *
+ * 列表不做窗口化（2026-10-14 评估）：LIMIT=200，且只在挂载/手动刷新时重渲染，
+ * 不是流式更新 —— 200 个单行文本节点的布局成本可忽略。真正按帧重建整块文本的
+ * 是日志视图（BoardPage 的 LogView，那里上了 content-visibility）；为 200 行
+ * 引入测量式虚拟化是拿复杂度换一个不存在的问题。若将来 LIMIT 上调一个数量级，
+ * 把 LogView 那一套原样搬过来即可。
  */
 export function AuditPanel() {
   const [records, setRecords] = useState<AuditRecordView[]>([]);

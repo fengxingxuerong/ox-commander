@@ -320,6 +320,48 @@ describe("BoardPage", () => {
     expect(screen.getByText(/第 1 行日志/)).toBeTruthy();
   });
 
+  /**
+   * 日志视图的两笔性能账（2026-10-14 全栈评价的前端性能项），各钉一条：
+   *
+   * ① **帧合并**：流式输出时日志事件几十条/秒，旧实现每条事件同步重建整块
+   *    文本；新实现按帧合并，后到的更新取消前一次的调度。判据选"中间态
+   *    从未上屏"—— 它同时是一条**回归测试**：旧实现会在第一次 act 就把
+   *    "第 3 行日志"渲染出来，`queryByText` 非空即红。
+   * ② **逐行结构**：content-visibility 按元素跳过布局，前提是一行一个元素
+   *    （jsdom 的 CSSOM 不认 content-visibility，跳过渲染本身由 Chromium
+   *    保证，单测只钉结构面）。
+   */
+  it("日志按帧合并：后到的更新合掉前一次的帧，中间态不上屏", async () => {
+    seedBoard();
+    render(<BoardPage />);
+    expect(screen.getByText(/第 1 行日志/)).toBeTruthy();
+    // 第一次帧更新：入队但未渲染（rAF 未到）
+    act(() => {
+      useApp.setState({ logs: [...useApp.getState().logs, "第 3 行日志"] });
+    });
+    // 第二次帧更新：取消上一次调度，改挂最新的
+    act(() => {
+      useApp.setState({ logs: [...useApp.getState().logs, "第 4 行日志"] });
+    });
+    // "第 3 行日志" 从未上过屏 —— 旧实现（每条事件同步渲染）会在这里红
+    expect(screen.queryByText("第 3 行日志")).toBeNull();
+    // 帧到：直接是最新
+    await waitFor(() => expect(screen.getByText("第 4 行日志")).toBeTruthy());
+  });
+
+  it("日志逐行渲染：一行一个节点；空态有占位（content-visibility 窗口化的结构面）", () => {
+    seedBoard();
+    const first = render(<BoardPage />);
+    expect(first.container.querySelectorAll(".log-line").length).toBe(2);
+    expect(screen.getByText("第 2 行日志")).toBeTruthy();
+    first.unmount();
+
+    useApp.setState({ logs: [] });
+    const second = render(<BoardPage />);
+    expect(screen.getByText("等待开始…")).toBeTruthy();
+    expect(second.container.querySelectorAll(".log-line").length).toBe(0);
+  });
+
   it("renders approval cards and forwards approval decisions to the bridge", () => {
     seedBoard();
     render(<BoardPage />);
@@ -589,7 +631,9 @@ describe("BoardPage", () => {
     });
     render(<BoardPage />);
     await waitFor(() => expect(screen.getByText(/上一次运行未正常收尾/)).toBeTruthy());
-    expect(screen.getByText(/已从审计日志恢复上次运行的进度/)).toBeTruthy();
+    // 恢复日志走 LogView 的帧合并（2026-10-14）：横幅是 BoardPage 自己的 state、
+    // 同步上板；日志行要等下一个动画帧 —— 所以这条断言等帧，上面那条不等。
+    await waitFor(() => expect(screen.getByText(/已从审计日志恢复上次运行的进度/)).toBeTruthy());
     expect(screen.getByText("实现任务列表")).toBeTruthy();
     expect(screen.getByText(/最后活动时间/)).toBeTruthy();
   });

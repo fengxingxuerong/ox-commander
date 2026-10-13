@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
@@ -61,15 +62,61 @@ export function SILENCE_LABEL(lastActivityTs: number, now: number): string | und
 }
 
 /**
- * 日志视图（2026-10-13 从 BoardPage 拆出 + memo）：此前 `logs` 由 BoardPage 整页
- * 订阅 —— 日志风暴（每条事件一次 set）会重渲染整页（任务列表/凭据/审计跟着跑），
- * 这是长任务下的首要渲染成本。拆出后只有本组件订阅 `logs`：非 logs 的状态变化
- * 不再触碰它，logs 变化也只重渲染这一个 `<pre>`。
+ * 逐行窗口化样式。两个属性是**性能机制不是皮肤**，所以跟着组件走而不是进
+ * styles.css —— 读 LogView 的人应该在同一屏里看到"它为什么不卡"。
+ *
+ * `content-visibility: auto`：视口外的行，浏览器跳过布局与绘制（DOM 里仍在，
+ * 可选中、可复制、find-in-page 照样找得到）。`contain-intrinsic-size` 的
+ * 20px 是**占位高度**（line-height 1.7 × 12px ≈ 20.4px）：从未渲染过的行按它
+ * 撑高度，Chromium 渲染出真实高度后会记住（`auto` 关键字），滚动条因此
+ * 不会突然变短。
+ *
+ * ⚠️ jsdom 的 CSSOM 不认这两个属性（setProperty 静默丢弃），所以单测钉的是
+ * **结构**（一行一个 `.log-line`），跳过渲染的行为由 Chromium 的标准机制保证，
+ * 不在单测里假装验证。
+ */
+const LOG_LINE_STYLE: CSSProperties = {
+  contentVisibility: "auto",
+  containIntrinsicSize: "auto 20px",
+};
+
+/**
+ * 日志视图（2026-10-13 从 BoardPage 拆出 + memo；2026-10-14 帧合并 + 逐行
+ * 窗口化）。此前 `logs` 由 BoardPage 整页订阅 —— 日志风暴（每条事件一次 set）
+ * 会重渲染整页（任务列表/凭据/审计跟着跑），这是长任务下的首要渲染成本。
+ * 拆出后只有本组件订阅 `logs`：非 logs 的状态变化不再触碰它。
+ *
+ * 2026-10-14 又清掉两笔账（全栈评价的前端性能项）：
+ * ① **频率无上界**：流式输出时日志事件可以几十条/秒，每条都走一次
+ *    setState → 整块文本重建 → 整块重排，而屏幕 60fps 封顶 —— 中间态没有
+ *    任何观察价值。修为按帧合并：一帧之内到达的多次更新只渲染最后一次。
+ * ② **单帧成本 O(全部行)**：`<pre>` 是一整个文本块，每帧重排全部（store 侧
+ *    已夹到 500 条，折行后视觉行更多）。修为逐行 `<div>` + 上面的
+ *    content-visibility：视口外的行不参与布局。
+ *
+ * 为什么不用手动窗口化（算 scrollTop 切行 + 上下占位 div）：`.log-view` 是
+ * `pre-wrap`，折行让视觉行高可变，按行切窗口的行高数学不成立；改成不换行
+ * （`pre` + 横滚）又是拿可读性换性能。content-visibility 按**元素**跳过，
+ * 两种代价都不付。（将来要精确控制滚动条再上测量方案，那更贵。）
  */
 const LogView = memo(function LogView() {
   const logs = useApp((s) => s.logs);
+  // 帧合并：logs 引用变化才调度；rAF 触发时渲染**当时最新**的 logs ——
+  // 先到后到以最后一次为准，中间态不上屏。cleanup 取消上一次调度，
+  // 所以并发到达的多次更新天然合并成一个帧。
+  // jsdom（vitest 默认 pretendToBeVisual）有 rAF；没有时退化为同步渲染。
+  const [frame, setFrame] = useState(logs);
+  useEffect(() => {
+    if (frame === logs) return;
+    if (typeof requestAnimationFrame !== "function") {
+      setFrame(logs);
+      return;
+    }
+    const raf = requestAnimationFrame(() => setFrame(logs));
+    return () => cancelAnimationFrame(raf);
+  }, [logs, frame]);
   // 终端行为：跟随新输出，除非操作者上滚看历史 —— 那就暂停钉底，滚回底部附近恢复。
-  const logRef = useRef<HTMLPreElement>(null);
+  const logRef = useRef<HTMLDivElement>(null);
   const logPinnedRef = useRef(true);
   const handleLogScroll = () => {
     const el = logRef.current;
@@ -79,11 +126,22 @@ const LogView = memo(function LogView() {
   useEffect(() => {
     const el = logRef.current;
     if (el && logPinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [logs]);
+  }, [frame]);
   return (
-    <pre ref={logRef} onScroll={handleLogScroll} className="log-view">
-      {logs.join("\n") || "等待开始…"}
-    </pre>
+    <div ref={logRef} onScroll={handleLogScroll} className="log-view">
+      {frame.length === 0 ? (
+        "等待开始…"
+      ) : (
+        // key 用下标：store 侧 slice(-500) 让数组整体左移，"稳定 id" 要先给
+        // 日志行编号（store 重构）；而帧合并已把全量 diff 从"事件速率"降到
+        // "帧速率"—— 一帧 500 个文本节点，量级可接受。
+        frame.map((line, i) => (
+          <div key={i} className="log-line" style={LOG_LINE_STYLE}>
+            {line}
+          </div>
+        ))
+      )}
+    </div>
   );
 });
 
