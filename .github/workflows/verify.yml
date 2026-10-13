@@ -61,20 +61,26 @@ jobs:
   # 跑完时才把结论写进 job summary，被掐就没有）。那时"CI 红了"分不清是代码
   # 问题还是太慢。故提到 60 分（≈1.85× 余量，可容约 2000 个位点）。verify 里跑的仍是 `mutation:quick`
   # （tier 1、每文件 1 个变异、~30s），守住"verify 是快门禁"。
+  # 2026-10-13：单 job 拆成按 tier 的两个分片（matrix）。三次升级的实证链：
+  #   ① 60 → 100 分钟（位点 1576 → 1647 后整轮超过 60min 超时）；
+  #   ② --jobs=3 在 2 vCPU 上互撞：大量 worker "异常退出（exit 0）"（子进程
+  #      静默不吐 ##MUTATION_RESULT##），fail-safe 串行复核 = 双倍耗时；
+  #   ③ runner 在 ~35min 被平台回收（今天 4/4 次）——整轮单 job 无论怎么调
+  #      都踩这个窗口。分片后每片 ~20-25min（tier1 719 位点 / tier2 928），
+  #      片内 --jobs=1 串行（零子进程，② 的病灶直接消失），两片并行总墙钟
+  #      仍低于回收窗口。若单片仍被回收，下一刀是按目标名再均摊（需要工具
+  #   支持 --file 多值），而不是继续抬超时。
   mutation-full:
-    name: mutation (site, every site)
+    name: mutation (site, tier ${{ matrix.tier }})
     # 只在 Linux 跑：site 审计的存活清单里会混进"平台相关等价变异"
     # （如 `process.platform === "win32"` 在本机恒真），在另一个 OS 上跑一次
     # 才能把它们和真缺口分开。CI 用 Linux，本机是 Windows，两边合起来才是全集。
     runs-on: ubuntu-latest
-    # 2026-10-13：60 → 100。旧值按 1576 位点 / 全并行约 43min 留的 1.85× 余量；
-    # 位点涨到 1647 后，--jobs=3 在 2 vCPU 上互撞，大量目标"并行下基线失败 →
-    # 单跑复核"（job 日志实证：types/board-derive/github-readonly/manifest-schema/
-    # orchestrator/receipt-verify/schema 都走了串行复核 = 双倍耗时），总时长越过
-    # 60min 被 job 超时杀掉（今天 4 个代码提交的 site job 全部 cancelled 于此）。
-    # 若后续仍吃紧，下一步是把 TARGETS 按 tier 拆成并行 job（shard），而不是
-    # 继续抬超时。
     timeout-minutes: 100
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [1, 2]
     steps:
       - uses: actions/checkout@v4
 
@@ -86,5 +92,5 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Mutation (site 口径，逐位点)
-        run: npm run mutation:audit
+      - name: Mutation (site 口径，逐位点，tier ${{ matrix.tier }})
+        run: node scripts/mutation-check.mjs --mode=site --limit=999 --tier=${{ matrix.tier }} --jobs=1
