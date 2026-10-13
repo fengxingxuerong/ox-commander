@@ -6,6 +6,26 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（liveness：LLM 冷却等待现在听取消 · 2026-10-13）
+
+CLI 真进程实测抓到的真 bug：一次 `POST /cancel` 在全路由 429 风暴里
+**7 分钟没落地**（`cancelled:true` 受理了，run 继续跑）。
+
+- **根因**：`withCooldownRetry`（shared/llm-client.ts）的等待是**整段
+  setTimeout**（封顶 120s），`shouldStop` 只在两次等待之间检查 —— 而
+  orchestrator 的 brainCall 正是它的调用方，规划期被限流时一次取消要等满
+  当前睡眠。同理"暂停 gate 无超时"是这一家的病。
+- **修法**：等待改为 tick 切片（1s 粒度）轮询 `shouldStop`，叫停立刻收尾；
+  新增 `stopError` 选项 —— orchestrator 传 `CancelledError` 工厂，"用户叫停"
+  不再被报成"provider 限流失败"（两种结局分开）。注入的 `sleep` 替身不受影响
+  （既有用例的单次全量断言照过）。
+- **测试**：两条**真实计时**用例钉住新行为（名义等待 60s、cancel 100ms 时到达
+  → 必须 ~1s 内抛 stopError；无 stopError 时抛原冷却错）。llm-client.ts
+  15/15、orchestrator.ts 72/72 逐位点全杀；基线不变。
+- **同模式未修（下轮，已记账）**：`http-clients.ts` combo 间退避睡眠
+  （`chat()` 全链没有外部 signal 可接）与 `scheduler.ts` 节流睡眠
+  （封顶 5min，Scheduler 无取消标志、需经 platform 接线）。
+
 ### 修复（前端：恢复路径上测试 + 凭据卡一键复核 · 2026-10-13）
 
 评价报告的两个 P2 收尾项：

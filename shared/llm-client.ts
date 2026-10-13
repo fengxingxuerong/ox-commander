@@ -34,6 +34,48 @@ export interface CooldownRetryOptions {
   onWait?: (waitMs: number, waitIndex: number) => void;
   /** When it returns true the original error is rethrown instead of waiting (e.g. run aborted). */
   shouldStop?: () => boolean;
+  /**
+   * shouldStop 在**等待期间**触发时抛这个错（2026-10-13 活测修复）。
+   *
+   * 为什么需要它：等待期间原来的处置是"整段睡完再抛冷却错"—— 一次 /cancel 在
+   * 全路由限流风暴里等了 7 分钟没落地（实测）。而且"用户叫停"与"provider 限流"
+   * 是两种结局，混在一起会把取消报成限流失败。调用方（orchestrator）传
+   * CancelledError 的工厂；缺省时保持旧行为（抛原冷却错）。
+   */
+  stopError?: () => Error;
+}
+
+/** 等待期间检查 shouldStop 的粒度（活测：整段 120s 睡眠让 cancel 等满封顶）。 */
+const COOLDOWN_STOP_TICK_MS = 1_000;
+
+/**
+ * 睡 `ms`，但期间每 tick 看一眼 shouldStop —— 叫停就立刻以 stopError（或原错误）
+ * 收尾，而不是睡满整个封顶。注入的 sleep 仍然照原样调用（测试替身不受影响）。
+ */
+async function waitOrStop(
+  ms: number,
+  shouldStop: (() => boolean) | undefined,
+  sleep: (ms: number) => Promise<void>,
+  stopError: (() => Error) | undefined,
+  original: unknown,
+): Promise<void> {
+  if (!shouldStop) return sleep(ms);
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      clearInterval(timer);
+      fn();
+    };
+    const timer = setInterval(() => {
+      if (shouldStop()) finish(() => reject(stopError?.() ?? original));
+    }, COOLDOWN_STOP_TICK_MS);
+    void sleep(ms).then(
+      () => finish(resolve),
+      (e) => finish(() => reject(e)),
+    );
+  });
 }
 
 /**
@@ -52,11 +94,11 @@ export async function withCooldownRetry<T>(fn: () => Promise<T>, opts: CooldownR
       return await fn();
     } catch (e) {
       if (!(e instanceof AllRoutesCoolingError) || waits >= maxWaits) throw e;
-      if (opts.shouldStop?.()) throw e;
+      if (opts.shouldStop?.()) throw (opts.stopError?.() ?? e);
       const waitMs = Math.min(Math.max(e.retryInMs, 0), maxWaitMs);
       waits += 1;
       opts.onWait?.(waitMs, waits);
-      await sleep(waitMs);
+      await waitOrStop(waitMs, opts.shouldStop, sleep, opts.stopError, e);
     }
   }
 }

@@ -246,6 +246,48 @@ describe("withCooldownRetry", () => {
     expect(sleeps).toEqual([5_000]);
   });
 
+  it("cancel 在等待中途到达 → 1s 内以 stopError 收尾，绝不等满封顶（2026-10-13 活测修复）", async () => {
+    // 活测实录：/cancel 在全路由 429 风暴里 7 分钟没落地 —— withCooldownRetry 的
+    // 整段睡眠不听 shouldStop。这条用例用真实时间钉住新行为：名义等待 60s，
+    // cancel 100ms 时到达，必须 ~1s（tick 粒度）内抛 stopError。
+    let stopped = false;
+    const t0 = Date.now();
+    setTimeout(() => {
+      stopped = true;
+    }, 100);
+    await expect(
+      withCooldownRetry(
+        async () => {
+          throw new AllRoutesCoolingError(60_000);
+        },
+        {
+          sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)),
+          shouldStop: () => stopped,
+          stopError: () => new Error("CANCELLED"),
+          maxWaits: 3,
+        },
+      ),
+    ).rejects.toThrow("CANCELLED");
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  }, 8_000);
+
+  it("等待期间叫停但没给 stopError → 抛原冷却错（旧调用方兼容）", async () => {
+    let stopped = false;
+    const t0 = Date.now();
+    setTimeout(() => {
+      stopped = true;
+    }, 50);
+    await expect(
+      withCooldownRetry(
+        async () => {
+          throw new AllRoutesCoolingError(60_000);
+        },
+        { sleep: (ms) => new Promise<void>((r) => setTimeout(r, ms)), shouldStop: () => stopped, maxWaits: 3 },
+      ),
+    ).rejects.toThrow(AllRoutesCoolingError);
+    expect(Date.now() - t0).toBeLessThan(3_000);
+  }, 8_000);
+
   it("rethrows non-cooling errors immediately without sleeping", async () => {
     const sleeps: number[] = [];
     await expect(

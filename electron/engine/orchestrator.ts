@@ -308,6 +308,9 @@ export class OrchestratorEngine {
   private async brainCall<T>(what: string, fn: () => Promise<T>): Promise<T> {
     return withCooldownRetry(fn, {
       shouldStop: () => this.cancelled,
+      // 等待被 cancel 时以 CancelledError 收尾（2026-10-13）：冷却错是 provider
+      // 的结局，取消是用户的结局 —— 等待不再睡满封顶，cancel 最迟 1s 内落地。
+      stopError: () => new CancelledError(),
       onWait: (ms, n) =>
         this.cb.onLog(
           `${what}：全部 LLM 路由冷却中，第 ${n} 次等待约 ${Math.ceil(ms / 1000)}s 后重试`,
