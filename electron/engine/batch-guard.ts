@@ -49,6 +49,45 @@ export interface BatchScope {
   changes: FileChange[];
 }
 
+/**
+ * 名单里最多列几个路径。
+ *
+ * 为什么不无限列：失败面很大时（一次回滚几十个文件全失败）把整份名单灌进失败
+ * 摘要会把重修 prompt 撑爆 —— 那比不列更糟。截断时明确写出还剩多少条，
+ * 宁可"说清有多少没列"也不静默丢。
+ */
+const MAX_LISTED_PATHS = 8;
+
+/** `a、b、c`；超限补一句"另有 N 个未列出"。 */
+function cappedPaths(paths: readonly string[]): string {
+  const shown = paths.slice(0, MAX_LISTED_PATHS);
+  const rest = paths.length - shown.length;
+  return shown.join("、") + (rest > 0 ? `、另有 ${rest} 个未列出` : "");
+}
+
+/**
+ * 回滚**没做成的**那些路径渲染成可读名单（含各自原因）。
+ *
+ * 为什么必须点名而不是只报个数（2026-10-14）：`SnapshotStore.revert` **不是事务** ——
+ * 它逐个文件尽力恢复（继续而不是遇到第一个失败就停，那是对的选择），所以部分失败
+ * 会留下**混合态**：有的文件回到了基线、有的没有。只报"3 个未能回滚"有两个后果：
+ *
+ *   ① 操作员得把整个仓库 diff 一遍才知道是哪三个；
+ *   ② 更糟的是这段摘要会跟着失败任务进重修 prompt 发给**下一个执行器** ——
+ *      它拿着"3 个未能回滚"继续在**半回滚的工作区**上干活，却不知道哪几个文件是脏的。
+ *
+ * 原因跟路径一起给：`skipped` 里混着"真失败"与"本来就不需要动"（快照里没有、
+ * 当前也不存在）两类，只列路径的话操作员还得回去翻源码猜是哪一类。
+ */
+function shortfallNote(skipped: readonly { path: string; reason: string }[]): string {
+  const shown = skipped.slice(0, MAX_LISTED_PATHS).map((s) => `${s.path}（${s.reason}）`);
+  const rest = skipped.length - shown.length;
+  return (
+    `${skipped.length} 个未能回滚，需要人工检查：${shown.join("；")}` +
+    (rest > 0 ? `；另有 ${rest} 个未列出` : "")
+  );
+}
+
 export interface BatchGuardOptions {
   journal?: FileJournal;
   snapshots?: SnapshotStore;
@@ -258,7 +297,7 @@ export class BatchGuard {
       if (revertResult) {
         this.onEvent?.(
           `已回滚 ${revertResult.restored.length} 个文件、删除 ${revertResult.removed.length} 个新增文件` +
-            (revertResult.skipped.length > 0 ? `，${revertResult.skipped.length} 个未能回滚` : ""),
+            (revertResult.skipped.length > 0 ? `，${shortfallNote(revertResult.skipped)}` : ""),
         );
       } else {
         this.onEvent?.("未配置快照存储，仅报告越权（无法回滚）");
@@ -281,17 +320,27 @@ export class BatchGuard {
     // quarantine: move the offending files aside instead of destroying them.
     // 被**删除**的越权文件无档可隔（盘上已经没有了）—— 正是它们留在台账上。
     let moved = 0;
-    let failed = 0;
+    const stuck: string[] = [];
     for (const rel of allPaths) {
       const dest = await this.quarantine(scope, rel);
       if (dest) moved += 1;
-      else failed += 1;
+      // 与回滚同一条纪律：没挪成的要**点名**。只报个"（N 个失败）"操作员不知道
+      // 该去动哪几个。措辞不写"仍在原处"：失败的一种常见原因是该文件**已被删除**
+      // （无档可隔，见本分支上方的注释），那时它并不在原处。
+      else stuck.push(rel);
     }
-    this.onEvent?.(`已将 ${moved} 个越权文件移入隔离区${failed > 0 ? `（${failed} 个失败）` : ""}`);
+    this.onEvent?.(
+      `已将 ${moved} 个越权文件移入隔离区` +
+        (stuck.length > 0 ? `（${stuck.length} 个失败：${cappedPaths(stuck)}）` : ""),
+    );
     if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
     return this.settleLedger(
       scope,
-      { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies },
+      {
+        outcomes: this.markBatchFailed(outcomes, conflicts, { quarantineStuck: stuck }),
+        conflicts,
+        remedies,
+      },
       freshDeletions,
     );
   }
@@ -361,7 +410,7 @@ export class BatchGuard {
   private markBatchFailed(
     outcomes: DispatchOutcome[],
     conflicts: Conflict[],
-    extra: { reverted?: RevertResult } = {},
+    extra: { reverted?: RevertResult; quarantineStuck?: readonly string[] } = {},
   ): DispatchOutcome[] {
     const lines = [
       `zone 越权：本批任务修改了声明 zone 之外的文件 → ${conflicts.flatMap((c) => c.paths).join("、")}`,
@@ -370,7 +419,14 @@ export class BatchGuard {
     if (extra.reverted) {
       lines.push(
         `已回滚 ${extra.reverted.restored.length} 个文件、删除 ${extra.reverted.removed.length} 个新增文件` +
-          (extra.reverted.skipped.length > 0 ? `；${extra.reverted.skipped.length} 个未能回滚，需要人工检查` : ""),
+          (extra.reverted.skipped.length > 0 ? `；${shortfallNote(extra.reverted.skipped)}` : ""),
+      );
+    }
+    // 隔离没挪成的那几个：同样要点名 —— 这份摘要会进重修 prompt，
+    // 下一个执行器得知道是哪几个越权文件没被隔离掉。
+    if (extra.quarantineStuck && extra.quarantineStuck.length > 0) {
+      lines.push(
+        `${extra.quarantineStuck.length} 个越权文件未能移入隔离区：${cappedPaths(extra.quarantineStuck)}`,
       );
     }
     const notice = lines.join("\n");

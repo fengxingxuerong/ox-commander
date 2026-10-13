@@ -714,7 +714,7 @@ const SITE_BASELINE = {
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
   "electron/context/github-readonly.ts": 54,
-  "electron/engine/batch-guard.ts": 16,
+  "electron/engine/batch-guard.ts": 19,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
   "electron/engine/git-remote.ts": 39,

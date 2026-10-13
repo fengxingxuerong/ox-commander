@@ -1663,6 +1663,114 @@ describe("BatchGuard arbitration", () => {
   });
 });
 
+/**
+ * 回滚留混合态时**点名路径**（2026-10-14）。
+ *
+ * `SnapshotStore.revert` 不是事务：它逐个文件尽力恢复（遇到失败继续，而不是中止 ——
+ * 那是对的选择），所以部分失败会留下**混合态**：有的文件回到了基线、有的没有。
+ * 在此之前每一处上报都只给数量（"3 个未能回滚"），有两个后果：
+ *   ① 操作员得把整个仓库 diff 一遍才知道是哪三个；
+ *   ② 更糟的是这段摘要会跟着失败任务进重修 prompt 发给**下一个执行器** ——
+ *      它在半回滚的工作区上继续干活，却不知道哪几个文件是脏的。
+ */
+describe("BatchGuard · 混合态要点名（回滚/隔离没做成的路径）", () => {
+  /** zone 外、且快照不覆盖的文件被改过：没有备份可还原 —— 混合态的典型来源。 */
+  function shortfallFixture(tag: string, names: string[]) {
+    const root = scratch(`guard-shortfall-${tag}`);
+    const backupRoot = scratch(`guard-shortfall-${tag}-backups`);
+    for (const rel of names) write(root, rel, "before");
+    const events: string[] = [];
+    const guard = new BatchGuard({
+      snapshots: new SnapshotStore({ backupRoot }),
+      mode: "revert-batch",
+      onEvent: (t) => events.push(t),
+    });
+    return { root, guard, events };
+  }
+
+  it("未能回滚的路径与原因同时进事件流与失败摘要", async () => {
+    const { root, guard, events } = shortfallFixture("paths", ["rogue/a.js", "rogue/b.js"]);
+    const scope = await guard.begin("r-shortfall", root, ["src"]);
+    write(root, "rogue/a.js", "after");
+    write(root, "rogue/b.js", "after");
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    // 两处都要有：事件流给操作员，logDigest 会被拼进重修 prompt 给下一个执行器
+    for (const [where, text] of [
+      ["事件流", events.join("|")],
+      ["失败摘要", verdict.outcomes[0]!.logDigest],
+    ] as const) {
+      expect(text, `${where}没报数量`).toContain("2 个未能回滚");
+      expect(text, `${where}没点名 rogue/a.js`).toContain("rogue/a.js");
+      expect(text, `${where}没点名 rogue/b.js`).toContain("rogue/b.js");
+      // 原因跟路径一起给：`skipped` 里混着"真失败"与"本来就不需要动"两类
+      expect(text, `${where}没带原因`).toContain("需人工确认");
+    }
+  });
+
+  it("名单超限时截断，但明说还有多少没列 —— 不静默丢", async () => {
+    const names = Array.from({ length: 10 }, (_, i) => `rogue/f${i}.js`);
+    const { root, guard, events } = shortfallFixture("cap", names);
+    const scope = await guard.begin("r-shortfall-cap", root, ["src"]);
+    for (const rel of names) write(root, rel, "after");
+
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    const text = events.join("|");
+    expect(text).toContain("10 个未能回滚");
+    expect(text).toContain("rogue/f0.js");
+    expect(text).toContain("rogue/f7.js"); // 上限 8：最后一个被列出的
+    expect(text).not.toContain("rogue/f8.js"); // 超出的一条都不列（免得把 prompt 撑爆）
+    expect(text).toContain("另有 2 个未列出"); // 但也不许静默丢
+  });
+
+  it("隔离没挪成的同样点名（事件流 + 失败摘要）", async () => {
+    const root = scratch("guard-quarantine-stuck");
+    const backupRoot = scratch("guard-quarantine-stuck-backups");
+    const events: string[] = [];
+    const guard = new BatchGuard({
+      snapshots: new SnapshotStore({ backupRoot }),
+      mode: "quarantine",
+      onEvent: (t) => events.push(t),
+    });
+    write(root, "rogue/a.js", "a");
+    write(root, "rogue/b.js", "b");
+    const scope = await guard.begin("r-q-stuck", root, ["src"]);
+    // 被**删除**的越权文件无档可隔 —— 隔离必然失败，而这正是它该被点名的场景
+    fs.rmSync(path.join(root, "rogue/a.js"));
+    fs.rmSync(path.join(root, "rogue/b.js"));
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    expect(events.join("|")).toContain("2 个失败");
+    expect(events.join("|")).toContain("rogue/a.js");
+    expect(events.join("|")).toContain("rogue/b.js");
+    const digest = verdict.outcomes[0]!.logDigest;
+    expect(digest).toContain("2 个越权文件未能移入隔离区");
+    expect(digest).toContain("rogue/a.js");
+  });
+
+  it("负例：干净回滚不出现「未能回滚」—— 别把正常收尾也报成混合态", async () => {
+    const root = scratch("guard-no-shortfall");
+    const backupRoot = scratch("guard-no-shortfall-backups");
+    const events: string[] = [];
+    const guard = new BatchGuard({
+      snapshots: new SnapshotStore({ backupRoot }),
+      mode: "revert-batch",
+      onEvent: (t) => events.push(t),
+    });
+    const scope = await guard.begin("r-clean-revert", root, ["src"]);
+    write(root, "rogue/x.js", "rogue"); // 本批新建的越权文件 ⇒ 应被删除，不是"未能回滚"
+
+    const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    expect(events.join("|")).toContain("删除 1 个新增文件");
+    expect(events.join("|")).not.toContain("未能回滚");
+    expect(verdict.outcomes[0]!.logDigest).not.toContain("未能回滚");
+  });
+});
+
 describe("updateDeletionLedger · 台账状态转移（纯函数）", () => {
   /**
    * `continue` 与 `break` 的差别只在"被跳过的条目之后还有没有条目"这一格 ——
