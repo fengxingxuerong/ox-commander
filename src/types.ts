@@ -168,6 +168,8 @@ export interface AppState {
   interrupted?: boolean;
   /** ts of the last audit fact, shown next to the recovery banner. */
   lastActivityTs?: string;
+  /** 本次 run 的开始时刻（confirmAndExecute 落的；看板据此显示已耗时）。 */
+  runStartedAt?: number;
   escalations: EscalationView[];
   approvals: ApprovalView[];
   conflicts: ConflictView[];

@@ -399,6 +399,19 @@ describe("BoardPage", () => {
     expect(s.stage).toBe("DEVELOPMENT");
     expect(s.receipt).toBeUndefined();
     expect(s.verification).toBeUndefined();
+    expect(typeof s.runStartedAt).toBe("number"); // 已耗时展示的数据源
+  });
+
+  it("看板显示运行已耗时（runStartedAt 起算，2026-10-13）", () => {
+    seedBoard(); // VERIFICATION = 运行态
+    useApp.setState({ runStartedAt: Date.now() - 65_000 });
+    render(<BoardPage />);
+    expect(screen.getByText(/已耗时/)).toBeTruthy();
+    // 无运行态（有凭据）时不显示 —— 它是"本次 run"的计时器（render 后改 store 要包 act）
+    act(() => {
+      useApp.setState({ stage: "DONE" });
+    });
+    expect(screen.queryByText(/已耗时/)).toBeNull();
   });
 
   it("本次运行用量上板：可信边界与预算盲区都念出来", () => {

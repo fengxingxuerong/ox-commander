@@ -746,7 +746,7 @@ const SITE_BASELINE = {
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
-  "headless/protocol.ts": 93,
+  "headless/protocol.ts": 95,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 26,
   "headless/schedule-core.ts": 21,

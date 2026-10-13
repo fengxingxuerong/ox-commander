@@ -65,9 +65,20 @@ describe("parseSpec", () => {
     expect(spec.warnings).toEqual([]);
   });
 
-  it("echoes a host-supplied protocol version", () => {
-    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, protocolVersion: "ox-headless/9" }));
-    expect(spec.protocolVersion).toBe("ox-headless/9");
+  it("显式 protocolVersion 只认 ox-headless/1（2026-10-13 收紧）", () => {
+    // 旧行为：任意非空串都接受、只回声 —— 宿主写 ox-headless/999 也照跑，
+    // 语义漂了无人察觉。现在主版本不认识/形态不对都是 spec 错误。
+    // parse() 助手：ok=false 会抛（消息带原文）—— 正例拿 spec，负例断言消息。
+    const ok = parse(JSON.stringify({ ...LEGACY_SPEC, protocolVersion: "ox-headless/1" }));
+    expect(ok.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(() => parse(JSON.stringify({ ...LEGACY_SPEC, protocolVersion: "ox-headless/9" }))).toThrow(
+      /主版本 9/,
+    );
+    for (const bad of ["1.0", "ox-headless/", "v1"]) {
+      expect(() => parse(JSON.stringify({ ...LEGACY_SPEC, protocolVersion: bad })), bad).toThrow(
+        /protocolVersion/,
+      );
+    }
   });
 
   it("reports unknown fields as warnings instead of failing", () => {

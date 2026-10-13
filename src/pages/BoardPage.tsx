@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
@@ -59,6 +59,33 @@ export function SILENCE_LABEL(lastActivityTs: number, now: number): string | und
   return `⏸ 静默 ${silentS}s`;
 }
 
+/**
+ * 日志视图（2026-10-13 从 BoardPage 拆出 + memo）：此前 `logs` 由 BoardPage 整页
+ * 订阅 —— 日志风暴（每条事件一次 set）会重渲染整页（任务列表/凭据/审计跟着跑），
+ * 这是长任务下的首要渲染成本。拆出后只有本组件订阅 `logs`：非 logs 的状态变化
+ * 不再触碰它，logs 变化也只重渲染这一个 `<pre>`。
+ */
+const LogView = memo(function LogView() {
+  const logs = useApp((s) => s.logs);
+  // 终端行为：跟随新输出，除非操作者上滚看历史 —— 那就暂停钉底，滚回底部附近恢复。
+  const logRef = useRef<HTMLPreElement>(null);
+  const logPinnedRef = useRef(true);
+  const handleLogScroll = () => {
+    const el = logRef.current;
+    if (!el) return;
+    logPinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+  };
+  useEffect(() => {
+    const el = logRef.current;
+    if (el && logPinnedRef.current) el.scrollTop = el.scrollHeight;
+  }, [logs]);
+  return (
+    <pre ref={logRef} onScroll={handleLogScroll} className="log-view">
+      {logs.join("\n") || "等待开始…"}
+    </pre>
+  );
+});
+
 /** 凭据任务账的状态图标（与看板任务状态同色系，但这里是**结论**不是进度）。 */
 const RECEIPT_TASK_ICON: Record<ReceiptTaskStatus, string> = {
   done: "✅",
@@ -70,7 +97,6 @@ const RECEIPT_TASK_ICON: Record<ReceiptTaskStatus, string> = {
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
-  const logs = useApp((s) => s.logs);
   const verification = useApp((s) => s.verification);
   const receipt = useApp((s) => s.receipt);
   const usage = useApp((s) => s.usage);
@@ -88,6 +114,7 @@ export function BoardPage() {
     return () => clearInterval(timer);
   }, []);
   const lastActivityTs = useApp((s) => s.lastActivityTs);
+  const runStartedAt = useApp((s) => s.runStartedAt);
   const loadRecovery = useApp((s) => s.loadRecovery);
   const start = useApp((s) => s.confirmAndExecute);
   const activeProjectId = useApp((s) => s.activeProjectId);
@@ -105,20 +132,6 @@ export function BoardPage() {
     void loadRecovery();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount-only by design
   }, []);
-  // Terminal behavior: the log view follows new output, unless the operator
-  // has scrolled up to inspect history — then pinning pauses until they
-  // scroll back near the bottom.
-  const logRef = useRef<HTMLPreElement>(null);
-  const logPinnedRef = useRef(true);
-  const handleLogScroll = () => {
-    const el = logRef.current;
-    if (!el) return;
-    logPinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
-  };
-  useEffect(() => {
-    const el = logRef.current;
-    if (el && logPinnedRef.current) el.scrollTop = el.scrollHeight;
-  }, [logs]);
   const openWorkspace = async () => {
     if (!activeProjectId) return;
     setWorkspaceError(null);
@@ -160,7 +173,12 @@ export function BoardPage() {
         {/* 左栏：阶段进度 + 任务列表（DAG 分组） */}
         <aside className="col col-left">
           <section className="card">
-            <h3>流水线阶段</h3>
+            <h3>
+              流水线阶段
+              {runActive && runStartedAt !== undefined && (
+                <span className="task-meta"> · ⏱ 已耗时 {Math.max(0, Math.floor((tickNow - runStartedAt) / 1000))}s</span>
+              )}
+            </h3>
             <ol className="stage-list">
               {STAGE_ORDER.map((s) => (
                 <li key={s} className={s === stage ? "current" : ""}>
@@ -206,7 +224,7 @@ export function BoardPage() {
         <main className="col col-center">
           <section className="card log-card">
             <h3>执行日志</h3>
-            <pre ref={logRef} onScroll={handleLogScroll} className="log-view">{logs.join("\n") || "等待开始…"}</pre>
+            <LogView />
           </section>
           <AuditPanel />
         </main>

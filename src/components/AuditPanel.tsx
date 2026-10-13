@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { AuditExportResult, AuditRecordView } from "../types";
 
 const PHASE_LABELS: Record<AuditRecordView["phase"], string> = {
@@ -73,27 +73,35 @@ export function AuditPanel() {
   };
 
   // `read()` 返回的是 newest last，而面板要最新在上。
-  const visible = records
-    .filter((r) => (phase === "all" || r.phase === phase) && (!onlyFailures || r.ok === false))
-    .slice()
-    .reverse();
+  // 2026-10-13 useMemo：此前每次渲染（任意 store 状态变化）都重算筛选与聚合 ——
+  // 审计面板与日志同栏，日志风暴期间这段会跟着跑几百次。
+  const visible = useMemo(
+    () =>
+      records
+        .filter((r) => (phase === "all" || r.phase === phase) && (!onlyFailures || r.ok === false))
+        .slice()
+        .reverse(),
+    [records, phase, onlyFailures],
+  );
 
   // 按 agentId 折叠成一行成功/失败：操作者先想知道"哪只手最不稳"，
   // 而不是在几十条记录里逐条数。聚合跟随当前筛选（所见即所统）——
   // 若统计范围与列表不一致，任何一行数字都需要额外解释才能相信。
   // run 起止没有 agentId：它们是 run 级事实，不是某只手的，不进聚合。
-  const perAgent = new Map<string, { ok: number; fail: number }>();
-  for (const r of visible) {
-    if (!r.agentId) continue;
-    const s = perAgent.get(r.agentId) ?? { ok: 0, fail: 0 };
-    if (r.ok === true) s.ok += 1;
-    else if (r.ok === false) s.fail += 1;
-    perAgent.set(r.agentId, s);
-  }
-  const agentStats = [...perAgent.entries()]
-    .map(([id, s]) => ({ id, ...s }))
-    // 失败多的排前面，其次成功多的；同分按 id 稳定排序，避免每次刷新顺序抖动。
-    .sort((a, b) => b.fail - a.fail || b.ok - a.ok || a.id.localeCompare(b.id));
+  const agentStats = useMemo(() => {
+    const perAgent = new Map<string, { ok: number; fail: number }>();
+    for (const r of visible) {
+      if (!r.agentId) continue;
+      const s = perAgent.get(r.agentId) ?? { ok: 0, fail: 0 };
+      if (r.ok === true) s.ok += 1;
+      else if (r.ok === false) s.fail += 1;
+      perAgent.set(r.agentId, s);
+    }
+    return [...perAgent.entries()]
+      .map(([id, s]) => ({ id, ...s }))
+      // 失败多的排前面，其次成功多的；同分按 id 稳定排序，避免每次刷新顺序抖动。
+      .sort((a, b) => b.fail - a.fail || b.ok - a.ok || a.id.localeCompare(b.id));
+  }, [visible]);
 
   return (
     <section className="card">

@@ -350,6 +350,26 @@ export function parseSpec(rawText: string): ParseResult {
     if (!KNOWN_FIELDS.has(key)) warnings.push(`未知字段 "${key}" 已忽略`);
   }
 
+  // 协议版本（2026-10-13 收紧）：此前"任意非空字符串"都接受、只回声 —— 宿主写
+  // `ox-headless/999` 也照跑，语义漂了也无人察觉。现在：缺席 = 当前版本；显式
+  // 给出必须是 `ox-headless/<整数>` 且主版本 = 1（本引擎只按 1 的语义跑，拒绝
+  // 猜测兼容）；形态不对也拒绝 —— 版本协商从拼写开始就严格。
+  let protocolVersion = PROTOCOL_VERSION;
+  if (raw.protocolVersion !== undefined) {
+    const m = isNonEmptyString(raw.protocolVersion)
+      ? /^ox-headless\/(\d+)$/.exec(raw.protocolVersion)
+      : null;
+    if (!m) {
+      issues.push(
+        `protocolVersion 必须形如 ${PROTOCOL_VERSION}，实际收到：${JSON.stringify(raw.protocolVersion)}`,
+      );
+    } else if (m[1] !== "1") {
+      issues.push(`protocolVersion 不认识的主版本 ${m[1]}（本引擎只按 1 的语义跑，拒绝猜测兼容）`);
+    } else {
+      protocolVersion = raw.protocolVersion as string; // 正则已钉死形态：ox-headless/1
+    }
+  }
+
   if (!isNonEmptyString(raw.requirement)) issues.push("requirement 必须是非空字符串");
   if (!isNonEmptyString(raw.projectRoot)) issues.push("projectRoot 必须是非空字符串");
 
@@ -557,7 +577,7 @@ export function parseSpec(rawText: string): ParseResult {
   return {
     ok: true,
     spec: {
-      protocolVersion: isNonEmptyString(raw.protocolVersion) ? raw.protocolVersion : PROTOCOL_VERSION,
+      protocolVersion,
       requirement: (raw.requirement as string).trim(),
       projectRoot: path.resolve(raw.projectRoot as string),
       ...(prd ? { prd } : {}),

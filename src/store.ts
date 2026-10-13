@@ -187,6 +187,7 @@ export const useApp = create<AppState>((set, get) => ({
       // 会让"这次跑到哪了"读不出真假，也和按钮的运行态联动相互依赖（2026-10-13）。
       verification: undefined,
       receipt: undefined,
+      runStartedAt: Date.now(),
     });
     try {
       await api().startOrchestration(activeProjectId);
