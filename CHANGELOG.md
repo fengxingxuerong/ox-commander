@@ -6,6 +6,21 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（smoke-fullchain 漏接 fileExists 探针 · 2026-10-15）
+
+`scripts/smoke-fullchain.mjs` 自建引擎时没喂 `fileExists`，而引擎对这条判据的口径是
+**没喂就是没检查、不是检查通过** —— 它只打一行告警就继续，冒烟照样报绿。
+契约路径合规（Stage 3.5）正是昨天修幽灵义务的那条防线，在这条「全链路」冒烟里却是断的。
+
+- 接上真探针（`fs.existsSync(path.join(root, rel))`，与 `platform.ts` / `run-spec.ts`
+  同一实现 —— 引擎已过 `isProbeableRel`，宿主不再重复判定）。
+- **并加覆盖断言**：`probeCalls > 0` 且日志出现「契约路径合规：核了 N 条」才允许 exit 0。
+  只接不断言，"接了但从未被调用"仍会静默绿。
+- 真跑（4m07s，EXIT 0）：两轮各「核了 2 条点名路径，缺 0 条」，probeCalls=4。
+
+模式（可推广）：引擎里凡是**可选注入**的能力（`fileExists` / `conflicts` /
+`exportDeliveryBranch`）都是同一口径，写冒烟时要逐个问「这条冒烟有没有断言它真的跑了」。
+
 ### 修复（真跑 e2e 负结果的三个病灶：幽灵义务 / 路由不换线 / touched 并行互踩 · 2026-10-14）
 
 2026-10-14 的 `run-multiagent-e2e.mjs --real` 真跑（35 min、12.5 万 token、exit 1）

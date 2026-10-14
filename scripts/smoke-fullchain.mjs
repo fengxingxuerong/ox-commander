@@ -117,11 +117,28 @@ async function main() {
 
   const settings = { ...DEFAULT_SETTINGS, maxRepairRounds: 2 };
   const logs = [];
+  /*
+   * 契约路径合规（Stage 3.5）的存在性探针。
+   *
+   * 为什么必须在这里显式接上：引擎对这条判据的口径是 **不喂就是没检查** ——
+   * 宿主没接 `fileExists` 时，它只打一行「这一轮没有执行」就继续，不会静默给绿，
+   * 但也**不会**让这条冒烟变红。结果就是一处"自称全链路、其实少一环"的覆盖洞：
+   * 契约路径合规正是 2026-10-14 幽灵义务那轮修的防线，在冒烟里却是断的。
+   *
+   * 所以这里做两件事：① 接真文件系统（与 platform.ts / run-spec.ts 同一实现：
+   * 引擎已把路径过成干净相对路径，宿主只 join + existsSync）；② 记调用次数，
+   * 结尾断言它**真的被调用过** —— 接上但从未调用，同样是空转。
+   */
+  let probeCalls = 0;
   const engine = new OrchestratorEngine(
     {
       llm: { chat: async () => { throw new Error("planning not used here"); } },
       scheduler: new Scheduler([new SensenovaApiAdapter()], [], new ZoneGuard()),
       verify: (cwd) => verifyProject(settings.verificationCommands, { cwd: () => cwd }),
+      fileExists: (r, rel) => {
+        probeCalls += 1;
+        return fs.existsSync(path.join(r, rel));
+      },
       settings,
     },
     {
@@ -148,7 +165,23 @@ async function main() {
       console.log("capitalize('hELLO') =", m.capitalize ? m.capitalize("hELLO") : "(missing)");
       console.log("words('a  b c') =", m.words ? JSON.stringify(m.words("a  b c")) : "(missing)");
     }
-    process.exit(report.passed ? 0 : 1);
+    /*
+     * 覆盖断言：契约路径合规这一层必须**真跑过**，否则这条冒烟不能算全链路。
+     * 两个信号都要有 —— 探针被调用（引擎进了 Stage 3.5）+ 引擎自报"核了 N 条"
+     * （真的从任务描述里提取出了可核的点名路径，而不是核了 0 条还打绿）。
+     */
+    const contractLine = logs.find((l) => String(l).startsWith("契约路径合规：核了"));
+    const skipped = logs.some((l) => String(l).includes("没有执行") || String(l).includes("什么都没检查"));
+    console.log("contract probe calls:", probeCalls);
+    console.log("contract check line:", contractLine ?? (skipped ? "(空转：引擎说这一层没检查)" : "(无)"));
+    const covered = probeCalls > 0 && Boolean(contractLine);
+    if (!covered) {
+      console.log(
+        "FAIL: 契约路径合规没有被真正执行 —— 这条冒烟失去覆盖它的意义" +
+          `（probeCalls=${probeCalls}，跳过/空转=${skipped}）`,
+      );
+    }
+    process.exit(report.passed && covered ? 0 : 1);
   } finally {
     // Keep the workspace for inspection on failure; clean on success.
     if (process.exitCode === 0) fs.rmSync(root, { recursive: true, force: true });
