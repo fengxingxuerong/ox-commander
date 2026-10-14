@@ -2,7 +2,7 @@ node_modules/
 dist/
 dist-electron/
 dist-headless/
-release/
+release*/
 logs/
 *.log
 .env
