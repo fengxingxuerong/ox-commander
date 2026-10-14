@@ -3472,3 +3472,250 @@ describe("执行期中止闸的接线（2026-10-13）", () => {
     expect(() => eng.cancel()).not.toThrow();
   });
 });
+
+/**
+ * 2026-10-14 --real 真跑负结果的三处修复（F1b/F2/F3）的位点补杀。
+ * 9 个存活全在新增代码里：F3 定向重修分支（probe 三元、outcome 查找、守卫、
+ * 幽灵消息）与 F2 失败账收集（|| → &&、continue → break）。
+ */
+describe("F3 定向重修 —— 验证败但无失败任务时，契约缺口有主 ⇒ 只重派有主的任务", () => {
+  const mkTask = (id: string, zone: string, description: string): Task => ({
+    id,
+    title: id,
+    description,
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  it("宿主没接探针 ⇒ Stage 3.5 整层跳过，验证败仍走全员重跑且不炸", async () => {
+    const events: string[] = [];
+    let calls = 0;
+    const scheduler = {
+      async runBatch(tasks: Task[]) {
+        calls += 1;
+        return tasks.map((t) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(calls >= 2),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+      // 刻意不接 fileExists。
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (l) => events.push(l),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const t1 = mkTask("t1", "src/cli.js", "Create src/cli.js. Also create samples/sample.csv.");
+    const report = await eng.execute([[t1]], ".");
+    expect(report.passed).toBe(true);
+    expect(events.some((e) => e.includes("全员重跑"))).toBe(true);
+  });
+
+  it("Stage 3.5 幽灵翻红：digest 经 repairOf 进下轮重修上下文（@999 补杀）+ 日志点名幽灵（@1013 补杀）", async () => {
+    const events: string[] = [];
+    const repairDigests: string[] = [];
+    let calls = 0;
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { repairOf?: Map<string, { round: number; errorLogDigest: string }> },
+      ) {
+        calls += 1;
+        if (calls >= 2) {
+          for (const t of tasks) {
+            const d = opts?.repairOf?.get(t.id);
+            if (d) repairDigests.push(d.errorLogDigest);
+          }
+        }
+        return tasks.map((t) => ({ taskId: t.id, ok: true, logDigest: "ok", events: [] }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(false),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      // samples/sample.csv 不在盘上，但它的 index 布局（samples/sample/index.js）在
+      // —— indexLayout 有值。
+      // 这不是随手写的：@975 位点（ghost 分支的三元被换成 indexLayout）在
+      // indexLayout 为 null 时与原版不可区分（filter(Boolean) 把 null 滤掉），
+      // 只有"等价布局在场"才能把两种 digest 分开。
+      fileExists: (_root, rel) => rel === "samples/sample/index.js",
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (l) => events.push(l),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const t4 = mkTask("t4", "src/cli.js", "Create src/cli.js. Also create samples/sample.csv.");
+    await expect(eng.execute([[t4]], ".")).rejects.toThrow(); // 幽灵靠重跑治不了，轮数耗尽
+    // 翻红发生在 Stage 3.5（验证之前）⇒ 每一轮都翻；digest 进下一轮 repairOf。
+    expect(events.some((e) => e.includes("（幽灵义务：无 zone 认领）"))).toBe(true);
+    expect(repairDigests.length).toBeGreaterThan(0);
+    for (const d of repairDigests) {
+      // repairOf digest 按**段落**（\n\n）组装：归因头 / 失败日志 / 履历。
+      // 定位"上次失败日志"段 —— 它就是 Stage 3.5 翻红时写进 lastFailedLogs 的
+      // digest 本体。⚠️ 必须按段落切而不是按行：翻红 digest 自身可以多行，
+      // 按行 find 会把第二行落成独立物理行而漏看（@975 第一次补杀就栽在这）。
+      const segment = d
+        .split("\n\n")
+        .find((s) => s.startsWith("[该任务上次失败日志] "));
+      expect(segment).toBeDefined();
+      const body = segment!.slice("[该任务上次失败日志] ".length);
+      expect(body).toContain("没有任何 zone 认领它");
+      // @975：幽灵分支的三元无论被换成 indexLayout 还是整段互换，都会让翻红
+      // digest 多出第二行 —— 而幽灵 digest 的契约就是**恰好一行**：行动指引
+      // （等价布局/按契约路径创建）只属于非幽灵缺口，幽灵的根因在规划，给
+      // 执行者任何"去写某个文件"的指引都是误导。形状断言把整族置换一网打尽。
+      expect(body.split("\n")).toHaveLength(1);
+      expect(body).not.toContain("等价布局");
+      expect(body).not.toContain("请把该文件按契约路径创建出来");
+      expect(body).not.toContain("samples/sample/index.js");
+    }
+  });
+});
+
+describe("F2 失败账 —— runBatch 收到的 taskFailures 只含失败且带 agentId 的 outcome（@938 补杀）", () => {
+  it("ok 的不计入（|| → && 补杀）、第二个失败的也计入（break 补杀）", async () => {
+    const ledgers: Array<Record<string, Record<string, number>>> = [];
+    let calls = 0;
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { taskFailures?: (taskId: string) => ReadonlyMap<string, number> | undefined },
+      ) {
+        calls += 1;
+        if (calls >= 2) {
+          const snap: Record<string, Record<string, number>> = {};
+          for (const t of tasks) {
+            const m = opts?.taskFailures?.(t.id);
+            if (m) snap[t.id] = Object.fromEntries(m);
+          }
+          ledgers.push(snap);
+        }
+        const fail = calls === 1;
+        return tasks.map((t) => ({
+          taskId: t.id,
+          ok: fail ? t.id === "t3" : true,
+          logDigest: "boom",
+          events: [],
+          ...(fail && t.id !== "t3" ? { agentId: t.id === "t1" ? "a1" : "a2" } : {}),
+        }));
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(calls >= 2),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const mk = (id: string, zone: string): Task => ({
+      id,
+      title: id,
+      description: "",
+      zone,
+      dependencies: [],
+      suggestedRole: "backend-dev",
+    });
+    const report = await eng.execute([[mk("t1", "src/a"), mk("t2", "src/b"), mk("t3", "src/c")]], ".");
+    expect(report.passed).toBe(true);
+    // t1 失败@a1、t2 失败@a2、t3 成功 ⇒ 账面只记前两个；t3 不许出现在账里。
+    expect(ledgers.length).toBeGreaterThan(0);
+    for (const snap of ledgers) {
+      expect(snap["t1"]).toEqual({ a1: 1 });
+      expect(snap["t2"]).toEqual({ a2: 1 });
+      expect(snap["t3"]).toBeUndefined();
+    }
+  });
+});
+
+/**
+ * @914 两个位点（|| → && 与 continue → break）的补杀。
+ * 形状要点：ok outcome 排在失败**前面**（break 补杀）、失败 outcome 不带 agentId
+ * （|| → && 补杀 —— 无 agent 可罚，账面不许出现 undefined 键）。
+ */
+describe("F2 失败账 —— 顺序与无主失败（@914 补杀）", () => {
+  it("ok 在前不截断后面的失败账；无 agentId 的失败不进账", async () => {
+    const ledgers: Array<Record<string, Record<string, number>>> = [];
+    let calls = 0;
+    const scheduler = {
+      async runBatch(
+        tasks: Task[],
+        _root: string,
+        opts?: { taskFailures?: (taskId: string) => ReadonlyMap<string, number> | undefined },
+      ) {
+        calls += 1;
+        if (calls >= 2) {
+          const snap: Record<string, Record<string, number>> = {};
+          for (const t of tasks) {
+            const m = opts?.taskFailures?.(t.id);
+            if (m) snap[t.id] = Object.fromEntries(m);
+          }
+          ledgers.push(snap);
+        }
+        return tasks.map((t) => {
+          if (t.id === "t1") return { taskId: t.id, ok: true, logDigest: "ok", events: [], agentId: "a1" };
+          if (t.id === "t2") {
+            // 首轮失败且不带 agentId（如 "no agent available"）—— 没有谁来背这条账；
+            // 重修轮成功，让运行能走完。
+            return {
+              taskId: t.id,
+              ok: calls >= 2,
+              logDigest: calls >= 2 ? "ok" : "no agent",
+              events: [],
+              ...(calls < 2 ? {} : { agentId: "a2" }),
+            };
+          }
+          return { taskId: t.id, ok: calls === 1 ? false : true, logDigest: "boom", events: [], agentId: "a3" };
+        });
+      },
+    } as unknown as Scheduler;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler,
+      verify: async () => makeReport(calls >= 2),
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 2 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: () => undefined,
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+    });
+    const mk = (id: string, zone: string): Task => ({
+      id,
+      title: id,
+      description: "",
+      zone,
+      dependencies: [],
+      suggestedRole: "backend-dev",
+    });
+    const report = await eng.execute([[mk("t1", "src/a"), mk("t2", "src/b"), mk("t3", "src/c")]], ".");
+    expect(report.passed).toBe(true);
+    expect(ledgers.length).toBeGreaterThan(0);
+    for (const snap of ledgers) {
+      // t2 的失败没有 agentId ⇒ 无账可记；t3 的失败@a3 ⇒ 必须在账里（ok 的 t1
+      // 排在前面不许把循环截断）。
+      expect(snap["t2"]).toBeUndefined();
+      expect(snap["t3"]).toEqual({ a3: 1 });
+    }
+  });
+});

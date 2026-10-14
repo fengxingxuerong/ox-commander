@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   checkContractPaths,
   declaredArtifactPaths,
+  describeGhostObligations,
   describeZoneGaps,
   extractDeclaredPaths,
+  findGhostObligations,
   findOrphanPaths,
   verificationCommandPaths,
 } from "../shared/zone-coverage";
@@ -300,7 +302,9 @@ describe("checkContractPaths —— 点名的文件必须真的在盘上", () =>
   it("点名的文件缺失 ⇒ 报 gap，并点名等价布局", () => {
     const r = checkContractPaths([T1], (p) => p === "src/core/csv/index.js");
     expect(r.checked).toBe(1);
-    expect(r.gaps).toEqual([{ taskId: "t1", path: "src/core/csv.js", indexLayout: "src/core/csv/index.js" }]);
+    expect(r.gaps).toEqual([
+      { taskId: "t1", path: "src/core/csv.js", indexLayout: "src/core/csv/index.js", ghost: false },
+    ]);
   });
 
   it("文件在 ⇒ 不报（正向对照：判据不是「永远红」）", () => {
@@ -314,12 +318,22 @@ describe("checkContractPaths —— 点名的文件必须真的在盘上", () =>
     expect(r.gaps[0]?.indexLayout).toBeNull();
   });
 
-  it("义务只认任务自己的 description：PRD 或别人的描述里点名，不算它的活儿", () => {
-    const other = task("t2", "src/report", "renderReport(rows)；它 require src/core/csv.js 里的 parseCsv");
-    // t2 的 zone 不含 src/core/csv.js ⇒ isPathInZone 挡掉，不判 t2；t1 仍然只被自己的描述牵上
-    const r = checkContractPaths([other], () => false);
-    expect(r.checked).toBe(0);
-    expect(r.gaps).toEqual([]);
+  it("义务只认 zone 认领者：别人的 zone 盖住了路径 ⇒ 点名者不背；无人认领 ⇒ 归点名者（幽灵义务）", () => {
+    // 2026-10-14 修订前的旧语义是"out-of-zone 点名一律跳过"—— samples 真跑
+    // 证明那是盲区：规划把产物分给 zone 盖不住的任务，执行者写了必被回滚，
+    // 三层检查全看不见。新语义：无人认领 ⇒ 归点名者（ghost=true）。
+    const ref = task("t2", "src/report", "renderReport(rows)；它 require src/core/csv.js 里的 parseCsv");
+    const owner = task("t1", "src/core/csv", "Create src/core/csv.js — CommonJS exporting parseCsv(text).");
+    // t1 的 zone 认领了 csv.js ⇒ t2 的点名只是引用，义务归 t1。
+    const withOwner = checkContractPaths([ref, owner], () => false);
+    expect(withOwner.checked).toBe(1);
+    expect(withOwner.gaps.map((g) => g.taskId)).toEqual(["t1"]);
+    // 只有 t2（zone 盖不住）⇒ 幽灵义务，归 t2。
+    const ghost = checkContractPaths([ref], () => false);
+    expect(ghost.checked).toBe(1);
+    expect(ghost.gaps).toEqual([
+      { taskId: "t2", path: "src/core/csv.js", indexLayout: null, ghost: true },
+    ]);
   });
 
   it("归属不唯一 ⇒ 不判（误判的代价是一整轮修预算白烧）", () => {
@@ -355,7 +369,9 @@ describe("checkContractPaths —— 点名的文件必须真的在盘上", () =>
     const t = task("t5", "tests", "Write tests/csv.test.js and tests/stats.test.js using node:test.");
     const r = checkContractPaths([t], (p) => p === "tests/csv.test.js");
     expect(r.checked).toBe(2);
-    expect(r.gaps).toEqual([{ taskId: "t5", path: "tests/stats.test.js", indexLayout: null }]);
+    expect(r.gaps).toEqual([
+      { taskId: "t5", path: "tests/stats.test.js", indexLayout: null, ghost: false },
+    ]);
   });
 });
 
@@ -412,12 +428,17 @@ describe("checkContractPaths —— 多元素时的 continue 语义", () => {
   });
 
   it("同一任务里先出现不归本 zone 的路径，再出现归本 zone 的 ⇒ 后者仍被核", () => {
-    // 摘掉 `if (!isPathInZone(...)) continue` 的 continue 语义（改成 break）
-    // 会让第一个不匹配的路径把整条描述的后半截丢掉。
+    // 摘掉提取循环的 continue 语义（改成 break）会让第一个元素把整条描述的
+    // 后半截丢掉。2026-10-14 起第一个元素本身也入账（幽灵义务归点名者）——
+    // 两条都要出现在结果里，且 ghost 标记各归各位：这条同时钉住"循环不断链"
+    // 与"幽灵/在册两种归属不互相污染"。
     const t = task("t1", "src/report", "它先读 src/other/nope.js，然后写 src/report/report.js");
     const r = checkContractPaths([t], () => false);
-    expect(r.checked).toBe(1);
-    expect(r.gaps.map((g) => g.path)).toEqual(["src/report/report.js"]);
+    expect(r.checked).toBe(2);
+    expect(r.gaps).toEqual([
+      { taskId: "t1", path: "src/other/nope.js", indexLayout: null, ghost: true },
+      { taskId: "t1", path: "src/report/report.js", indexLayout: null, ghost: false },
+    ]);
   });
 
   it("先有一条归属不唯一、后有一条归属唯一 ⇒ 后者仍被判定", () => {
@@ -436,5 +457,109 @@ describe("checkContractPaths —— 多元素时的 continue 语义", () => {
     const r = checkContractPaths([t], () => false);
     expect(r.gaps.map((g) => g.path)).toEqual(["tests/csv.test.js", "tests/stats.test.js"]);
     expect(r.checked).toBe(2);
+  });
+});
+
+/**
+ * 幽灵义务（2026-10-14 --real 真跑的负结果逼出来的一层）。
+ * 真实因果链：规划官在 t4 的 description 里点名 samples/sample.csv 与
+ * samples/edge.csv，只给了 zone src/cli.js —— 执行者一写就被仲裁回滚，
+ * 独立冒烟 file not found，最后一轮重修预算烧光。PRD 级 findOrphanPaths
+ * 看不见它（samples 是分解时才发明的，PRD 里没有）。
+ */
+describe("findGhostObligations —— 任务点名了路径，却没有任何 zone 认领", () => {
+  const task = (id: string, zone: string, description: string): Task => ({
+    id,
+    title: id,
+    description,
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  it("zone 盖不住自己点名的路径 ⇒ 幽灵，归点名者", () => {
+    const t4 = task("t4", "src/cli.js", "Create src/cli.js. Also create samples/sample.csv with content.");
+    const ghosts = findGhostObligations([t4]);
+    expect(ghosts).toEqual([
+      { path: "samples/sample.csv", declaredBy: ["t4"], zones: ["src/cli.js"] },
+    ]);
+  });
+
+  it("别的任务 zone 认领了 ⇒ 不是幽灵（点名只是引用）", () => {
+    const a = task("ta", "src/report", "renderReport 需要读 src/core/csv.js 里的 parseCsv");
+    const owner = task("tb", "src/core", "Create src/core/csv.js");
+    expect(findGhostObligations([a, owner])).toEqual([]);
+  });
+
+  it("被两个任务点名、仍无人认领 ⇒ 还是幽灵（declaredBy 记全）", () => {
+    const a = task("ta", "src/cli.js", "产出 samples/edge.csv");
+    const b = task("tb", "src/report", "samples/edge.csv 也要更新");
+    const ghosts = findGhostObligations([a, b]);
+    expect(ghosts).toEqual([
+      { path: "samples/edge.csv", declaredBy: ["ta", "tb"], zones: ["src/cli.js", "src/report"] },
+    ]);
+  });
+
+  it("保护前缀（node_modules/.git/ox-scripts）不算义务", () => {
+    const t = task("t1", "src", "不要动 node_modules/left-pad 与 ox-scripts/test.js");
+    expect(findGhostObligations([t])).toEqual([]);
+  });
+
+  it("zone 本身盖得住 ⇒ 空输出（正向对照）", () => {
+    const t = task("t1", "samples", "产出 samples/sample.csv 与 samples/edge.csv");
+    expect(findGhostObligations([t])).toEqual([]);
+  });
+
+  it("describeGhostObligations 的消息带点名者与现有 zone", () => {
+    const t4 = task("t4", "src/cli.js", "Also create samples/sample.csv.");
+    const msg = describeGhostObligations(findGhostObligations([t4]));
+    expect(msg).toContain("samples/sample.csv");
+    expect(msg).toContain("t4 点名");
+    expect(msg).toContain("src/cli.js");
+  });
+});
+
+/**
+ * findGhostObligations 的三条存活位点补杀（2026-10-14 逐位点审计）：
+ * 循环两处 continue→break 与排序比较器三元互换。全部是**多元素顺序**行为 ——
+ * 单元素用例天然杀不掉它们，这正是当初 continue→break 换成无人发现的同一形状。
+ */
+describe("findGhostObligations —— 多元素顺序语义（位点补杀）", () => {
+  const task = (id: string, zone: string, description: string): Task => ({
+    id,
+    title: id,
+    description,
+    zone,
+    dependencies: [],
+    suggestedRole: "backend-dev",
+  });
+
+  it("保护前缀路径排在前面也不许截断后面的幽灵（@206 break 补杀）", () => {
+    const t = task(
+      "t1",
+      "src",
+      "不要动 node_modules/left-pad/index.js；产出 samples/sample.csv",
+    );
+    const ghosts = findGhostObligations([t]);
+    expect(ghosts.map((g) => g.path)).toEqual(["samples/sample.csv"]);
+  });
+
+  it("zone 认领的路径排在前面也不许截断后面的幽灵（@214 break 补杀）", () => {
+    const t = task(
+      "t1",
+      "aaa",
+      "产出 aaa/covered.js；另外产出 zzz/ghost.js",
+    );
+    const ghosts = findGhostObligations([t]);
+    // aaa/covered.js 被 zone 认领 ⇒ 不是幽灵；zzz/ghost.js 无人认领 ⇒ 是。
+    expect(ghosts.map((g) => g.path)).toEqual(["zzz/ghost.js"]);
+  });
+
+  it("输出按路径排序稳定（@213 比较器三元互换补杀）", () => {
+    // 声明顺序故意与字母序相反：insertion zzz 在前、aaa 在后。
+    const a = task("ta", "src", "产出 zzz/b.js");
+    const b = task("tb", "src2", "产出 aaa/a.js");
+    const ghosts = findGhostObligations([a, b]);
+    expect(ghosts.map((g) => g.path)).toEqual(["aaa/a.js", "zzz/b.js"]);
   });
 });

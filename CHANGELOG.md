@@ -6,6 +6,39 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（真跑 e2e 负结果的三个病灶：幽灵义务 / 路由不换线 / touched 并行互踩 · 2026-10-14）
+
+2026-10-14 的 `run-multiagent-e2e.mjs --real` 真跑（35 min、12.5 万 token、exit 1）
+把三个缺陷当场钉死，本轮全修：
+
+- **幽灵义务（规划层）**：规划官在任务 description 里点名 `samples/sample.csv`，
+  zone 却只给 `src/cli.js` —— 写了必被仲裁回滚，而 PRD 级 `findOrphanPaths`
+  看不见它（samples 是分解时才发明的，PRD 里没有）。新增
+  `findGhostObligations`（`shared/zone-coverage.ts`）：任务点名、无 zone 认领
+  ⇒ 规划校验直接打回，带着缺口重分解。`checkContractPaths` 的归属同步修订：
+  "无人认领"不再一律放过 —— 幽灵义务归**点名者**（`ghost` 字段说破根因是规划
+  不是执行者），归属冲突仍不判。
+- **路由不换线（调度层）**：t1 在 loomy 上两次 600s 超时，第三轮路由仍选它 ——
+  role(100)+zone(40)+priority(50) 的结构分压过质量分（上限 ±20）。
+  `RouteContext` 新增 `taskFailures`（本任务此前失败的 agent 账，宿主从 run
+  履历喂入），评分减 `taskRetryPenalty`（默认 100/次）：一败翻盘、两败必换线；
+  唯一候选仍中选（惩罚只排序不硬拦，拦了就饿死任务）。
+- **mutation:touched 并行互踩（门禁层）**：JOBS=3 时并行审计各自往自己的目标
+  文件写变异体，但多个目标的测试集共享 import 图 —— scheduler 的**基线**
+  vitest 传递 import 了 router.ts，而 router 的并行审计正把变异体写在上面 ⇒
+  别人的基线被我的变异体打红（fixture 期望 a1 实得 v1），目标被误判"基线失败"
+  整轮跳过。串行化（JOBS=1）：并行只在"目标间无 import 耦合"时才成立，而
+  耦合检查做不对就等于没做。
+
+另有一段写完又删：曾给"验证未过但无失败任务"分支写契约定向翻红，位点审计 +
+死代码推演一起判它不可达（Stage 3.5 在验证**之前**就翻红缺口，该分支的前提
+"outcomes 全 ok 且有缺口"按构造不成立）—— 按本仓口诀删掉，全员重跑保留。
+
+**测试**：新增 18 条（zone-coverage 幽灵 9 · router 换线 5 · orchestrator 4）。
+逐位点审计：zone-coverage 36/36 · router 24/24（等价位点白名单行号 221→244 校回）·
+orchestrator 78/78 · scheduler 42/42 · audit-log 33/33；基线 73 目标 / **1723 处
+位点**。全量 **2078 通过 + 8 跳过 = 2086 条**零失败；verify 29 段全过。
+
 ### 修复（NSIS 与 portable 同名互相覆盖 · 2026-10-14）
 
 `win.artifactName` 是 nsis / portable 两个 target 共用的同一个名字，于是先打的

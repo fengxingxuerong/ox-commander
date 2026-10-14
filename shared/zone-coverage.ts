@@ -165,9 +165,64 @@ export function describeZoneGaps(gaps: readonly ZoneCoverageGap[]): string {
  * - **归属不唯一就不判**：一条路径被两个任务的 zone 同时认领（或无人认领）时，
  *   判红会把别人的活儿算到它头上，而误判的代价是一整轮修预算白烧 —— 与
  *   `extractDeclaredPaths` 同一套"宁可漏判不可误判"的取向；
+ *   2026-10-14 修订："无人认领"不再一律放过 —— 幽灵义务（有任务点名、无 zone
+ *   认领）归**点名者**：它被要求交，缺了就是它没交成，根因另外在 `ghost` 字段
+ *   说破（是规划没给 zone，不是执行者偷懒）。归属**冲突**（多个 zone 抢）仍旧不判；
  * - **义务只认任务自己的 description**，不认 PRD：执行者拿到的是这段文字，
  *   "点名的文件"只有在对它说话的时候才是要求。
  */
+/**
+ * 幽灵义务（2026-10-14 --real 真跑的负结果逼出来的一层）。
+ *
+ * 当场看到的因果链：规划官在 t4 的 description 里点名 `samples/sample.csv`
+ * 与 `samples/edge.csv`，却只给了 t4 zone `src/cli.js`。三样东西都看不见它：
+ * PRD 级的 `findOrphanPaths` 只读 PRD（samples 是分解时才发明的，PRD 里没有）；
+ * `checkContractPaths` 只认 in-zone 义务（out-of-zone 的点名被"不是这个任务
+ * 该交的东西"跳过）；批次照常跑完 —— 执行者一写 samples/ 就被仲裁回滚，
+ * 独立样本冒烟 `Error: file not found`，最后一轮重修预算烧在全员重跑上。
+ *
+ * 判据：一条路径被**某个任务的 description 点名**，却不被**任何任务的 zone
+ * 认领** ⇒ 它是幽灵义务 —— 有人被要求交它，但写了必被沙箱回滚。
+ * 与 `findOrphanPaths`（PRD 视角）互补：那条管"PRD 点名的文件没人认领"，
+ * 这条管"分解自己发明的产物没人认领"。
+ */
+export interface GhostObligation {
+  path: string;
+  /** description 里点名它的任务 id（1 个或多个）。 */
+  declaredBy: string[];
+  /** 现存 zone 全集（一条都不覆盖它）。 */
+  zones: string[];
+}
+
+export function findGhostObligations(
+  tasks: readonly Task[],
+  protectedPrefixes: readonly string[] = ["node_modules/", ".git/", "ox-scripts/"],
+): GhostObligation[] {
+  if (tasks.length === 0) return [];
+  const zones = [...new Set(tasks.map((t) => t.zone))];
+  const declarers = new Map<string, Set<string>>();
+  for (const t of tasks) {
+    for (const p of extractDeclaredPaths(t.description)) {
+      if (protectedPrefixes.some((prefix) => p.startsWith(prefix))) continue;
+      const list = declarers.get(p) ?? new Set<string>();
+      list.add(t.id);
+      declarers.set(p, list);
+    }
+  }
+  const ghosts: GhostObligation[] = [];
+  for (const [path, ids] of [...declarers.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    if (zones.some((z) => isPathInZone(path, z))) continue;
+    ghosts.push({ path, declaredBy: [...ids].sort(), zones });
+  }
+  return ghosts;
+}
+
+export function describeGhostObligations(ghosts: readonly GhostObligation[]): string {
+  return ghosts
+    .map((g) => `${g.path}（${g.declaredBy.join("、")} 点名；现有 zone：${g.zones.join("、") || "无"}）`)
+    .join("；");
+}
+
 export interface ContractPathGap {
   taskId: string;
   /** 描述里点名、但盘上不存在的相对路径。 */
@@ -177,6 +232,12 @@ export interface ContractPathGap {
    * 这个字段存在的理由：**只说"文件不存在"会把执行者带去改内容**，而问题在路径形状。
    */
   indexLayout: string | null;
+  /**
+   * 幽灵义务：点名的路径**不被任何任务的 zone 认领**。这种缺口的根因不是执行者
+   * 没交，而是规划把产物分给了 zone 盖不住它的任务 —— 执行者重跑一百次也会被
+   * 仲裁回滚。消费方（重修上下文）要如实说破，别把执行者带去"再写一遍"。
+   */
+  ghost: boolean;
 }
 
 export interface ContractPathReport {
@@ -211,26 +272,37 @@ export function checkContractPaths(
   tasks: readonly Task[],
   exists: (rel: string) => boolean,
 ): ContractPathReport {
-  const owners = new Map<string, string[]>();
+  // 义务归属（2026-10-14 扩）：先收"谁点名"与"谁的 zone 认领"，再判归属。
+  // 点名了但**没有任何 zone 认领**（幽灵义务）⇒ 归点名者：它被要求交这个文件，
+  // zone 没盖住是规划层的缺陷 —— 这里把缺口如实记到它头上，而不是假装
+  // "不是这个任务该交的东西"然后整条链路闭眼。
+  const declarers = new Map<string, string[]>();
+  const zoneOwners = new Map<string, string[]>();
   for (const t of tasks) {
     for (const p of extractDeclaredPaths(t.description)) {
-      if (!isPathInZone(p, t.zone)) continue; // 不是这个任务该交的东西
-      const list = owners.get(p) ?? [];
-      if (!list.includes(t.id)) list.push(t.id);
-      owners.set(p, list);
+      const d = declarers.get(p) ?? [];
+      if (!d.includes(t.id)) d.push(t.id);
+      declarers.set(p, d);
+      if (!isPathInZone(p, t.zone)) continue;
+      const o = zoneOwners.get(p) ?? [];
+      if (!o.includes(t.id)) o.push(t.id);
+      zoneOwners.set(p, o);
     }
   }
   const gaps: ContractPathGap[] = [];
   const ambiguous: string[] = [];
   let checked = 0;
-  for (const [path, list] of [...owners.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+  for (const [path, named] of [...declarers.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))) {
+    const zoneOwnersOfPath = zoneOwners.get(path) ?? [];
+    const ghost = zoneOwnersOfPath.length === 0;
+    const list = ghost ? named : zoneOwnersOfPath;
     if (list.length !== 1) {
       ambiguous.push(`${path}（被 ${list.join("、")} 认领）`);
       continue;
     }
     checked += 1;
     if (exists(path)) continue;
-    gaps.push({ taskId: list[0]!, path, indexLayout: probeIndexLayout(path, exists) });
+    gaps.push({ taskId: list[0]!, path, indexLayout: probeIndexLayout(path, exists), ghost });
   }
   return { gaps, checked, ambiguous };
 }

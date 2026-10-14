@@ -23,6 +23,15 @@ export interface RouteContext {
   requiredTags?: AgentAction[];
   /** `enabledAgents` order used as a tie-breaker. */
   preferredAgents?: readonly string[];
+  /**
+   * 本任务此前的失败账（agentId → 在这个任务上失败的次数），由宿主从 run 履历喂入。
+   *
+   * 为什么按任务维度记：同一个 agent 全局成功率尚可、却在**这一个任务**上连续
+   * 超时（2026-10-14 --real 实测：loomy 三接 t1，两次 600s 撞死 —— role+zone
+   * 加分 190 压过 sensenova 的 140，质量分上限 ±20 根本翻不了盘）。重派时
+   * 换个执行器，比在同一个坑里再烧一个 deadline 便宜得多。
+   */
+  taskFailures?: ReadonlyMap<string, number>;
 }
 
 export interface RoutingDecision {
@@ -54,6 +63,13 @@ export interface RouterWeights {
   circuitHalfOpen: number;
   /** Multiplied by the declared manifest priority. */
   priority: number;
+  /**
+   * Applied per prior failure of THIS task on THIS agent（同任务换线惩罚）。
+   * 100 恰好翻盘实测案例里的 role(100)+zone(40)+priority(50) 结构 —— 两连败
+   * 就是 -200，唯一候选时仍会中选（惩罚只排序，不做硬排除：只有它能干时，
+   * 惩罚它等于把任务饿死）。
+   */
+  taskRetryPenalty: number;
 }
 
 export const DEFAULT_ROUTER_WEIGHTS: RouterWeights = {
@@ -65,6 +81,7 @@ export const DEFAULT_ROUTER_WEIGHTS: RouterWeights = {
   load: 10,
   circuitHalfOpen: 15,
   priority: 1,
+  taskRetryPenalty: 100,
 };
 
 export interface RouterOptions {
@@ -191,6 +208,12 @@ export function createCapabilityRouter(opts: RouterOptions = {}): CapabilityRout
         if (descriptor.priority !== 0) {
           score += w.priority * descriptor.priority;
           parts.push(`priority=${descriptor.priority >= 0 ? "+" : ""}${descriptor.priority * w.priority}`);
+        }
+        const fails = ctx.taskFailures?.get(descriptor.manifest.id) ?? 0;
+        if (fails > 0) {
+          const penalty = w.taskRetryPenalty * fails;
+          score -= penalty;
+          parts.push(`retry=${descriptor.manifest.id}×${fails}(-${penalty})`);
         }
         scored.push({ descriptor, score, parts });
       }

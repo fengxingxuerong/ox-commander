@@ -727,7 +727,7 @@ const SITE_BASELINE = {
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 72,
+  "electron/engine/orchestrator.ts": 78,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 42,
   "electron/engine/verifier.ts": 23,
@@ -780,7 +780,7 @@ const SITE_BASELINE = {
   "shared/schema.ts": 62,
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
-  "shared/zone-coverage.ts": 29,
+  "shared/zone-coverage.ts": 36,
   "src/store.ts": 35,
 };
 
@@ -844,8 +844,10 @@ const EQUIVALENT_SITES = [
    *
    * 2026-09-27：并发准入轮在评分循环里插入 28 行（满载 continue + 全满载
    * 不回落分支）→ 193 → 221。
+   * 2026-10-14：taskFailures 评分块（+7 行）插入在 priority 之后 → 221 → 244。
+   * 蕴含关系重核：X 为真 ⇒ 池中有声明候选 ⇒ A 恒真，不变。
    */
-  { file: "electron/engine/router.ts", op: "&& → ||", line: 221 },
+  { file: "electron/engine/router.ts", op: "&& → ||", line: 244 },
   /**
    * `headless/serve.ts` 控制面里 `if (!busy && !engine)`
    * 的 `&& → ||` —— **可证明等价**（2026-10-05 反向注入时发现）。

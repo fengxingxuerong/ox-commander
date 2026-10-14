@@ -107,11 +107,14 @@ if (hits.length === 0) {
 }
 
 const failed = [];
-// 并行池（2026-10-11）：每个目标一个子进程（stdio 直通，输出天然按目标分块），
-// 同时在跑的最多 JOBS 个 —— 单目标内部仍是串行（基线 → 逐位点），台账按文件
-// 一条互不干扰。JOBS 取 3：本机 8 核实测 3 并发时 vitest 各自的多线程刚好吃满，
-// 再高只会互相抢核。失败收集与退出码语义不变。
-const JOBS = 3;
+// 串行（2026-10-14 教训）：此前 JOBS=3 并行，每个目标一个 mutation-check 子进程，
+// 各自往**自己的目标文件**写变异体 —— 但多个目标的测试集共享 import 图（本机实测：
+// orchestrator/router/scheduler/zone-coverage 四个目标同批改动时，scheduler 的
+// **基线** vitest 传递 import 了 router.ts，而 router 的并行审计正把变异体写在
+// 那上面 ⇒ 别人的基线被我的变异体打红（fixture 期望 a1 实得 v1，路由签名），
+// 目标被误判"基线失败"整轮跳过 —— 该目标**完全没被验证**还报非零，两头都是错的。
+// 并行只在"目标间无 import 耦合"时才成立，而耦合检查做不对就等于没做 —— 串行。
+const JOBS = 1;
 let cursor = 0;
 const runOne = (f) =>
   new Promise((resolve) => {

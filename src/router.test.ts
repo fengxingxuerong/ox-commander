@@ -355,3 +355,77 @@ describe("CapabilityRouter · 并发准入（maxConcurrency 是硬上限，不�
     expect(d.reason).toContain("load=1/2");
   });
 });
+
+/**
+ * 同任务换线（2026-10-14 --real 真跑逼出）：t1 在 loomy 上两次 600s 超时，
+ * 第三轮路由仍选它 —— role(100)+zone(40)+priority(50) 的结构分压过质量分
+ * （上限 ±20）。taskFailures 把"这个任务在谁身上失败过几次"喂进评分，
+ * 重派时换线；唯一候选时仍中选（惩罚只排序，不硬拦 —— 拦了就饿死任务）。
+ */
+describe("CapabilityRouter · taskFailures 同任务换线", () => {
+  function twoAgents() {
+    const t = task("src/core/csv.js", "backend-dev");
+    const { candidates } = build(
+      [
+        { id: "loomy", caps: caps({ roles: ["backend-dev"], zoneGlobs: ["src/core", "src/core/**"], maxConcurrency: 1 }) },
+        { id: "sensenova", caps: caps({ roles: ["backend-dev", "fullstack-dev"], zoneGlobs: ["**"], maxConcurrency: 3 }) },
+      ],
+      t,
+    );
+    return { t, candidates };
+  }
+
+  it("零失败 ⇒ 结构分照旧（正向对照：loomy 凭 role+zone+priority 胜出）", () => {
+    const { t, candidates } = twoAgents();
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("loomy");
+    expect(d.reason).not.toContain("retry=");
+  });
+
+  it("在本任务上失败过 ⇒ -100/次翻盘，sensenova 接手", () => {
+    const { t, candidates } = twoAgents();
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 0,
+      candidates,
+      taskFailures: new Map([["loomy", 1]]),
+    });
+    expect(d.agentId).toBe("sensenova");
+  });
+
+  it("两连败 ⇒ -200，换线更彻底（reason 只带胜者明细，败者惩罚体现在结果上）", () => {
+    const { t, candidates } = twoAgents();
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 0,
+      candidates,
+      taskFailures: new Map([["loomy", 2]]),
+    });
+    expect(d.agentId).toBe("sensenova");
+  });
+
+  it("唯一候选时惩罚不拦派（饿死任务比换不了线更糟）", () => {
+    const t = task("src/core/csv.js", "backend-dev");
+    const { candidates } = build(
+      [{ id: "only", caps: caps({ roles: ["backend-dev"], zoneGlobs: ["src/core/**"], maxConcurrency: 1 }) }],
+      t,
+    );
+    const d = createCapabilityRouter().assign({
+      task: t,
+      index: 0,
+      candidates,
+      taskFailures: new Map([["only", 3]]),
+    });
+    expect(d.agentId).toBe("only");
+    expect(d.reason).toContain("retry=only×3(-300)");
+  });
+
+  it("失败账是调用方按任务喂的（router 只认 map）；不给账 ⇒ 行为与从前一致", () => {
+    const { t, candidates } = twoAgents();
+    // 作用域保证在 orchestrator（只喂本任务的失败）—— router 层不重复假设。
+    // 这里钉的是缺省行为：不喂 taskFailures 时连 retry= 字样都不出现。
+    const d = createCapabilityRouter().assign({ task: t, index: 0, candidates });
+    expect(d.agentId).toBe("loomy");
+    expect(d.reason).not.toContain("retry=");
+  });
+});

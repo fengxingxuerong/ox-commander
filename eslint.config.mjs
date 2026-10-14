@@ -78,6 +78,10 @@ export default [
       // （`no-undef: process/console`），而那份红与被改的代码毫无关系。
       ".box-agent/**",
       ".box-agent-scratch/**",
+      // 同类（2026-10-14 实测）：WorkBuddy 会话目录，本机工具脚本（如 API 通道
+      // 推送）住 `.workbuddy/tools/`，不进仓库 —— 进了 lint 的扫描范围就会以
+      // 同一批 no-undef 把 verify 拦在第一段。
+      ".workbuddy/**",
     ],
   },
   js.configs.recommended,

@@ -377,6 +377,7 @@ export class Scheduler {
   private async planPool(
     tasks: Task[],
     preferredAgentId?: string,
+    taskFailures?: (taskId: string) => ReadonlyMap<string, number> | undefined,
   ): Promise<Array<AgentAdapter | undefined>> {
     this.budgetSkippedByTask = new Map();
     if (preferredAgentId) {
@@ -415,6 +416,7 @@ export class Scheduler {
         candidates,
         inflight,
         preferredAgents: this.preferredAgents,
+        taskFailures: taskFailures?.(task.id),
       });
       this.opts.onRouting?.(decision, task);
       // Never route worse than the legacy pool: an unassignable task falls back
@@ -512,7 +514,16 @@ export class Scheduler {
   async runBatch(
     tasks: Task[],
     projectRoot: string,
-    opts?: { preferredAgentId?: string; repairOf?: Map<string, { round: number; errorLogDigest: string }> },
+    opts?: {
+      preferredAgentId?: string;
+      repairOf?: Map<string, { round: number; errorLogDigest: string }>;
+      /**
+       * 本任务此前的失败账（agentId → 次数），喂给路由做同任务换线
+       * （见 `RouteContext.taskFailures`）。宿主从 run 履历算，调度器自己
+       * 看不到跨批历史。缺省 = 无账可查，路由行为与从前一致。
+       */
+      taskFailures?: (taskId: string) => ReadonlyMap<string, number> | undefined;
+    },
   ): Promise<DispatchOutcome[]> {
     const zones = tasks.map((t) => t.zone);
     // 互斥的是**重叠**，不是同名。原判定只做字符串全等，于是 `src` 与 `src/util`
@@ -526,7 +537,7 @@ export class Scheduler {
       }
     }
 
-    const agentPool = await this.planPool(tasks, opts?.preferredAgentId);
+    const agentPool = await this.planPool(tasks, opts?.preferredAgentId, opts?.taskFailures);
     const guard = this.opts.guard;
     // `guard` 与它开出的 `scope` 是同生共死的：要么都有，要么都没有。
     // 打成一对之后，收尾处只需要判一次真值。

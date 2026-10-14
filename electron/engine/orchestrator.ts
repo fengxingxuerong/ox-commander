@@ -3,7 +3,7 @@ import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
-import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths } from "../../shared/zone-coverage";
+import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths, findGhostObligations, describeGhostObligations } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
 import { buildReceipt, receiptTaskStatus, sealReceipt } from "../../shared/delivery-receipt";
 import type {
@@ -459,16 +459,31 @@ export class OrchestratorEngine {
       undefined,
       verificationCommandPaths(verificationCommands ?? []),
     );
-    if (gaps.length === 0) return;
-    const message = `以下路径不属于任何 zone，写入必被沙箱拒绝、重修不可能成功：${describeZoneGaps(gaps)}`;
+    // 幽灵义务与 PRD 孤儿是两条互补的缝：上面那条管"PRD 点名没人认领"，
+    // 这条管"分解时才发明的产物没人认领"（PRD 里没有，PRD 级检查天生看不见）。
+    // 都在派发**之前**拦下 —— 真跑实测（2026-10-14）：samples 义务 zone 盖不住，
+    // 执行者写了必被仲裁回滚，独立冒烟必红，最后一轮重修预算烧在全员重跑上。
+    const ghosts = findGhostObligations(tasks);
+    if (gaps.length === 0 && ghosts.length === 0) return;
+    const messages: string[] = [];
+    if (gaps.length > 0) {
+      messages.push(
+        `以下路径不属于任何 zone，写入必被沙箱拒绝、重修不可能成功：${describeZoneGaps(gaps)}`,
+      );
+      messages.push("请让相关任务的 zone 覆盖这些路径（例如取它们的父目录），或修正 PRD 中的产物路径。");
+    }
+    if (ghosts.length > 0) {
+      messages.push(
+        `以下路径被任务描述点名，但不属于任何 zone，写入必被仲裁回滚、重修不可能成功：${describeGhostObligations(ghosts)}`,
+      );
+      messages.push(
+        "请让相应任务的 zone 覆盖这些路径（例如取它们的父目录），或拆出 zone 能覆盖该产物目录的任务，或从任务描述里去掉这个要求。",
+      );
+    }
+    const message = messages.join("\n");
     this.cb.onLog(`[规划校验] ${message}`);
-    throw new SchemaValidationError([
-      message,
-      "请让相关任务的 zone 覆盖这些路径（例如取它们的父目录），或修正 PRD 中的产物路径。",
-    ]);
-  }
-
-  /** Runs DEVELOPMENT → VERIFICATION (+ repair loops) → DELIVERY. */
+    throw new SchemaValidationError([message]);
+  }  /** Runs DEVELOPMENT → VERIFICATION (+ repair loops) → DELIVERY. */
   async execute(
     batches: Task[][],
     projectRoot: string,
@@ -791,6 +806,13 @@ export class OrchestratorEngine {
           // （outcomes 为空的断点续跑轮不算：恢复的 allDone 必须保留）
           // 断点续跑恢复的完成状态是真实工作成果，全员重跑只清本轮派发过的，
           // 不清从 journal 恢复的 —— 否则已交付模块会被无谓重派。
+          //
+          // 2026-10-14 注：这里**刻意**没有再做"契约缺口定向翻红"。Stage 3.5
+          // 在验证**之前**就把缺口（含幽灵义务）翻成 failed(contract)，走到本
+          // 分支时缺口早已翻过、任务早已 failed —— "outcomes 全 ok 且仍有缺口"
+          // 按构造不可达。曾在这里写过定向分支，位点审计 + 死代码推演一起判它
+          // 不可达（tests 先红），按本仓口诀删掉而不是留着装有用。真跑里那单
+          // "冒烟失败烧光预算"的病灶，修的是 Stage 3.5 的幽灵盲区（F1b），不是这里。
           allDone.clear();
           for (const id of restoredIds) allDone.add(id);
           outcomes = [];
@@ -881,7 +903,23 @@ export class OrchestratorEngine {
               ]),
             )
           : undefined;
-        const batchOutcomes = await this.deps.scheduler.runBatch(pending, projectRoot, { repairOf });
+        // 同任务换线（2026-10-14 --real 实测逼出）：t1 在 loomy 上两次 600s 超时，
+        // 第三轮路由仍选它 —— role(100)+zone(40)+priority(50) 的结构分压过质量分
+        // （上限 ±20）。把本 run 内"这个任务在哪个 agent 上失败过几次"喂给路由，
+        // 让重派换线：失败一次 -100，两连败 -200，唯一候选除外（惩罚只排序不硬拦）。
+        // 只认本 run 的 outcomes：断点续跑恢复的失败没有结构化 agentId 可查，
+        // 那种轮次行为与从前一致（不装作有账）。
+        const failuresByTask = new Map<string, Map<string, number>>();
+        for (const o of outcomes) {
+          if (o.ok || !o.agentId) continue;
+          const m = failuresByTask.get(o.taskId) ?? new Map<string, number>();
+          m.set(o.agentId, (m.get(o.agentId) ?? 0) + 1);
+          failuresByTask.set(o.taskId, m);
+        }
+        const batchOutcomes = await this.deps.scheduler.runBatch(pending, projectRoot, {
+          repairOf,
+          taskFailures: (taskId) => failuresByTask.get(taskId),
+        });
         const byId = new Map(outcomes.map((o) => [o.taskId, o]));
         for (const o of batchOutcomes) byId.set(o.taskId, o);
         outcomes = [...byId.values()];
@@ -928,20 +966,28 @@ export class OrchestratorEngine {
           o.ok = false;
           o.errorClass = "contract";
           o.logDigest = [
-            `契约点名的文件不存在：${g.path}`,
-            g.indexLayout
-              ? `交付里是等价布局 ${g.indexLayout} —— 目录 + index **不等于**契约点名的文件。` +
-                `zone 判定两种形状都放行（` +
-                "`isPathInZone` 把 `x/y.js` 算进 zone `x/y`），所以这不是权限问题，是路径问题：" +
-                `内容要落在 ${g.path}。`
-              : "请把该文件按契约路径创建出来（zone 允许写它）。",
+            g.ghost
+              ? `契约点名的文件不存在：${g.path} —— 而且**没有任何 zone 认领它**（规划缺陷，不是你没交）。` +
+                `重派也修不好它：写了必被仲裁回滚。修复轮耗尽后会带着这条根因升级请人裁决 —— ` +
+                `要救它就把该路径划进某个任务的 zone，或去掉这个要求。`
+              : `契约点名的文件不存在：${g.path}`,
+            g.ghost
+              ? ""
+              : g.indexLayout
+                ? `交付里是等价布局 ${g.indexLayout} —— 目录 + index **不等于**契约点名的文件。` +
+                  `zone 判定两种形状都放行（` +
+                  "`isPathInZone` 把 `x/y.js` 算进 zone `x/y`），所以这不是权限问题，是路径问题：" +
+                  `内容要落在 ${g.path}。`
+                : "请把该文件按契约路径创建出来（zone 允许写它）。",
           ]
             .filter(Boolean)
             .join("\n");
           lastFailedLogs.set(g.taskId, o.logDigest);
           allDone.delete(g.taskId); // 否则下一轮的 depsReady/allDone 会把它当已完成跳过
           this.cb.onTaskStatus(g.taskId, "failed", attempts.get(g.taskId) ?? 1);
-          flipped.push(`${g.taskId} 缺 ${g.path}${g.indexLayout ? `（交成了 ${g.indexLayout}）` : ""}`);
+          flipped.push(
+            `${g.taskId} 缺 ${g.path}${g.indexLayout ? `（交成了 ${g.indexLayout}）` : ""}${g.ghost ? "（幽灵义务：无 zone 认领）" : ""}`,
+          );
         }
         if (flipped.length > 0) {
           this.cb.onLog(
