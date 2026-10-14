@@ -491,6 +491,18 @@ describe("findGhostObligations —— 任务点名了路径，却没有任何 zo
     expect(findGhostObligations([a, owner])).toEqual([]);
   });
 
+  it("console.log / process.exitCode 这类 API 名不是义务路径（2026-10-14 --real 假阳性补杀）", () => {
+    // CLI 任务的描述必然写 "logs error to console.error"、"sets process.exitCode=1"
+    // —— 两段形状骗过嵌套路径启发式，被当成义务后又被幽灵检查拦下，规划重试
+    // 全同形 ⇒ 规划必败。与 require/module.exports（2026-09-27）同族。
+    const t = task(
+      "t7",
+      "tests",
+      "capture console.log output; verify it contains col0; sets process.exitCode = 1 when missing",
+    );
+    expect(findGhostObligations([t])).toEqual([]);
+  });
+
   it("被两个任务点名、仍无人认领 ⇒ 还是幽灵（declaredBy 记全）", () => {
     const a = task("ta", "src/cli.js", "产出 samples/edge.csv");
     const b = task("tb", "src/report", "samples/edge.csv 也要更新");
