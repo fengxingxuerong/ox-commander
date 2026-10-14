@@ -38,6 +38,16 @@ win:
     - portable
   artifactName: "${productName}-${version}-${arch}.${ext}"
 
+# 两个 target 必须各有自己的 artifactName：都落在 win 级的
+# "${productName}-${version}-${arch}.${ext}" 上时是**同名互相覆盖** ——
+# 先打的 NSIS 安装器被后打的 portable 盖掉，.blockmap 还是 NSIS 那一轮的旧版
+# （差量更新按 blockmap 对位，错位即坏）。实测 2026-10-14：只剩一个 81MB exe。
+nsis:
+  artifactName: "${productName}-Setup-${version}-${arch}.${ext}"
+
+portable:
+  artifactName: "${productName}-Portable-${version}-${arch}.${ext}"
+
 linux:
   target:
     - AppImage

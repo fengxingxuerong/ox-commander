@@ -6,6 +6,19 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（NSIS 与 portable 同名互相覆盖 · 2026-10-14）
+
+`win.artifactName` 是 nsis / portable 两个 target 共用的同一个名字，于是先打的
+NSIS 安装器被后打的 portable **原地覆盖**，留下的 `.blockmap` 还是 NSIS 那一轮的
+旧版 —— 差量更新按 blockmap 对位，错位即坏；而看输出目录只会觉得"就一个 exe，
+挺正常"。现在两个 target 各自命名（`-Setup-` / `-Portable-`），Setup 的
+blockmap 与 Setup 的 exe 配对。
+
+同轮首次真跑通打包（此前配置从未在本机出过产物）：`ELECTRON_MIRROR` 与
+`ELECTRON_BUILDER_BINARIES_MIRROR` 指 npmmirror（github.com 直连被掐），
+产出 `OxCommander-Setup-0.1.8-x64.exe` 与 `OxCommander-Portable-0.1.8-x64.exe`
+两件，`smoke:artifact` 10 检全过。
+
 ### 新增（从 GitHub issue 建任务：摄入半边 · 2026-10-14）
 
 竞品清单 P2-1 一直只有"读半边"：issue/PR 文本能进规划背景、diff 行批注能回传进上下文，
