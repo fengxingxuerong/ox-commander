@@ -59,11 +59,17 @@ function emit(run, kind, text) {
  * 合法写入都判成越权。统一在正斜杠空间里比。
  */
 function assertWritable(zone, rel) {
+  const s = String(rel);
+  // 绝对性一律**按字面**判，不用 `path.isAbsolute` —— 它随宿主平台变：同一份成果在 win32
+  // 上被判"拒绝绝对路径"，在 POSIX 上会掉进 zone 判定报成"越权"（2026-10-15 CI ubuntu 实测分叉）。
+  // 盘符与 UNC 形态在任何平台上都不是合法交付路径，理由也不该跟着宿主变。
+  if (s.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(s) || s.startsWith("\\\\")) {
+    throw new Error(`拒绝绝对路径: ${rel}`);
+  }
   const norm = path
-    .normalize(String(rel))
+    .normalize(s)
     .replace(/\\/g, "/")
     .replace(/^(?:\.\.\/)+/, "");
-  if (path.isAbsolute(String(rel))) throw new Error(`拒绝绝对路径: ${rel}`);
   if (norm.includes("..")) throw new Error(`拒绝路径穿越: ${rel}`);
   const top = norm.split("/")[0];
   if (FORBIDDEN_TOPS.includes(top)) throw new Error(`拒绝受保护目录: ${rel}`);

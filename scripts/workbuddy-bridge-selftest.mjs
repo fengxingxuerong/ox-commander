@@ -37,11 +37,24 @@ if (start < 0 || end < 0 || end <= start) {
   console.error("无法在 workbuddy-bridge.mjs 里定位沙箱判定区（锚点被改名或移动了？）");
   process.exit(2);
 }
-const { assertWritable, writeFiles } = new Function(
-  "path",
-  "fs",
-  `${src.slice(start, end)}\nreturn { assertWritable, writeFiles };`,
-)(path, fs);
+const SLICE = src.slice(start, end);
+/** 同一份判定代码，按注入的 `path` 视图求值 —— 用来证明它不随宿主平台分叉。 */
+function buildView(pathView) {
+  return new Function("path", "fs", `${SLICE}\nreturn { assertWritable, writeFiles };`)(pathView, fs);
+}
+const native = buildView(path);
+const assertWritable = native.assertWritable;
+const writeFiles = native.writeFiles;
+// POSIX 视图：`path.posix.*` 在 win32 上也能求值，于是"CI ubuntu 上的分叉"本机就能复现，
+// 不必等推送（2026-10-15 就是靠这一步才发现 `path.isAbsolute` 让同一份成果在 Linux 上
+// 从"拒绝绝对路径"变成"越权"）。
+const posixView = {
+  join: path.posix.join,
+  normalize: path.posix.normalize,
+  isAbsolute: path.posix.isAbsolute,
+  sep: "/",
+  delimiter: ":",
+};
 
 /**
  * 每条用例：`want` 是期望返回的归一化路径（放行），或 `{ throw: "<消息片段>" }`（拦截）。
@@ -98,32 +111,67 @@ const cases = [
   { name: "受保护文件：package-lock.json", zone: "src", rel: "package-lock.json", want: { throw: "拒绝受保护文件" } },
 
   // ---- 拦截：路径形态 ----
-  { name: "绝对路径直接拒", zone: "src", rel: "D:/evil/x.js", want: { throw: "拒绝绝对路径" } },
+  { name: "Windows 盘符路径直接拒", zone: "src", rel: "D:/evil/x.js", want: { throw: "拒绝绝对路径" } },
   { name: "UNC 路径直接拒", zone: "src", rel: "\\\\?\\D:\\evil\\x.js", want: { throw: "拒绝绝对路径" } },
+  { name: "POSIX 绝对路径直接拒（两个宿主视图上都得是这个理由）", zone: "src", rel: "/etc/passwd", want: { throw: "拒绝绝对路径" } },
   { name: "藏在中间的路径穿越拒", zone: "src", rel: "src/..hidden/x.js", want: { throw: "拒绝路径穿越" } },
 ];
 
 let pass = 0;
 let fail = 0;
-for (const c of cases) {
-  let got;
-  let threw = null;
+
+/** 一条用例在给定视图下的结局：`放行 → 归一化路径` 或 `拦截 → 理由`。 */
+function outcomeOf(fn, c) {
   try {
-    got = assertWritable(c.zone, c.rel);
+    return { threw: null, got: fn(c.zone, c.rel) };
   } catch (e) {
-    threw = e?.message ?? String(e);
+    return { threw: e?.message ?? String(e), got: undefined };
   }
-  const ok =
-    typeof c.want === "string" ? threw === null && got === c.want : threw !== null && threw.includes(c.want.throw);
-  if (ok) {
-    pass += 1;
-  } else {
-    fail += 1;
-    console.error(
-      `✗ ${c.name}（zone=${c.zone} rel=${c.rel}）  期望 ${
-        typeof c.want === "string" ? `放行 → ${c.want}` : `拦截 → ${c.want.throw}`
-      }，实得 ${threw === null ? `放行 → ${got}` : `拦截 → ${threw}`}`,
-    );
+}
+
+function runCases(label, fn) {
+  for (const c of cases) {
+    const { threw, got } = outcomeOf(fn, c);
+    const ok =
+      typeof c.want === "string" ? threw === null && got === c.want : threw !== null && threw.includes(c.want.throw);
+    if (ok) {
+      pass += 1;
+    } else {
+      fail += 1;
+      console.error(
+        `✗ [${label}] ${c.name}（zone=${c.zone} rel=${c.rel}）  期望 ${
+          typeof c.want === "string" ? `放行 → ${c.want}` : `拦截 → ${c.want.throw}`
+        }，实得 ${threw === null ? `放行 → ${got}` : `拦截 → ${threw}`}`,
+      );
+    }
+  }
+}
+
+runCases("宿主视图", assertWritable);
+
+/*
+ * 同一批用例在 POSIX 视图上再跑一遍，并且**逐条要求理由与宿主视图一致**。
+ *
+ * 为什么要这一层：`path.isAbsolute` 之类的宿主分支会让"同一份成果"在 win32 与 POSIX 上报
+ * 不同的拒绝理由，本机全绿而 CI 的 ubuntu 那格红 —— 2026-10-15 实际发生过一次
+ * （`D:/evil/x.js` 在 Linux 上掉进 zone 判定，报成"越权"）。把宿主换成 posix 视图就地复现，
+ * 分叉在本机就红，不用等推送。
+ */
+{
+  const posix = buildView(posixView);
+  runCases("POSIX 视图", posix.assertWritable);
+  for (const c of cases) {
+    const a = outcomeOf(assertWritable, c);
+    const b = outcomeOf(posix.assertWritable, c);
+    const same = a.threw === null ? b.threw === null && a.got === b.got : b.threw === a.threw;
+    if (same) {
+      pass += 1;
+    } else {
+      fail += 1;
+      console.error(
+        `✗ [两宿主同理由] ${c.name}（rel=${c.rel}）  win32=${a.threw === null ? `放行 ${a.got}` : a.threw} / posix=${b.threw === null ? `放行 ${b.got}` : b.threw}`,
+      );
+    }
   }
 }
 
@@ -232,7 +280,10 @@ for (const c of wcases) {
   fs.rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 50 });
 }
 
-console.log(`WorkBuddy 桥沙箱判定自测：${pass}/${cases.length + wcases.length} 通过`);
+console.log(
+  `WorkBuddy 桥沙箱判定自测：${pass}/${cases.length * 3 + wcases.length} 通过` +
+    `（判定 ${cases.length} 例 × 宿主/POSIX 两视图 + 两宿主同理由差分，写入 ${wcases.length} 例）`,
+);
 if (fail > 0) {
   console.error(
     "  判据口径是平台 shared/glob.ts 的 isPathInZone + 桥里的受保护名单 + 整批原子性；" +

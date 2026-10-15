@@ -220,9 +220,11 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   —— 那一家的"没覆盖"被写成了"覆盖其余一切"；命令串带 `--selftest`，判据自己先过 4 例）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
-→ check:workbuddy-bridge（`scripts/workbuddy-bridge.mjs` 的沙箱判定：放行谁、拦谁。
-  口径与平台 `shared/glob.ts → isPathInZone` 逐字对齐 —— 2026-10-15 桥缺 `z.` 前缀规则，
-  zone 取"文件名级"粒度时契约要求的字面路径被判越权；21 例按锚点抠函数注入 `path` 跑）
+→ check:workbuddy-bridge（`scripts/workbuddy-bridge.mjs` 的沙箱判定：放行谁、拦谁，外加
+  `writeFiles` 的整批原子性。口径与平台 `shared/glob.ts → isPathInZone` 逐字对齐 —— 2026-10-15
+  桥缺 `z.` 前缀规则，zone 取“文件名级”粒度时契约要求的字面路径被判越权；同日 CI 又暴露
+  `path.isAbsolute` 的宿主分叉。72 例按锚点抠函数注入 `path`/`fs` 跑，其中判定用例在宿主视图与
+  `path.posix` 视图上各跑一遍并逐条要求理由一致）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
 → check:ipc-channels（preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道，两个方向的漂移都拦；

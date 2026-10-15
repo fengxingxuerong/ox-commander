@@ -13,9 +13,14 @@
 链里没有一格会真起它的进程 —— 于是本轮新增两段，并修掉三个只有跨进程才暴露的洞：
 
 - **段 11（`check:workbuddy-bridge`）**：按锚点从桥里抠 `assertWritable` + `writeFiles` 注入假件，
-  27 例钉住「放行谁 / 拦谁」，口径逐字对齐平台 `shared/glob.ts → isPathInZone`。
+  72 例钉住「放行谁 / 拦谁」+ 整批原子性，口径逐字对齐平台 `shared/glob.ts → isPathInZone`。
   首钉的是桥缺 `z.` 前缀规则那格：zone 取"文件名级"粒度（`src/parse`）时，契约点名的字面路径
   `src/parse.js` 被桥判成越权 —— 症状是任务全红在越权，而 zone 契约其实是对的。
+- **段 11 的第三遍差分（推送后 CI 教会我们的）**：桥用 `path.isAbsolute` 判绝对路径，**那是宿主相关量** ——
+  win32 上 `D:/evil/x.js` 报"拒绝绝对路径"，Linux 上它不算绝对路径，于是掉进 zone 判定报成"越权"。
+  本机 27 例全绿、CI `verify (ubuntu-latest)` 红 2 条（`8e9895d`，2026-10-15）。修法不是给用例加平台早退，
+  而是把绝对性改成**按字面判**（前导 `/`、盘符 `X:` / `X:\`、UNC `\\`），并把 `path.posix` 视图注进同一份
+  判定代码把同一批用例再跑一遍 + 逐条要求两宿主理由一致 ⇒ 分叉在本机就红，不用等推送。
 - **段 28（`smoke:workbuddy-bridge`）**：**真桥进程 × 真 `dist-headless` 进程**，测试扮演"人"读写
   inbox/outbox，6 场景 36 项断言。与段 26 `smoke:offline-e2e` 的分工是后者桥为内联假件、
   一行真桥代码都没碰过。随机端口、零配额，实测整段 11s。
