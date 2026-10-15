@@ -6,6 +6,28 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复 + 新增门禁（WorkBuddy 桥进门禁：判定口径 + 真进程端到端 · 2026-10-15）
+
+`scripts/workbuddy-bridge.mjs` 是对话式智能体被平台指挥的唯一入口（ox-agent/2 协议，
+任务书落 `inbox/`、成果由人写回 `outbox/`）。此前它只有 `.workbuddy/` 里一份一次性手跑记录，
+链里没有一格会真起它的进程 —— 于是本轮新增两段，并修掉三个只有跨进程才暴露的洞：
+
+- **段 11（`check:workbuddy-bridge`）**：按锚点从桥里抠 `assertWritable` + `writeFiles` 注入假件，
+  27 例钉住「放行谁 / 拦谁」，口径逐字对齐平台 `shared/glob.ts → isPathInZone`。
+  首钉的是桥缺 `z.` 前缀规则那格：zone 取"文件名级"粒度（`src/parse`）时，契约点名的字面路径
+  `src/parse.js` 被桥判成越权 —— 症状是任务全红在越权，而 zone 契约其实是对的。
+- **段 28（`smoke:workbuddy-bridge`）**：**真桥进程 × 真 `dist-headless` 进程**，测试扮演"人"读写
+  inbox/outbox，6 场景 36 项断言。与段 26 `smoke:offline-e2e` 的分工是后者桥为内联假件、
+  一行真桥代码都没碰过。随机端口、零配额，实测整段 11s。
+- **修复一（整批原子性）**：`writeFiles` 原先边校验边写 —— 一批里第二份越权时，第一份已经落盘，
+  而桥回给平台的只有 `failed`（不带文件清单），平台 `arbitration: revert-batch` 拿不到产物路径，
+  回滚覆盖不到那半个文件；被拒的一批于是在目标项目里留下一份从未通过验证的半成品，下一轮踩着它。
+  现在整批先校验后落盘，任一被拒 ⇒ 一个字节都不写。摘掉修复，段 11 里 2 条断言当场红。
+- **修复二（队列泄漏）**：`outbox` 里的坏 JSON 不删不改名 ⇒ 永久躺在待消费目录；`abort` 与
+  `deadline` 两条退出路径不删任务书 ⇒ `inbox` 无限涨（与交付路径那句"任务书只在运行期有用"矛盾）。
+  现在坏 JSON 改名 `.bad` 留现场但不留在队列里，三条退出路径统一走 `dropTaskBook`。
+  段 28 场景 5/6 各钉一条；改动前实测红 3 条。
+
 ### 修复（smoke-fullchain 漏接 fileExists 探针 · 2026-10-15）
 
 `scripts/smoke-fullchain.mjs` 自建引擎时没喂 `fileExists`，而引擎对这条判据的口径是

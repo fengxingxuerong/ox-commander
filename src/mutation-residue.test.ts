@@ -19,7 +19,7 @@
  * 并行 worker（--jobs 按目标分进程）各写各的记录，谁也顶不掉谁；跨会话的
  * 活体残留判定也从"全场互斥"收窄到"本轮要动的文件"。
  */
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -227,7 +227,10 @@ function liveMutant(): string | null {
   if (!fs.existsSync(REAL_PENDING_DIR)) return null;
   const records = fs.readdirSync(REAL_PENDING_DIR).filter((n) => n.endsWith(".json"));
   for (const name of records) {
-    const record = path.join(PENDING_DIR, name);
+    // ⚠️ 必须是 REAL_PENDING_DIR：上面 readdir 读的是真实台账目录，这里若用测试的
+    // PENDING_DIR（由环境变量注入给被测脚本），join 出来的是临时目录里不存在的路径，
+    // readFileSync 抛 ENOENT 被 catch 成"台账不可读" —— 只要真实台账非空就恒红。
+    const record = path.join(REAL_PENDING_DIR, name);
     let rec: { file?: string; backup?: string };
     try {
       rec = JSON.parse(fs.readFileSync(record, "utf8")) as { file?: string; backup?: string };
@@ -278,19 +281,43 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
   it("refuses to start while another run is live — its ledger is not residue", () => {
     // `PENDING_DIR` 是仓库级全局路径：本机同时开两个会话跑门禁时，旧实现会把别人活着的
     // 台账连备份一起 `rm -rf`，那一轮被强杀后残留就彻底没人认得。
-    // 这里 pid 用测试自己进程的 —— 子进程看它是别人的、且活着，判据是确定性的。
+    // 这里起一个**命令行里带着 mutation-check.mjs 的真活进程**（node 只 sleep，不执行脚本）
+    // 当那个"另一轮"：判据是 pid 活着 **且** 身份对得上，不是裸 pid 探活。
     // check:residue 是全场卫生检查（myFiles=all），任何文件的活体台账都拦。
     const file = makeTarget("original\n", "MUTANT");
+    const live = spawn(process.execPath, ["-e", "setTimeout(() => {}, 8000)", "mutation-check.mjs"], {
+      stdio: "ignore",
+    });
+    try {
+      writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: live.pid });
+
+      const run = recoverOnly();
+
+      expect(run.status).toBe(2);
+      expect(run.err).toContain("另一轮变异正在运行");
+      // 现场一点不许动：文件、备份、台账都得留给那一轮自己收
+      expect(fs.readFileSync(file, "utf8")).toBe("MUTANT");
+      expect(fs.existsSync(path.join(PENDING_DIR, "target.ts.orig"))).toBe(true);
+      expect(fs.existsSync(RECORD)).toBe(true);
+    } finally {
+      live.kill();
+    }
+  });
+
+  it("does not treat a reused pid as a live run", () => {
+    // 2026-10-15 生产事故：凌晨一轮变异被强杀，台账里的 pid 35512 后来被微信
+    // （Weixin.exe）复用 —— `isPidAlive` 说它活着，check:residue 于是把一堆早已
+    // 还原干净的残留判成"另一轮正在运行"，拒绝清理也拒绝启动，npm test 跟着红。
+    // 判据收紧为"pid 活着 **且** 命令行里真是这个脚本"。这里用测试进程自己当那个
+    // 被复用的 pid：它确实活着，但命令行里没有 mutation-check。
+    const file = makeTarget("already restored\n", "already restored\n");
     writeRecord(RECORD, { file, backup: path.join(PENDING_DIR, "target.ts.orig"), pid: process.pid });
 
     const run = recoverOnly();
 
-    expect(run.status).toBe(2);
-    expect(run.err).toContain("另一轮变异正在运行");
-    // 现场一点不许动：文件、备份、台账都得留给那一轮自己收
-    expect(fs.readFileSync(file, "utf8")).toBe("MUTANT");
-    expect(fs.existsSync(path.join(PENDING_DIR, "target.ts.orig"))).toBe(true);
-    expect(fs.existsSync(RECORD)).toBe(true);
+    expect(run.status).toBe(0);
+    expect(run.out).toContain("台账已清理");
+    expect(fs.existsSync(RECORD)).toBe(false);
   });
 
   it("still heals a ledger whose pid is not a live process", () => {
@@ -364,6 +391,186 @@ describe("mutation-check --recover-only（verify 第 1 段）", () => {
 
     expect(run.status).toBe(2);
     expect(run.err).toContain("映射不回源文件");
+  });
+});
+
+/**
+ * pid 身份判定的单元层：`isForeignMutationRun` 的分支 + `pidCommandLine` 的退化链。
+ *
+ * 为什么值得单测（2026-10-15 生产事故）：判据原来只看 `isPidAlive`，而 pid 会被
+ * 别的程序复用（微信）—— 症状是"一堆早已还原干净的残留被判成另一轮正在运行"。
+ * 身份校验修好后，**真并发现场**只能覆盖"命令行里确实有 mutation-check"这一条；
+ * 退化链（wmic → powershell → 拿不到）与"查不到时保守按活着算"这三条，只有注进去
+ * 直接问才问得到。它们恰是最容易在下次重构里被悄悄改坏的部分。
+ *
+ * 手法与本文件其它节一致：按锚点把函数体从门禁脚本里抠出来注进新作用域，不留第二份
+ * 实现；只把 `process` / `spawnSync` / `fs` 换成用例能决定的假件（探活的抛错码
+ * 决定不了，所以 `kill` 也换）。
+ */
+describe("isForeignMutationRun · pid 活着之外还要看身份", () => {
+  const SRC = fs.readFileSync(SCRIPT, "utf8");
+  const START_ANCHOR = "/** 进程号是否还活着";
+  const END_ANCHOR = "/** 一条台账的落盘路径";
+  const start = SRC.indexOf(START_ANCHOR);
+  const end = SRC.indexOf(END_ANCHOR);
+
+  interface Identity {
+    isForeignMutationRun: (pid: number) => boolean;
+    pidCommandLine: (pid: number) => string | null;
+    isPidAlive: (pid: number) => boolean;
+  }
+  interface SpawnCall {
+    cmd: string;
+    args: string[];
+  }
+
+  /**
+   * 抠出 isPidAlive / pidCommandLine / isForeignMutationRun 注进新作用域。
+   * `replies` 按调用顺序应答 spawnSync（抛 Error 等价于"这条命令起不来"）；
+   * `proc` 决定 posix 侧 `/proc/<pid>/cmdline` 读到什么（默认读不到）。
+   */
+  function load(opts: {
+    platform: string;
+    kill?: (pid: number, signal: number) => void;
+    replies?: Array<{ status: number; stdout: string } | Error>;
+    proc?: (p: string) => string;
+  }): { api: Identity; calls: SpawnCall[] } {
+    if (start < 0 || end < 0 || end <= start) {
+      throw new Error(
+        `无法在 mutation-check.mjs 里定位 pid 身份判定区（锚点 ${START_ANCHOR} / ${END_ANCHOR} 被改名或移动了？）`,
+      );
+    }
+    const calls: SpawnCall[] = [];
+    const queue = [...(opts.replies ?? [])];
+    const enoent = () => Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+    const processStub = { platform: opts.platform, kill: opts.kill ?? (() => undefined) };
+    const spawnSyncStub = (cmd: string, args: string[]) => {
+      calls.push({ cmd, args });
+      const next = queue.shift();
+      if (next === undefined || next instanceof Error) throw next ?? new Error("队列里没有应答");
+      return next;
+    };
+    const fsStub = {
+      readFileSync: (p: fs.PathLike) => {
+        if (!String(p).startsWith("/proc/") || !opts.proc) throw enoent();
+        return opts.proc(String(p));
+      },
+    };
+    const factory = new Function(
+      "fs",
+      "process",
+      "spawnSync",
+      `${SRC.slice(start, end)}\nreturn { isForeignMutationRun, pidCommandLine, isPidAlive };`,
+    );
+    const api = factory(fsStub, processStub, spawnSyncStub) as unknown as Identity;
+    return { api, calls };
+  }
+
+  it("pid 已经不存在 ⇒ 不是外来轮次，且不必再去问命令行", () => {
+    const { api, calls } = load({
+      platform: "win32",
+      kill: () => {
+        throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+      },
+    });
+
+    expect(api.isForeignMutationRun(35512)).toBe(false);
+    expect(calls).toEqual([]);
+  });
+
+  it("pid 活着但命令行是别的程序（pid 被复用）⇒ 不是外来轮次", () => {
+    // 2026-10-15 事故的最小复现：pid 35512 被 Weixin.exe 复用。
+    const { api, calls } = load({
+      platform: "win32",
+      replies: [{ status: 0, stdout: "C:\\Program Files (x86)\\Tencent\\Weixin\\Weixin.exe" }],
+    });
+
+    expect(api.isForeignMutationRun(35512)).toBe(false);
+    expect(calls.map((c) => c.cmd)).toEqual(["wmic"]);
+  });
+
+  it("pid 活着且命令行正是这个脚本 ⇒ 是外来轮次", () => {
+    const { api } = load({
+      platform: "win32",
+      replies: [
+        { status: 0, stdout: "node  D:\\ox\\ox-commander\\scripts\\mutation-check.mjs --mode=site --file=src/store.ts\r\n" },
+      ],
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+  });
+
+  it("win32：wmic 没给出有效输出时退化到 PowerShell CIM，且带上那个 pid", () => {
+    const { api, calls } = load({
+      platform: "win32",
+      replies: [
+        { status: 0, stdout: "  \r\n" }, // 有进程、命令行空白 ⇒ 等价于拿不到
+        { status: 0, stdout: "node  scripts\\mutation-check.mjs" },
+      ],
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+    expect(calls.map((c) => c.cmd)).toEqual(["wmic", "powershell"]);
+    // 过滤器必须点到被问的那个 pid：写成查全表会把别的进程也拖进判定。
+    expect(calls[1].args.join(" ")).toContain("ProcessId=4242");
+    expect(calls[1].args.join(" ")).toContain("Get-CimInstance Win32_Process");
+  });
+
+  it("两条查询都拿不到命令行时，保守按「活着算」", () => {
+    // 把不确定当已退出会更糟：那等于让一次查询失败就授权去还原别人正在写的源码。
+    const { api, calls } = load({
+      platform: "win32",
+      replies: [new Error("wmic 已不在"), { status: 1, stdout: "" }],
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+    expect(calls.map((c) => c.cmd)).toEqual(["wmic", "powershell"]);
+  });
+
+  it("探活返回 EPERM（进程属于别人）也算活着，接保守判定", () => {
+    const { api } = load({
+      platform: "win32",
+      kill: () => {
+        throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      },
+      replies: [],
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+  });
+
+  it("posix：/proc/<pid>/cmdline 里正是这个脚本 ⇒ 是外来轮次", () => {
+    const { api } = load({
+      platform: "linux",
+      proc: () => "node\u0000scripts/mutation-check.mjs\u0000--mode=site\u0000",
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+  });
+
+  it("posix：/proc/<pid>/cmdline 是别的程序 ⇒ 不是外来轮次", () => {
+    const { api } = load({ platform: "linux", proc: () => "/usr/bin/wechat\u0000--session\u0000" });
+
+    expect(api.isForeignMutationRun(4242)).toBe(false);
+  });
+
+  it("posix：/proc 读不到（已退出或无权）时同样保守按活着算", () => {
+    const { api } = load({
+      platform: "linux",
+      proc: () => {
+        throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+      },
+    });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+  });
+
+  it("isPidAlive 只认正整数 pid（0/-1/NaN 一律当已退出）", () => {
+    const { api } = load({ platform: "win32" });
+
+    expect(api.isPidAlive(0)).toBe(false);
+    expect(api.isPidAlive(-1)).toBe(false);
+    expect(api.isPidAlive(Number.NaN)).toBe(false);
   });
 });
 

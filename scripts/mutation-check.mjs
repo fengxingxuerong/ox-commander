@@ -91,7 +91,7 @@
  *      三种诱因（测试路径写错 / 测试被改坏 / 源码有语法错）都会让整块覆盖静默归零，
  *      与「CI 里写错路径、从来没真正跑过的 job」同族。现在改为 exit 1 并点名。
  */
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1548,6 +1548,49 @@ function isPidAlive(pid) {
   }
 }
 
+/** 取一个进程的命令行；拿不到（权限/平台/已退出）返回 null。 */
+function pidCommandLine(pid) {
+  if (process.platform === "win32") {
+    // wmic 已弃用但仍在；退化到 PowerShell CIM。都失败返回 null（调用方保守处理）。
+    for (const [cmd, args] of [
+      ["wmic", ["process", "where", `processid=${pid}`, "get", "commandline"]],
+      [
+        "powershell",
+        ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+      ],
+    ]) {
+      try {
+        const out = spawnSync(cmd, args, { encoding: "utf8", timeout: 8000 });
+        if (out.status === 0 && typeof out.stdout === "string" && out.stdout.trim() !== "") return out.stdout;
+      } catch {
+        /* 换下一种 */
+      }
+    }
+    return null;
+  }
+  try {
+    return fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * pid 是否属于**另一个还在跑的 mutation-check 实例**。
+ *
+ * ⚠️ 不能只用 `isPidAlive`：pid 会复用。2026-10-15 实测 —— 凌晨一轮变异被强杀，
+ * 台账里的 pid 35512 后来被微信（Weixin.exe）复用，`check:residue` 于是把一堆
+ * 早已还原干净的残留判成"另一轮正在运行"，拒绝清理且拒绝启动，`npm test` 也跟着红
+ * （那条卫生断言的本意是抓活体变异体，不是抓 pid 撞车）。所以活着之外还要看身份：
+ * 命令行里得真是这个脚本。查不到命令行时保守按"活着算"—— 把不确定当已退出会更糟。
+ */
+function isForeignMutationRun(pid) {
+  if (!isPidAlive(pid)) return false;
+  const cmd = pidCommandLine(pid);
+  if (cmd === null) return true;
+  return cmd.includes("mutation-check");
+}
+
 /** 一条台账的落盘路径：按文件一条（备份名 + .json）。
  *  旧设计是单槽 `index.json`——它从根上假设"同一时刻只有一个源文件在被变异"，
  *  并行 worker（按目标分进程）会互相顶掉记录。按文件一条后，谁写谁都互不干扰，
@@ -1692,7 +1735,7 @@ function recoverPendingRecord(myFiles) {
     } catch {
       rec = null;
     }
-    if (rec?.pid !== undefined && rec.pid !== process.pid && isPidAlive(rec.pid)) {
+    if (rec?.pid !== undefined && rec.pid !== process.pid && isForeignMutationRun(rec.pid)) {
       // 别的文件上活着的外来台账：不是残留，也不是本轮的事，跳过不判。
       // 本轮要动的文件上有 → 拒绝启动（同一份源码两轮互踩，谁的结果都不可信）。
       if (myFiles === "all" || (rec.file && myFiles.has(rec.file))) {

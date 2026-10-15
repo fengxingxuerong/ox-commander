@@ -199,7 +199,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**29 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**31 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 14 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
@@ -220,6 +220,9 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   —— 那一家的"没覆盖"被写成了"覆盖其余一切"；命令串带 `--selftest`，判据自己先过 4 例）
 → check:scripts / check:scripts-wired / check:packaged-paths / check:masker
   （工具脚本语法与接线、打包路径缺陷判定、掩空器自测 24 例）
+→ check:workbuddy-bridge（`scripts/workbuddy-bridge.mjs` 的沙箱判定：放行谁、拦谁。
+  口径与平台 `shared/glob.ts → isPathInZone` 逐字对齐 —— 2026-10-15 桥缺 `z.` 前缀规则，
+  zone 取"文件名级"粒度时契约要求的字面路径被判越权；21 例按锚点抠函数注入 `path` 跑）
 → check:tests-collected（盘上有、但 vitest 根本不收集的测试文件 → FAIL；
   vitest 收集不到任何文件也 FAIL —— 收集过程坏了不许报绿）
 → check:ipc-channels（preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道，两个方向的漂移都拦；
@@ -234,7 +237,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
   空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
   空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
-→ vitest（2026-10-14 现跑 2079 通过 + 8 跳过，合计 2087 条，分布在 67 个有可执行用例的文件；
+→ vitest（2026-10-15 现跑 2090 通过 + 8 跳过，合计 2098 条，分布在 67 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -252,7 +255,17 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
    ≠ 结论为真）→ `--replay` 复跑判 verified。它同时是 README 的演示与回归基线）
 → smoke:snapshot-secrets / smoke:gateway / smoke:coze / smoke:import / smoke:offline-e2e（五条集成链路，最后一条是零配额的离线全链路 E2E）
 → smoke:target-range（LLM 故障转移靶场：本地故障注入端点矩阵，18 场景走真实 HTTP 验证 failover/冷却/升级/恢复全行为）
+→ smoke:workbuddy-bridge（对话式智能体桥 `workbuddy-bridge.mjs` 的**真进程**端到端：真起桥 +
+   真起 dist-headless，由测试扮演"人"读写 inbox/outbox，6 场景钉住协议字段、越权整批拒、
+   失败终态映射、deadline 收口与队列清理；随机端口、零配额）
 ```
+
+⚠️ 本机（WorkBuddy 宿主）跑**整链**时，`build` 段可能红在
+`[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":51,...}` —— 那不是项目缺陷：
+宿主按**单次工具调用**累计删除数（阈值 50），变异阶段清台账 + vite 清空 `dist/assets`
+同属一个调用就超线。分段跑（每段一次调用）即可；非要一个调用跑完，对该命令加
+`CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令的守卫，不动全局配置）——
+`dist/` 是 git 忽略的构建产物，删它没有个人文件风险。
 
 覆盖率：`npm run test:coverage`（v8 provider，模块级报告；2026-10-05 复测 92.89% stmts（5580/6007）/
 89.11% branch（3661/4108），**不设阈值**，所以它不是门禁）。

@@ -101,6 +101,29 @@ for (const h of hits) {
   const tests = table.get(h);
   console.log(`  · ${h}${tests && tests.length > 0 ? ` ← ${tests.join(", ")}` : " ← (没挂测试文件)"}`);
 }
+/*
+ * 把「改了门禁自己」这件事在输出里说破。
+ *
+ * 2026-10-15 实测的盲区：`scripts/mutation-check.mjs`（判据本身）不在 TARGETS 里 ——
+ * 这是刻意的，门禁不能把变异体写进自己身上再启动自己去测，自指会让审计失去意义。
+ * 但于是本次只改判据时，上面那行会打印「其中变异目标=0」，下面紧跟着一句
+ * 「无需逐位点审计」—— 读的人会以为这批改动没有任何审计要求，而它恰恰是最需要
+ * 审计的那批：改坏了不会有任何变异位点变红，只会让后面的段集体说谎。
+ *
+ * 所以这里点名这些文件，并说清它们的正确性靠什么：不是变异审计，而是单元用例
+ * （`src/mutation-residue.test.ts` 里按锚点抠函数注入假件那一套）。只提示、不改退出码
+ * —— 判「该不该有单元用例」需要人，机器只能保证这件事没被忘掉。
+ */
+const gateScripts = uniq.filter((f) => f.startsWith("scripts/") && f.endsWith(".mjs") && !table.has(f));
+if (gateScripts.length > 0) {
+  console.log(
+    `  ⚠️ 改了门禁脚本（刻意不在 TARGETS 内，避免自指审计）：${gateScripts.join(", ")}`,
+  );
+  console.log(
+    "     这批文件没有逐位点变异审计可做，正确性靠单元用例担保（锚点抠函数 + 注入假件）；" +
+      "没有用例的改动请一并补上。",
+  );
+}
 if (hits.length === 0) {
   console.log("PASS: 本次改动没有触及任何变异目标文件 —— 无需逐位点审计");
   process.exit(0);

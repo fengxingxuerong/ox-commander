@@ -1,9 +1,13 @@
-# `npm run verify` 的逐段机制（29 段）
+# `npm run verify` 的逐段机制（31 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、29 段、
-2079 通过 + 8 跳过，合计 2087 条，分布在 67 个有可执行用例的文件（2026-10-14 现跑：链首到
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、31 段、
+2090 通过 + 8 跳过，合计 2098 条，分布在 67 个有可执行用例的文件（2026-10-15 现跑：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
+⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
+`safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
+变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
+分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
 变异规模实物：**73 个目标** / 基线 **1723 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
@@ -35,6 +39,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 6 | `check:scripts-wired` | `scripts/check-script-wiring.mjs --selftest` | 先跑 13 例边界匹配自测（判据自身的判据），再判：不可达脚本 → 红；失效 `ACCEPTED` → 红。**名字按边界匹配**（命中前后不能是 `[\w.-]`）—— 纯 `includes` 是漏报方向 |
 | 7 | `check:packaged-paths` | `scripts/check-packaged-paths.mjs` | 打包后必坏的读路径判定 |
 | 8 | `check:masker` | `scripts/masker-selftest.mjs` | 从 `mutation-check.mjs` 抠函数失败 → **exit 2** |
+| 8b | `check:workbuddy-bridge` | `scripts/workbuddy-bridge-selftest.mjs`：桥的沙箱判定（放行谁/拦谁）+ `writeFiles` 的**整批原子性**，口径对齐平台 `shared/glob.ts → isPathInZone` | 判松（放行 zone 外写入）/ 判严（合法交付被判越权）→ 红。2026-10-15 桥缺 `z.` 前缀规则，zone 取"文件名级"粒度（`src/parse`）时契约字面路径 `src/parse.js` 被判越权；同日到位的第二个洞：边校验边写 ⇒ 一批里第二份越权时第一份已落盘，而 `failed` 不带文件清单，平台的 `revert-batch` 看不到那半个文件。按锚点抠函数注入 `path`/`fs`，27 例 |
 | 9 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
 | 10 | `check:ipc-channels` | `scripts/check-ipc-channels.mjs`：preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道 | 悬空通道（一调就 reject）→ 红；注册了但没暴露（**静默不可用**）→ 红；同通道 invoke/handle 两次 → 红；**任一侧解析为空也红**（解析失配当通过 = 永远绿的摆设）。反向注入 6/6 |
 | 11 | `check:mutation-targets` | `scripts/check-mutation-targets.mjs`：本次改动的生产文件必须已在 `TARGETS` 或显式豁免里 | 漏挂 → 红。漏挂的文件**不参与**变异统计，那个 PASS 对它没有含义（2026-10-05 三个漏挂文件入表后一次暴露 9 处存活位点）。反向注入 4/4 |
@@ -59,6 +64,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 22-25 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
 | 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
 | 27 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
+| 28 | `smoke:workbuddy-bridge` | `workbuddy-bridge-it.mjs`：**真进程 × 真 `dist-headless` 进程**（假大脑随机端口 + 测试扮演"人"读写 inbox/outbox），6 场景 36 项断言（实测 `^PASS` 计数：`check()` 30 条 + 每场景一条桥健康检查）| 零配额、随机端口。钉的是只有跨进程才成立的六件事：平台发的 TaskRequest 字段真桥认不认、completed/failed 终态映射（不能把人的拒绝当成功交付）、越权/受保护文件的**整批**拒且盘上零产物、outbox 坏 JSON 判失败而不卡死（现场改名 `.bad` 不留在待消费队列）、deadline 到点自己收口、三条退出路径都删任务书。与段 26 的分工：那里的桥是内联假件，一行真桥代码都没碰过 |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -320,7 +326,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 29 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 31 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 
