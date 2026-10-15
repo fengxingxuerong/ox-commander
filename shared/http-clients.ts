@@ -289,8 +289,13 @@ export class AnthropicClient extends BaseHttpLlmClient {
   }
 }
 
-/** Brain layer (PRD / task decomposition) calls: compact JSON, tighter timeout. */
-export const BRAIN_TIMEOUT_MS = 120_000;
+/**
+ * Brain layer (PRD / task decomposition) calls. Was 120s ("tighter than the executor"),
+ * relaxed to 300s on 2026-10-15: the planner sends this repo's whole surface as one prompt, and
+ * two live pool lines answer it in 2+ minutes. At 120s those lines were judged as timeouts and
+ * pushed into the cooldown table, so a rate-limited primary left no usable fallback at all.
+ */
+export const BRAIN_TIMEOUT_MS = 300_000;
 /** Executor layer calls: full-file code generation, generous timeout. */
 export const EXECUTOR_TIMEOUT_MS = 300_000;
 
