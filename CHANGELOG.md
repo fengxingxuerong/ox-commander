@@ -26,6 +26,15 @@ tier 2 有约 23 min 是重复跑 tier 1 —— 而它已经压过 runner ~35 mi
   `tier1 ∪ tier2 = 73`（＝全集）；tier 2 两片各 20 目标且 `∪ = 40`；全量三片 `∪ = 73`。
 - 验收：`npm run verify` 全绿（31 段）。
 
+### 文档（CI 分片时长实测回填 · 2026-10-16）
+
+上一条的"分片"修完后首轮 CI 实测 @ `80946b0` run #38922557558 **五 job 全绿**：
+`verify` ubuntu 3.4 min / windows 4.8 min、`mutation` tier 1 **17.6 min** / tier 2 两片
+**12.7 + 13.7 min**。最长 job 从修前的 54.8 min 降到 17.6 min，重新落回 runner ~35 min
+的回收窗口之内。README 与 `verify.yml` 注释里的"预期"已换成实测值 —— 这条的价值不在数字
+本身（它落笔即过时），而在**分片终于真的是分区**：此前那条 job 的覆盖里含一段"重复跑
+tier 1"的空转，现在 `tier1 ∪ tier2 = 全集` 且各片各自收敛。
+
 ### 修复（变异在跑时算基线 —— 假漂移会诱导人污染基线 · 2026-10-16）
 
 本机在 tier 2 全量跑的途中跑 `check:doc-claims`，它内部的 `site-baseline.mjs --json`

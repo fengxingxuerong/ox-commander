@@ -76,7 +76,8 @@ jobs:
   #      的回收窗口把 tier 2 用 `--shard` 再轮转切成 2 片。分片由**工具自己算**
   #      （各片之并恒为全集），不写死目标清单 —— 写死清单漏掉一个目标 = 那个目标
   #      永远不被审计，而它的 job 照样绿（本仓库反复踩过的那类"PASS 没有含义"）。
-  #      预期：tier 1 单片 ≈23min，tier 2 每片 ≈16min。
+  #      修后首轮实测 @ 80946b0 run #38922557558：tier 1 17.6min、tier 2 两片 12.7 / 13.7min
+  #      （五 job 全绿）；最长 job 从 54.8min 降到 17.6min，重新落回回收窗口之内。
   mutation-full:
     name: mutation (site, tier ${{ matrix.tier }} ${{ matrix.shard }})
     # 只在 Linux 跑：site 审计的存活清单里会混进"平台相关等价变异"

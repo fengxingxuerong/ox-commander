@@ -11,8 +11,9 @@
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部 73 个目标**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
 > 里，tier 2 有约 23 min 是**重复跑 tier 1**。现在 `--tier` 是精确匹配、tier 2 再按 `--shard` 轮转切 2 片
-> （分片由工具自己算，各片之并恒为全集，不漏目标）；预期单片 ≈23 min。⚠️ 新时长的**实测值待下一轮 CI 回填**，
-> 别拿预期当实测。
+> （分片由工具自己算，各片之并恒为全集，不漏目标）。修后首轮实测 @ `80946b0` run #38922557558 **五 job 全绿**：
+> tier 1 单片 17.6 min · tier 2 两片 12.7 / 13.7 min · `verify` ubuntu 3.4 min / windows 4.8 min ——
+> 最长的 job 从 54.8 min 降到 17.6 min，重新落回 runner ~35 min 回收窗口之内。
 > 结论与数字（杀死 N/M、存活清单）写进该 job 的 **summary**，不用翻 log。这两个数里的"基线"由 `check:doc-claims` 对实物核（取自
 > `mutation-check.mjs` 的 `SITE_BASELINE`）—— 它随 TARGETS 增长，而增长是加代码的自然结果，
 > 所以**落笔即被检查**（上一版这里停在「881/881」那个时期的规模）。⚠️ 基线现值与全量审计结果是
@@ -283,17 +284,17 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 162/162（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | CI 每次 push 全量跑（`mutation (site, tier …)` 三分片：tier 1 单片 + tier 2 轮转两片。2026-10-16 起 `--tier` 精确匹配、`--shard` 真均摊 —— 此前 `--tier=2` 是超集，会重复跑 tier 1）。最近一次**修复前**整轮 @ `94a7a59` run #153 两片全绿（tier 1 23.4 min / tier 2 54.8 min，tier 2 含约 23 min 重复）。本机最新：tier 1 737/737 全杀（2026-10-16 win32，45.8 min）。本机历史最好记录 1330/1330（2026-10-05 win32 全量，当时在册「64」个目标） |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | CI 每次 push 全量跑（`mutation (site, tier …)` 三分片：tier 1 单片 + tier 2 轮转两片。2026-10-16 起 `--tier` 精确匹配、`--shard` 真均摊 —— 此前 `--tier=2` 是超集，会重复跑 tier 1）。**修后** @ `80946b0` run #38922557558 五 job 全绿（tier 1 17.6 min · tier 2 12.7 / 13.7 min）。修前整轮 @ `94a7a59` run #153 两片全绿（tier 1 23.4 min / tier 2 54.8 min，tier 2 含约 23 min 重复）。本机最新：tier 1 737/737 全杀（2026-10-16 win32，45.8 min）。本机历史最好记录 1330/1330（2026-10-05 win32 全量，当时在册「64」个目标） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
 CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径三分片各 100 min 上限），
 `release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
-（公开仓库），`verify.yml` 随每次 push 运行。**run #153 @ `94a7a59` 四 job 全绿**（当时分片是 tier 1/2 两片，
-其中 tier 2 是超集 —— 见上文；2026-10-16 起改为三分片）：`verify` ubuntu 3.3 min / windows 4.9 min、
-`mutation` tier 1 23.4 min / tier 2 54.8 min —— 这类状态数字落笔即过时，CI 结论以 Actions 页为准，
-别拿 README 当 CI 状态。
+（公开仓库），`verify.yml` 随每次 push 运行。**修后 @ `80946b0` run #38922557558 五 job 全绿**
+（`verify` ubuntu 3.4 min / windows 4.8 min、`mutation` tier 1 17.6 min / tier 2 两片 12.7 + 13.7 min）。
+此前 @ `94a7a59` run #153 是四 job 全绿（当时分片是 tier 1/2 两片，其中 tier 2 是超集 —— 见上文）。
+这类状态数字落笔即过时，CI 结论以 Actions 页为准，别拿 README 当 CI 状态。
 
 `mutation (site, tier …)` 分片 job 的结论与数字（杀死 N/M / 口径 / 存活清单 / 耗时）会由
 `mutation-check.mjs` 自己写进 job 的 **summary**（`GITHUB_STEP_SUMMARY`）：绿/红只有一个 bit，
