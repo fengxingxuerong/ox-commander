@@ -14,9 +14,14 @@ afterAll(() => {
   // Child processes may still hold the directory on Windows; retry briefly and
   // never fail the suite over temp-file cleanup.
   //
-  // 2026-10-17：原窗口是 5×100ms = 0.5s，实测不够 —— 句柄没释放时 rmSync 抛
-  // EBUSY 被下面 catch 静默吞掉，目录就此永久留在 %TEMP%。本机累积到 1441 个
-  // `ox-cli-prompts-*`（全是空目录）。给到 ~3.75s，清不掉的概率显著下降。
+  // 2026-10-17 实测（**这一处没有根治，别把它读成"已修"**）：失败的错误是
+  // `EBUSY: resource busy or locked, rmdir <dir>` —— 锁的是**目录本身**（rmdir，
+  // 不是 unlink 某个文件），而把重试窗口从 0.5s 放到 3.75s、再放到 12s，照样每次漏
+  // 一个。测试结束后手动删同一个目录立刻成功，所以不是外部进程长期持有；
+  // 更像是 dispatch 起的 node 子进程在 afterAll 时还没真正退出 —— 它的 cwd 指向这里。
+  // 真要根治得让 dispatch 在用例结束前把子进程收干净，那要动适配器，不在本次范围。
+  // 本次的收益在**另 3 个同型文件**（cli-agent-env / sandbox-path / mutation-residue），
+  // 它们的残留实测已归零：那几处是纯时间问题，这一处不是。
   try {
     fs.rmSync(promptDir, { recursive: true, force: true, maxRetries: 25, retryDelay: 150 });
   } catch {
