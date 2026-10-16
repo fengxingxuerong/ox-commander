@@ -209,7 +209,14 @@ afterEach(() => {
 // 同形根是整个文件共用一个（备份名的编码规则要它稳定），所以在这里一次删掉：
 // 正常收尾不留 OS 临时目录，被中途打断时留下的也只是仓库外的垃圾。
 afterAll(() => {
-  fs.rmSync(ROOT, { recursive: true, force: true });
+  // 2026-10-17：无重试时 win32 上的偶发 EBUSY 会把整棵同形根留在 %TEMP%
+  // （本机累积 55 个 `ox-residue-root-*`）。这里不因清盘失败而让用例变红 ——
+  // 判据已经跑完了，清盘是卫生问题 —— 但给它 ~3.75s 的重试窗口。
+  try {
+    fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 25, retryDelay: 150 });
+  } catch {
+    // left to the OS temp cleaner
+  }
 });
 
 /**

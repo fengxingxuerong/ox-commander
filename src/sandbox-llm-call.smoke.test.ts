@@ -63,14 +63,28 @@ interface Probe {
   out: string;
 }
 
-const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sbx-llm-"));
-const PROBE_FILE = path.join(ROOT, "probe.mjs");
+/**
+ * 2026-10-17：临时目录改为**惰性**建立 —— 原先写在模块顶层，于是每一次
+ * `vitest list`（只导入不执行）也照样造一个目录；而 3 条用例整体挂在
+ * `skipIf(!enabled)` 下，`afterAll` 的清盘根本不会被调度到，目录就此永久留下。
+ * 实测本机 TEMP 里堆了 499 个空的 `ox-sbx-llm-*` —— 一个默认跑 0 条断言的
+ * 文件，唯一的"贡献"是制造垃圾。建目录这件事挪到确认真要跑的时候。
+ */
+let ROOT = "";
+let PROBE_FILE = "";
+
+function ensureProbeDir(): void {
+  if (ROOT) return;
+  ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "ox-sbx-llm-"));
+  PROBE_FILE = path.join(ROOT, "probe.mjs");
+}
 
 /**
  * 起一个真正过沙箱门的子进程：命令与参数先过 CommandPolicy，再按平台包成 spawn 三元组。
  * 计划本身也在这里被断言 —— 未过门的 argv 不该走到 spawn 这一步。
  */
 function runSandboxed(mode: string, env: NodeJS.ProcessEnv): Promise<Probe> {
+  ensureProbeDir();
   const policy = createDefaultCommandPolicy();
   const spec = planSpawn("node", ["probe.mjs", mode], policy);
   const child = spawn(spec.file, spec.args, {
@@ -89,10 +103,13 @@ function runSandboxed(mode: string, env: NodeJS.ProcessEnv): Promise<Probe> {
 }
 
 beforeAll(() => {
-  if (enabled) fs.writeFileSync(PROBE_FILE, PROBE_SRC, "utf8");
+  if (!enabled) return;
+  ensureProbeDir();
+  fs.writeFileSync(PROBE_FILE, PROBE_SRC, "utf8");
 });
 
 afterAll(() => {
+  if (!ROOT) return;
   try {
     fs.rmSync(ROOT, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
   } catch {
@@ -119,6 +136,7 @@ describe.skipIf(!enabled)("沙箱内真实调用 LLM", () => {
   }, 120_000);
 
   it("验证链（verifyProject）起的子进程同样不得继承宿主凭证环境", async () => {
+    ensureProbeDir();
     const cmds: VerificationCommand[] = [{ kind: "build", command: "node", args: ["probe.mjs", "envonly"] }];
     const report = await verifyProject(cmds, { cwd: () => ROOT });
     const log = report.results[0]?.logDigest ?? "";

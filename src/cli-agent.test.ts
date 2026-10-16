@@ -13,8 +13,12 @@ const promptDir = fs.mkdtempSync(path.join(os.tmpdir(), "ox-cli-prompts-"));
 afterAll(() => {
   // Child processes may still hold the directory on Windows; retry briefly and
   // never fail the suite over temp-file cleanup.
+  //
+  // 2026-10-17：原窗口是 5×100ms = 0.5s，实测不够 —— 句柄没释放时 rmSync 抛
+  // EBUSY 被下面 catch 静默吞掉，目录就此永久留在 %TEMP%。本机累积到 1441 个
+  // `ox-cli-prompts-*`（全是空目录）。给到 ~3.75s，清不掉的概率显著下降。
   try {
-    fs.rmSync(promptDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(promptDir, { recursive: true, force: true, maxRetries: 25, retryDelay: 150 });
   } catch {
     // left to the OS temp cleaner
   }

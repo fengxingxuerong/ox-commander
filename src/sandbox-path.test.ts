@@ -10,8 +10,10 @@ import { DEFAULT_FORBIDDEN_WRITE, PathPolicy, isCaseInsensitiveFs } from "../ele
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), "ox-policy-")));
 
 afterAll(() => {
+  // 2026-10-17：0.25s 的原窗口太短（win32 句柄未释放 → EBUSY 被静默吞掉），
+  // 本机 %TEMP% 累积 266 个 `ox-policy-*`。放大到 ~3.75s。
   try {
-    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 25, retryDelay: 150 });
   } catch {
     // temp cleaner will get it
   }

@@ -28,8 +28,10 @@ const CANARIES = {
 
 afterAll(() => {
   for (const name of Object.keys(CANARIES)) delete process.env[name];
+  // 2026-10-17：0.5s 的重试窗口在 win32 上不够（子进程句柄未释放 → EBUSY →
+  // 静默留在 %TEMP%，本机累积 266 个 `ox-env-e2e-*`）。放大到 ~3.75s。
   try {
-    fs.rmSync(promptDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    fs.rmSync(promptDir, { recursive: true, force: true, maxRetries: 25, retryDelay: 150 });
   } catch {
     // left to the OS temp cleaner
   }
