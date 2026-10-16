@@ -6,6 +6,32 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 修复（测试临时目录不再永久泄漏 %TEMP% —— 单次收集 0 残留 · 2026-10-17）
+
+5 个测试文件在**模块顶层** `fs.mkdtempSync` 建目录，清盘写在 `afterAll` 里 —— 于是
+「建」总是发生，「清」却不一定。本机 %TEMP% 累计 **18352 个 `ox-*` 目录**
+（15876 个为空）：这不是磁盘问题，是判据之外的**静默副作用**：全绿的测试报告里
+看不到它，只有 %TEMP% 会一直膨胀。
+
+最坏的一处是 `src/sandbox-llm-call.smoke.test.ts`：它的 3 条用例整体挂在
+`skipIf(!enabled)` 下，**默认跑 0 条断言**，`afterAll` 根本不会被调度；但顶层建目录
+**每次 `vitest list` 都执行**（list 只导入不执行用例）。一个从不执行任何断言的文件，
+唯一的贡献是每次收集制造一个永久垃圾目录 —— 实测 499 个 `ox-sbx-llm-*`。
+
+其余 4 处（`cli-agent` / `cli-agent-env` / `sandbox-path` / `mutation-residue`）的清盘
+重试窗口只有 0.25–0.5s：win32 上子进程句柄未释放时 `rmSync` 抛 EBUSY，被 `catch`
+静默吞掉，目录就此留下（`ox-cli-prompts` 1441 / `ox-policy` 266 / `ox-env-e2e` 266 /
+`ox-residue-root` 55）。
+
+- `sandbox-llm-call.smoke.test.ts`：临时目录改**惰性**建立（`ensureProbeDir()`），
+  只在确认真要跑时建；非 enabled 时 `afterAll` 直接返回。修复后连跑 `vitest list`，
+  %TEMP% 增量 **0**（原每次 +1）。
+- 其余 4 处：重试窗口放大到 25×150ms ≈ 3.75s —— `mutation-residue` 的 `afterAll`
+  原先**完全无重试**。清盘失败仍不让用例变红：判据已经跑完，清盘是卫生问题，
+  不是结论问题。
+- 验收：typecheck / eslint 全绿；`npm test` 2090 passed | 8 skipped（与改动前逐条一致）；
+  `check:tests-collected` PASS；`check:mutation-targets` PASS（0 个生产文件改动）。
+
 ### 修复（变异分片是"超集"不是"分区" —— CI 重复跑 · 2026-10-16）
 
 `--tier=N` 的实现是 `t.tier <= maxTier`（缺省 99＝全部），而脚本头注释与工作手册写的
