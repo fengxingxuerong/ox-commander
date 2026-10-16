@@ -39,6 +39,7 @@
     "check:masker": "node scripts/masker-selftest.mjs",
     "check:workbuddy-bridge": "node scripts/workbuddy-bridge-selftest.mjs",
     "check:tests-collected": "node scripts/check-tests-collected.mjs",
+    "check:test-side-effects": "node scripts/check-test-side-effects.mjs",
     "check:ipc-channels": "node scripts/check-ipc-channels.mjs",
     "check:mutation-targets": "node scripts/check-mutation-targets.mjs",
     "check:doc-claims": "node scripts/check-doc-claims.mjs --selftest",
@@ -54,7 +55,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "typecheck": "tsc -p tsconfig.json --noEmit --incremental false && tsc -p tsconfig.electron.json --noEmit --incremental false && tsc -p tsconfig.headless.json --noEmit --incremental false && tsc -p tsconfig.node.json --noEmit --incremental false",
-    "verify": "npm run check:residue && npm run typecheck && npm run lint && npm run check:unwired && npm run check:field-orphans && npm run check:exhaustive && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:workbuddy-bridge && npm run check:tests-collected && npm run check:ipc-channels && npm run check:mutation-targets && npm run check:doc-claims && npm run mutation:baseline && npm test && npm run mutation:quick && npm run mutation:touched && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:receipt-verify && npm run smoke:demo && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import && npm run smoke:offline-e2e && npm run smoke:target-range && npm run smoke:workbuddy-bridge",
+    "verify": "npm run check:residue && npm run typecheck && npm run lint && npm run check:unwired && npm run check:field-orphans && npm run check:exhaustive && npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:workbuddy-bridge && npm run check:tests-collected && npm run check:ipc-channels && npm run check:mutation-targets && npm run check:doc-claims && npm run mutation:baseline && npm test && npm run mutation:quick && npm run mutation:touched && npm run build && npm run build:headless && npm run smoke:artifact && npm run smoke:receipt-verify && npm run smoke:demo && npm run smoke:snapshot-secrets && npm run smoke:gateway && npm run smoke:coze && npm run smoke:import && npm run smoke:offline-e2e && npm run smoke:target-range && npm run smoke:workbuddy-bridge && npm run check:test-side-effects",
     "check:exhaustive": "node scripts/check-exhaustive-maps.mjs --selftest"
   },
   "dependencies": {

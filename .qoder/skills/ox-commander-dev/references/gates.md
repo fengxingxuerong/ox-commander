@@ -1,6 +1,6 @@
-# `npm run verify` 的逐段机制（31 段）
+# `npm run verify` 的逐段机制（32 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、31 段、
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、32 段、
 2090 通过 + 8 跳过，合计 2098 条，分布在 67 个有可执行用例的文件（2026-10-15 现跑：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
@@ -65,6 +65,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
 | 27 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 | 28 | `smoke:workbuddy-bridge` | `workbuddy-bridge-it.mjs`：**真进程 × 真 `dist-headless` 进程**（假大脑随机端口 + 测试扮演"人"读写 inbox/outbox），6 场景 36 项断言（实测 `^PASS` 计数：`check()` 30 条 + 每场景一条桥健康检查）| 零配额、随机端口。钉的是只有跨进程才成立的六件事：平台发的 TaskRequest 字段真桥认不认、completed/failed 终态映射（不能把人的拒绝当成功交付）、越权/受保护文件的**整批**拒且盘上零产物、outbox 坏 JSON 判失败而不卡死（现场改名 `.bad` 不留在待消费队列）、deadline 到点自己收口、三条退出路径都删任务书。与段 26 的分工：那里的桥是内联假件，一行真桥代码都没碰过 |
+| 29 | `check:test-side-effects` | `scripts/check-test-side-effects.mjs`：扫描 `src/` `shared/` `electron/` `headless/` 下的测试文件，找**模块顶层**（缩进 0，导入即执行）的建目录 / 写文件 / spawn 类调用 | 两条都红：**A** 顶层建了东西而全文件**没有任何** `rmSync` —— 每次导入泄漏一份（`vitest list` 只导入不执行，`afterAll` 不会被调度）；**B** 顶层有副作用而文件带 `skipIf`/`skip` 门控 —— 门控跳过时 `afterAll` 不调度，清理不发生而副作用照常发生。**不禁止**「顶层建 + `afterAll` 清」这个既有写法（cli-agent / cli-agent-env / sandbox-path / mutation-residue 四处的残留实测已归零）。自检 6 例（含「注释里的调用不算」「缩进的调用不算」两个反向样本） |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -326,7 +327,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 31 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 32 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 
@@ -356,3 +357,43 @@ async 门面（`text()` / `json()` / `chat()`）。
 引用它之前先问：我新写的那几处是不是那四种算子之一？不是的话，该位点根本不在审计范围内，
 "全杀"与它无关。这类判据的机制只能靠**差分**（摘掉实现必须红）或扩算子集
 （脚本要求扩之前先确认不会引入等价变异噪声，且那会改变位点总数）。
+
+## `check:test-side-effects`（2026-10-17 新增，段 29）
+
+**它盯的是一类躲得过全绿报告的缺陷。** 2026-10-17 体检在 `%TEMP%` 里发现 **18352 个 `ox-*`
+目录**（15876 个为空）。根因是测试文件在**模块顶层** `fs.mkdtempSync`：
+
+- `vitest list` 只导入不执行用例 —— 顶层的建目录**每次收集都跑**；
+- 清盘写在 `afterAll` 里 —— 用例没跑，`afterAll` **就不被调度**。
+
+于是「建」总是发生，「清」却不一定。最坏的一处 `src/sandbox-llm-call.smoke.test.ts`
+（3 条用例整体挂在 `skipIf(!enabled)` 下，默认跑 **0 条断言**）贡献了 499 个残留目录 ——
+**一个从不执行任何断言的文件，唯一的副作用是制造永久垃圾**。
+
+这类东西在 `Tests N passed` 里**完全看不见**：副作用发生在断言之外，而全绿的报告会让人
+以为"测试很干净"。所以它是一道**不跑用例就能看见它**的静态检查。
+
+### 判据
+
+| 判据 | 命中条件 | 为什么红 |
+| --- | --- | --- |
+| A | 顶层建目录/写文件，且全文件没有任何 `rmSync` | 每次导入泄漏一份，没人清 |
+| B | 顶层有副作用，且文件里存在 `skipIf`/`skip` 门控 | 门控跳过时 `afterAll` 不调度 —— 清了也轮不到 |
+
+**刻意不禁止**「顶层建 + `afterAll` 清」这个既有写法：`cli-agent` / `cli-agent-env` /
+`sandbox-path` / `mutation-residue` 四个文件走的就是它，放大重试窗口后残留实测归零。
+判据为难的是**必漏**的两种形态，不是所有顶层副作用。
+
+### 已知边界（别把它读成"已修"）
+
+- `cli-agent.test.ts` 的清盘**至今仍每次漏一个非空目录**。抓到的真实错误是
+  `EBUSY ... rmdir <dir>` —— 锁的是**目录本身**，把重试窗口从 0.5s 放到 12s 照样漏，
+  而测试结束后手动删同一个目录立刻成功。剩余假设：`dispatch` 起的 node 子进程在
+  `afterAll` 时还没真正退出，而它的 cwd 指向该目录。根治要动适配器，本次没做。
+  本段**抓不到它** —— 它有 `rmSync`（判据 A 不命中）、无门控（判据 B 不命中）。
+  **别把本段 PASS 读成"临时目录没有泄漏"**，它只证明没有那两种必漏形态。
+- 「顶层」按**缩进 0** 判定，不用 AST：缩进 0 一定在模块顶层（保守方向，不漏报），
+  代价是识别不了奇怪的格式化。注释行与缩进的调用都排除（自检里有反向样本）。
+- 副作用清单是**显式枚举**的（`mkdtempSync` / `mkdirSync` / `writeFileSync` /
+  `appendFileSync` / `copyFileSync` / `rmSync` / `rm` / `renameSync` / `symlinkSync`）。
+  新增一种留盘 API 而不更新这份清单 ⇒ 那一类不被看见。

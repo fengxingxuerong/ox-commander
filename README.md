@@ -204,7 +204,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**31 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**32 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 14 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
@@ -267,7 +267,18 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:workbuddy-bridge（对话式智能体桥 `workbuddy-bridge.mjs` 的**真进程**端到端：真起桥 +
    真起 dist-headless，由测试扮演"人"读写 inbox/outbox，6 场景钉住协议字段、越权整批拒、
    失败终态映射、deadline 收口与队列清理；随机端口、零配额）
+→ check:test-side-effects（测试文件的**顶层副作用**：顶层建目录却没人清、或清理写在
+   `skipIf` 门控的块里而门控没开 —— 两种都必漏。判据见下，自检 6 例）
 ```
+
+> **`check:test-side-effects` 为什么存在**（2026-10-17）：体检在 `%TEMP%` 里发现
+> **18352 个 `ox-*` 目录**（15876 个为空）。根因是测试文件在**模块顶层** `fs.mkdtempSync`
+> —— 而 `vitest list` 只导入不执行用例，`afterAll` 永远不会被调度：目录建了，没人清。
+> 最坏的一处默认跑 **0 条断言**（3 条用例整体挂在 `skipIf` 下），却每次收集制造一个
+> 永久垃圾目录。**这类缺陷躲得过全绿的测试报告**：副作用发生在断言之外，`Tests N passed`
+> 里看不到它，只有 %TEMP% 一直膨胀。所以它是一道**不跑用例就能看见它**的静态检查。
+> 两条判据都 FAIL：顶层建了东西而全文件无 `rmSync`；顶层有副作用而文件带 `skipIf` 门控。
+> 它**不禁止**「顶层建 + `afterAll` 清」这个既有写法（那 4 个文件实测残留已归零）。
 
 ⚠️ 本机（WorkBuddy 宿主）跑**整链**时，`build` 段可能红在
 `[safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED] {"count":51,...}` —— 那不是项目缺陷：
