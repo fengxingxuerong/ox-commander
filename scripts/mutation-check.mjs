@@ -36,6 +36,8 @@
  *   node scripts/mutation-check.mjs --file=glob
  *   node scripts/mutation-check.mjs --limit=4    # 每文件最多 4 个变异（默认 4）
  *   node scripts/mutation-check.mjs --tier=1     # 只跑 tier 1（快目标，verify 用这个）
+ *   node scripts/mutation-check.mjs --shard=1/3  # 把（已按 --tier/--file 过滤后的）目标轮转均摊成
+ *                                                #   3 片，只跑第 1 片（CI 按时长切片用）
  *   node scripts/mutation-check.mjs --list       # 只列变异（含位点数），不改文件不跑测试
  *   node scripts/mutation-check.mjs --mode=site  # **逐位点**变异（默认 aggregate，见下）
  *   node scripts/mutation-check.mjs --audit      # = --mode=site --limit=999，逐点全量
@@ -106,6 +108,12 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  * `tier` 是成本分层，不是重要性分层：
  *   - tier 1（快，单个变异 ~2s）：`verify` 内的 `mutation:quick` 跑这些。
  *   - tier 2（慢，单个变异 ~25s）：仅 `npm run mutation` 全量扫描时跑。
+ *
+ * ⚠️ `--tier=N` 是**精确**匹配（只跑该层），不是"≤N"；不传 ＝ 全部目标。
+ *   2026-10-16 修：此前实现是 `t.tier <= maxTier`，于是 CI 的 `--tier=2` 分片实际跑的是
+ *   **全部**目标（含 tier 1）——那条 job 与 tier 1 那条不是"分区"而是"超集"，
+ *   tier 2 的 54.8 min 墙钟里约 23 min 是重复跑 tier 1。脚本头注释与此处写的一直是
+ *   "只跑 tier 1"（精确语义），是**实现与声明不符**，不是文档要改。
  *
  * `electron/engine/scheduler.ts` 于 2026-09-20 接入：此前它不在目标里，于是
  * 「类内缺陷」穿过三层门禁（`check:unwired` 只查导出符号、变异不覆盖引擎层，
@@ -1353,7 +1361,50 @@ function findSites(source, masked, op) {
 const args = process.argv.slice(2);
 const onlyFile = args.find((a) => a.startsWith("--file="))?.slice(7);
 const limit = Number(args.find((a) => a.startsWith("--limit="))?.slice(8) ?? "4");
-const maxTier = Number(args.find((a) => a.startsWith("--tier="))?.slice(7) ?? "99");
+
+/**
+ * `--tier=N`：**精确**匹配该成本层（不是"≤N"）。不传 ＝ 全部目标。
+ *
+ * 2026-10-16 修：此前是 `t.tier <= maxTier`（缺省 99＝全部），于是 CI 的 `--tier=2`
+ * 分片跑的是**全部**目标（含 tier 1）——它与 tier 1 那条 job 不是"分区"而是"超集"：
+ * tier 2 的 54.8 min 里有约 23 min 是重复跑 tier 1。而脚本头注释写着
+ * 「--tier=1 # 只跑 tier 1」——声明与实现不符。改精确后 `tier 1 ∪ tier 2` 才真是
+ * 全集，下面的 `--shard` 也才有意义（分片必须建立在分区之上）。
+ */
+const tierRaw = args.find((a) => a.startsWith("--tier="))?.slice("--tier=".length);
+const tierFilter = tierRaw === undefined ? null : Number(tierRaw);
+if (tierFilter !== null && (!Number.isInteger(tierFilter) || tierFilter < 1)) {
+  console.error(`--tier=${tierRaw} 非法（要正整数，如 --tier=1；不传＝全部目标）`);
+  process.exit(2);
+}
+
+/**
+ * `--shard=i/n`：把（已按 --tier / --file 过滤后的）目标**轮转**均摊成 n 片，只跑第 i 片
+ * （i 从 1 起）。用途：CI 的全量 site 审计按时长切片 —— 单片超过 runner 的回收窗口就会被
+ * 平台掐掉，而**被掐就没有存活清单**，那是这条 job 唯一的产出。
+ *
+ * 为什么是"轮转"而不是"CI 手写目标清单"（2026-09-29 roadmap 记的下一刀形式）：手写清单
+ * 漏掉一个目标 ＝ 那个目标**永远不被审计**，而它所在的 job 照样绿 —— 正是本仓库反复踩的
+ * 「漏挂的文件根本不参与统计，那个 PASS 对它没有任何含义」。轮转由工具自己算，
+ * 各片之并恒为全集，新增目标自动落进某一片，不需要人去维护清单。
+ */
+const shardRaw = args.find((a) => a.startsWith("--shard="))?.slice("--shard=".length);
+let shardIndex = 1;
+let shardCount = 1;
+if (shardRaw !== undefined) {
+  const m = /^(\d+)\/(\d+)$/.exec(shardRaw);
+  if (!m) {
+    console.error(`--shard=${shardRaw} 非法（要形如 i/n，如 --shard=1/3）`);
+    process.exit(2);
+  }
+  shardIndex = Number(m[1]);
+  shardCount = Number(m[2]);
+  if (!Number.isInteger(shardCount) || shardCount < 1 || shardIndex < 1 || shardIndex > shardCount) {
+    console.error(`--shard=${shardRaw} 非法（要求 1 ≤ i ≤ n 且 n ≥ 1）`);
+    process.exit(2);
+  }
+}
+
 const listOnly = args.includes("--list");
 const recoverOnly = args.includes("--recover-only");
 // 并行度：>1 时按**目标**分进程池（每个 worker 子进程独占一个目标，复用全部
@@ -1432,7 +1483,7 @@ const enabledExtra = new Set(String(opsArg ?? "").split(",").filter(Boolean));
 if (opsArg && enabledExtra.has("all")) for (const op of OPERATORS) if (op.optName) enabledExtra.add(op.optName);
 const ACTIVE_OPERATORS = OPERATORS.filter((op) => !op.extra || (op.optName && enabledExtra.has(op.optName)));
 
-const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) => {
+const matched = TARGETS.filter((t) => tierFilter === null || t.tier === tierFilter).filter((t) => {
   if (!onlyFile) return true;
   // 匹配语义（2026-09-29 收紧）：全路径精确优先；短名回退按「路径末段」。
   // 此前是 `t.file.includes(onlyFile)` —— touched 审 `src/store.ts` 时传
@@ -1443,9 +1494,29 @@ const targets = TARGETS.filter((t) => t.tier <= maxTier).filter((t) => {
   // 冗余，可接受；touched 已改为传完整路径，走精确分支。
   return t.file === onlyFile || t.file === `${onlyFile}.ts` || t.file.endsWith(`/${onlyFile}.ts`);
 });
-if (targets.length === 0) {
-  console.error(`没有匹配的目标：--file=${onlyFile} --tier=${maxTier}`);
+if (matched.length === 0) {
+  console.error(
+    `没有匹配的目标：--file=${onlyFile ?? "（未指定）"} ` +
+      `--tier=${tierFilter ?? "（未指定，＝全部目标）"}`,
+  );
   process.exit(2);
+}
+// 分片：轮转切片（见 --shard 的注释）。i=1 取第 0、n、2n… 个，i=n 取第 n-1、2n-1… 个；
+// 各片之并恒等于 matched。
+const targets =
+  shardCount === 1 ? matched : matched.filter((_, i) => i % shardCount === shardIndex - 1);
+if (targets.length === 0) {
+  console.error(
+    `分片 ${shardIndex}/${shardCount} 里没有目标（--tier / --file 过滤后只有 ${matched.length} 个）。\n` +
+      "  这多半是分片数大于目标数。刻意让它 exit 2 而不是空跑 PASS ——\n" +
+      "  空跑的绿会读成「这个分片全过」，而它一个位点都没验过。",
+  );
+  process.exit(2);
+}
+if (shardCount > 1) {
+  // 走 stderr：stdout 是 `--list` / worker `##MUTATION_RESULT##` 的机器可读面，
+  // 一行提示混进去就是"输出多一行把下游砸了"的那类事故。
+  console.error(`分片 ${shardIndex}/${shardCount}：命中 ${targets.length}/${matched.length} 个目标`);
 }
 
 /**
@@ -1949,7 +2020,9 @@ function runOneChild(target) {
       path.join("scripts", "mutation-check.mjs"),
       `--mode=${mode}`,
       auditMode ? "--audit" : `--limit=${limit}`,
-      `--tier=${maxTier}`,
+      // 只在显式给了 --tier 时透传：worker 只跑 `--file=` 那一个目标，tier 已是冗余，
+      // 但传空会让子进程的 tierFilter 变成 null（＝全部），语义失真。
+      ...(tierFilter !== null ? [`--tier=${tierFilter}`] : []),
       `--file=${target.file}`,
       "--no-report",
       "--result-json",
@@ -2310,7 +2383,9 @@ function writeStepSummary(verdict, extra) {
   if (!p) return;
   const lines = [
     `杀死 ${totalKilled}/${totalRan}（${overall}%）· 耗时 ${fmtMs(totalMs)}`,
-    `口径 ${mode} · 本次参与 ${results.length} 个目标`,
+    `口径 ${mode} · 本次参与 ${results.length} 个目标${
+      shardCount > 1 ? ` · 分片 ${shardIndex}/${shardCount}` : ""
+    }`,
     ...extra,
   ];
   try {

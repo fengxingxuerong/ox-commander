@@ -59,22 +59,26 @@ jobs:
   # timeout 给 35 分钟时余量只剩 2.5 分 —— 而同一天的运行间抖动就有 8 分，
   # 且被 timeout 掐掉等于**丢掉整份存活清单**（本 job 的唯一产出 —— 脚本只在
   # 跑完时才把结论写进 job summary，被掐就没有）。那时"CI 红了"分不清是代码
-  # 问题还是太慢。故提到 60 分（≈1.85× 余量，可容约 2000 个位点）。verify 里跑的仍是 `mutation:quick`
+  # 问题还是太慢。故提到 60 分。verify 里跑的仍是 `mutation:quick`
   # （tier 1、每文件 1 个变异、~30s），守住"verify 是快门禁"。
-  # 2026-10-13：单 job 拆成按 tier 的两个分片（matrix）。三次升级的实证链：
+  # 2026-10-13：单 job 拆成按 tier 的两个分片（matrix）。升级的实证链：
   #   ① 60 → 100 分钟（位点 1576 → 1647 后整轮超过 60min 超时）；
   #   ② --jobs=3 在 2 vCPU 上互撞：大量 worker "异常退出（exit 0）"（子进程
   #      静默不吐 ##MUTATION_RESULT##），fail-safe 串行复核 = 双倍耗时；
-  #   ③ runner 在 ~35min 被平台回收（今天 4/4 次）——整轮单 job 无论怎么调
-  #      都踩这个窗口。分片时预期「每片 ~20-25min（tier1 719 / tier2 928）」，
-  #      **实测推翻**：run #153 @ 94a7a59 → tier1 23.4min / tier2 **54.8min**。
-  #      tier 2 单片已经超过③当初要躲的那个 ~35min 窗口（这轮侥幸没被回收），
-  #      即③只解决了"整轮"，没解决"tier 2 本身"。
-  #      片内 --jobs=1 串行（零子进程，② 的病灶直接消失）。
-  #      下一刀（tier 2 继续涨时）：按目标名再均摊（需要工具支持 --file 多值），
-  #      而不是继续抬超时 —— 抬超时只是把"被掐"推迟，不是让它不被掐。
+  #   ③ runner 在 ~35min 被平台回收（当天 4/4 次）——整轮单 job 无论怎么调
+  #      都踩这个窗口。片内 --jobs=1 串行（零子进程，② 的病灶直接消失）。
+  #   ④ **2026-10-16：这两个分片不是"分区"，是"超集"。** `--tier=N` 的实现是
+  #      `t.tier <= maxTier`，于是 `--tier=2` 那片实际跑的是**全部 73 个目标**
+  #      （含 33 个 tier 1）。run #153 的 tier1 23.4min / tier2 54.8min 里，
+  #      tier 2 那 54.8 约有 23min 是**重复跑 tier 1**；脚本自己的头注释一直写着
+  #      「--tier=1 # 只跑 tier 1」（精确语义），是实现与声明不符。
+  #      已把 `--tier` 改成精确匹配（tier 1 ∪ tier 2 现在才真是全集），并按 runner
+  #      的回收窗口把 tier 2 用 `--shard` 再轮转切成 2 片。分片由**工具自己算**
+  #      （各片之并恒为全集），不写死目标清单 —— 写死清单漏掉一个目标 = 那个目标
+  #      永远不被审计，而它的 job 照样绿（本仓库反复踩过的那类"PASS 没有含义"）。
+  #      预期：tier 1 单片 ≈23min，tier 2 每片 ≈16min。
   mutation-full:
-    name: mutation (site, tier ${{ matrix.tier }})
+    name: mutation (site, tier ${{ matrix.tier }} ${{ matrix.shard }})
     # 只在 Linux 跑：site 审计的存活清单里会混进"平台相关等价变异"
     # （如 `process.platform === "win32"` 在本机恒真），在另一个 OS 上跑一次
     # 才能把它们和真缺口分开。CI 用 Linux，本机是 Windows，两边合起来才是全集。
@@ -83,7 +87,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [1, 2]
+        include:
+          # tier 1（33 目标 / 737 位点）单片 ≈23min，够快，不再切。
+          - { tier: 1, shard: "1/1" }
+          # tier 2（40 目标 / 980 位点）单片 ≈31min —— 贴着回收窗口，轮转切 2 片。
+          - { tier: 2, shard: "1/2" }
+          - { tier: 2, shard: "2/2" }
     steps:
       - uses: actions/checkout@v4
 
@@ -95,5 +104,5 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Mutation (site 口径，逐位点，tier ${{ matrix.tier }})
-        run: node scripts/mutation-check.mjs --mode=site --limit=999 --tier=${{ matrix.tier }} --jobs=1
+      - name: Mutation (site 口径，逐位点，tier ${{ matrix.tier }} 片 ${{ matrix.shard }})
+        run: node scripts/mutation-check.mjs --mode=site --limit=999 --tier=${{ matrix.tier }} --shard=${{ matrix.shard }} --jobs=1
