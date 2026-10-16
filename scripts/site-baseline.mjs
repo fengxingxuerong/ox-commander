@@ -16,13 +16,44 @@
  * (and CI's `mutation-full` job) is what proves each site individually, so a
  * count that moved without a fresh audit means the proof is stale.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const GATE = path.join(HERE, "mutation-check.mjs");
 const write = process.argv.includes("--write");
+
+/**
+ * 变异在跑时，本脚本算出来的位点数**不是真值** —— 它读的正是被改着的源码。
+ *
+ * 不是假想：2026-10-16 在 tier 2 全量跑的途中跑 `check:doc-claims`，它内部的
+ * `site-baseline.mjs --json` 读到变异体，报「SITE_BASELINE 已漂移 1 处」。
+ * 那 1 处是假象；真正的害处在下一步 —— 人照着提示去 `--write`，把变异体的
+ * 位点当真值写进基线，基线从此被污染，而且污染得很安静。
+ *
+ * 所以这里不是"提示一下"，是拒绝算，`--write` 更要拒。
+ *
+ * 判据：`.orig` 备份在 ⇒ 变异体正在生效（源码与 git 不一致）。
+ * 目录与 `mutation-check.mjs` 的 `PENDING_DIR` 是同一个：
+ * `scripts/.mutation-pending`。两处各写一份路径字符串不是好做法，但
+ * mutation-check.mjs 顶层自执行（import 它会把整轮变异跑起来），抽不成共享模块；
+ * 这份常量即使失配，最坏也只是退回"报假漂移"，不会给出错误结论。
+ */
+const PENDING_DIR = path.join(HERE, ".mutation-pending");
+
+function mutationBackupAlive(pendingDir, io = { existsSync, readdirSync }) {
+  return io.existsSync(pendingDir) && io.readdirSync(pendingDir).some((n) => n.endsWith(".orig"));
+}
+
+if (mutationBackupAlive(PENDING_DIR)) {
+  console.error(
+    "FAIL: 检测到存活的变异台账（scripts/.mutation-pending 里有 .orig）—— 源码此刻正被变异改动。\n" +
+      "  这时算出的位点数不是真值，任何\"漂移\"都是假象；照它 --write 会把变异体的位点写进基线。\n" +
+      "  处置：先 `npm run check:residue` 确认没有真残留（若另一轮确实在跑，等它跑完），再重跑本命令。",
+  );
+  process.exit(2);
+}
 
 const src = readFileSync(GATE, "utf8");
 
@@ -264,6 +295,36 @@ function selfTestBaselineWrite(text, counts) {
   console.log(`PASS: SITE_BASELINE 写回判据自测 ${checks.length} 条（幂等 + 历史脏收敛 + 正向对照）`);
 }
 
+/**
+ * 「变异体正在生效」这条判据的自测。
+ *
+ * 用注入的 fs 假件，不去真造 `.mutation-pending` —— 那个目录是仓库级全局路径，
+ * 造一份假的 .orig 会让**另一轮正在跑的变异**以为自己有残留要还原。
+ *
+ * 承重方向：判据若退化成「目录存在就算」（不看有没有 .orig），第 4 条会红 ——
+ * 已还原干净、只剩 .json 台账的目录会被误判成"变异在跑"，于是基线永远算不出来。
+ * 反过来若退化成「有文件就算」，第 5 条红。两边都得钉。
+ */
+function selfTestBackupAlive() {
+  const io = (exists, names) => ({ existsSync: () => exists, readdirSync: () => names });
+  const checks = [
+    ["目录不存在 → 放行", mutationBackupAlive("/p", io(false, [])) === false],
+    ["空目录 → 放行", mutationBackupAlive("/p", io(true, [])) === false],
+    ["有 .orig → 拒绝", mutationBackupAlive("/p", io(true, ["a.orig"])) === true],
+    ["只剩 .json 台账（已还原）→ 放行", mutationBackupAlive("/p", io(true, ["a.json"])) === false],
+    [".json 与 .orig 混杂 → 拒绝", mutationBackupAlive("/p", io(true, ["a.json", "b.orig"])) === true],
+    ["同名但不是 .orig 后缀 → 拒绝", mutationBackupAlive("/p", io(true, ["a.orig.bak"])) === false],
+    ["注入件缺省时走真 fs（不吞异常）", typeof mutationBackupAlive("/p") === "boolean"],
+  ];
+  const failed = checks.filter(([, ok]) => !ok);
+  for (const [name, ok] of checks) console.log(`  ${ok ? "ok  " : "FAIL"} ${name}`);
+  if (failed.length > 0) {
+    console.error(`\nFAIL: 变异在跑判据自测 ${failed.length}/${checks.length} 条不通过`);
+    process.exit(1);
+  }
+  console.log(`PASS: 变异在跑判据自测 ${checks.length} 条（注入假件，不真造台账目录）`);
+}
+
 // ---- Compare against the committed baseline ----
 const baselineBlock = sliceTopLevelObject(src, "SITE_BASELINE");
 if (!baselineBlock) {
@@ -285,7 +346,10 @@ for (const file of Object.keys(SITE_BASELINE)) {
 const json = process.argv.includes("--json");
 
 // 判据自测只在人读的那一面跑：--json 的输出喂给 check:doc-claims，多一行就把它砸了。
-if (process.argv.includes("--selftest") && !json) selfTestBaselineWrite(src, counts);
+if (process.argv.includes("--selftest") && !json) {
+  selfTestBaselineWrite(src, counts);
+  selfTestBackupAlive();
+}
 
 if (json) {
   // 机器可读的那一面：给 check:doc-claims 用，让它能把 README 里那句

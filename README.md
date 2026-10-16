@@ -7,9 +7,10 @@
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
 > 判错逻辑本身被**逐位点**证明过：当前在册 **73 个目标** / 基线 **1723 处位点**。
-> **全量** site 审计由 CI 的 `mutation (site, tier 1/2)` 两个分片 job 每次 push 跑（Linux，片内串行、各约 20-25 分钟；
-> 最近一次 @ `c67d920` success，43 min），结论与数字（杀死 N/M、存活清单）写进该 job 的
-> **summary**，不用翻 log。这两个数里的"基线"由 `check:doc-claims` 对实物核（取自
+> **全量** site 审计由 CI 的 `mutation (site, tier 1/2)` 两个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）。
+> 最近一次 @ `94a7a59` run #153：两片 success，**tier 1 23.4 min / tier 2 54.8 min** —— 两片时长差一倍以上，
+> 别用"各约 N 分钟"糊过去；分片时那句"每片 20-25 分钟"的预期已被 tier 2 推翻，job 超时 100 min 现在只剩约 1.8× 余量。
+> 结论与数字（杀死 N/M、存活清单）写进该 job 的 **summary**，不用翻 log。这两个数里的"基线"由 `check:doc-claims` 对实物核（取自
 > `mutation-check.mjs` 的 `SITE_BASELINE`）—— 它随 TARGETS 增长，而增长是加代码的自然结果，
 > 所以**落笔即被检查**（上一版这里停在「881/881」那个时期的规模）。⚠️ 基线现值与全量审计结果是
 > 两个数：前者说"有多少处该被逐点验过"，后者说"这一批位点真跑全量是什么结果" —— 混着写就是自证。
@@ -234,6 +235,8 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → check:doc-claims（本节这几个数字**由命令现算**：段数、每段在文档里有没有行、
   用例数是否等于 `vitest list` 的收集结果、变异规模是否等于 `site-baseline --json`）
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
+  **变异正在跑时它拒绝算**（检测到 `scripts/.mutation-pending` 里有 `.orig` 就 exit 2）：那一刻读到的是
+  变异中的源码，报出的"漂移"是假象 —— 而照着假象去 `--write` 会把变异体的位点写进基线，污染得很安静。
   位点数涨了而基线没更新 = 新位点**没人逐点审计过**，此时「全部 N 处已逐点验证」是假象。
   这道漂移检查此前只在 site 口径里判，而 site 口径本机 verify 从不跑 ⇒ 漂移只有 CI 才知道。
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
@@ -277,16 +280,16 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 | 口径 | 命令 | 含义 | 最近实测 |
 | --- | --- | --- | --- |
 | aggregate | `npm run mutation` | 每个算子**至少一处**被覆盖 | 162/162（会掩盖位点，见下） |
-| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | CI 每次 push 全量跑（`mutation (site, tier 1/2)` 两个分片）：最近一次整轮成功记录 @ `c67d920`（43 min，分片前）。本机历史最好记录 1330/1330（2026-10-05 win32 全量，当时在册「64」个目标） |
+| **site** | `npm run mutation:audit` | **每一处位点**单独验证 | CI 每次 push 全量跑（`mutation (site, tier 1/2)` 两个分片）：最近一次整轮 @ `94a7a59` run #153 两片全绿（tier 1 23.4 min / tier 2 54.8 min）。本机最新：tier 1 737/737 全杀（2026-10-16 win32，45.8 min）。本机历史最好记录 1330/1330（2026-10-05 win32 全量，当时在册「64」个目标） |
 
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
-CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径 60 min 上限），
+CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径两分片各 100 min 上限），
 `release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
-（公开仓库），`verify.yml` 随每次 push 运行。**已推送到 `77bc033`：run 14 三 job 全绿；run 15 的两个
-`verify` job 已绿，它的 `mutation` job 落笔时仍在跑** —— 这类状态数字落笔即过时，CI 结论以 Actions
-页为准，别拿 README 当 CI 状态。
+（公开仓库），`verify.yml` 随每次 push 运行。**run #153 @ `94a7a59` 四 job 全绿**
+（`verify` ubuntu 3.3 min / windows 4.9 min、`mutation` tier 1 23.4 min / tier 2 54.8 min）—— 这类状态数字
+落笔即过时，CI 结论以 Actions 页为准，别拿 README 当 CI 状态。
 
 `mutation (site, tier 1/2)` 分片 job 的结论与数字（杀死 N/M / 口径 / 存活清单 / 耗时）会由
 `mutation-check.mjs` 自己写进 job 的 **summary**（`GITHUB_STEP_SUMMARY`）：绿/红只有一个 bit，

@@ -379,10 +379,15 @@ function mutationScale() {
   const line = String(r.stdout ?? "").trim().split(/\r?\n/).pop();
   const parsed = parseJsonLoose(line);
   if (!parsed || typeof parsed.targets !== "number" || typeof parsed.baselineSites !== "number") {
+    // 带上 stderr：site-baseline 会在"源码正被变异改动"时以 exit 2 拒绝算，
+    // 那句话只在 stderr 上。只报 exit 码的话，人看到的是"规模不可用"，
+    // 而真因是并发 —— 会被误读成基线算坏了，进而去动基线。
+    const why = String(r.stderr ?? "").trim();
     fail(
       "`site-baseline.mjs --json` 没给出可解析的规模（exit=" +
         `${r.status}，输出 ${JSON.stringify(line).slice(0, 120)}）—— 变异数字的真值不可用，` +
-        "不许拿上一版文档当数。",
+        "不许拿上一版文档当数。" +
+        (why ? `\n  该脚本的理由：\n${why.split(/\r?\n/).map((l) => `    ${l}`).join("\n")}` : ""),
     );
   }
   if (parsed.drifted > 0) {
