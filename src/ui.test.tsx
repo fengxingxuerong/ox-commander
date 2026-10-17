@@ -115,6 +115,7 @@ function makeBridge(): Bridge {
     probeAgents: vi.fn(async () => ({ "sensenova-api": true })),
     getAgentStats: vi.fn(async () => ({ circuits: {} })),
     recentAudit: vi.fn(async () => []),
+    listChanges: vi.fn(async () => []),
     auditFiles: vi.fn(async () => []),
     exportAudit: vi.fn(async () => ({ ok: true as const, path: "/x/out.jsonl" })),
     // 2026-10-13 补盲区：这两个此前不在 fake 里 —— 看板恢复的成功路径与

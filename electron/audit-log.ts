@@ -7,6 +7,7 @@ export type AuditPhase =
   | "run-start"
   | "run-end"
   | "batch-guard"
+  | "batch-changes"
   | "agent-change"
   | "settings"
   /** 流水线阶段推进（board:recovery 用它恢复"上次跑到哪"）。 */
@@ -31,6 +32,14 @@ export interface AuditRecord {
   /** Kept short on purpose: the first N paths plus the real total. */
   paths?: string[];
   pathsTotal?: number;
+  /**
+   * 批次改动文件清单（`batch-changes` phase）：每批一条、冲突与否都落 ——
+   * 这是「这轮到底改了哪些文件」唯一的持久事实（`batch-guard` phase 只记
+   * 越权路径，clean 批连记录都没有）。写入方自截（上限见 context.ts），
+   * 超限写 `filesTotal`。op 取值同 FileJournal：`create` / `modify` / `delete`。
+   */
+  files?: Array<{ path: string; op: string; bytes?: number }>;
+  filesTotal?: number;
   /**
    * 越权种类（`batch-guard` phase），与 `conflict` 协议事件同词：
    * `unauthorized-write`（写到了声明 zone 之外）/ `shared-drift`（共享文件漂移）。

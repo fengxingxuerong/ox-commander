@@ -12,7 +12,7 @@ import {
   type CircuitBreakerOptions,
   type CircuitPersistence,
 } from "../sandbox/circuit-breaker";
-import { BatchGuard, type BatchVerdict } from "../engine/batch-guard";
+import { BatchGuard, type BatchScope, type BatchVerdict } from "../engine/batch-guard";
 import { SnapshotStore } from "../sandbox/snapshot-store";
 import { FileJournal } from "../sandbox/file-journal";
 import { readJsonFile, writeFileAtomic } from "../atomic-file";
@@ -87,8 +87,13 @@ export interface AgentLayerOptions {
   sharedPaths?: readonly string[];
   /** Sink for breaker + guard diagnostics (board log). */
   onEvent?: (text: string) => void;
-  /** Structured batch verdicts (hosts stream these as events). */
-  onVerdict?: (verdict: BatchVerdict) => void;
+  /**
+   * Structured batch verdicts (hosts stream these as events). The second
+   * parameter is the batch scope with `changes` already filled in by
+   * `settle()` — the full per-batch file list, conflicts or not, which is the
+   * only persistent source for a "what did this run touch" view.
+   */
+  onVerdict?: (verdict: BatchVerdict, scope: BatchScope) => void;
   /** Routing decision sink (board log). */
   onRouting?: SchedulerOptions["onRouting"];
   /** 任务活性心跳（2026-10-03 竞品吸收）：宿主转发给看板/协议事件流。 */

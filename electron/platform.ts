@@ -88,8 +88,15 @@ export interface PlatformHost {
    * hosts before the facts/derived split only ever needed id/zone. */
   onRunStart?(agentId: string, task: { id: string; zone: string; title?: string }): void;
   onRunComplete?(outcome: DispatchOutcome, task: { id: string; zone: string; title?: string }): void;
-  /** Zone-violation verdict sink (rollback / isolation / report-only outcomes). */
-  onVerdict?(verdict: BatchVerdict): void;
+  /**
+   * Zone-violation verdict sink (rollback / isolation / report-only outcomes).
+   * The second parameter carries the batch scope with `changes` filled in —
+   * the full per-batch file list, which is the diff panel's only data source.
+   */
+  onVerdict?(
+    verdict: BatchVerdict,
+    scope?: { changes: Array<{ path: string; op: string; bytes?: number }> },
+  ): void;
   /** Escalation decision; omit to keep the engine's fail-fast/typed-error path. */
   requestEscalationDecision?(taskId: string, summary: string): Promise<EscalationAction>;
   /**
@@ -387,11 +394,11 @@ export function createPlatform(config: PlatformConfig): Platform {
   // 而宿主是否关心事件流是另一回事（转发处按可选调用处理）。
   if (layer.schedulerOptions.guard) {
     const sink = host.onVerdict;
-    layer.schedulerOptions.guard.setVerdictSink((verdict) => {
+    layer.schedulerOptions.guard.setVerdictSink((verdict, scope) => {
       for (const conflict of verdict.conflicts) {
         verdictConflicts.push(pairConflict(conflict, verdict.remedies));
       }
-      sink?.(verdict);
+      sink?.(verdict, scope);
     });
   }
 

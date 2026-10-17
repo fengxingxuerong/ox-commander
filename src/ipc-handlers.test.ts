@@ -1919,3 +1919,75 @@ describe("交付凭据复核（receipt:verify · 欠账 #7）", () => {
     expect(h.createPlatformCalls.length).toBeGreaterThan(0);
   });
 });
+
+describe("changes handlers（diff 面板供数，竞品缺口 B1）", () => {
+  it("changes:list 按项目过滤 batch-changes 记录，最新在前", () => {
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockReturnValue([
+      { phase: "batch-changes", ts: "2026-10-17T01:00:00Z", projectId: "p-other", changed: 1 },
+      {
+        phase: "batch-changes",
+        ts: "2026-10-17T02:00:00Z",
+        projectId: "p-1",
+        changed: 2,
+        files: [
+          { path: "src/b.js", op: "modify", bytes: 10 },
+          { path: "src/c.js", op: "delete" },
+        ],
+      },
+      { phase: "run-start", ts: "2026-10-17T00:00:00Z" },
+    ]);
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:list", "p-1") as Array<Record<string, unknown>>;
+    expect(out).toHaveLength(1);
+    expect(out[0]!.files).toEqual([
+      { path: "src/b.js", op: "modify", bytes: 10 },
+      { path: "src/c.js", op: "delete" },
+    ]);
+  });
+
+  it("changes:list 无项目过滤时把最新批次排最前", () => {
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockReturnValue([
+      { phase: "batch-changes", ts: "2026-10-17T01:00:00Z", changed: 1 },
+      { phase: "batch-changes", ts: "2026-10-17T02:00:00Z", changed: 1 },
+    ]);
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:list") as Array<{ ts: string }>;
+    expect(out.map((r) => r.ts)).toEqual(["2026-10-17T02:00:00Z", "2026-10-17T01:00:00Z"]);
+  });
+
+  it("onVerdict 把批次改动落成 batch-changes 审计：clean 批也落、files 带 op", () => {
+    buildEngine("p-changes");
+    const host = lastPlatformConfig().host;
+    host.onVerdict({ conflicts: [], remedies: [] }, { changes: [{ path: "src/a.js", op: "create", bytes: 7 }] });
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "batch-changes",
+        changed: 1,
+        files: [{ path: "src/a.js", op: "create", bytes: 7 }],
+      }),
+    );
+  });
+
+  it("onVerdict 的 files 超 100 条时截断并写 filesTotal", () => {
+    buildEngine("p-changes-overflow");
+    const host = lastPlatformConfig().host;
+    const many = Array.from({ length: 130 }, (_, i) => ({ path: `f/${i}.js`, op: "modify", bytes: i }));
+    host.onVerdict({ conflicts: [], remedies: [] }, { changes: many });
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    const call = (audit.append as Mock).mock.calls.find(
+      (c: unknown[]) => (c[0] as { phase?: string }).phase === "batch-changes",
+    ) as unknown as [{ files: unknown[]; filesTotal?: number; changed: number }];
+    expect(call[0].files).toHaveLength(100);
+    expect(call[0].filesTotal).toBe(130);
+    expect(call[0].changed).toBe(130);
+  });
+
+  it("scope 缺席（无 guard 的装配）不编一条空记录", () => {
+    buildEngine("p-changes-noscope");
+    const host = lastPlatformConfig().host;
+    host.onVerdict({ conflicts: [], remedies: [] });
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    expect(audit.append).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "batch-changes" }));
+  });
+});

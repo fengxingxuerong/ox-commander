@@ -221,6 +221,87 @@ function TrailView({ state }: { state?: TrailState }) {
   );
 }
 
+/**
+ * 批次改动记录（`changes:list` 的返回形状）。files 截断上限 100（主进程侧），
+ * 超限有 filesTotal —— 界面把"没显示的"说出来。
+ */
+type ChangeRecord = {
+  ts: string;
+  projectId?: string;
+  changed?: number;
+  paths?: string[];
+  files?: Array<{ path: string; op: string; bytes?: number }>;
+  filesTotal?: number;
+};
+
+const OP_ICON: Record<string, string> = { create: "➕", modify: "✏️", delete: "🗑" };
+
+/**
+ * 批次改动面板（`changes:list` 的界面出口，竞品缺口 B1 的第一半）。
+ *
+ * 它回答的是「这轮到底改了哪些文件」—— 交付凭据回答"跑没跑过"，这里回答
+ * "动了什么"。取数是懒加载 + 手动刷新：改动是批次结算时落的审计事实，run
+ * 进行中会持续增加，但没有值得为它开推送通道的事件量（一批一条）。
+ *
+ * 刻意**只有事实没有按钮**：批次成功后快照已 commit 回收，此刻不存在可靠的
+ * 单文件回滚路径 —— 放一个"回滚"按钮等于邀请人按下一个必然失败的操作。
+ * 回滚的入口是越权仲裁（自动）与工作区自身的 git；这里的诚实边界要写出来。
+ */
+function ChangesPanel() {
+  const activeProjectId = useApp((s) => s.activeProjectId);
+  const [state, setState] = useState<
+    { kind: "loading" } | { kind: "ready"; records: ChangeRecord[] } | { kind: "error"; message: string }
+  >({ kind: "loading" });
+  const load = () => {
+    setState({ kind: "loading" });
+    window.oxCommander
+      .listChanges(activeProjectId ?? undefined)
+      .then((records) => setState({ kind: "ready", records }))
+      .catch((e: unknown) => setState({ kind: "error", message: (e as Error).message }));
+  };
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 取数跟随项目切换
+  }, [activeProjectId]);
+
+  if (state.kind === "loading") return <p className="muted">正在读取改动…</p>;
+  if (state.kind === "error") return <p className="muted">读不到改动记录：{state.message}</p>;
+  return (
+    <section className="card">
+      <h3>
+        改动文件
+        <button className="refresh-btn" onClick={load} title="重新读取">
+          ↻
+        </button>
+      </h3>
+      {state.records.length === 0 ? (
+        <p className="muted">还没有批次改动记录（跑一次就有了）</p>
+      ) : (
+        state.records.map((r, i) => {
+          const files = r.files ?? [];
+          return (
+            <details className="failure-details" key={r.ts} open={i === 0}>
+              <summary>
+                {new Date(r.ts).toLocaleTimeString()} · {r.changed ?? files.length} 个文件
+                {r.filesTotal !== undefined ? `（清单截断，共 ${r.filesTotal}）` : ""}
+              </summary>
+              {files.map((f) => (
+                <p key={f.path} className="task-meta">
+                  {OP_ICON[f.op] ?? "·"} <code>{f.path}</code>
+                  {f.bytes !== undefined ? ` · ${f.bytes} B` : ""}
+                </p>
+              ))}
+            </details>
+          );
+        })
+      )}
+      <p className="muted">
+        批次结算时落审计的事实记录；批次成功后备份即回收，这里不提供回滚 —— 回滚走越权仲裁与工作区 git。
+      </p>
+    </section>
+  );
+}
+
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
@@ -396,6 +477,7 @@ export function BoardPage() {
             <h3>执行日志</h3>
             <LogView />
           </section>
+          <ChangesPanel />
           <AuditPanel />
         </main>
 

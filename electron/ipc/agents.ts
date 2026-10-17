@@ -158,6 +158,22 @@ export function registerObservabilityHandlers(): void {
   ipcMain.handle("audit:files", () => ensureAudit().files().map((f) => path.basename(f)));
 
   /**
+   * 批次改动事实（diff 面板供数）：读 `batch-changes` 审计，按项目过滤，
+   * 最新批次在前。只读不回滚 —— 批次成功后快照已 commit 回收，此刻没有
+   * 可靠的单文件回滚路径；界面必须如实标注"此处是事实记录，不是回滚入口"。
+   */
+  ipcMain.handle("changes:list", (_e, projectId?: string) => {
+    const records = ensureAudit().read({ phase: "batch-changes", limit: 1000 });
+    // 两步判而不是 `typeof === "string" && projectId !== ""`：site 审计曾在这里
+    // 抓到一个真存活 —— `&&` 换 `||` 后，无参调用会掉进 filter 分支把"没有
+    // projectId 的记录"当成"这个项目的"，而当时的用例恰好全部无 projectId，
+    // 两个分支结果相同，断言杀不掉它。拆成两步后每一支都有独立断言盯着。
+    const wanted = typeof projectId === "string" ? projectId : "";
+    const mine = wanted === "" ? records : records.filter((r) => r.projectId === wanted);
+    return mine.slice(-50).reverse();
+  });
+
+  /**
    * Export the whole audit history to a file the user picks in a save dialog.
    *
    * The renderer never names a path: the dialog *is* the authorization, so no

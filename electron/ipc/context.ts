@@ -6,7 +6,7 @@
  * share state without importing each other. Only this file may hold `let`
  * bindings for that state; the handler modules are stateless registrars.
  */
-import { app, safeStorage, type BrowserWindow } from "electron";
+import { app, Notification, safeStorage, type BrowserWindow } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { OrchestratorEngine, type OrchestratorCallbacks, type RunSnapshot } from "../engine";
@@ -14,6 +14,7 @@ import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../agent
 import { AuditLog } from "../audit-log";
 import { taskTrail, trailBriefForRepair } from "../board-derive";
 import { createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
+import { desktopNotificationOf, type NotifyEventShape } from "../notify-rules";
 import { writeFileAtomic } from "../atomic-file";
 import { ProjectStore, SettingsStore } from "../store";
 import { KeysStore, createSafeStorageCrypto } from "../keys-store";
@@ -79,6 +80,14 @@ export function attachWindow(win: BrowserWindow): void {
 /** Push one event payload to the renderer, if a window is attached. */
 export function send(payload: Record<string, unknown>): void {
   currentWindow?.webContents.send("ox:event", payload);
+  // 桌面通知（C1）：渲染层推送回答"看板上有什么"，通知回答"该回工位了" ——
+  // 长 run 在后台跑、窗口被切走时，后一条是操作者唯一还能收到的信号。
+  // 判据是纯函数（notify-rules.ts），弹不弹只挑三类卡住/错过的事件；
+  // 平台不支持（isSupported false）就安静降级，不抛。
+  const note = desktopNotificationOf(payload as NotifyEventShape);
+  if (note && Notification.isSupported()) {
+    new Notification({ title: note.title, body: note.body }).show();
+  }
 }
 
 export function logLine(text: string): void {
@@ -334,7 +343,24 @@ export function buildPlatformLayer(
       },
       // Zone-conflict verdicts must reach the board even though the guard lives
       // inside the long-lived layer, not inside this engine.
-      onVerdict: (verdict) => {
+      onVerdict: (verdict, scope) => {
+        // 批次改动事实（diff 面板的数据源）：每批一条、clean 批也落 ——
+        // `batch-guard` phase 只记越权路径，正常批次的改动此前没有任何持久事实。
+        // scope 缺席（测试直接调宿主回调 / 无 guard 的装配）就不落：编一条
+        // "0 个文件"比什么都不写更假。上限 100 条 + filesTotal：审计是 2MiB
+        // 轮转的 JSONL，一批写几百个路径会把别的记录挤出去；说破"截断了"
+        // 比静默丢强。
+        const changes = scope?.changes ?? [];
+        if (scope) {
+          auditLog.append({
+            phase: "batch-changes",
+            ...auditProject,
+            changed: changes.length,
+            paths: changes.map((c) => c.path),
+            files: changes.slice(0, 100).map((c) => ({ path: c.path, op: c.op, bytes: c.bytes })),
+            ...(changes.length > 100 ? { filesTotal: changes.length } : {}),
+          });
+        }
         for (const conflict of verdict.conflicts) {
           // 配对规则只有一份实现（`pairConflict`）：事件流报的处置与交付凭据里
           // 报的处置必须是同一个，而两份实现不一致是没有测试能发现的。

@@ -254,6 +254,21 @@ declare global {
       getAgentStats(): Promise<{ circuits: Record<string, AgentCircuitStats> }>;
       recentAudit(limit?: number): Promise<AuditRecordView[]>;
       /**
+       * 批次改动事实（diff 面板供数，竞品缺口 B1）：`batch-changes` 审计的界面出口。
+       * 每批一条（clean 批也落），files 截断上限 100、超限有 filesTotal。
+       * 只读 —— 批次成功后快照已回收，这里没有回滚按钮。
+       */
+      listChanges(projectId?: string): Promise<
+        Array<{
+          ts: string;
+          projectId?: string;
+          changed?: number;
+          paths?: string[];
+          files?: Array<{ path: string; op: string; bytes?: number }>;
+          filesTotal?: number;
+        }>
+      >;
+      /**
        * 一个任务的**运行履历**（P1-3 上下文回溯的界面出口）：
        * `deriveBoardView` 回答"现在是什么状态"，它回答"经历过什么" ——
        * 重修轮里同一个任务会被派给不同执行器，前一次为什么失败、换谁重派的。

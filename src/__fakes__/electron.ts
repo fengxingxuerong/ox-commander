@@ -195,3 +195,29 @@ export const dialog = {
 /** Only used by preload.ts, which this project never exercises in tests. */
 export const contextBridge = { exposeInMainWorld: vi.fn() };
 export const ipcRenderer = { invoke: vi.fn(), on: vi.fn(), removeListener: vi.fn() };
+
+/**
+ * Notification double（桌面通知 C1）：记录每次 show 的内容，判据测试据此断言
+ * "这一类事件该弹/不该弹"。`isSupported` 默认 true；要验"平台不支持就安静"
+ * 的用例自己 flip。
+ */
+export const notificationShows: Array<{ title: string; body?: string }> = [];
+
+export class Notification {
+  static isSupported = vi.fn(() => true);
+  public title: string;
+  public body?: string;
+  /** 两种构造形态都吃：`new Notification(title, {body})` 与 `new Notification({title, body})`。 */
+  constructor(arg: string | { title: string; body?: string }, options?: { body?: string }) {
+    if (typeof arg === "string") {
+      this.title = arg;
+      this.body = options?.body;
+    } else {
+      this.title = arg.title;
+      this.body = arg.body;
+    }
+  }
+  show(): void {
+    notificationShows.push({ title: this.title, body: this.body });
+  }
+}

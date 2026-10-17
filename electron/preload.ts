@@ -36,6 +36,7 @@ const api = {
   probeAgents: (id?: string) => ipcRenderer.invoke("agents:probe", id),
   getAgentStats: () => ipcRenderer.invoke("agents:stats"),
   recentAudit: (limit?: number) => ipcRenderer.invoke("audit:recent", limit),
+  listChanges: (projectId?: string) => ipcRenderer.invoke("changes:list", projectId),
   taskTrail: (taskId: string) => ipcRenderer.invoke("audit:trail", taskId),
   auditFiles: () => ipcRenderer.invoke("audit:files"),
   exportAudit: () => ipcRenderer.invoke("audit:export"),
