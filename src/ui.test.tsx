@@ -116,6 +116,7 @@ function makeBridge(): Bridge {
     getAgentStats: vi.fn(async () => ({ circuits: {} })),
     recentAudit: vi.fn(async () => []),
     listChanges: vi.fn(async () => []),
+    setTaskNote: vi.fn(async () => true),
     auditFiles: vi.fn(async () => []),
     exportAudit: vi.fn(async () => ({ ok: true as const, path: "/x/out.jsonl" })),
     // 2026-10-13 补盲区：这两个此前不在 fake 里 —— 看板恢复的成功路径与
@@ -424,6 +425,31 @@ describe("BoardPage", () => {
     expect(screen.getByText("npm run deploy")).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "批准" }));
     expect(window.oxCommander.resolveApproval).toHaveBeenCalledWith("a-1", true);
+  });
+
+  /**
+   * 操作者附言编辑器（C2 的界面出口）。钉三件事：① 保存真的过桥
+   * （不是只改本地 state）；② 已挂附言的任务摘要显示"已挂"；③ 升级卡里
+   * 也有入口 —— "带话重派"是人在回路里最常用的形态。
+   */
+  it("附言编辑器：保存过桥、已挂附言有标记、升级卡也有入口", async () => {
+    useApp.setState({
+      activeProjectId: "p-1",
+      stage: "VERIFICATION",
+      tasks: {
+        t2: { taskId: "t2", title: "编写测试", zone: "tests", status: "failed", attempts: 2, operatorNote: "先修编译错" },
+      },
+      escalations: [{ taskId: "t9", summary: "预算耗尽", resolved: false }],
+    });
+    render(<BoardPage />);
+    expect(screen.getByText("✏️ 附言（已挂）")).toBeTruthy();
+    fireEvent.click(screen.getByText("✏️ 附言（已挂）"));
+    // 任务行与升级卡各有一个编辑器：取任务行那个（第一个）
+    fireEvent.change(screen.getAllByPlaceholderText(/纠偏指示/)[0]!, { target: { value: "改口径" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "保存附言" })[0]!);
+    await waitFor(() => expect(window.oxCommander.setTaskNote).toHaveBeenCalledWith("t2", "改口径"));
+    // 升级卡：未决任务的附言入口（"带话重派"）
+    expect(screen.getByText(/带话重派/)).toBeTruthy();
   });
 
   it("SILENCE_LABEL 打表：不足阈值不显示，超过点名（长任务与挂死可区分）", async () => {
