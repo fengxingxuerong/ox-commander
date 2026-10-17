@@ -30,4 +30,10 @@ jobs:
       - name: Probe verify segments
         env:
           GH_TOKEN: ${{ github.token }}
-        run: node scripts/diag-verify-segments.mjs
+        run: node scripts/diag-probe.mjs
+
+      - name: Publish probe report
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/diag-publish.mjs

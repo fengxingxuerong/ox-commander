@@ -39,7 +39,8 @@ const SELF = "check-script-wiring.mjs";
  * 真实外部服务、或长跑靶场）。说不清就该接进入口，而不是加进这里。
  */
 const ACCEPTED_ENTRIES = [
-  ["diag-verify-segments.mjs", "临时诊断脚本（仅 ci-diagnose-ubuntu 分支存在），merge 前整分支删除"],
+  ["diag-probe.mjs", "临时诊断脚本（仅 ci-diagnose-ubuntu 分支存在），merge 前整分支删除"],
+  ["diag-publish.mjs", "临时诊断脚本（仅 ci-diagnose-ubuntu 分支存在），merge 前整分支删除"],
   ["marvis-bridge.mjs", "外部智能体桥，需对方真实服务在跑；由操作员手动启动"],
   ["run-multiagent-e2e.mjs", "长跑端到端（--max-minutes 可配），需真实 LLM 凭据，人工验收用"],
   ["probe-endpoints.cjs", "诊断工具，探测外部端点连通性，非验收判据"],

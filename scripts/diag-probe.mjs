@@ -1,11 +1,14 @@
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import path from "node:path";
 
 const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
 const segs = String(pkg.scripts?.verify ?? "")
   .split("&&")
   .map((s) => s.trim())
   .filter(Boolean);
+const logPath = path.join(process.env.RUNNER_TEMP ?? "/tmp", "probe.log");
+fs.writeFileSync(logPath, "");
 const repo = process.env.GITHUB_REPOSITORY;
 const sha = process.env.GITHUB_SHA;
 const token = process.env.GH_TOKEN;
@@ -26,36 +29,34 @@ async function publish(name, conclusion, title, text) {
       output: { title, summary: title, text: text.slice(-64000) },
     }),
   });
-  if (!res.ok) {
-    console.error(`check-run ${name} -> HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  }
+  if (!res.ok) console.error(`publish ${name} -> HTTP ${res.status}`);
 }
 
-const summary = [];
 for (let i = 0; i < segs.length; i += 1) {
   const seg = segs[i];
-  const t0 = Date.now();
-  const r = spawnSync(seg, { shell: true, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
-  const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  const out = `${r.stdout ?? ""}${r.stderr ?? ""}`;
+  fs.appendFileSync(logPath, `\n===== SEG ${i + 1}/${segs.length}: ${seg} =====\n`);
+  console.log(`===== SEG ${i + 1}/${segs.length}: ${seg} =====`);
+  const fd = fs.openSync(logPath, "a");
+  const r = spawnSync(seg, { shell: true, stdio: ["ignore", fd, fd] });
+  fs.closeSync(fd);
+  fs.appendFileSync(logPath, `\n----- SEG ${i + 1} exit=${r.status} signal=${r.signal ?? ""} -----\n`);
   const ok = r.status === 0;
-  summary.push(`${ok ? "PASS" : "FAIL"}  ${String(i + 1).padStart(2)}  ${seg}  (exit ${r.status}, ${secs}s)`);
-  console.log(`=== [${i + 1}/${segs.length}] ${seg} => exit ${r.status} (${secs}s) ===`);
-  console.log(out.slice(-2500));
   await publish(
     `diag-seg-${String(i + 1).padStart(2, "0")}`,
     ok ? "success" : "failure",
-    `${ok ? "PASS" : "FAIL"} 第 ${i + 1} 段 ${seg}（exit ${r.status}，${secs}s）`,
-    `${summary.join("\n")}\n\n--- 段输出尾部 ---\n${out.slice(-30000)}`,
+    `${ok ? "PASS" : "FAIL"} 第 ${i + 1} 段 ${seg}（exit ${r.status}，signal ${r.signal ?? "无"}）`,
+    fs.readFileSync(logPath, "utf8").slice(-60000),
   );
   if (!ok) {
+    fs.appendFileSync(logPath, `FIRST_FAILURE_SEG=${i + 1}\n`);
     await publish(
       "diag-FIRST-FAILURE",
       "failure",
-      `Ubuntu 上第一处失败：第 ${i + 1} 段 ${seg}`,
-      `${summary.join("\n")}\n\n--- 失败段输出尾部 ---\n${out.slice(-30000)}`,
+      `Ubuntu 第一处失败：第 ${i + 1} 段 ${seg}（exit ${r.status}）`,
+      fs.readFileSync(logPath, "utf8").slice(-64000),
     );
     process.exit(1);
   }
 }
-await publish("diag-all-pass", "success", "ubuntu 上 verify 全段通过", summary.join("\n"));
+fs.appendFileSync(logPath, "PROBE_DONE\n");
+await publish("diag-report", "success", "ubuntu 上 verify 全段通过", fs.readFileSync(logPath, "utf8").slice(-64000));
