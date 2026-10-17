@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
+import { formatConventionsBlock } from "../../shared/project-conventions";
+import { readProjectConventions } from "./conventions";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths, findGhostObligations, describeGhostObligations } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
@@ -395,22 +397,50 @@ export class OrchestratorEngine {
     throw new RunWallClockError(elapsed, limit);
   }
 
-  async generatePrd(userRequirement: string): Promise<PrdDocument> {
+  async generatePrd(userRequirement: string, projectRoot?: string): Promise<PrdDocument> {
     this.cb.onStage("PRD");
     const context = await this.collectExternalContext();
+    // 项目约定（B3）：给了项目根才读（规划可能在任何根之前被调用，例如
+    // 纯 PRD 预演）；读到就说一声 —— "这次注入了哪些约定"是可核的事实。
+    const conventions = this.conventionsFor(projectRoot);
     const prd = await this.brainCall(
       "PRD 生成",
       () =>
         chatJson(
           this.deps.llm,
           {
-            messages: [{ role: "user", content: buildPrdPrompt(userRequirement, context) }],
+            messages: [
+              { role: "user", content: buildPrdPrompt(userRequirement, context, conventions) },
+            ],
             signal: this.abort.signal,
           },
           { schemaName: "PRD", validate: parsePrd },
         ),
     );
     return prd;
+  }
+
+  /**
+   * 读项目约定并成块（B3）；缺席/空 → 空串（提示里不产段）。
+   *
+   * 读不动的文件要**说破**：约定注入最坏的失败形态是"以为带进去了、其实没有"，
+   * 而那在提示里看不见（缺了就是缺了，模型不会报警）。
+   */
+  private conventionsFor(projectRoot?: string): string {
+    if (!projectRoot) return "";
+    const read = readProjectConventions(projectRoot);
+    for (const u of read.unreadable) {
+      this.cb.onLog(`[conventions] ${u.name} 读不动（不影响规划）：${u.reason}`);
+    }
+    for (const s of read.skipped) {
+      this.cb.onLog(`[conventions] ${s.name} 超过单文件上限（${s.bytes} B），已跳过`);
+    }
+    const block = formatConventionsBlock(read.files);
+    if (block !== "") {
+      const names = read.files.map((f) => f.name).join(" + ");
+      this.cb.onLog(`[conventions] 已注入项目约定：${names}（${block.length} 字符）`);
+    }
+    return block;
   }
 
   /**

@@ -999,6 +999,88 @@ describe("OrchestratorEngine.execute", () => {
   });
 });
 
+describe("OrchestratorEngine · 项目约定注入（B3）", () => {
+  const PRD_JSON = JSON.stringify({ goal: "g", features: [], techStack: [], acceptanceCriteria: [] });
+
+  function engineWith(llm: LlmClient, events: string[]): OrchestratorEngine {
+    return new OrchestratorEngine(
+      {
+        llm,
+        scheduler: fakeScheduler(false),
+        verify: async () => makeReport(true),
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+      } as OrchestratorDeps,
+      {
+        onStage: () => undefined,
+        onLog: (l) => events.push(l),
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+      },
+    );
+  }
+
+  it("给了项目根：约定进 PRD 提示，并在需求之前（背景先于需求）", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-conv-prd-"));
+    try {
+      fs.writeFileSync(path.join(root, "OX.md"), "PRD-CONV-MARK：技术栈只用 Node。", "utf8");
+      let prompt = "";
+      const llm: LlmClient = {
+        async chat(req) {
+          // chatJson 会在最前面插一条 system 约束；要的是 user 那条。
+          prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      const events: string[] = [];
+      await engineWith(llm, events).generatePrd("做一个 CSV 统计工具", root);
+
+      expect(prompt).toContain("PRD-CONV-MARK");
+      expect(prompt).toContain("【项目约定（项目根的 OX.md / AGENTS.md）】");
+      expect(prompt.indexOf("PRD-CONV-MARK")).toBeLessThan(prompt.indexOf("User requirement:"));
+      // 注入事实要被说出来（"以为带进去了、其实没有"是这层最坏的失败形态）
+      expect(events.some((e) => e.includes("[conventions]") && e.includes("OX.md"))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("不给项目根：提示与历史逐字同形（缺席零副作用）", async () => {
+    let prompt = "";
+    const llm: LlmClient = {
+      async chat(req) {
+        prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+        return { content: PRD_JSON, provider: "t", model: "m" };
+      },
+    };
+    const events: string[] = [];
+    await engineWith(llm, events).generatePrd("demo");
+    expect(prompt).not.toContain("【项目约定");
+    // 可选参数缺席时不许把字面量 "undefined" 拼进去（真值判定把它当"有内容"
+    // 就会发生 —— site 审计在 buildPrdPrompt 的那行抓到过这个形态）。
+    expect(prompt).not.toContain("undefined");
+    expect(events.some((e) => e.includes("[conventions]"))).toBe(false);
+  });
+
+  it("约定文件读不动：说破但不影响 PRD 生成", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-conv-bad-"));
+    try {
+      fs.mkdirSync(path.join(root, "OX.md"), { recursive: true }); // 同名目录 → 读不动
+      const llm: LlmClient = {
+        async chat() {
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      const events: string[] = [];
+      const prd = await engineWith(llm, events).generatePrd("demo", root);
+      expect(prd.goal).toBe("g");
+      expect(events.some((e) => e.includes("[conventions]") && e.includes("读不动"))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+});
+
 describe("OrchestratorEngine brain cooldown handling", () => {
   const PRD_JSON = JSON.stringify({ goal: "g", features: [], techStack: [], acceptanceCriteria: [] });
 

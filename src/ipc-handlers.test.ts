@@ -912,7 +912,9 @@ describe("orchestration handlers", () => {
 
     const res = await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
     expect(res).toEqual({ prd, batches });
-    expect(h.generatePrd).toHaveBeenCalledWith("r");
+    // B3 起第二个参数是项目根（规划阶段也注入项目约定）：断言它非空，
+    // 而不是钉死 tmp 路径 —— 路径由 app.getPath("userData") 决定，逐版本会变。
+    expect(h.generatePrd).toHaveBeenCalledWith("r", expect.stringContaining("workspaces"));
     expect(store.update).toHaveBeenNthCalledWith(1, "p1", {
       prdJson: JSON.stringify(prd),
       stage: "PLANNING",

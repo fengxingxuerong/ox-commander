@@ -391,7 +391,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       io.emit({ type: "tasks", batches });
     } else {
       // 需求文本用解析后的（issue 形态下 spec.requirement 是空串占位）。
-      const prd = spec.prd ?? (await engine.generatePrd(requirement));
+      // 项目约定（B3）与桌面端同一口径：项目根的 OX.md / AGENTS.md 进规划提示。
+      const prd = spec.prd ?? (await engine.generatePrd(requirement, spec.projectRoot));
       io.emit({ type: "prd", prd });
       // 把宿主的验证命令一并交给 zone 覆盖校验：它引用的文件若不被任何任务
       // 的 zone 覆盖，重修多少轮都造不出来 —— 早失败，别烧掉整个重修预算。

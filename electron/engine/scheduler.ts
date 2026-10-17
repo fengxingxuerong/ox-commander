@@ -8,7 +8,9 @@ import type {
 } from "../../shared/types";
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
 import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES, buildOperatorNoteBlock } from "../../shared/prompts";
+import { formatConventionsBlock } from "../../shared/project-conventions";
 import { zonesOverlap } from "../../shared/glob";
+import { readProjectConventions } from "./conventions";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
 import type { CircuitBreaker } from "../sandbox/circuit-breaker";
@@ -538,6 +540,9 @@ export class Scheduler {
     }
 
     const agentPool = await this.planPool(tasks, opts?.preferredAgentId, opts?.taskFailures);
+    // 项目约定（B3）：每次 runBatch 现读一次（项目根的 OX.md / AGENTS.md）。
+    // 局部常量而不是实例字段 —— 批内 jobs 并发跑，字段会被后一个批覆盖。
+    const conventionsBlock = formatConventionsBlock(readProjectConventions(projectRoot).files);
     const guard = this.opts.guard;
     // `guard` 与它开出的 `scope` 是同生共死的：要么都有，要么都没有。
     // 打成一对之后，收尾处只需要判一次真值。
@@ -577,10 +582,16 @@ export class Scheduler {
       // 平台契约模板强制注入：每个执行者（无论哪家智能体）都必须收到统一的
       // 语义条款，堵住"description 没写清 → 各自发明口径"的漂移来源。
       // 带标记检查，避免重修轮重复拼接。
+      //
+      // 顺序（B3 起）：任务描述 → **项目约定** → 平台契约 → 操作者附言。
+      // 约定是背景（先于合同读），契约是强制条款（必须最后压住），附言是
+      // run 级最新纠偏。约定块自己也声明"不覆盖契约"。
       const baseDesc = task.description ?? "";
-      const withContract = baseDesc.includes(CONTRACT_MARKER)
-        ? baseDesc
-        : `${baseDesc}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
+      const withConventions =
+        conventionsBlock === "" ? baseDesc : `${baseDesc}\n\n${conventionsBlock}`;
+      const withContract = withConventions.includes(CONTRACT_MARKER)
+        ? withConventions
+        : `${withConventions}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
       // 操作者附言（C2）拼在契约**之后**：契约条款块恒在附言上方，附言块自己
       // 也写着"不得覆盖契约"。空附言不产块 —— 没有一个字的改动不该出现。
       const noteBlock = buildOperatorNoteBlock(task.operatorNote ?? "");

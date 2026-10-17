@@ -193,6 +193,11 @@ const TARGETS = [
   // （行号、增删统计、截断与二进制的"未知即 null"）双端共用；位点不密但
   // 每一处都是"面板上的数字对不对"的直接来源，值得逐点盯着。
   { file: "shared/text-diff.ts", test: "src/text-diff.test.ts", tier: 1 },
+  // 2026-10-17（B3）：项目约定注入。纯函数（拼接/截断/空块）与读盘
+  // （OX.md / AGENTS.md、单文件上限、读不动只报不抛）各一条目标 ——
+  // 拼错一个字符就是"约定带进了提示但读的人看不懂"，而它在测试之外不可见。
+  { file: "shared/project-conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
+  { file: "electron/engine/conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
   // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
   // 并发上限用例（`never exceeds maxParallelRuns` / `treats 0 as unlimited`），
   // 而 `maxParallel()` 的三元就在那个文件里被真实验证。此前只挂 scheduler.test.ts，
@@ -444,7 +449,13 @@ const TARGETS = [
   // 「产出格式约束」：措辞一改，模型的输出形状跟着变（而这条链路上没有类型系统
   // 兜底）。能钉住它的只有字符串层面的 `includes(...)` 断言 —— 正好是现有算子
   // 能覆盖的形状。tier 1：6ms。
-  { file: "shared/prompts.ts", test: "src/prompts.test.ts", tier: 1 },
+  {
+    file: "shared/prompts.ts",
+    // 2026-10-17（B3）：约定块的三元（空段不产）由 orchestrator.test.ts 的
+    // 「项目约定注入」钉住 —— 只挂 prompts.test.ts 时那两格没人守。
+    tests: ["src/prompts.test.ts", "src/orchestrator.test.ts"],
+    tier: 1,
+  },
   // electron/store.ts 是主进程的设置/持久层（108 行），桌面启动早期读的东西。
   // 它是迄今唯一「测试写在被测模块旁」的目标（electron/store.test.ts），
   // 会不会被 vitest 收集由 check-tests-collected 守着，不会漏挂。
@@ -741,12 +752,13 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
+  "electron/engine/conventions.ts": 2,
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 27,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 82,
+  "electron/engine/orchestrator.ts": 83,
   "electron/engine/router.ts": 25,
-  "electron/engine/scheduler.ts": 44,
+  "electron/engine/scheduler.ts": 46,
   "electron/engine/verifier.ts": 23,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
@@ -790,8 +802,9 @@ const SITE_BASELINE = {
   "shared/http-clients.ts": 61,
   "shared/llm-client.ts": 15,
   "shared/policy-file.ts": 33,
+  "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,
-  "shared/prompts.ts": 5,
+  "shared/prompts.ts": 6,
   "shared/providers.ts": 3,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,

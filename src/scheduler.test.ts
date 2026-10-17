@@ -761,6 +761,116 @@ describe("Scheduler · 平台契约模板注入", () => {
   });
 });
 
+describe("Scheduler · 项目约定注入（B3）", () => {
+  function capturing(captured: Array<{ taskId: string; description: string }>): AgentAdapter {
+    return {
+      meta: { id: "a1", name: "a1", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        captured.push({ taskId: payload.taskId, description: payload.description });
+        return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "completed" as const, text: "ok", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  /** 造一个带约定文件的项目根；返回根目录与清理函数。 */
+  function projectWith(files: Record<string, string>): { root: string; cleanup: () => void } {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-conv-"));
+    for (const [name, body] of Object.entries(files)) {
+      fs.writeFileSync(path.join(root, name), body, "utf8");
+    }
+    return {
+      root,
+      cleanup: () => fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }),
+    };
+  }
+
+  it("项目根的 OX.md 进每个任务的 description，且在契约块之前", async () => {
+    const proj = projectWith({ "OX.md": "约定：所有文件用 CommonJS；禁止改 package.json。" });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      const desc = captured[0]!.description;
+      expect(desc).toContain("禁止改 package.json");
+      expect(desc).toContain("【项目约定（项目根的 OX.md / AGENTS.md）】");
+      // 顺序即语义：背景（约定）先于合同（契约块）
+      expect(desc.indexOf("【项目约定")).toBeGreaterThan(-1);
+      expect(desc.indexOf("【项目约定")).toBeLessThan(desc.indexOf("[平台契约条款]"));
+    } finally {
+      proj.cleanup();
+    }
+  });
+
+  it("OX.md 与 AGENTS.md 同时存在：两块都在，OX 在前", async () => {
+    const proj = projectWith({
+      "OX.md": "OX-约定-A",
+      "AGENTS.md": "AGENTS-约定-B",
+    });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      const desc = captured[0]!.description;
+      expect(desc).toContain("### OX.md");
+      expect(desc).toContain("### AGENTS.md");
+      expect(desc.indexOf("OX-约定-A")).toBeLessThan(desc.indexOf("AGENTS-约定-B"));
+    } finally {
+      proj.cleanup();
+    }
+  });
+
+  it("没有约定文件：description 不产空标题（缺席零副作用）", async () => {
+    const proj = projectWith({});
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      const desc = captured[0]!.description;
+      expect(desc).not.toContain("【项目约定");
+      expect(desc).toContain("[平台契约条款]"); // 契约照旧
+    } finally {
+      proj.cleanup();
+    }
+  });
+
+  it("三段顺序：描述 → 约定 → 契约 → 附言（附言永远最后）", async () => {
+    const proj = projectWith({ "OX.md": "CONV-MARK" });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      const t = task("t1", "src");
+      t.description = "BASE-MARK";
+      t.operatorNote = "NOTE-MARK";
+      await new Scheduler([capturing(captured)]).runBatch([t], proj.root);
+      const desc = captured[0]!.description;
+      const base = desc.indexOf("BASE-MARK");
+      const conv = desc.indexOf("CONV-MARK");
+      const contract = desc.indexOf("[平台契约条款]");
+      const note = desc.indexOf("NOTE-MARK");
+      expect(base).toBeGreaterThan(-1);
+      expect(conv).toBeGreaterThan(base);
+      expect(contract).toBeGreaterThan(conv);
+      expect(note).toBeGreaterThan(contract);
+    } finally {
+      proj.cleanup();
+    }
+  });
+
+  it("空/纯空白的约定文件不产块", async () => {
+    const proj = projectWith({ "OX.md": "   \n\n  " });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      expect(captured[0]!.description).not.toContain("【项目约定");
+    } finally {
+      proj.cleanup();
+    }
+  });
+});
+
 describe("Scheduler · 事件流的终止判定", () => {
   /** 按给定事件序列回报的适配器（`adapterWith` 只能给"成功/失败"两段固定流）。 */
   function eventAdapter(id: string, events: Array<{ kind: string; text: string }>): AgentAdapter {

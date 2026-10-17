@@ -170,7 +170,9 @@ export function registerOrchestrationHandlers(): void {
     if (!rec) throw new Error(`project ${projectId} not found`);
     if (getRunningProjectId() === projectId) throw new Error("项目正在执行中，请先取消再重新规划");
     const engine = buildEngine(projectId);
-    const prd = await engine.generatePrd(rec.requirement);
+    // 项目约定（B3）：规划阶段也注入 —— 约定影响"技术栈/边界怎么定"，
+    // 只在执行阶段带进去的话，PRD 早就把约定违背了。
+    const prd = await engine.generatePrd(rec.requirement, workspaceRoot(projectId));
     stores().update(projectId, { prdJson: JSON.stringify(prd), stage: "PLANNING" });
     send({ type: "stage", stage: "PLANNING" });
     // 与 headless 入口保持一致：把验证命令交给 zone 覆盖校验。它引用的文件若

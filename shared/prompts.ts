@@ -60,8 +60,17 @@ export function buildOperatorNoteBlock(note: string): string {
 export function buildPrdPrompt(
   userRequirement: string,
   externalContext?: readonly { name: string; text: string }[],
+  conventionsBlock?: string,
 ): string {
   const ctx = externalContext ? externalContextBlock(externalContext) : "";
+  // 项目约定（B3）放在需求之前：先给项目背景，再读本次需求。空块不产段 ——
+  // 没有约定的项目占多数，空标题只会挤占提示。
+  //
+  // 写法刻意收敛成"先归一化再判空"：`conventionsBlock ?? ""` 把可选参数的
+  // undefined 挡在外面（否则真值判定里 undefined 会被当成"有内容"，把字面量
+  // "undefined" 拼进提示 —— site 审计在本行抓到过那个形态）。
+  const conv = conventionsBlock ?? "";
+  const conventions = conv.trim() !== "" ? `${conv}\n\n` : "";
   return `You are the planning brain of OxCommander, an orchestrator that decomposes software projects and dispatches them to coding agents.
 
 Convert the user's requirement below into a structured PRD.
@@ -80,7 +89,7 @@ Rules:
 - techStack: MUST stay inside the execution sandbox: Node.js (CommonJS modules), Node built-in modules and the built-in node:test runner only. NEVER propose Python, browsers/bundlers, or external npm packages — the workspace has no network installs and verification runs npm scripts backed by node only.
 - acceptanceCriteria: objective, machine-checkable criteria (build passes, tests pass, feature X works). Tests must be runnable via "npm test" with test files under tests/*.test.js using require("node:test").
 
-${ctx ? `${ctx}\n\n` : ""}User requirement:
+${conventions}${ctx ? `${ctx}\n\n` : ""}User requirement:
 ${userRequirement}`;
 }
 
