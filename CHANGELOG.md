@@ -6,6 +6,64 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 新增（改动文件面板：批次改动首次有持久事实 + 看板出口 · 2026-10-17）
+
+竞品缺口 B1「diff 面板」的第一半。完整 diff viewer（逐行 before/after）没做 ——
+批次成功后快照即 commit 回收，此刻没有可靠的逐行对比数据源；本批先把
+**「这轮到底改了哪些文件」**这条最基础的答案从"翻审计日志"变成看板上一块面板：
+
+- **数据源**：`onVerdict` 的第二个参数（`BatchScope.changes`）此前被两个宿主
+  全部丢弃 —— 它带着每批完整改动清单（含 clean 批），而 `batch-guard` phase
+  只记越权路径。现在每批一条 `batch-changes` 审计（新 phase，不污染
+  `zone-cost` 对 batch-guard 记录的越权统计），files 上限 100 + `filesTotal` 说破截断。
+- **口径**：scope 缺席（无 guard 的装配 / 测试直调宿主回调）**不落记录** ——
+  编一条 "0 个文件"比什么都不写更假。
+- **界面**：`changes:list` IPC + 看板「改动文件」卡（按批次折叠、op 图标、
+  截断提示）。**刻意没有回滚按钮**：备份已回收，放一个必然失败的按钮
+  等于邀请人按它；边界写在卡片底部。
+- **门禁**：5 条新测试（过滤/倒序/落审计/截断/无 scope 不编记录）；
+  site 逐位点审计 6 个改动生产文件全 100% 全杀（含一个被 `site-baseline --write`
+  前暴露的真问题：`changes:list` 里 `typeof x === "string" && x !== ""` 的
+  `&& → ||` 存活 —— 换 `||` 后无参调用会把"无 projectId 的记录"当成"本项目的"，
+  而当时的用例恰好全部无 projectId，两分支同结果。拆成两步判后两支各有断言盯着）。
+  白名单锚点 `context.ts` 因本批插行漂移 212 → 221，按纪律校回。
+- 位点 1723 → **1738**；用例 2090 → **2105**；`check:doc-claims` 同步 PASS。
+
+### 新增（桌面通知：run 出结论 / 待决策 / 待审批时系统级提醒 · 2026-10-17）
+
+竞品缺口 C1。serve 解决了"能看"，没解决"该看了"——长 run 后台跑、窗口被切走时，
+操作者唯一还能收到的信号。判据是纯函数 `electron/notify-rules.ts`（可逐点审计），
+弹窗本身只是 `send()` 里一行 `new Notification(...).show()`：
+
+- **只弹三类**（判据保守是刻意的：通知的价值与频率成反比）：
+  receipt（交付与未交付都弹 —— 没交付更要回来）/ escalation（三选一没人答就挂住）/
+  approval-request（fail-closed，问不到人就不执行）。
+  日志、任务进度、批次完成、线路健康**一律不弹**。
+- `Notification.isSupported()` 为 false 时安静降级不抛；正文截断到 120 字符。
+- 测试 10 条（判据 8 + 集成 2：receipt 真走一次 show、log 不弹）；
+  site 8/8 全杀；目标 73 → **74**、位点 1738（含本轮新增 8 处）。
+- **已知边界**：headless/serve 宿主没有通知通道（无 GUI），只有桌面端有。
+
+### 新增（分发面三件套：npx CLI 包 / 英文 README / 首屏 demo GIF · 2026-10-17）
+
+竞品缺口盘点（`docs/2026-10-17-competitor-gap.md`）的结论：技术差距在缩小，**分发差距在拉大**——
+判据有 1723 处逐点验证，却没有任何一条路径让陌生人在 3 分钟内摸到它。本批补最便宜的三格，零架构改动：
+
+- **CLI 分发包**（`npx oxcommander` 那一格）：`scripts/build-cli-pkg.mjs` 从 `dist-headless/` 产出
+  `dist-cli/`（git 忽略）——只有 `bin/ox.js` + 不带 sourceMap 的 `dist-headless/` + 一份英文 README，
+  不含 Electron / devDependencies。`bin` 提供 `ox`（run）/ `ox serve` / `ox mcp` / `ox receipt` 四个子命令，
+  只做「找入口 + 转发」，退出码原样透传。验收是新增的 `smoke:cli-pkg`（verify 第 33 段，19 断言）：
+  **非空转**两条——非法 spec 必须拿到协议层的 `error` 事件（CLI 自己编一条错也算 exit 1，所以认事件类型）、
+  `receipt` 子命令必须拿到复核工具的报错而不是 run 的报错（证明子命令没被当成 run 转发）。
+  段数 32 → 33，四处清单（README / gates.md / SKILL.md / 本文件）同批同步，`check:doc-claims` PASS。
+- **英文 README**（`README.en.md`）：定位段 + `npx` 快速开始 + 差异表 + 两处诚实短板（无 macOS 签名、
+  无终端 IDE 形态）。中文版顶部加语言切换。刻意**不复制段数/用例数**——那些数字由
+  `check:doc-claims` 在中文版对实物核，英文版复制一份就是第二处会腐烂的地方，只链接不重复。
+- **首屏 demo GIF**（`docs/demo.gif`，980×598 · 62 帧 · ~2MB）：素材是 `npm run demo` 的 stdout **原文**
+  （不是手写剧本），由 `scripts/make-demo-gif.py`（Pillow，仅本脚本用，不进项目依赖）渲染成滚动
+  终端动画——渲染而非录屏，是因为录屏不可复现而「stdout 原文 + 渲染脚本」在换机器后重跑两条命令即可再生。
+  中英 README 首屏都挂上。
+
 ### 新增（`check:test-side-effects` —— 让顶层副作用躲不过门禁 · 2026-10-17）
 
 上一条修的是**已经漏出来的** 18352 个目录；这一条修的是**为什么会漏而没人发现**：

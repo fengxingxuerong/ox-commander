@@ -1,14 +1,14 @@
-# `npm run verify` 的逐段机制（32 段）
+# `npm run verify` 的逐段机制（33 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、32 段、
-2090 通过 + 8 跳过，合计 2098 条，分布在 67 个有可执行用例的文件（2026-10-15 现跑：链首到
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、33 段、
+2105 通过 + 8 跳过，合计 2113 条，分布在 68 个有可执行用例的文件（2026-10-17 现跑：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**73 个目标** / 基线 **1723 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**74 个目标** / 基线 **1738 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -65,7 +65,8 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
 | 27 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 | 28 | `smoke:workbuddy-bridge` | `workbuddy-bridge-it.mjs`：**真进程 × 真 `dist-headless` 进程**（假大脑随机端口 + 测试扮演"人"读写 inbox/outbox），6 场景 36 项断言（实测 `^PASS` 计数：`check()` 30 条 + 每场景一条桥健康检查）| 零配额、随机端口。钉的是只有跨进程才成立的六件事：平台发的 TaskRequest 字段真桥认不认、completed/failed 终态映射（不能把人的拒绝当成功交付）、越权/受保护文件的**整批**拒且盘上零产物、outbox 坏 JSON 判失败而不卡死（现场改名 `.bad` 不留在待消费队列）、deadline 到点自己收口、三条退出路径都删任务书。与段 26 的分工：那里的桥是内联假件，一行真桥代码都没碰过 |
-| 29 | `check:test-side-effects` | `scripts/check-test-side-effects.mjs`：扫描 `src/` `shared/` `electron/` `headless/` 下的测试文件，找**模块顶层**（缩进 0，导入即执行）的建目录 / 写文件 / spawn 类调用 | 两条都红：**A** 顶层建了东西而全文件**没有任何** `rmSync` —— 每次导入泄漏一份（`vitest list` 只导入不执行，`afterAll` 不会被调度）；**B** 顶层有副作用而文件带 `skipIf`/`skip` 门控 —— 门控跳过时 `afterAll` 不调度，清理不发生而副作用照常发生。**不禁止**「顶层建 + `afterAll` 清」这个既有写法（cli-agent / cli-agent-env / sandbox-path / mutation-residue 四处的残留实测已归零）。自检 6 例（含「注释里的调用不算」「缩进的调用不算」两个反向样本） |
+| 29 | `smoke:cli-pkg` | `scripts/cli-pkg-smoke.mjs`：先 spawn `build-cli-pkg.mjs --json` 造出 `dist-cli/`（`npx oxcommander` 的发布形态），再对**包**断言 | bin 指向的文件不在盘上 / 四个入口（`headless-main` `serve-main` `mcp-main` `receipt-verify-main`）少一个 / 版本与根 `package.json` 漂移 / `files` 白名单漏目录 / 带了 devDependencies → 红。**转发非空转**：非法 spec 必须拿到协议层的 `error` 事件且退出码 1（CLI 自己编一条错也算 exit 1，所以要认事件类型）；`receipt` 子命令必须拿到复核工具的报错（`读不了凭据`）而不是 run 的报错——证明子命令没被当成 run 转发。发布面：包内无 `.map`、无 `node_modules`。**它盯的是"表面正常"那一类坏法**：`--version` 照样打印、包照样能 `npm pack`，而少拷一个入口只有真从 `dist-cli` 里启动才现形 |
+| 30 | `check:test-side-effects` | `scripts/check-test-side-effects.mjs`：扫描 `src/` `shared/` `electron/` `headless/` 下的测试文件，找**模块顶层**（缩进 0，导入即执行）的建目录 / 写文件 / spawn 类调用 | 两条都红：**A** 顶层建了东西而全文件**没有任何** `rmSync` —— 每次导入泄漏一份（`vitest list` 只导入不执行，`afterAll` 不会被调度）；**B** 顶层有副作用而文件带 `skipIf`/`skip` 门控 —— 门控跳过时 `afterAll` 不调度，清理不发生而副作用照常发生。**不禁止**「顶层建 + `afterAll` 清」这个既有写法（cli-agent / cli-agent-env / sandbox-path / mutation-residue 四处的残留实测已归零）。自检 6 例（含「注释里的调用不算」「缩进的调用不算」两个反向样本） |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
 
@@ -327,7 +328,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 32 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 33 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 
@@ -358,7 +359,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 "全杀"与它无关。这类判据的机制只能靠**差分**（摘掉实现必须红）或扩算子集
 （脚本要求扩之前先确认不会引入等价变异噪声，且那会改变位点总数）。
 
-## `check:test-side-effects`（2026-10-17 新增，段 29）
+## `check:test-side-effects`（2026-10-17 新增，段 30）
 
 **它盯的是一类躲得过全绿报告的缺陷。** 2026-10-17 体检在 `%TEMP%` 里发现 **18352 个 `ox-*`
 目录**（15876 个为空）。根因是测试文件在**模块顶层** `fs.mkdtempSync`：

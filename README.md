@@ -1,15 +1,19 @@
 # OxCommander
 
+[English](README.en.md) | 简体中文
+
 [![verify](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml/badge.svg)](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 ![mutation gate](https://img.shields.io/badge/mutation-逐位点全杀-blueviolet)
 
+<img src="docs/demo.gif" alt="npm run demo：一次真实交付（规划 → 派单 → 门禁 → 交付凭据 → 外部复核）" width="100%">
+
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **73 个目标** / 基线 **1723 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **74 个目标** / 基线 **1738 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
-> 于是 `--tier=2` 那片实际跑的是**全部 73 个目标**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
+> 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
 > 里，tier 2 有约 23 min 是**重复跑 tier 1**。现在 `--tier` 是精确匹配、tier 2 再按 `--shard` 轮转切 2 片
 > （分片由工具自己算，各片之并恒为全集，不漏目标）。修后首轮实测 @ `80946b0` run #38922557558 **五 job 全绿**：
 > tier 1 单片 17.6 min · tier 2 两片 12.7 / 13.7 min · `verify` ubuntu 3.4 min / windows 4.8 min ——
@@ -45,6 +49,8 @@ Electron 桌面端 + headless CLI 双入口。
 > | 特征 | OxCommander |
 > | --- | --- |
 > | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染 |
+| 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**只读不回滚**：批次成功后备份即回收，回滚走越权仲裁与工作区 git（边界写在卡片上，不放必然失败的按钮） |
+| 通知 | 桌面系统通知（只三类：run 出结论 / 任务待决策 / 命令待审批）—— 长任务切走后"该回工位了"由操作系统喊，判据是纯函数可逐点审计；`isSupported` 为 false 安静降级 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
 > | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀） |
@@ -58,6 +64,20 @@ Electron 桌面端 + headless CLI 双入口。
 需求 → PRD → PLANNING → DEVELOPMENT（zone 互斥并行） → VERIFICATION（build/typecheck/test） → DELIVERY → DONE
                 ↑______________ repair loop（按 zone 归因重修）______________|
 ```
+
+## 一条命令先跑起来（不 clone、不 build）
+
+```bash
+npx oxcommander --help
+echo '{"requirement":"...","projectRoot":"."}' | npx oxcommander   # 一次交付，stdout 出 JSONL 事件
+npx oxcommander serve --port=8787    # 常驻服务：状态页 + SSE + POST /run
+npx oxcommander mcp                  # MCP stdio server，接进 agent 生态
+npx oxcommander receipt receipt.json --replay   # 独立复核一份交付凭据
+```
+
+> CLI 包由 `npm run build:cli` 从 `dist-headless/` 产出（`dist-cli/`，git 忽略），
+> `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、四个入口齐全、转发真的到达协议层。
+> 发布：`cd dist-cli && npm publish`。桌面安装包见下方「获取与安装」。
 
 ## 快速开始
 
@@ -204,7 +224,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**32 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**33 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 14 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
@@ -246,7 +266,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
   空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
   空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
-→ vitest（2026-10-15 现跑 2090 通过 + 8 跳过，合计 2098 条，分布在 67 个有可执行用例的文件；
+→ vitest（2026-10-17 现跑 2105 通过 + 8 跳过，合计 2113 条，分布在 68 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -267,6 +287,11 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:workbuddy-bridge（对话式智能体桥 `workbuddy-bridge.mjs` 的**真进程**端到端：真起桥 +
    真起 dist-headless，由测试扮演"人"读写 inbox/outbox，6 场景钉住协议字段、越权整批拒、
    失败终态映射、deadline 收口与队列清理；随机端口、零配额）
+→ smoke:cli-pkg（`npx oxcommander` 那一格的分发包冒烟：自己构建 `dist-cli/`，再断言
+  bin 指向的文件真在盘上、四个入口齐全、版本不与仓库漂移、非法 spec 真转发到协议层、
+  `receipt` 子命令真路由到复核入口、包内不带 sourceMap 与 node_modules。
+  它盯的是「包自洽」这一类**表面正常**的坏法：`--version` 照样打印、包照样能 pack，
+  但 `dist-headless` 少拷一个入口时只有真从 dist-cli 里启动才现形）
 → check:test-side-effects（测试文件的**顶层副作用**：顶层建目录却没人清、或清理写在
    `skipIf` 门控的块里而门控没开 —— 两种都必漏。判据见下，自检 6 例）
 ```
