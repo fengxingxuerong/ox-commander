@@ -133,6 +133,9 @@ export function buildEngine(projectId: string): OrchestratorEngine {
         }),
       onVerification: (report) => send({ type: "verification", report }),
       onEscalation: (taskId, summary) => send({ type: "escalation", taskId, summary }),
+      // 操作者附言的状态回声（C2）：设置/清除/任务成功退休都广播。人写的
+      // 东西要即时确认"生效了"，否则分不清没保存还是没派发。
+      onTaskNote: (taskId, note) => send({ type: "task-note", taskId, note }),
       // 交付凭据：看板要把它整份留下来（它是这次运行唯一的对外结论），
       // 同时 projectStore 存一份，重载窗口后仍看得到上次交付的结论。
       onReceipt: (receipt) => {
@@ -229,6 +232,27 @@ export function registerOrchestrationHandlers(): void {
 
   ipcMain.handle("orchestration:escalation-decide", (_e, taskId: string, action: EscalationAction) => {
     if (!resolveEscalation(taskId, action)) throw new Error(`没有等待决策的任务：${taskId}`);
+    return true;
+  });
+
+  /**
+   * 操作者附言（C2）：给一个任务挂一句"下一次派发时带上"的指示；空串 = 清除。
+   *
+   * 只对**在跑的 run** 有效（附言的存活范围是引擎实例）：没有 run 时写哪里
+   * 都不对 —— 落盘会 invent 一个跨 run 语义，而那正是 PRD 评审页的职责。
+   * 所以这里找不到引擎就明说，不静默成功。
+   *
+   * taskId 不存在的后果由 UI 的任务清单过滤（人只能给看得见的任务写），
+   * 引擎侧不重复建一套白名单 —— 写了但对不上任何任务的附言到不了任何派发，
+   * 而"对不上"这件事看板上看得见。
+   */
+  ipcMain.handle("orchestration:task-note", (_e, taskId: string, note: string) => {
+    if (typeof taskId !== "string" || taskId === "") throw new Error("taskId 必须是非空字符串");
+    if (typeof note !== "string") throw new Error("note 必须是字符串（空串 = 清除）");
+    const running = getRunningProjectId();
+    const engine = running ? enginesOf().get(running) : undefined;
+    if (!engine) throw new Error("没有在跑的 run：附言只对本次运行有效（运行前请用 PRD 评审）");
+    engine.setOperatorNote(taskId, note);
     return true;
   });
 

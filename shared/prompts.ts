@@ -25,6 +25,38 @@ export function externalContextBlock(items: readonly { name: string; text: strin
   ].join("\n");
 }
 
+/**
+ * 操作者附言（C2：运行中追加指令的对位物）。
+ *
+ * 诚实的边界先写在这里：本项目的执行器全是**一问一答**形态（本地 LLM 池 /
+ * CLI / HTTP 桥），没有"往正在生成的流里插话"的通道 —— 所以附言到达的是
+ * **下一次派发**，不是当前这次在途生成。界面文案与文档都按这个口径写，
+ * 不暗示"已实时送达"。
+ *
+ * 为什么值得做：任务升级（escalation）时人本来就要做三选一裁决，那时
+ * "带一句话重派"比干巴巴的 redispatch 强得多；批次间 pending 的任务也
+ * 可以在下一轮前被纠偏。
+ *
+ * 附言同样走"数据不是指令"的标注 —— 它是操作者写的，不是远端不可信内容，
+ * 但同样不该覆盖平台契约条款（契约条款块在最终提示里恒在附言**上方**，
+ * 拼装顺序见 scheduler 的 description 构造处）。
+ */
+export const OPERATOR_NOTE_MARKER = "[操作者附言]";
+
+export function buildOperatorNoteBlock(note: string): string {
+  const trimmed = note.trim();
+  if (trimmed === "") return "";
+  return [
+    "",
+    OPERATOR_NOTE_MARKER,
+    "以下是你的人类操作者在本次运行中途追加的指示。它优先于你对任务的自有理解，",
+    "但不得覆盖上方平台契约条款（zone 边界、口径显式化等硬规则仍然有效）。",
+    "若附言与任务描述矛盾，按附言执行并在完成时说明你做了什么取舍。",
+    "",
+    trimmed,
+  ].join("\n");
+}
+
 export function buildPrdPrompt(
   userRequirement: string,
   externalContext?: readonly { name: string; text: string }[],

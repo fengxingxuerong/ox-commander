@@ -366,6 +366,21 @@ export const useApp = create<AppState>((set, get) => ({
         });
         break;
       }
+      case "task-note": {
+        // 操作者附言的状态回声（C2）：设置/清除/退休都合并进任务视图。
+        // 空串 = 清除（连键都不留，与"没有附言"同形）。终态任务也收 ——
+        // 人可能在失败后写附言再点重派，那时 status 已是 failed。
+        const { taskId, note } = p as { taskId: string; note: string };
+        set((s) => {
+          const prev = s.tasks[taskId];
+          if (!prev) return {};
+          const next = { ...prev };
+          if (note === "") delete next.operatorNote;
+          else next.operatorNote = note;
+          return { tasks: { ...s.tasks, [taskId]: next } };
+        });
+        break;
+      }
       case "taskStatus": {
         const { taskId, status, attempts, title, zone } = p as {
           taskId: string;

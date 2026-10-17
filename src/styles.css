@@ -649,6 +649,50 @@ button.small {
   text-shadow: 0 0 10px rgba(89, 194, 255, 0.5);
 }
 
+/* 附言编辑器（C2）：与履历同一形态的折叠块，但类名独立 ——
+   测试按 .trail-details 选元素（"第 N 个折叠块"），两类折叠块混用同一个
+   类名会让那种按序数的测试随插入顺序漂移（本轮实测踩到：附言块插在
+   履历块之后，openTrail(container, 1) 从"第二个任务的履历"变成
+   "第一个任务的附言"，一条既有测试当场红）。 */
+.task-note-details {
+  flex-basis: 100%;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.task-note-details summary {
+  cursor: pointer;
+  color: var(--info);
+  user-select: none;
+  letter-spacing: 0.03em;
+}
+
+.task-note-details summary:hover {
+  text-shadow: 0 0 10px rgba(89, 194, 255, 0.5);
+}
+
+.task-note-editor textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  border-radius: 6px;
+  color: var(--text, #e6edf3);
+  font: inherit;
+  font-size: 12px;
+  padding: 6px 8px;
+  resize: vertical;
+}
+
+.task-note-editor .btn-row {
+  margin-top: 4px;
+}
+
+.task-note-editor .error-text {
+  margin: 4px 0 0;
+}
+
 .trail-list {
   list-style: none;
   margin: 6px 0 0;

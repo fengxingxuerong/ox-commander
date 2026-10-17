@@ -7,7 +7,7 @@ import type {
   TaskPayload,
 } from "../../shared/types";
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
-import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES } from "../../shared/prompts";
+import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES, buildOperatorNoteBlock } from "../../shared/prompts";
 import { zonesOverlap } from "../../shared/glob";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
@@ -578,9 +578,13 @@ export class Scheduler {
       // 语义条款，堵住"description 没写清 → 各自发明口径"的漂移来源。
       // 带标记检查，避免重修轮重复拼接。
       const baseDesc = task.description ?? "";
-      const description = baseDesc.includes(CONTRACT_MARKER)
+      const withContract = baseDesc.includes(CONTRACT_MARKER)
         ? baseDesc
         : `${baseDesc}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;
+      // 操作者附言（C2）拼在契约**之后**：契约条款块恒在附言上方，附言块自己
+      // 也写着"不得覆盖契约"。空附言不产块 —— 没有一个字的改动不该出现。
+      const noteBlock = buildOperatorNoteBlock(task.operatorNote ?? "");
+      const description = noteBlock === "" ? withContract : `${withContract}\n${noteBlock}`;
 
       // 任务级冗余赛马（§5.3）：redundancy > 1 时同任务派 N 个不同执行器并行，
       // 第一个到终态成功者赢，其余 abort。redundancy = 1 保持单派发路径不变。

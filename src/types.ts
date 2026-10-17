@@ -68,6 +68,12 @@ export interface TaskView {
   lastActivityTs?: number;
   /** Duration of the last run. */
   durationMs?: number;
+  /**
+   * 操作者附言（C2，2026-10-17）：人给这个任务挂的、下一次派发生效的指示。
+   * 空串/缺席 = 没有。**不是实时送达**：执行器是一问一答形态，附言进的是
+   * 下一次派发的 prompt；任务成功后引擎自动清除并广播空串。
+   */
+  operatorNote?: string;
 }
 
 /** Per-agent circuit state, as reported by the breaker. */
@@ -243,6 +249,12 @@ declare global {
       pause(): Promise<void>;
       resume(): Promise<void>;
       resolveEscalation(taskId: string, action: EscalationAction): Promise<boolean>;
+      /**
+       * 操作者附言（C2）：给一个任务挂一句"下一次派发时带上"的指示；
+       * 空串 = 清除。只对**在跑的 run** 有效（引擎内存，不落盘）——
+       * 没有 run 时主进程抛错，不静默成功。
+       */
+      setTaskNote(taskId: string, note: string): Promise<boolean>;
       resolveApproval(requestId: string, granted: boolean): Promise<boolean>;
       verifyReceipt(projectId: string, replay?: boolean): Promise<ReceiptVerifyResult>;
       listAgents(): Promise<AgentListResult>;

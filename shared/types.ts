@@ -128,6 +128,17 @@ export interface Task {
   zone: string;
   dependencies: string[];
   suggestedRole: string;
+  /**
+   * 操作者附言（C2，2026-10-17）：运行中由人追加的一次性指示。
+   *
+   * 语义边界（与 `buildOperatorNoteBlock` 同一口径）：执行器都是一问一答形态，
+   * 附言进入的是**下一次派发**的 prompt，不是在途生成的插话。任务成功后由引擎
+   * 清除（附言的用途已兑现）；未清除则每次派发都重复带 —— 附言是覆盖不是叠加。
+   *
+   * 缺席 = 没有附言。存活范围 = 引擎内存 + 本次 run（不落盘、不过重启：
+   * 跨 run 的指示属于 PRD 评审页的职责，那是计划级输入）。
+   */
+  operatorNote?: string;
 }
 
 export interface RepairRecord {

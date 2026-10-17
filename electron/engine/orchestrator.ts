@@ -170,6 +170,12 @@ export interface OrchestratorCallbacks {
     meta?: { agentId?: string; errorClass?: string; durationMs?: number },
   ): void;
   /**
+   * 操作者附言的状态变化（C2）：设置 / 清除 / 任务成功后自动清除都走这里。
+   * 宿主转成 `task-note` 事件给看板 —— 附言是**人刚写的东西**，没有实时回显
+   * 就没有人知道它有没有生效。note 为空串 = 已清除。
+   */
+  onTaskNote?(taskId: string, note: string): void;
+  /**
    * Fired when repair rounds are exhausted. When provided, the engine waits
    * for the returned decision instead of aborting; omit it to keep the old
    * fail-fast behaviour.
@@ -279,6 +285,14 @@ export class OrchestratorEngine {
    * 活过一轮，跑完就没了。这里攒下来，最后由 `emitReceipt` 写进凭据的逐任务账。
    */
   private readonly repairsSeen = new Map<string, RepairRecord[]>();
+  /**
+   * 操作者附言（C2，2026-10-17）：taskId → 人写的一次性指示。
+   *
+   * 存活范围是**引擎实例**（= 一次 run）：不落盘、不过重启。派发前由
+   * `pendingWithNotes()` 拷进 Task 副本，任务成功后 `deleteNote` 收回
+   * （附言的用途已兑现，留着会让下一轮重修重复带旧指示）。
+   */
+  private readonly operatorNotes = new Map<string, string>();
 
   constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {
     // 取消探针接进调度器的节流等待（2026-10-13）：节流指数退避封顶 5min 的整段
@@ -311,6 +325,32 @@ export class OrchestratorEngine {
 
   resume(): void {
     this.paused = false;
+  }
+
+  /**
+   * 设置/清除一个任务的操作者附言（C2）。
+   *
+   * 空串（或全空白）= 清除。unknown taskId 也收下 —— 附言可能在规划前就写
+   * （那时任务表还没建），execute() 建任务时按 id 对得上；对不上的附言
+   * 永远到不了任何派发，UI 侧的任务清单就是过滤器，引擎不重复建一套白名单。
+   *
+   * 立即回声 `onTaskNote`：人写的东西要有"已生效"的实时确认，否则分不清
+   * 是没保存还是没派发。
+   */
+  setOperatorNote(taskId: string, note: string): void {
+    const trimmed = note.trim();
+    if (trimmed === "") this.operatorNotes.delete(taskId);
+    else this.operatorNotes.set(taskId, trimmed);
+    this.cb.onTaskNote?.(taskId, trimmed);
+  }
+
+  /** 附言抄进 Task 副本（不改计划原件 —— PRD 是计划级输入，附言是 run 级）。 */
+  private pendingWithNotes(tasks: readonly Task[]): Task[] {
+    if (this.operatorNotes.size === 0) return [...tasks];
+    return tasks.map((t) => {
+      const note = this.operatorNotes.get(t.id);
+      return note === undefined ? t : { ...t, operatorNote: note };
+    });
   }
 
   private async gate(): Promise<void> {
@@ -916,10 +956,14 @@ export class OrchestratorEngine {
           m.set(o.agentId, (m.get(o.agentId) ?? 0) + 1);
           failuresByTask.set(o.taskId, m);
         }
-        const batchOutcomes = await this.deps.scheduler.runBatch(pending, projectRoot, {
-          repairOf,
-          taskFailures: (taskId) => failuresByTask.get(taskId),
-        });
+        const batchOutcomes = await this.deps.scheduler.runBatch(
+          this.pendingWithNotes(pending),
+          projectRoot,
+          {
+            repairOf,
+            taskFailures: (taskId) => failuresByTask.get(taskId),
+          },
+        );
         const byId = new Map(outcomes.map((o) => [o.taskId, o]));
         for (const o of batchOutcomes) byId.set(o.taskId, o);
         outcomes = [...byId.values()];
@@ -933,6 +977,9 @@ export class OrchestratorEngine {
           this.inFlight.delete(o.taskId);
           if (o.ok) {
             allDone.add(o.taskId);
+            // 附言随成功一起退休（C2）：它的用途已兑现；不清的话下一轮若因
+            // 别处失败触发整体重修，旧指示会重复带进 prompt。回声给看板。
+            if (this.operatorNotes.delete(o.taskId)) this.cb.onTaskNote?.(o.taskId, "");
             this.cb.onTaskStatus(o.taskId, "done", attempts.get(o.taskId)!);
           } else {
             this.cb.onTaskStatus(o.taskId, "failed", attempts.get(o.taskId)!);

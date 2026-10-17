@@ -302,6 +302,52 @@ function ChangesPanel() {
   );
 }
 
+/**
+ * 任务附言编辑器（C2 的界面出口）。
+ *
+ * 三条边界写在组件里而不是藏进文档：① **下一次派发生效**，不是在途生成里
+ * 插话（执行器全是一问一答形态）；② 任务成功后引擎自动清除；③ 只对在跑的
+ * run 有效 —— 没有 run 时主进程抛错，这里把错误原样显示出来（"静默成功"
+ * 会让人以为附言在跑之前就存下来了）。
+ */
+function TaskNoteEditor({ taskId, note }: { taskId: string; note?: string }) {
+  const [draft, setDraft] = useState(note ?? "");
+  const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const save = (value: string) => {
+    setSaving(true);
+    setError(null);
+    window.oxCommander
+      .setTaskNote(taskId, value)
+      .then(() => setDraft(value.trim()))
+      .catch((e: unknown) => setError((e as Error).message))
+      .finally(() => setSaving(false));
+  };
+  const dirty = draft.trim() !== (note ?? "");
+  return (
+    <div className="task-note-editor">
+      <textarea
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        placeholder="给这个任务的纠偏指示，保存后下一次派发生效（任务成功后自动清除）"
+        rows={2}
+      />
+      <div className="btn-row">
+        <button className="primary" onClick={() => save(draft)} disabled={saving || !dirty} title="保存附言">
+          保存附言
+        </button>
+        {note ? (
+          <button onClick={() => save("")} disabled={saving} title="清除附言">
+            清除
+          </button>
+        ) : null}
+      </div>
+      {error && <p className="error-text">{error}</p>}
+      {note ? <p className="muted">当前附言将在下一次派发时带进 prompt。</p> : null}
+    </div>
+  );
+}
+
 export function BoardPage() {
   const stage = useApp((s) => s.stage);
   const tasks = useApp((s) => s.tasks);
@@ -463,6 +509,13 @@ export function BoardPage() {
                 >
                   <summary>📜 运行履历</summary>
                   <TrailView state={trails[t.taskId]} />
+                </details>
+                {/* 操作者附言（C2）：升级裁决之外的常态化纠偏入口。
+                    升级卡里也放一个（见下）—— 那里是"run 正卡着等人"的时刻，
+                    带话重派比干巴巴的 redispatch 强得多。 */}
+                <details className="task-note-details">
+                  <summary>✏️ 附言{t.operatorNote ? "（已挂）" : ""}</summary>
+                  <TaskNoteEditor taskId={t.taskId} note={t.operatorNote} />
                 </details>
               </div>
             ))}
@@ -650,7 +703,14 @@ export function BoardPage() {
                   {e.resolved ? (
                     <p className="muted">已处理</p>
                   ) : (
-                    <div className="btn-row">
+                    <>
+                      {/* 带话重派（C2）：先写附言再点重派，附言随下一次派发
+                          进 prompt —— 这是"人在回路里"最常用的形态。 */}
+                      <details className="task-note-details">
+                        <summary>✏️ 带话重派（附言随下一次派发生效）</summary>
+                        <TaskNoteEditor taskId={e.taskId} note={tasks[e.taskId]?.operatorNote} />
+                      </details>
+                      <div className="btn-row">
                       <button onClick={() => void resolveEscalation(e.taskId, "skip")} title="放弃该任务，继续交付其余部分">
                         跳过
                       </button>
@@ -660,7 +720,8 @@ export function BoardPage() {
                       <button className="danger" onClick={() => void resolveEscalation(e.taskId, "abort")} title="终止整个项目执行">
                         终止
                       </button>
-                    </div>
+                      </div>
+                    </>
                   )}
                 </div>
               ))}
