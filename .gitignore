@@ -27,3 +27,7 @@ scripts/.mutation-pending/
 # WorkBuddy 会话目录（.workbuddy/memory/ 是本机会话记忆与日志）：属运行时状态，
 # 不是项目内容。与 .box-agent/ 同性质 —— 显式忽略，避免 git add -A 误收。
 .workbuddy/
+
+# 陈旧变异台账留证（2026-10-17：被宿主杀掉的运行残留 + pid 复用误判 foreign-live，
+# 10 份 .orig 已逐份与源码核内容一致，工作区干净；留证不删，但不进版本库）
+scripts/.mutation-pending.stale-*/
