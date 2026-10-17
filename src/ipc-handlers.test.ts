@@ -213,6 +213,7 @@ import {
   dynamicAgentMap,
   enginesOf,
   ensureAgentLayer,
+  ensureAudit,
   getRunningProjectId,
   resolveApproval,
   resolveEscalation,
@@ -222,6 +223,7 @@ import {
   writeJournal,
 } from "../electron/ipc/context";
 import { exampleManifest } from "../electron/agents/manifest-schema";
+import { SnapshotStore } from "../electron/sandbox/snapshot-store";
 import { HttpLlmError } from "../shared/http-clients";
 import type { AgentCapabilities, AgentDescriptor } from "../shared/agent-contract";
 import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
@@ -1989,6 +1991,283 @@ describe("changes handlers（diff 面板供数，竞品缺口 B1）", () => {
     host.onVerdict({ conflicts: [], remedies: [] });
     const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
     expect(audit.append).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "batch-changes" }));
+  });
+
+  it("onVerdict 把 scope.archiveId 落进审计（diff 与单文件回滚的供数键）", () => {
+    buildEngine("p-changes-arch");
+    const host = lastPlatformConfig().host;
+    host.onVerdict(
+      { conflicts: [], remedies: [] },
+      { changes: [{ path: "src/a.js", op: "create", bytes: 7 }], archiveId: "r-1__abc-1" },
+    );
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    const call = (audit.append as Mock).mock.calls.find(
+      (c: unknown[]) => (c[0] as { phase?: string }).phase === "batch-changes",
+    ) as unknown as [{ archiveId?: string }];
+    expect(call[0].archiveId).toBe("r-1__abc-1");
+  });
+
+  it("scope 没有 archiveId 时审计里这个键也不出现（字段即承诺）", () => {
+    buildEngine("p-changes-noarch");
+    const host = lastPlatformConfig().host;
+    host.onVerdict({ conflicts: [], remedies: [] }, { changes: [{ path: "src/a.js", op: "create", bytes: 7 }] });
+    const audit = h.auditInstances[h.auditInstances.length - 1] as { append: Mock };
+    const call = (audit.append as Mock).mock.calls.find(
+      (c: unknown[]) => (c[0] as { phase?: string }).phase === "batch-changes",
+    ) as unknown as [Record<string, unknown>];
+    expect("archiveId" in call[0]).toBe(false);
+  });
+});
+
+/**
+ * B1 第二半：changes:file（逐行 diff）与 changes:revert（单文件回滚）。
+ *
+ * 这里用**真的 SnapshotStore**（临时目录）而不是替身 —— 这两个 handler 的
+ * 全部价值就在"存档里真的读得到 before、回滚后盘上真的是旧内容"，mock 掉
+ * store 等于把要证的东西证没了。审计（create 证据的来源）仍是替身。
+ */
+describe("changes:file / changes:revert（B1 第二半：diff 与单文件回滚）", () => {
+  /** 造一个存档批次：before 内容先进盘，begin，再改成 after。返回 batchId 与 root。 */
+  async function makeArchive(tag: string, runId: string) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), `ox-chg-${tag}-`));
+    const backupRoot = fs.mkdtempSync(path.join(os.tmpdir(), `ox-chg-${tag}-bk-`));
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/a.js"), "line1\nold\nline3\n", "utf8");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId, root, zones: ["src"] });
+    fs.writeFileSync(path.join(root, "src/a.js"), "line1\nnew\nline3\n", "utf8");
+    const record = await store.archive(token, { runId });
+    return { root, backupRoot, store, batchId: record!.id };
+  }
+
+  /** 让审计替身只认得一条带 archiveId 的 batch-changes 记录。 */
+  function stubAudit(files: Array<{ path: string; op: string }>, archiveId: string) {
+    // 先确保实例已经建出来：`inst(h.auditInstances)` 依赖"前面某个用例
+    // 已经触发过 ensureAudit"——那是顺序依赖，`-t` 单跑时就会炸。
+    ensureAudit();
+    (inst(h.auditInstances).read as Mock).mockReturnValue([
+      { phase: "batch-changes", ts: "2026-10-17T00:00:00Z", archiveId, files },
+    ]);
+  }
+
+  afterEach(() => {
+    h.layer.snapshots = undefined;
+  });
+
+  it("changes:file 返回逐行 diff：before 来自存档、after 来自盘上", async () => {
+    const { store, batchId } = await makeArchive("diff", "r-chg-diff");
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/a.js", op: "modify" }], batchId);
+
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId, path: "src/a.js" }) as {
+      ok: boolean;
+      diff?: { status: string; added: number | null; deleted: number | null; lines: Array<{ kind: string; text: string }> };
+    };
+    expect(out.ok).toBe(true);
+    expect(out.diff!.status).toBe("modified");
+    expect(out.diff!.added).toBe(1);
+    expect(out.diff!.deleted).toBe(1);
+    expect(out.diff!.lines.map((l) => l.text)).toContain("old");
+    expect(out.diff!.lines.map((l) => l.text)).toContain("new");
+  });
+
+  it("changes:file：不在存档 files 里的路径按 created 呈现（本批新建）", async () => {
+    const { root, store, batchId } = await makeArchive("diff-new", "r-chg-diff-new");
+    fs.writeFileSync(path.join(root, "src/brand-new.js"), "n1\nn2\n", "utf8");
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/brand-new.js", op: "create" }], batchId);
+
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId, path: "src/brand-new.js" }) as {
+      ok: boolean;
+      diff?: { status: string; added: number | null };
+    };
+    expect(out.ok).toBe(true);
+    expect(out.diff!.status).toBe("created");
+    expect(out.diff!.added).toBe(2);
+  });
+
+  it("changes:file：盘上文件已不在 ⇒ deleted（而不是当成空文件）", async () => {
+    const { root, store, batchId } = await makeArchive("diff-gone", "r-chg-diff-gone");
+    fs.rmSync(path.join(root, "src/a.js"), { force: true });
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/a.js", op: "delete" }], batchId);
+
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId, path: "src/a.js" }) as {
+      ok: boolean;
+      diff?: { status: string };
+    };
+    expect(out.diff!.status).toBe("deleted");
+  });
+
+  it("changes:file：未配置快照存储 ⇒ 明说，不装成空 diff", () => {
+    h.layer.snapshots = undefined;
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId: "r__1", path: "src/a.js" }) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("未配置快照存储");
+  });
+
+  it("changes:file：存档不存在（被容量策略回收）⇒ 明说", () => {
+    h.layer.snapshots = new SnapshotStore({ backupRoot: fs.mkdtempSync(path.join(os.tmpdir(), "ox-chg-empty-bk-")) });
+    const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId: "ghost__1", path: "src/a.js" }) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("不存在");
+  });
+
+  it("changes:file：路径穿越被拒（../ 与绝对路径）", async () => {
+    const { store, batchId } = await makeArchive("diff-trav", "r-chg-diff-trav");
+    h.layer.snapshots = store;
+    stubAudit([], batchId);
+    for (const bad of ["../../etc/passwd", "/etc/passwd", ".."]) {
+      const out = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId, path: bad }) as {
+        ok: boolean;
+        reason?: string;
+      };
+      expect(out.ok, `路径 ${bad} 应被拒`).toBe(false);
+    }
+  });
+
+  it("changes:file：请求形状不对时明说（null / 坏 batchId / path 非字符串）", () => {
+    h.layer.snapshots = new SnapshotStore({ backupRoot: fs.mkdtempSync(path.join(os.tmpdir(), "ox-chg-shape-bk-")) });
+    // null：typeof null === "object"，单靠前者放行 —— 解构就会抛
+    const nullOut = (h.ipcMain as FakeIpcMain).invoke("changes:file", null) as { ok: boolean; reason?: string };
+    expect(nullOut.ok).toBe(false);
+    expect(nullOut.reason).toContain("请求形状不对");
+    // 带分隔符的 batchId（会变成存档目录名的一部分）
+    const slashOut = (h.ipcMain as FakeIpcMain).invoke("changes:file", { batchId: "a/b", path: "x" }) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(slashOut.ok).toBe(false);
+    expect(slashOut.reason).toContain("请求形状不对");
+  });
+
+  it("changes:revert：目标记录排在别的记录后面也扫得到（continue 不是 break）", async () => {
+    const { root, store, batchId } = await makeArchive("rev-scan", "r-chg-rev-scan");
+    const target = path.join(root, "src/generated.js");
+    fs.writeFileSync(target, "gen", "utf8");
+    h.layer.snapshots = store;
+    // 先一条别人的记录：`continue` 换成 `break` 时这里就停，扫不到目标的 create 证据。
+    // 目标故意选**无备份**的新建文件 —— 删除分支才让"证据有没有扫到"可观测
+    // （有备份的文件走恢复分支，与 created 无关，break 版行为相同 → 杀不掉）。
+    ensureAudit();
+    (inst(h.auditInstances).read as Mock).mockReturnValue([
+      { phase: "batch-changes", ts: "2026-10-17T00:00:00Z", archiveId: "other__1", files: [] },
+      {
+        phase: "batch-changes",
+        ts: "2026-10-17T01:00:00Z",
+        archiveId: batchId,
+        files: [{ path: "src/generated.js", op: "create" }],
+      },
+    ]);
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", {
+      batchId,
+      path: "src/generated.js",
+    })) as { ok: boolean; action?: string };
+    expect(out).toEqual({ ok: true, action: "removed" });
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it("changes:revert：审计里一条该批的记录都没有 ⇒ 拒绝删除（末尾 return false 不是 true）", async () => {
+    const { root, store, batchId } = await makeArchive("rev-norec", "r-chg-rev-norec");
+    const target = path.join(root, "package.json");
+    fs.writeFileSync(target, '{"name":"user"}', "utf8");
+    h.layer.snapshots = store;
+    // 审计被轮转清空（或查询窗口里根本没有这一批）：没有任何 create 证据。
+    ensureAudit();
+    (inst(h.auditInstances).read as Mock).mockReturnValue([]);
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", {
+      batchId,
+      path: "package.json",
+    })) as { ok: boolean; reason?: string };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("不删");
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
+  it("changes:revert：审计说 modify 而存储里没有备份 ⇒ 仍拒绝删除（证据必须是 create）", async () => {
+    const { root, store, batchId } = await makeArchive("rev-mismatch", "r-chg-rev-mismatch");
+    const target = path.join(root, "package.json");
+    fs.writeFileSync(target, '{"name":"user"}', "utf8");
+    h.layer.snapshots = store;
+    // 审计记录说它是 modify —— 但快照里没有它的备份（zone 外）。删除许可只认
+    // create：把 op 写错（或记录被截断）时不能顺手把用户的文件删掉。
+    stubAudit([{ path: "package.json", op: "modify" }], batchId);
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", { batchId, path: "package.json" })) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("不删");
+    expect(fs.existsSync(target)).toBe(true);
+  });
+
+  it("changes:revert：有备份的 modify ⇒ 恢复旧内容，盘上真的变回去", async () => {
+    const { root, store, batchId } = await makeArchive("rev", "r-chg-rev");
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/a.js", op: "modify" }], batchId);
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", { batchId, path: "src/a.js" })) as {
+      ok: boolean;
+      action?: string;
+    };
+    expect(out).toEqual({ ok: true, action: "restored" });
+    expect(fs.readFileSync(path.join(root, "src/a.js"), "utf8")).toBe("line1\nold\nline3\n");
+  });
+
+  it("changes:revert：审计里 op=create 的新文件 ⇒ 撤销新建（删除）", async () => {
+    const { root, store, batchId } = await makeArchive("rev-new", "r-chg-rev-new");
+    const target = path.join(root, "src/brand-new.js");
+    fs.writeFileSync(target, "new", "utf8");
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/brand-new.js", op: "create" }], batchId);
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", { batchId, path: "src/brand-new.js" })) as {
+      ok: boolean;
+      action?: string;
+    };
+    expect(out).toEqual({ ok: true, action: "removed" });
+    expect(fs.existsSync(target)).toBe(false);
+  });
+
+  it("changes:revert：无备份又无 create 证据 ⇒ 拒绝删除（可能是既有文件）", async () => {
+    const { root, store, batchId } = await makeArchive("rev-refuse", "r-chg-rev-refuse");
+    const target = path.join(root, "package.json");
+    fs.writeFileSync(target, '{"name":"user"}', "utf8");
+    h.layer.snapshots = store;
+    // 审计里这个文件根本没出现（files 截断没带上它）⇒ 没有 create 证据
+    stubAudit([{ path: "src/a.js", op: "modify" }], batchId);
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", { batchId, path: "package.json" })) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("不删");
+    expect(fs.existsSync(target)).toBe(true); // 原样保留
+  });
+
+  it("changes:revert：存档不存在 ⇒ 明说，不动盘上文件", async () => {
+    const { root, backupRoot, store, batchId } = await makeArchive("rev-gone", "r-chg-rev-gone");
+    h.layer.snapshots = store;
+    stubAudit([{ path: "src/a.js", op: "modify" }], batchId);
+    // 直接删存档目录（不用 private getter）：模拟"被容量策略回收"的现场。
+    fs.rmSync(path.join(backupRoot, "archive", batchId), { recursive: true, force: true });
+
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("changes:revert", { batchId, path: "src/a.js" })) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("不存在");
+    expect(fs.readFileSync(path.join(root, "src/a.js"), "utf8")).toBe("line1\nnew\nline3\n"); // 没被碰
   });
 });
 

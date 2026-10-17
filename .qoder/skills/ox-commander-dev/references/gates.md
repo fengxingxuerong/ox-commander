@@ -1,14 +1,14 @@
 # `npm run verify` 的逐段机制（33 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、33 段、
-2121 通过 + 8 跳过，合计 2129 条，分布在 68 个有可执行用例的文件（2026-10-17 现跑：链首到
+2176 通过 + 8 跳过，合计 2184 条，分布在 69 个有可执行用例的文件（2026-10-17 现跑：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**74 个目标** / 基线 **1752 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**75 个目标** / 基线 **1831 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -327,6 +327,11 @@ async 门面（`text()` / `json()` / `chat()`）。
   `npm ci` + `npm run verify`，**无 `timeout-minutes`**
 - `mutation-full` job：**只在 ubuntu**、`timeout-minutes: 35`、跑 `npm run mutation:audit`
   → site 口径全位点在本机 verify 里**从不执行**，锚定文件改动的真实回归面只有推上去才知道
+- `cli-macos` job：**只在 macos-latest**（2026-10-17 新增，缺口 A4）：`build:headless` +
+  `build:cli` + `smoke:cli-pkg` + `smoke:demo`。桌面端 macOS 产物仍刻意不出
+  （无签名凭据、未签名 .app 被 Gatekeeper 拦 —— electron-builder.yml 顶部有完整论证），
+  这个 job 证明的是 `npx oxcommander` 这条**纯 Node 分发通路**在 mac 上真的通。
+  零凭据零网络零固定端口，失败即该通路坏，与 verify 两格互为补充而非重复。
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
   那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 33 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。

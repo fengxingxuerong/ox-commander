@@ -39,6 +39,12 @@ const api = {
   getAgentStats: () => ipcRenderer.invoke("agents:stats"),
   recentAudit: (limit?: number) => ipcRenderer.invoke("audit:recent", limit),
   listChanges: (projectId?: string) => ipcRenderer.invoke("changes:list", projectId),
+  // ── 批次 diff 与单文件回滚（竞品缺口 B1 第二半）──
+  // 只有带 archiveId 的批次有存档可 diff / 可回滚；界面据此决定按钮显隐。
+  fileDiff: (batchId: string, path: string) =>
+    ipcRenderer.invoke("changes:file", { batchId, path }),
+  revertFile: (batchId: string, path: string) =>
+    ipcRenderer.invoke("changes:revert", { batchId, path }),
   taskTrail: (taskId: string) => ipcRenderer.invoke("audit:trail", taskId),
   auditFiles: () => ipcRenderer.invoke("audit:files"),
   exportAudit: () => ipcRenderer.invoke("audit:export"),

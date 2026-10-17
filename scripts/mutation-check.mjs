@@ -189,6 +189,10 @@ const TARGETS = [
   { file: "shared/github-issue.ts", test: "shared/github-issue.test.ts", tier: 1 },
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
+  // 2026-10-17（B1 第二半）：行级 diff 纯函数。住 shared 是因为 diff 判据
+  // （行号、增删统计、截断与二进制的"未知即 null"）双端共用；位点不密但
+  // 每一处都是"面板上的数字对不对"的直接来源，值得逐点盯着。
+  { file: "shared/text-diff.ts", test: "src/text-diff.test.ts", tier: 1 },
   // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
   // 并发上限用例（`never exceeds maxParallelRuns` / `treats 0 as unlimited`），
   // 而 `maxParallel()` 的三元就在那个文件里被真实验证。此前只挂 scheduler.test.ts，
@@ -745,8 +749,8 @@ const SITE_BASELINE = {
   "electron/engine/scheduler.ts": 44,
   "electron/engine/verifier.ts": 23,
   "electron/engine/zone-guard.ts": 6,
-  "electron/ipc/agents.ts": 22,
-  "electron/ipc/context.ts": 26,
+  "electron/ipc/agents.ts": 42,
+  "electron/ipc/context.ts": 27,
   "electron/ipc/github.ts": 22,
   "electron/ipc/orchestration.ts": 11,
   "electron/ipc/projects.ts": 12,
@@ -763,7 +767,7 @@ const SITE_BASELINE = {
   "electron/sandbox/kill-tree.ts": 11,
   "electron/sandbox/loop-detector.ts": 5,
   "electron/sandbox/path-policy.ts": 40,
-  "electron/sandbox/snapshot-store.ts": 13,
+  "electron/sandbox/snapshot-store.ts": 33,
   "electron/sandbox/spawn-plan.ts": 8,
   "electron/sandbox/timeout-gate.ts": 3,
   "electron/store.ts": 8,
@@ -792,6 +796,7 @@ const SITE_BASELINE = {
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 62,
+  "shared/text-diff.ts": 38,
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
@@ -862,6 +867,29 @@ const EQUIVALENT_SITES = [
    * 蕴含关系重核：X 为真 ⇒ 池中有声明候选 ⇒ A 恒真，不变。
    */
   { file: "electron/engine/router.ts", op: "&& → ||", line: 244 },
+  /**
+   * `electron/sandbox/snapshot-store.ts:402`（`archivedFilePath` 的路径校验）
+   * 两处 `|| → &&` —— **可证明等价**（2026-10-17，B1 第二半落地时 site 审计抓出）。
+   *
+   * 记条件为 `E || D || A`（E = rel 为空，D = 以上级目录开头，A = 绝对路径）。
+   * 这一行是**第一道**；紧接着的
+   *   `const file = path.resolve(path.join(dir, rel)); if (!file.startsWith(dir + path.sep)) return null;`
+   * 是**第二道**，而两者的失败返回值同为 `null`（本函数只返回 `string | null`，
+   * 不返回原因，调用方 `readArchived` / `hasBackupFor` 都只看见 null）。
+   * 于是"第一道放行了非法 rel"在行为上不可观测：任何越界的 rel 都会在
+   * `resolve` 前缀检查处得到同一个 null。逐输入核过三种形态：
+   *   - rel = ""：`path.resolve(join(dir, ""))` = dir，`dir.startsWith(dir + sep)` 为假 ⇒ null；
+   *   - rel = ".." / "../x"：resolve 到 archive/ 之上或 dir 之外 ⇒ null；
+   *   - rel = "C:/x"：win32 下 `path.join` 把盘符段当普通段拼在 dir 下，仍在 dir 内 ⇒ 只是查不到文件 ⇒ null。
+   * 第一道换 `&&` 后每一支的返回值都不变。
+   *
+   * ⚠️ 行号是锚点：本函数结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认上面的"第二道兜住"仍成立。
+   * 反向说明为什么 `restoreArchived` 的同类判据**不**进白名单：那边两道防护
+   * 的 reason 措辞不同（`拒绝绝对路径与上级目录` / `备份路径越出存档目录`），
+   * 第一道放行是**可观测**的（reason 变了），所以测试能杀，不该豁免。
+   */
+  { file: "electron/sandbox/snapshot-store.ts", op: "|| → &&", line: 402 },
   /**
    * `headless/serve.ts` 控制面里 `if (!busy && !engine)`
    * 的 `&& → ||` —— **可证明等价**（2026-10-05 反向注入时发现）。

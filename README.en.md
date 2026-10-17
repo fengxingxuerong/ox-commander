@@ -2,6 +2,7 @@
 
 [![verify](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml/badge.svg)](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 
 > **Other orchestrators hand you N diffs and ask you to pick one. OxCommander delivers one that already passed the gate.**
 >
@@ -53,8 +54,10 @@ result to review instead of N.
 | Isolation | zone mutual exclusion (cross-module edits can cooperate) | worktree per agent | n/a | docker / swarm | worktree per workspace |
 | Self-proof | **mutation testing, site granularity** — every decision site has an assertion | — | — | — | — |
 
-Two honest gaps: there is **no macOS build** (no signing certificate; unsigned `.app` is blocked by
-Gatekeeper, so we ship nothing rather than something broken), and the desktop app is **not a terminal
+Two honest gaps: there is **no macOS desktop build** (no signing certificate; unsigned `.app` is
+blocked by Gatekeeper, so we ship nothing rather than something broken) — but the `npx oxcommander`
+CLI **does** run on macOS (pure Node package, no native deps; a dedicated `cli (macOS)` CI job
+builds and smokes it on every push), and the desktop app is **not a terminal
 IDE** — no embedded terminal, no per-file diff viewer yet. The CLI/headless surface is where
 programmatic control lives (JSONL protocol + MCP server).
 
@@ -107,6 +110,9 @@ and are reported separately on purpose — they can hide uncovered sites.
 
 Numbers live in [README.md](README.md) (Chinese, authoritative) and are re-derived from the source by
 the gate, so this file deliberately doesn't repeat them.
+
+Contributing: see [CONTRIBUTING.md](CONTRIBUTING.md) — the repo's own gate culture (one verify
+chain, four synchronized doc lists, manually registered mutation targets) is written up there.
 
 ## License
 

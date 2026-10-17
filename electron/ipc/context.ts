@@ -359,6 +359,9 @@ export function buildPlatformLayer(
             paths: changes.map((c) => c.path),
             files: changes.slice(0, 100).map((c) => ({ path: c.path, op: c.op, bytes: c.bytes })),
             ...(changes.length > 100 ? { filesTotal: changes.length } : {}),
+            // 存档 id（B1 第二半）：有它，看板这一批才能 diff 与单文件回滚。
+            // 字段即承诺：没有存档时这个键不出现（契约见 audit-log）。
+            ...(scope.archiveId ? { archiveId: scope.archiveId } : {}),
           });
         }
         for (const conflict of verdict.conflicts) {

@@ -107,3 +107,43 @@ jobs:
 
       - name: Mutation (site 口径，逐位点，tier ${{ matrix.tier }} 片 ${{ matrix.shard }})
         run: node scripts/mutation-check.mjs --mode=site --limit=999 --tier=${{ matrix.tier }} --shard=${{ matrix.shard }} --jobs=1
+
+  # macOS 上的 **CLI 通路**证明（竞品缺口 A4 的落地形态）。
+  #
+  # 为什么不打 macOS 桌面端产物：electron-builder.yml 顶部有完整论证 ——
+  # 没有签名凭据，未签名 .app 在新系统上被 Gatekeeper 直接拦下，
+  # 出一个"用户打不开"的产物比不出更糟。桌面端缺口**认了**，写进 README 平台表。
+  #
+  # 但缺口盘点的结论是"桌面端缺口可以认，CLI 缺口不该认"：`npx oxcommander`
+  # 是纯 Node 包（dist-headless/ + bin 转发），本身跨平台，却从没有任何一条
+  # 路径在 macOS 上验证过它。本 job 补这一格：在 macos-latest 上真造
+  # `dist-cli/` 并跑它的冒烟，外加 `smoke:demo`（真子进程 + 零网络零固定端口）。
+  #
+  # 为什么不跑整链 verify：verify 在 ubuntu + windows 两格已全覆盖，
+  # 且 `mutation:touched` 要 HEAD~1、CI 深克隆成本不值当。本 job 只回答
+  # "macOS 上这条分发通路通不通"一个问题。零凭据、零网络，失败即该通路坏了。
+  cli-macos:
+    name: cli (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Build headless + CLI package
+        run: |
+          npm run build:headless
+          npm run build:cli
+
+      - name: Smoke CLI package（npx 形态）
+        run: npm run smoke:cli-pkg
+
+      - name: Smoke demo delivery（真子进程，零网络）
+        run: npm run smoke:demo

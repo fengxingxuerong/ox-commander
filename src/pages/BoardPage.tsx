@@ -5,6 +5,7 @@ import { AuditPanel } from "../components/AuditPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
 import type { ReceiptTaskStatus, ReceiptVerdict } from "../../shared/delivery-receipt";
 import { usageFact } from "../../shared/usage-meter";
+import type { FileDiff } from "../../shared/text-diff";
 import type { TaskTrail, TrailRun } from "../../electron/board-derive";
 
 /**
@@ -224,6 +225,10 @@ function TrailView({ state }: { state?: TrailState }) {
 /**
  * 批次改动记录（`changes:list` 的返回形状）。files 截断上限 100（主进程侧），
  * 超限有 filesTotal —— 界面把"没显示的"说出来。
+ *
+ * `archiveId`（B1 第二半）：本批备份的存档 id。有它才点亮 diff / 回滚按钮；
+ * 缺席的三种情况（未配置快照存储、存档失败已回收、纯新建批）按钮不出现，
+ * 底部说明文字念出来 —— 不放必然失败的按钮。
  */
 type ChangeRecord = {
   ts: string;
@@ -232,26 +237,99 @@ type ChangeRecord = {
   paths?: string[];
   files?: Array<{ path: string; op: string; bytes?: number }>;
   filesTotal?: number;
+  archiveId?: string;
 };
 
 const OP_ICON: Record<string, string> = { create: "➕", modify: "✏️", delete: "🗑" };
 
+/** diff 取数的三态（每个文件行各自一份，按 path 归属）。 */
+type DiffState =
+  | { kind: "idle" }
+  | { kind: "loading"; path: string }
+  | { kind: "shown"; path: string; diff: FileDiff }
+  | { kind: "error"; path: string; message: string };
+
+/** 回滚结果的一行反馈（成功也说 —— "点了之后发生了什么"要可见）。 */
+type RevertNote = { path: string; message: string } | null;
+
+function revertOkText(action: "restored" | "removed" | "already-gone"): string {
+  if (action === "restored") return "已恢复为存档里的旧内容。";
+  if (action === "removed") return "已删除（本批新建的文件，没有旧内容可恢复）。";
+  return "文件已不在盘上，无需操作。";
+}
+
 /**
- * 批次改动面板（`changes:list` 的界面出口，竞品缺口 B1 的第一半）。
+ * diff 状态的人话说明（纯函数）。
  *
- * 它回答的是「这轮到底改了哪些文件」—— 交付凭据回答"跑没跑过"，这里回答
- * "动了什么"。取数是懒加载 + 手动刷新：改动是批次结算时落的审计事实，run
- * 进行中会持续增加，但没有值得为它开推送通道的事件量（一批一条）。
+ * ⚠️ 逐档登记、**不留 default**：`check:exhaustive` 管的就是"被 default 吞掉的档"
+ * （tsc 只兜得住 Record 缺键，switch + default 是它的盲区）。这里六档全列，
+ * 将来 DiffStatus 加一档会先在 typecheck 报"函数可能返回 undefined"。
+ */
+function diffStatusText(status: FileDiff["status"]): string {
+  switch (status) {
+    case "modified":
+      return "";
+    case "created":
+      return "本批新建的文件（没有旧内容）。";
+    case "deleted":
+      return "文件已不在盘上（本批删除，或之后被别的东西删了）。";
+    case "unchanged":
+      return "与存档相比没有变化（这一批之后没有再动过它）。";
+    case "binary":
+      return "二进制文件，不渲染内容。";
+    case "too-large":
+      return "文件行数超过渲染上限，只显示统计。";
+  }
+}
+
+/** 行级 diff 渲染。增删不只靠颜色：每行带 +/- 号与行号（色觉无障碍）。 */
+function DiffView({ diff }: { diff: FileDiff }) {
+  const head = diffStatusText(diff.status);
+  return (
+    <div className="diff-view">
+      <p className="muted">
+        {head}
+        {diff.status === "modified" || diff.status === "created" || diff.status === "deleted"
+          ? ` +${diff.added ?? "—"} / -${diff.deleted ?? "—"} 行`
+          : ""}
+        {diff.truncated ? "（内容已截断）" : ""}
+      </p>
+      {diff.lines.length > 0 ? (
+        <div className="diff-lines">
+          {diff.lines.map((l, i) => (
+            <div key={`${l.beforeNo ?? 0}-${l.afterNo ?? 0}-${i}`} className={`diff-line diff-${l.kind}`}>
+              <span className="diff-no">{l.beforeNo ?? ""}</span>
+              <span className="diff-no">{l.afterNo ?? ""}</span>
+              <span className="diff-sign">{l.kind === "add" ? "+" : l.kind === "del" ? "-" : " "}</span>
+              <span className="diff-text">{l.text === "" ? " " : l.text}</span>
+            </div>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * 批次改动面板（`changes:list` 的界面出口，竞品缺口 B1：第一半"改了哪些文件"，
+ * 第二半"改了什么、能不能只撤这一个"）。
  *
- * 刻意**只有事实没有按钮**：批次成功后快照已 commit 回收，此刻不存在可靠的
- * 单文件回滚路径 —— 放一个"回滚"按钮等于邀请人按下一个必然失败的操作。
- * 回滚的入口是越权仲裁（自动）与工作区自身的 git；这里的诚实边界要写出来。
+ * 取数是懒加载 + 手动刷新：改动是批次结算时落的审计事实，run 进行中会持续
+ * 增加，但没有值得为它开推送通道的事件量（一批一条）。
+ *
+ * 回滚的边界（2026-10-17 第二半起有真实备份支撑）：只回滚**有存档**的批次，
+ * 从该批存档恢复 before；本批新建的文件撤销新建（需审计里的 create 证据，
+ * 没有证据主进程拒绝删除）。它不是 git 操作，也不跨批次 —— 回滚后该批的
+ * 审计记录与存档仍在（事实不因为回滚消失），后续批次若又改过同一文件，
+ * 这里恢复的是**这一批**的旧内容，界面在确认框里说破这一点。
  */
 function ChangesPanel() {
   const activeProjectId = useApp((s) => s.activeProjectId);
   const [state, setState] = useState<
     { kind: "loading" } | { kind: "ready"; records: ChangeRecord[] } | { kind: "error"; message: string }
   >({ kind: "loading" });
+  const [diff, setDiff] = useState<DiffState>({ kind: "idle" });
+  const [revertNote, setRevertNote] = useState<RevertNote>(null);
   const load = () => {
     setState({ kind: "loading" });
     window.oxCommander
@@ -263,6 +341,37 @@ function ChangesPanel() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- 取数跟随项目切换
   }, [activeProjectId]);
+
+  const showDiff = (batchId: string, filePath: string) => {
+    setRevertNote(null);
+    setDiff({ kind: "loading", path: filePath });
+    window.oxCommander
+      .fileDiff(batchId, filePath)
+      .then((res) =>
+        res.ok
+          ? setDiff({ kind: "shown", path: filePath, diff: res.diff })
+          : setDiff({ kind: "error", path: filePath, message: res.reason }),
+      )
+      .catch((e: unknown) => setDiff({ kind: "error", path: filePath, message: (e as Error).message }));
+  };
+
+  const revert = (batchId: string, filePath: string, op: string) => {
+    // 二次确认把后果说清：这是直接改工作区，不是 git 操作；新建文件会被删掉。
+    const what = op === "create" ? "删除这个文件（本批新建，没有旧内容）" : "用本批存档里的旧内容覆盖当前文件";
+    if (!window.confirm(`回滚 ${filePath}？\n${what}。\n这是直接改工作区的操作，不走 git；之后若有别的批次又改过它，恢复的是本批的旧内容。`)) {
+      return;
+    }
+    setDiff({ kind: "idle" });
+    window.oxCommander
+      .revertFile(batchId, filePath)
+      .then((res) => {
+        setRevertNote({ path: filePath, message: res.ok ? revertOkText(res.action) : `回滚被拒绝：${res.reason}` });
+        if (res.ok) load();
+      })
+      .catch((e: unknown) =>
+        setRevertNote({ path: filePath, message: `回滚失败：${(e as Error).message}` }),
+      );
+  };
 
   if (state.kind === "loading") return <p className="muted">正在读取改动…</p>;
   if (state.kind === "error") return <p className="muted">读不到改动记录：{state.message}</p>;
@@ -284,19 +393,55 @@ function ChangesPanel() {
               <summary>
                 {new Date(r.ts).toLocaleTimeString()} · {r.changed ?? files.length} 个文件
                 {r.filesTotal !== undefined ? `（清单截断，共 ${r.filesTotal}）` : ""}
+                {r.archiveId ? " · 有存档" : ""}
               </summary>
               {files.map((f) => (
-                <p key={f.path} className="task-meta">
-                  {OP_ICON[f.op] ?? "·"} <code>{f.path}</code>
-                  {f.bytes !== undefined ? ` · ${f.bytes} B` : ""}
-                </p>
+                <div key={f.path} className="change-row">
+                  <p className="task-meta">
+                    {OP_ICON[f.op] ?? "·"} <code>{f.path}</code>
+                    {f.bytes !== undefined ? ` · ${f.bytes} B` : ""}
+                    {r.archiveId ? (
+                      <span className="change-actions">
+                        <button
+                          className="link-btn"
+                          onClick={() => showDiff(r.archiveId!, f.path)}
+                          disabled={diff.kind === "loading" && diff.path === f.path}
+                          title="看这一版的逐行 diff（存档旧内容 × 盘上现状）"
+                        >
+                          diff
+                        </button>
+                        <button
+                          className="link-btn"
+                          onClick={() => revert(r.archiveId!, f.path, f.op)}
+                          title="从本批存档恢复这个文件（需二次确认）"
+                        >
+                          回滚
+                        </button>
+                      </span>
+                    ) : null}
+                  </p>
+                  {diff.kind !== "idle" && diff.path === f.path ? (
+                    diff.kind === "loading" ? (
+                      <p className="muted">正在算 diff…</p>
+                    ) : diff.kind === "error" ? (
+                      <p className="muted">diff 取数失败：{diff.message}</p>
+                    ) : (
+                      <DiffView diff={diff.diff} />
+                    )
+                  ) : null}
+                  {revertNote && revertNote.path === f.path ? (
+                    <p className="muted">{revertNote.message}</p>
+                  ) : null}
+                </div>
               ))}
             </details>
           );
         })
       )}
       <p className="muted">
-        批次结算时落审计的事实记录；批次成功后备份即回收，这里不提供回滚 —— 回滚走越权仲裁与工作区 git。
+        每批改动是结算时落的审计事实；有「存档」标记的批次可看逐行 diff、可单文件回滚
+        （从该批备份恢复，不走 git）。存档只保留最近 8 批，超出后旧批次的按钮随之消失；
+        没有存档的批次（未配置快照存储 / 存档失败 / 纯新建批）不提供 diff 与回滚。
       </p>
     </section>
   );

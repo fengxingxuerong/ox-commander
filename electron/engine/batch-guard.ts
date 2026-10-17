@@ -47,6 +47,12 @@ export interface BatchScope {
   rootAbs: string;
   zones: string[];
   changes: FileChange[];
+  /**
+   * 本批备份的存档 id（B1 第二半）。settle 成功出口由 `finishBatch` 写入；
+   * 未配置快照存储 / 存档失败回退回收 / 纯新建批时缺席。宿主把它落进
+   * `batch-changes` 审计，看板据此知道哪一批能 diff、能单文件回滚。
+   */
+  archiveId?: string;
 }
 
 /**
@@ -257,7 +263,7 @@ export class BatchGuard {
       .map((c) => c.path);
 
     if (conflicts.length === 0) {
-      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+      await this.finishBatch(scope);
       const clean: BatchVerdict = { outcomes, conflicts: [], remedies: [] };
       return this.settleLedger(scope, clean, freshDeletions);
     }
@@ -273,12 +279,12 @@ export class BatchGuard {
     // 三种行为 —— 而且这一支既不 commit 也不 drop，备份目录会一批留一份。
     if (this.mode === "report-only") {
       this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（report-only，仅记录，不改判）`);
-      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+      await this.finishBatch(scope);
       return this.settleLedger(scope, { outcomes, conflicts, remedies }, freshDeletions);
     }
     if (this.mode === "deny-all") {
       this.onEvent?.(`检测到 ${conflicts.length} 类越权变更（deny-all，保留现场）`);
-      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+      await this.finishBatch(scope);
       return this.settleLedger(
         scope,
         { outcomes: this.markBatchFailed(outcomes, conflicts), conflicts, remedies },
@@ -302,7 +308,7 @@ export class BatchGuard {
       } else {
         this.onEvent?.("未配置快照存储，仅报告越权（无法回滚）");
       }
-      if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+      await this.finishBatch(scope);
       // 台账在回滚**之后**结算：revert 把删除恢复了，stillMissing 为假 ⇒ 不入账。
       return this.settleLedger(
         scope,
@@ -333,7 +339,7 @@ export class BatchGuard {
       `已将 ${moved} 个越权文件移入隔离区` +
         (stuck.length > 0 ? `（${stuck.length} 个失败：${cappedPaths(stuck)}）` : ""),
     );
-    if (this.snapshots) await this.snapshots.commit(this.snapshotTokenOf(scope));
+    await this.finishBatch(scope);
     return this.settleLedger(
       scope,
       {
@@ -343,6 +349,30 @@ export class BatchGuard {
       },
       freshDeletions,
     );
+  }
+
+  /**
+   * 批次收尾：备份转存档（B1 第二半），失败回退回收。
+   *
+   * 旧行为是这里直接 `commit`（删除备份）—— 于是"改了哪些文件"之外，
+   * 看板再也答不了"改了什么、能不能只撤这一个"。现在成功的每一批都把
+   * 备份留在 `<backupRoot>/archive/` 下（按容量策略只保留最近 N 批），
+   * `scope.archiveId` 把存档 id 透给宿主落审计，看板的 diff 与单文件
+   * 回滚都从它取数。
+   *
+   * 回退路径的诚实性：archive 失败（典型是跨设备 rename，EXDEV）时**必须**
+   * 回到 commit 回收 + 事件里说一声 —— 静默丢掉备份会让审计里的
+   * `archiveId` 指向一个不存在的存档，那比没有存档更糟。
+   */
+  private async finishBatch(scope: BatchScope): Promise<void> {
+    if (!this.snapshots) return;
+    try {
+      const record = await this.snapshots.archive(this.snapshotTokenOf(scope), { runId: scope.runId });
+      if (record) scope.archiveId = record.id;
+    } catch (err) {
+      this.onEvent?.(`批次存档失败，备份已回收：${(err as Error).message}`);
+      await this.snapshots.commit(this.snapshotTokenOf(scope));
+    }
   }
 
   /**

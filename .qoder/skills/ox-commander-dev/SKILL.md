@@ -43,7 +43,10 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
   （注释里提一句就算边，`docs/*.md` 不算）。没接线就红。
 - **别在注释/字符串里留裸算子字面量**（`&&`、`||`、`===`、`!==`、`continue`、`return false`）。
   `mutation-check.mjs` 的 `maskNonCode` 会把它们当代码位点统计，**位点总数会变**，跨版本数字不可比。
-- **平台分支**：`electron/` 与沙箱判据大量区分 win32 / POSIX，而 `verify` 在 CI 是 **ubuntu + windows 矩阵**。
+- **平台分支**：`electron/` 与沙箱判据大量区分 win32 / POSIX，而 `verify` job 在 CI 是
+  **ubuntu + windows 矩阵**；另有一个只在 macos-latest 跑的 `cli-macos` job
+  （2026-10-17 新增）：它只证明 `npx oxcommander` 这条纯 Node 分发通路在 mac 上通
+  （桌面端 mac 产物仍刻意不出，见 `references/gates.md` 的 CI 节与 electron-builder.yml 顶部论证）。
   Windows 本地全绿不代表 Linux 绿（POSIX 上"不可达分支""pid 复用误杀"两类缺陷都真出现过）。
   平台条件用例本仓库的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`。
 - **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`、

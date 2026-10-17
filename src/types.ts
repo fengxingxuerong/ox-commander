@@ -268,7 +268,10 @@ declare global {
       /**
        * 批次改动事实（diff 面板供数，竞品缺口 B1）：`batch-changes` 审计的界面出口。
        * 每批一条（clean 批也落），files 截断上限 100、超限有 filesTotal。
-       * 只读 —— 批次成功后快照已回收，这里没有回滚按钮。
+       *
+       * `archiveId`（B1 第二半）：本批备份的存档 id。有它才有逐行 diff 与
+       * 单文件回滚（`fileDiff` / `revertFile`）—— 缺席的三种情况是未配置
+       * 快照存储、存档失败已回收、纯新建批（没有 before 内容）。
        */
       listChanges(projectId?: string): Promise<
         Array<{
@@ -278,7 +281,30 @@ declare global {
           paths?: string[];
           files?: Array<{ path: string; op: string; bytes?: number }>;
           filesTotal?: number;
+          archiveId?: string;
         }>
+      >;
+      /**
+       * 逐行 diff（B1 第二半）：存档里的 before × 盘上的 after。
+       * 返回 `diffText` 的 `FileDiff`（status/lines/added/deleted/截断标记）。
+       */
+      fileDiff(
+        batchId: string,
+        path: string,
+      ): Promise<
+        | { ok: true; diff: import("../shared/text-diff").FileDiff }
+        | { ok: false; reason: string }
+      >;
+      /**
+       * 单文件回滚（B1 第二半）：从存档恢复 before；本批新建的文件撤销新建
+       * （需审计里的 create 证据，否则拒绝删除）。界面必须二次确认后调用。
+       */
+      revertFile(
+        batchId: string,
+        path: string,
+      ): Promise<
+        | { ok: true; action: "restored" | "removed" | "already-gone" }
+        | { ok: false; reason: string }
       >;
       /**
        * 一个任务的**运行履历**（P1-3 上下文回溯的界面出口）：

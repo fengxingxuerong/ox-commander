@@ -1,0 +1,61 @@
+name: 特性建议
+description: 提议新功能 —— 先写"没有它时的代价"，再写方案
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        提议前值得先看两份文档：
+        - [docs/2026-10-17-competitor-gap.md](../docs/2026-10-17-competitor-gap.md) ——
+          缺口清单里有一张「明确不补（附理由）」表。如果你的提议在表上，
+          请先反驳那条理由，否则会被直接关掉。
+        - [CONTRIBUTING.md](../CONTRIBUTING.md) —— 本仓库收 PR 的条件。
+
+  - type: textarea
+    id: cost
+    attributes:
+      label: 没有它时的代价
+      description: 这个缺口具体让什么场景做不到/做不好。竞品对照可以写，
+        但请以 README 原文口径写"宣称下界"，不要编数字。
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 提议的最小形态
+      description: 能落地的最小版本是什么。大特性请拆阶段，第一阶段是什么。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: 落在哪个面
+      options:
+        - 引擎 / 编排
+        - 桌面端 UI
+        - headless / serve / MCP 协议
+        - 执行器 / 线路池
+        - 门禁 / CI / 分发
+        - 文档
+        - 其他
+    validations:
+      required: true
+
+  - type: textarea
+    id: boundary
+    attributes:
+      label: 已知边界与不做的事
+      description: 这个特性明确不覆盖什么。本项目要求每个特性写清边界，
+        这条也适用于提议本身。
+    validations:
+      required: false
+
+  - type: checkboxes
+    id: implement
+    attributes:
+      label: 实现意愿
+      options:
+        - label: 我愿意为这个提议提交 PR（需先过 npm run verify 全链）
+          required: false

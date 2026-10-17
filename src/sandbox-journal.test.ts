@@ -78,6 +78,9 @@ function stubFs(overrides: Partial<SnapshotFsLike> = {}): SnapshotFsLike {
     copyFileSync: (from, to) => {
       fs.copyFileSync(from, to);
     },
+    renameSync: (from, to) => {
+      fs.renameSync(from, to);
+    },
     rmSync: (p, opts) => {
       fs.rmSync(p, opts);
     },
@@ -1278,6 +1281,215 @@ describe("SnapshotStore", () => {
   });
 });
 
+/**
+ * 批次存档（B1 第二半）：备份从"跑完即删"变成"留下供 diff 与单文件回滚"。
+ * 这里钉住四件事：存档可枚举可读、单文件回滚的两种形态（恢复 / 撤销新建）、
+ * 容量策略按新旧删、以及两类路径穿越必须被拒（renderer 传来的字符串）。
+ */
+describe("SnapshotStore · 批次存档（B1 第二半）", () => {
+  async function archiveOne(tag: string, runId: string) {
+    const root = scratch(`arch-${tag}`);
+    const backupRoot = scratch(`arch-${tag}-bk`);
+    write(root, "src/a.js", "before-a");
+    write(root, "src/b.js", "before-b");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId, root, zones: ["src"] });
+    write(root, "src/a.js", "after-a");
+    return { root, backupRoot, store, token };
+  }
+
+  it("archive 后：listArchives 可枚举、readArchived 读到 before、盘上是 after", async () => {
+    const { store, token } = await archiveOne("basic", "r-arch");
+    const record = await store.archive(token, { runId: "r-arch" });
+
+    expect(record).not.toBeNull();
+    expect(record!.id).toMatch(/^r-arch__/);
+    expect(record!.files).toEqual(["src/a.js", "src/b.js"]);
+    expect(store.listArchives().map((a) => a.id)).toEqual([record!.id]);
+    expect(store.readArchived(record!.id, "src/a.js")).toBe("before-a");
+    expect(store.hasArchive(record!.id)).toBe(true);
+    expect(store.hasArchive("nope__1")).toBe(false);
+  });
+
+  it("单文件回滚（有备份）：从存档恢复 before，盘上回到旧内容", async () => {
+    const { root, store, token } = await archiveOne("restore", "r-arch-restore");
+    const record = (await store.archive(token, { runId: "r-arch-restore" }))!;
+    expect(read(root, "src/a.js")).toBe("after-a");
+
+    const res = await store.restoreArchived(record.id, "src/a.js", false);
+    expect(res).toEqual({ ok: true, action: "restored" });
+    expect(read(root, "src/a.js")).toBe("before-a");
+  });
+
+  it("单文件回滚（无备份 + 新建证据）：撤销新建 = 删除", async () => {
+    const { root, store, token } = await archiveOne("remove", "r-arch-remove");
+    const record = (await store.archive(token, { runId: "r-arch-remove" }))!;
+    // begin 之后新建的文件没有备份；created 证据由调用方（IPC 经审计）给。
+    write(root, "src/brand-new.js", "new");
+
+    const res = await store.restoreArchived(record.id, "src/brand-new.js", true);
+    expect(res).toEqual({ ok: true, action: "removed" });
+    expect(read(root, "src/brand-new.js")).toBeNull();
+  });
+
+  it("单文件回滚（无备份 + 无证据）：拒绝删除，说破原因（可能是既有文件）", async () => {
+    const { root, store, token } = await archiveOne("refuse", "r-arch-refuse");
+    const record = (await store.archive(token, { runId: "r-arch-refuse" }))!;
+    write(root, "package.json", '{"name":"maybe-pre-existing"}');
+
+    const res = await store.restoreArchived(record.id, "package.json", false);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain("不删");
+    expect(read(root, "package.json")).toBe('{"name":"maybe-pre-existing"}'); // 原样保留
+  });
+
+  it("不存在的存档：读/回滚都明说，不抛", async () => {
+    const { store } = await archiveOne("missing", "r-arch-missing");
+    expect(store.readArchived("ghost__1", "src/a.js")).toBeNull();
+    const res = await store.restoreArchived("ghost__1", "src/a.js", false);
+    expect(res.ok).toBe(false);
+    if (!res.ok) expect(res.reason).toContain("不存在");
+  });
+
+  it("batchId / rel 穿越字符被拒（renderer 传来的字符串第一道关）", async () => {
+    const { store, token } = await archiveOne("traversal", "r-arch-traversal");
+    const record = (await store.archive(token, { runId: "r-arch-traversal" }))!;
+    expect(store.readArchived("../../etc", "passwd")).toBeNull();
+    expect(store.readArchived(record.id, "../../etc/passwd")).toBeNull();
+    const res = await store.restoreArchived(record.id, "../../etc/passwd", true);
+    expect(res.ok).toBe(false);
+  });
+
+  it("hasBackupFor 区分「有备份 / 没有这个文件 / 路径不合法」三态", async () => {
+    const { store, token } = await archiveOne("hasbackup", "r-arch-hasbackup");
+    const record = (await store.archive(token, { runId: "r-arch-hasbackup" }))!;
+    expect(store.hasBackupFor(record.id, "src/a.js")).toBe(true); // 有备份
+    expect(store.hasBackupFor(record.id, "src/nope.js")).toBe(false); // 存档内没有
+    // 路径不合法也必须 false —— `file !== null` 那半一旦短路失效（或运算子），
+    // 这三行就是把它钉住的地方（site 审计 @305 / @399）。
+    expect(store.hasBackupFor(record.id, "")).toBe(false);
+    expect(store.hasBackupFor(record.id, "/etc/passwd")).toBe(false);
+    expect(store.hasBackupFor(record.id, "..")).toBe(false);
+    expect(store.hasBackupFor("no-such-batch", "src/a.js")).toBe(false);
+    // batchId 非字符串：archiveDirFor 的 typeof 判定是这里的第一道（`!==` 换
+    // `===` 后会把合法 id 全拒、并且让 undefined 一路走到 `.replace` 抛错）。
+    expect(store.hasBackupFor(undefined as never, "src/a.js")).toBe(false);
+  });
+
+  it("restoreArchived 拒绝空路径与绝对路径（不洗白、不越界）", async () => {
+    const { root, store, token } = await archiveOne("rev-badpath", "r-arch-rev-badpath");
+    const record = (await store.archive(token, { runId: "r-arch-rev-badpath" }))!;
+    for (const bad of ["", "/etc/passwd", "..", "src/../../x.js"]) {
+      const res = await store.restoreArchived(record.id, bad, true);
+      expect(res.ok, `路径 ${JSON.stringify(bad)} 应被拒`).toBe(false);
+      // 断言**第一道**的具体措辞而不是"路径不合法"这个泛前缀：三道防护
+      // 各自有独立措辞，这里钉的是"它在进 path.join 之前就被拦下"。
+      // 只断泛前缀的话，第二道（resolve 越界）会替第一道兜住，变异就活了。
+      if (!res.ok) expect(res.reason).toContain("拒绝绝对路径与上级目录");
+    }
+    expect(read(root, "src/a.js")).toBe("after-a"); // 盘上没被碰
+  });
+
+  it("listArchives 跳过 archive/ 下的散落文件（continue 不是 break）", async () => {
+    // `continue` 换成 `break` 时，第一条非目录条目就让整个枚举提前收摊 ——
+    // 之后的存档全部"不存在"，diff 与回滚对着它们集体失效。
+    const { store, token, backupRoot } = await archiveOne("mixed", "r-arch-mixed");
+    await store.archive(token, { runId: "r-arch-mixed" });
+    // 直接在 archive/ 下放一个散落文件，再用假 readdir 把它排在目录前面
+    fs.writeFileSync(path.join(backupRoot, "archive", "stray.txt"), "junk", "utf8");
+    const realReaddir = fs.readdirSync;
+    const store2 = new SnapshotStore(
+      { backupRoot },
+      stubFs({
+        readdirSync: ((dir: string, _opts: { withFileTypes: true }) => {
+          const real = realReaddir(dir, { withFileTypes: true }) as fs.Dirent[];
+          const stray = real.find((e) => e.name === "stray.txt");
+          const rest = real.filter((e) => e.name !== "stray.txt");
+          return stray ? [stray, ...rest] : real;
+        }) as unknown as SnapshotFsLike["readdirSync"],
+      }),
+    );
+    expect(store2.listArchives()).toHaveLength(1); // break 版会是 0
+  });
+
+  it("listArchives 新的在前：跨毫秒的两个存档按 ts 排序（同毫秒才落到序号）", async () => {
+    const root = scratch("arch-order");
+    const backupRoot = scratch("arch-order-bk");
+    write(root, "src/a.js", "v0");
+    const store = new SnapshotStore({ backupRoot });
+    const t1 = await store.begin({ runId: "r-order", root, zones: ["src"] });
+    const first = await store.archive(t1, { runId: "r-order" });
+    // 跨过至少一个时钟 tick，让两个 meta 的 ts 确定不同
+    await new Promise((r) => setTimeout(r, 5));
+    write(root, "src/a.js", "v1");
+    const t2 = await store.begin({ runId: "r-order", root, zones: ["src"] });
+    const second = await store.archive(t2, { runId: "r-order" });
+
+    const ids = store.listArchives().map((a) => a.id);
+    expect(ids).toEqual([second!.id, first!.id]); // 新在前；比较器三元互换即反
+  });
+
+  it("重启后序号重置：ts 与 seq 不同序时，顺序仍由 ts 决定", async () => {
+    // 真实场景：进程重启后 archiveSeq 从 1 重新开始，磁盘上的旧存档 seq 更大
+    // 但 ts 更早。排序主键必须是 ts —— 只按 seq（或把 ts 比较写反）会把"最旧"
+    // 的那份排到最前，而 pruneArchives 正是按这个顺序删"最旧"。
+    const root = scratch("arch-restart");
+    const backupRoot = scratch("arch-restart-bk");
+    write(root, "src/a.js", "v0");
+    const oldStore = new SnapshotStore({ backupRoot });
+    const o1 = await oldStore.begin({ runId: "r-old", root, zones: ["src"] });
+    const old1 = await oldStore.archive(o1, { runId: "r-old" }); // seq 1
+    write(root, "src/a.js", "v1");
+    const o2 = await oldStore.begin({ runId: "r-old", root, zones: ["src"] });
+    const old2 = await oldStore.archive(o2, { runId: "r-old" }); // seq 2
+    await new Promise((r) => setTimeout(r, 5));
+
+    // 新实例 = 模拟重启（archiveSeq 从 1 起，ts 最新）
+    write(root, "src/a.js", "v2");
+    const newStore = new SnapshotStore({ backupRoot });
+    const n1 = await newStore.begin({ runId: "r-new", root, zones: ["src"] });
+    const fresh = await newStore.archive(n1, { runId: "r-new" }); // seq 1
+
+    const ids = newStore.listArchives().map((a) => a.id);
+    expect(ids[0]).toBe(fresh!.id); // 最新 ts 在最前，不受 seq 重置影响
+    expect(ids.slice(1)).toEqual([old2!.id, old1!.id]);
+  });
+
+  it("容量策略：超过 maxArchives 删最旧，新的留下", async () => {
+    const root = scratch("arch-prune");
+    const backupRoot = scratch("arch-prune-bk");
+    write(root, "src/a.js", "v0");
+    const store = new SnapshotStore({ backupRoot });
+    const ids: string[] = [];
+    for (let i = 0; i < 4; i += 1) {
+      write(root, "src/a.js", `v${i}`);
+      const token = await store.begin({ runId: "r-prune", root, zones: ["src"] });
+      const rec = await store.archive(token, { runId: "r-prune" }, { maxArchives: 2 });
+      if (rec) ids.push(rec.id);
+    }
+    const alive = store.listArchives().map((a) => a.id);
+    expect(alive).toHaveLength(2);
+    // listArchives 新的在前 ⇒ 与插入序的最后两条反过来
+    expect(alive).toEqual([...ids.slice(-2)].reverse());
+    expect(store.hasArchive(ids[0]!)).toBe(false); // 最旧两条被删
+    expect(store.hasArchive(ids[1]!)).toBe(false);
+    expect(store.readArchived(ids[3]!, "src/a.js")).toBe("v3");
+  });
+
+  it("backedUp 为空的纯新建批：archive 返回 null 且空目录不留在盘上", async () => {
+    const root = scratch("arch-newonly");
+    const backupRoot = scratch("arch-newonly-bk");
+    const store = new SnapshotStore({ backupRoot });
+    const token = await store.begin({ runId: "r-newonly", root, zones: ["src"] });
+    write(root, "src/brand-new.js", "new");
+
+    const record = await store.archive(token, { runId: "r-newonly" });
+    expect(record).toBeNull();
+    expect(store.listArchives()).toEqual([]);
+    expect(fs.readdirSync(backupRoot)).toEqual([]);
+  });
+});
+
 describe("withinZones", () => {
   it("路径落在任一声明 zone 内即为真", () => {
     expect(withinZones("src/a.js", ["src"])).toBe(true);
@@ -1333,7 +1545,7 @@ describe("SnapshotStore · runId 归一化", () => {
 });
 
 describe("BatchGuard arbitration", () => {
-  it("passes a clean batch through and drops the backups", async () => {
+  it("passes a clean batch through and archives the backups (B1 第二半：不再回收)", async () => {
     const root = scratch("guard-clean");
     const backupRoot = scratch("guard-clean-backups");
     write(root, "src/a.js", "a");
@@ -1344,7 +1556,10 @@ describe("BatchGuard arbitration", () => {
     const verdict = await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
     expect(verdict.conflicts).toEqual([]);
     expect(verdict.outcomes[0]!.ok).toBe(true);
-    expect(fs.readdirSync(backupRoot)).toEqual([]); // committed
+    // 旧的"committed"（删除备份）已换成"archived"：备份根下只剩 archive/
+    // 一个目录，runId 裸目录被移走。逐行 diff 与单文件回滚靠它供数。
+    expect(fs.readdirSync(backupRoot)).toEqual(["archive"]);
+    expect(scope.archiveId).toBeTruthy();
   });
 
   it("revert-batch rolls the violating files back and fails the batch", async () => {
@@ -1559,7 +1774,12 @@ describe("BatchGuard arbitration", () => {
     expect(read(root, "rogue/x.js")).toBe("rogue");
   });
 
-  it("不回滚的两档也必须收尾丢弃备份，否则每批泄漏一个快照目录", async () => {
+  /**
+   * 2026-10-17（B1 第二半）起语义变了：不回滚的两档**不再丢弃备份**，
+   * 而是转存档（看板的逐行 diff 与单文件回滚要从它取数）。"每批泄漏一个
+   * 裸 runId 目录"才是要防的形态 —— 现在备份根下只应出现 archive/。
+   */
+  it("不回滚的两档把备份转存档：备份根下只有 archive/，没有裸 runId 目录", async () => {
     for (const mode of ["report-only", "deny-all"] as const) {
       const root = scratch(`guard-backup-${mode}`);
       const backupRoot = scratch(`guard-backup-${mode}-bk`);
@@ -1569,8 +1789,50 @@ describe("BatchGuard arbitration", () => {
       write(root, "src/a.js", "changed");
       write(root, "rogue/x.js", "rogue");
       await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "", events: [] }]);
-      expect(fs.readdirSync(backupRoot), `${mode} 之后备份根没清空`).toEqual([]);
+      const top = fs.readdirSync(backupRoot).sort();
+      expect(top, `${mode} 之后备份根应是 archive/ 加残留 runId 目录`).toEqual(["archive"]);
     }
+  });
+
+  it("clean 批也留存档：scope.archiveId 有值，before 内容读得回来", async () => {
+    const root = scratch("guard-archive-clean");
+    const backupRoot = scratch("guard-archive-clean-bk");
+    write(root, "src/a.js", "before-content");
+    const store = new SnapshotStore({ backupRoot });
+    const guard = new BatchGuard({ snapshots: store });
+    const scope = await guard.begin("r-arch-clean", root, ["src"]);
+    write(root, "src/a.js", "after-content");
+
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    expect(scope.archiveId).toBeTruthy();
+    expect(store.readArchived(scope.archiveId!, "src/a.js")).toBe("before-content");
+    expect(read(root, "src/a.js")).toBe("after-content"); // 盘上是新内容（没回滚）
+    expect(store.listArchives().map((a) => a.id)).toContain(scope.archiveId!);
+  });
+
+  it("纯新建批没有 before 内容：archiveId 缺席，空备份目录不占存档位", async () => {
+    const root = scratch("guard-archive-newonly");
+    const backupRoot = scratch("guard-archive-newonly-bk");
+    const store = new SnapshotStore({ backupRoot });
+    const guard = new BatchGuard({ snapshots: store });
+    const scope = await guard.begin("r-arch-new", root, ["src"]);
+    write(root, "src/brand-new.js", "new");
+
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+
+    expect(scope.archiveId).toBeUndefined();
+    expect(store.listArchives()).toEqual([]);
+    expect(fs.readdirSync(backupRoot).sort()).toEqual([]); // 连空目录都不留
+  });
+
+  it("未配置快照存储时 archiveId 缺席，且不抛（无快照是合法装配）", async () => {
+    const root = scratch("guard-archive-nostore");
+    const guard = new BatchGuard({ mode: "report-only" });
+    const scope = await guard.begin("r-arch-nostore", root, ["src"]);
+    write(root, "src/a.js", "a");
+    await guard.settle(scope, [{ taskId: "t1", ok: true, logDigest: "ok", events: [] }]);
+    expect(scope.archiveId).toBeUndefined();
   });
 
   it("冲突描述区分「越权写入」与「共享文件被改动」", async () => {

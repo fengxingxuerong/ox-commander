@@ -41,6 +41,14 @@ export interface AuditRecord {
   files?: Array<{ path: string; op: string; bytes?: number }>;
   filesTotal?: number;
   /**
+   * 本批备份的存档 id（`batch-changes` phase，B1 第二半）。批次结算时
+   * 备份转入 `<backupRoot>/archive/` 保留（容量策略：最近 8 批），
+   * 逐行 diff 与单文件回滚都从这个 id 取数。缺席的三种情况：未配置
+   * 快照存储、存档失败已回退回收、纯新建批（没有 before 内容可存）——
+   * 界面对没有 id 的批次不提供 diff/回滚入口，而不是放必然失败的按钮。
+   */
+  archiveId?: string;
+  /**
    * 越权种类（`batch-guard` phase），与 `conflict` 协议事件同词：
    * `unauthorized-write`（写到了声明 zone 之外）/ `shared-drift`（共享文件漂移）。
    *

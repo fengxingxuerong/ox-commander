@@ -6,6 +6,90 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 新增（逐行 diff + 单文件回滚：批次备份从"跑完即删"改成"存档" · 2026-10-17）
+
+竞品缺口 B1 的**第二半**（第一半是 10-17 早些时候的「改动文件」面板）。
+前一半回答了"这轮改了哪些文件"，这一半回答"**改了什么、能不能只撤这一个**"。
+
+诚实的起点：旧设计里批次成功后快照立即 `commit` 回收 —— 于是逐行 diff 没有
+before 数据源，单文件回滚没有备份，这也是第一半刻意"只有事实没有按钮"的原因。
+本批改的是数据源本身：
+
+- **批次存档**（`SnapshotStore.archive`）：成功的每一批把备份从
+  `<backupRoot>/<runId>/` **移动**到 `<backupRoot>/archive/<batchId>/`
+  （带 `meta.json`：runId / ts / rootAbs / zones / 备份文件清单）。
+  容量策略 `pruneArchives` 只保留最近 **8 批**（按 ts，同毫秒用 id 尾部序号），
+  删除发生在每次 archive 之后 —— 磁盘上限是可预期的，不是"只增不减"。
+  纯新建批（没有 before 内容）不占存档位，空目录直接清掉。
+- **存档失败的回退**：`rename` 跨设备（EXDEV）等失败时回退 `commit` 回收并在
+  事件里说一声 —— 静默丢备份会让审计里的 `archiveId` 指向不存在的存档，那比
+  没有存档更糟。
+- **`archiveId` 进审计**（`batch-changes` 新字段）：`BatchScope.archiveId` 由
+  `finishBatch` 写入，宿主落盘。没有存档时这个键**不出现**（字段即承诺）。
+- **IPC 两个新通道**：`changes:file`（逐行 diff：存档 before × 盘上 after，
+  返回 `diffText` 的结构化结果）与 `changes:revert`（单文件回滚）。
+  请求形状与路径两道校验：IPC 层拒绝绝对路径与 `..`（**拒绝而不是洗白**），
+  SnapshotStore 层再按"原始输入判绝对、分割后判 `..`、resolve 前缀双保险"
+  三道拦；三道防护的 reason 措辞各自可区分（否则第二道会替第一道兜住，
+  变异测试就杀不掉第一道 —— 这是本批 site 审计抓出来的真教训）。
+- **删除分支的证据纪律**：本批新建的文件没有备份，撤销新建 = 删除盘上文件，
+  而删除许可**只认**审计里该批同路径 `op === "create"`；审计里没有这条记录
+  （被轮转/被截断 100 条上限/根本没有该批）时一律拒绝并说破 —— 与
+  `SnapshotStore.revert` 的老纪律同源：宁可留一个脏文件，不删错一个既有文件。
+- **逐行 diff 判据**（`shared/text-diff.ts`，纯函数）：LCS 行级 diff，
+  先剥公共前后缀再对中间段 DP（`Uint32Array` 表）；大文件超 2000 行给
+  `too-large`、含 NUL 给 `binary`，两者 `added`/`deleted` 是 **`null` 不是 0**
+  （拿不出这个数时报 0 等于显示"无变化"的反话）；增删行带 `+`/`-` 与两侧
+  行号（不只靠颜色）。
+- **界面**：改动文件行在有 `archiveId` 时出现「diff」「回滚」；回滚过
+  `window.confirm` 二次确认（写明"直接改工作区、不走 git、恢复的是本批旧内容"），
+  成功/被拒都把结果摆出来并重新取数；没有存档的批次不显示按钮，卡片底部
+  说清三种缺席（未配置快照存储 / 存档失败 / 纯新建批）与 8 批上限。
+- **测试 55 条**（含 19 条 diff 判据、12 条 IPC、4 条 UI）；site 逐位点审计：
+  四个改动目标 **137/137 全杀**（text-diff 38 · snapshot-store 31 ·
+  ipc/agents 42 · ipc/context 26），过程中抓出并修掉 6 处真断言缺口
+  （单侧 binary / 单侧超限 / created-deleted 行数为零、`hasBackupFor`
+  三态、审计扫描的 `continue`、末尾 `return false`）。
+  一处进 `EQUIVALENT_SITES`：`archivedFilePath` 的 `|| → &&`（后续 resolve
+  前缀检查使两者返回同一个 `null`，逐输入核过，附论证）。
+- **代价与已知边界**：① 磁盘 —— 存档含 zone 内文件副本（可能含 `.env` 一类
+  敏感文件），与回滚窗口期同样落在 `userData` 下，靠 8 批上限约束；
+  ② 回滚不跨批次：后续批次又改过同一文件时，恢复的是**这一批**的旧内容；
+  ③ 存档只对本进程写出的 `meta.json` 可枚举，被外部改坏的目录会被跳过。
+- 位点 1752 → **1831**（目标 74 → **75**，text-diff 入册）；用例 2121 → **2176**
+  （69 个文件）。`check:doc-claims` PASS。
+
+### 新增（贡献入口 + macOS CLI 通路证明 · 2026-10-17）
+
+竞品缺口盘点第五轮（`docs/2026-10-17-competitor-gap.md`）A 类的前两项。
+A 类的判断是「卡脖子——决定有没有人能装上、看得懂、留下来」，
+本批补其中最便宜、且不需要动架构的两格：
+
+- **CONTRIBUTING.md**（A5）：一份写给人的贡献指南，核心是把这个仓库的
+  门禁文化讲清楚 —— 唯一验收入口 `npm run verify`（33 段）、新测试放
+  `src/*.test.ts(x)`、新导出必须有生产调用者、新变异目标手工登记
+  （漏挂的文件不参与变异统计，那个 PASS 对它没有含义）、动 verify 链
+  四处文档同步、注释里不留裸算子字面量。**不复制门禁数字** ——
+  那些数由 `check:doc-claims` 对实物核，复制一份就是第二处会腐烂的地方。
+- **issue / PR 模板**：`bug-report.yml`（要求带 OS/Node/入口/复现步骤，
+  门禁相关的必须写**哪一段红 + 退出码** —— 本项目 33 段失败语义各不相同，
+  "verify 挂了"无法归因）与 `feature-request.yml`（先写"没有它时的代价"，
+  并提醒先看缺口盘点里的「明确不补」表）；PR 模板是一份门禁自查清单。
+  `config.yml` 关掉空白 issue，只留联系链接（指向 SKILL.md）。
+- **macOS CLI 通路证明**（A4 的落地形态）：桌面端 macOS 产物**仍然不出** ——
+  electron-builder.yml 顶部有完整论证（无签名凭据，未签名 .app 被 Gatekeeper
+  拦下，出"用户打不开"的产物比不出更糟），这是刻意决策不是遗漏。
+  但缺口盘点的结论是「桌面端缺口可以认，CLI 缺口不该认」，而
+  `npx oxcommander`（纯 Node 包）此前从没在 mac 上验证过。
+  新增 `cli-macos` CI job（只在 macos-latest）：`build:headless` +
+  `build:cli` + `smoke:cli-pkg` + `smoke:demo`，零凭据零网络零固定端口。
+  它证明的是分发通路本身，与 ubuntu/windows 的 verify 两格互补不重复。
+- **文档同步**：README / README.en.md 加 PRs welcome 徽章、平台表 macOS 行
+  改为「无桌面端安装包但 CLI 可用（CI 有 macOS job 盯着）」、文档索引加
+  CONTRIBUTING 行；gates.md 的 CI 节与 SKILL.md 的平台分支节同步新 job。
+- **门禁数字无变化**：未动 `verify` 串（段数仍 33）、未动测试与变异目标
+  （位点 1752 / 用例 2121 不变），`check:doc-claims` 口径不变。
+
 ### 新增（任务附言：运行中给任务带一句话，下一次派发生效 · 2026-10-17）
 
 竞品缺口 C2「运行中追加指令/接管」。诚实的边界先写：本项目执行器全是

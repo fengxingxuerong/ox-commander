@@ -21,7 +21,7 @@ import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from 
 import { fetchGithubContext } from "./context/github-readonly";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome } from "./engine/scheduler";
-import type { BatchVerdict } from "./engine/batch-guard";
+import type { BatchScope, BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { ActionGate } from "./sandbox/action-gate";
 import { buildLlmClient, buildLlmPool } from "../shared/build-llm";
@@ -90,13 +90,12 @@ export interface PlatformHost {
   onRunComplete?(outcome: DispatchOutcome, task: { id: string; zone: string; title?: string }): void;
   /**
    * Zone-violation verdict sink (rollback / isolation / report-only outcomes).
-   * The second parameter carries the batch scope with `changes` filled in —
-   * the full per-batch file list, which is the diff panel's only data source.
+   * The second parameter is the batch scope as the guard filled it — `changes`
+   * is the full per-batch file list (the diff panel's data source) and
+   * `archiveId` (B1 第二半) names the archived backup that panel's diff and
+   * single-file revert read from; absent when there is no archive.
    */
-  onVerdict?(
-    verdict: BatchVerdict,
-    scope?: { changes: Array<{ path: string; op: string; bytes?: number }> },
-  ): void;
+  onVerdict?(verdict: BatchVerdict, scope?: BatchScope): void;
   /** Escalation decision; omit to keep the engine's fail-fast/typed-error path. */
   requestEscalationDecision?(taskId: string, summary: string): Promise<EscalationAction>;
   /**

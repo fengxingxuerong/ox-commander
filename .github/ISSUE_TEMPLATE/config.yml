@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 开发工作手册（改代码前必读）
+    url: https://github.com/fengxingxuerong/ox-commander/blob/main/.qoder/skills/ox-commander-dev/SKILL.md
+    about: 门禁逐段机制、行号锚点与豁免表规则、放置约定、平台分支差异

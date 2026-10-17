@@ -4,13 +4,14 @@
 
 [![verify](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml/badge.svg)](https://github.com/fengxingxuerong/ox-commander/actions/workflows/verify.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](CONTRIBUTING.md)
 ![mutation gate](https://img.shields.io/badge/mutation-逐位点全杀-blueviolet)
 
 <img src="docs/demo.gif" alt="npm run demo：一次真实交付（规划 → 派单 → 门禁 → 交付凭据 → 外部复核）" width="100%">
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **74 个目标** / 基线 **1752 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **75 个目标** / 基线 **1831 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -49,9 +50,9 @@ Electron 桌面端 + headless CLI 双入口。
 > | 特征 | OxCommander |
 > | --- | --- |
 > | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染 |
-| 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**只读不回滚**：批次成功后备份即回收，回滚走越权仲裁与工作区 git（边界写在卡片上，不放必然失败的按钮） |
-| 人在回路 | 任务附言：运行中给任务挂一句纠偏指示，**下一次派发生效**（执行器是一问一答形态，没有在途插话通道，界面不暗示实时送达）；任务行与升级卡（"带话重派"）都有入口；成功后自动退休。只对在跑的 run 有效 —— 运行前的 steering 归 PRD 评审页 |
-| 通知 | 桌面系统通知（只三类：run 出结论 / 任务待决策 / 命令待审批）—— 长任务切走后"该回工位了"由操作系统喊，判据是纯函数可逐点审计；`isSupported` 为 false 安静降级 |
+> | 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**逐行 diff + 单文件回滚**（B1 第二半）：批次成功后备份转**存档**（容量策略只保留最近 8 批），diff 是"存档旧内容 × 盘上现状"；回滚从该批存档恢复，新建文件须有审计里的 `create` 证据才肯删（没证据宁可留一个脏文件）；存档过期或未配置快照存储时按钮不出现，边界写在卡片上 |
+> | 人在回路 | 任务附言：运行中给任务挂一句纠偏指示，**下一次派发生效**（执行器是一问一答形态，没有在途插话通道，界面不暗示实时送达）；任务行与升级卡（"带话重派"）都有入口；成功后自动退休。只对在跑的 run 有效 —— 运行前的 steering 归 PRD 评审页 |
+> | 通知 | 桌面系统通知（只三类：run 出结论 / 任务待决策 / 命令待审批）—— 长任务切走后"该回工位了"由操作系统喊，判据是纯函数可逐点审计；`isSupported` 为 false 安静降级 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
 > | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀） |
@@ -183,7 +184,7 @@ node dist-headless/headless/receipt-verify-main.js receipt.json --replay --cwd=<
 | --- | --- | --- |
 | Windows | `OxCommander-<ver>-x64.exe`（nsis 安装版）/ `…-x64.exe`（portable 免安装） | 两种都出，portable 解压即用 |
 | Linux | `OxCommander-<ver>-x64.AppImage` / `.deb` | AppImage 直接 `chmod +x` 后运行 |
-| macOS | **不产出** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺 |
+| macOS | **无桌面端安装包** | 无签名凭据；未签名 .app 会被 Gatekeeper 拦下，故宁缺（桌面端缺口认了）。但 **`npx oxcommander` CLI 在 macOS 可用** —— 纯 Node 包、无原生依赖，`verify` 工作流的 `cli (macOS)` job 每次 push 都在 macos-latest 上造包并冒烟 |
 
 ⚠️ **跑起来之前要有凭证**：桌面端在「设置」里填即可（加密进 OS keychain），也可以放一份 `.env`。
 至少给一把商汤的 key：
@@ -267,7 +268,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
   空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
   空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
-→ vitest（2026-10-17 现跑 2121 通过 + 8 跳过，合计 2129 条，分布在 68 个有可执行用例的文件；
+→ vitest（2026-10-17 现跑 2176 通过 + 8 跳过，合计 2184 条，分布在 69 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -326,7 +327,8 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 aggregate 用 `replaceAll` 一次改掉某算子的全部位点，"任一处被杀"即报杀死 ——
 所以它报的 100% 可能是假象。**site 才回答"每处是否真有断言"**。
 
-CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径三分片各 100 min 上限），
+CI 是两份 workflow：`verify.yml`（`verify` ubuntu + windows 矩阵、`mutation` site 口径三分片各 100 min 上限、
+外加一个只在 macos-latest 的 `cli (macOS)` job —— 造 npx 包并冒烟，证明 CLI 分发通路在 mac 上通），
 `release.yml`（`verify` → `build` 两 OS 矩阵，2026-09-24 起打包前必须先过门禁）。仓库托管在 GitHub
 （公开仓库），`verify.yml` 随每次 push 运行。**修后 @ `80946b0` run #38922557558 五 job 全绿**
 （`verify` ubuntu 3.4 min / windows 4.8 min、`mutation` tier 1 17.6 min / tier 2 两片 12.7 + 13.7 min）。
@@ -424,6 +426,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 ## 文档索引
 
+- [CONTRIBUTING.md](CONTRIBUTING.md) — 贡献指南：本地开发、提交前的门禁纪律、PR 与 issue 要求
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
   门禁逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
   （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）

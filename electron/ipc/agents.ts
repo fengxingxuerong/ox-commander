@@ -5,6 +5,7 @@
  * Registration only — all state lives in `./context`.
  */
 import { dialog, ipcMain } from "electron";
+import fs from "node:fs";
 import path from "node:path";
 import {
   buildAdaptersFromManifests,
@@ -13,6 +14,7 @@ import {
 } from "../agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "../agents/manifest-schema";
 import { taskTrail } from "../board-derive";
+import { diffText } from "../../shared/text-diff";
 import type { AgentDescriptor } from "../../shared/agent-contract";
 import {
   agentDir,
@@ -37,6 +39,43 @@ function describeAgent(d: AgentDescriptor) {
     limits: d.limits,
     credentialKind: d.manifest.credential?.kind ?? "none",
   };
+}
+
+/**
+ * `changes:file` / `changes:revert` 的请求形状与路径校验。
+ *
+ * 路径防穿越在这里做第一道：renderer 传来的 `path` 会拼进工作区绝对路径，
+ * `..` 段或绝对路径必须在此拦下（SnapshotStore 内部还有第二道，双保险）。
+ * batchId 限定 `[\w.-]` —— 它最终成为存档目录名的一部分。
+ */
+function parseFileRequest(input: unknown): { batchId: string; path: string } | null {
+  if (typeof input !== "object" || input === null) return null;
+  const { batchId, path: rel } = input as { batchId?: unknown; path?: unknown };
+  if (typeof batchId !== "string" || !/^[\w.-]+$/.test(batchId)) return null;
+  if (typeof rel !== "string") return null;
+  const norm = rel.replace(/\\/g, "/").replace(/^\.\/+/, "");
+  // 绝对路径**拒绝**而不是洗成相对：`/etc/passwd` 洗成 `etc/passwd` 后虽然
+  // 只会拼到工作区底下（读不到真系统文件），但"洗白"本身会让调用方以为
+  // 它传的路径被接受了。上级目录段同理。SnapshotStore 内还有第二道。
+  if (norm === "" || norm.startsWith("/") || /^[a-zA-Z]:/.test(norm) || norm.split("/").includes("..")) {
+    return null;
+  }
+  return { batchId, path: norm };
+}
+
+/**
+ * 审计证据：这个文件是不是该批 `create` 的（单文件回滚删除分支的许可）。
+ *
+ * 读 `batch-changes` 记录的 `files` 清单（写入方自截 100 条）—— 超出截断
+ * 的文件拿不到证据，那时调用方按"无证据"保守处理。
+ */
+function wasCreatedByBatch(batchId: string, rel: string): boolean {
+  for (const r of ensureAudit().read({ phase: "batch-changes", limit: 1000 })) {
+    if (r.archiveId !== batchId) continue;
+    const hit = r.files?.find((f) => f.path === rel);
+    return hit?.op === "create";
+  }
+  return false;
 }
 
 export function registerAgentHandlers(): void {
@@ -158,9 +197,10 @@ export function registerObservabilityHandlers(): void {
   ipcMain.handle("audit:files", () => ensureAudit().files().map((f) => path.basename(f)));
 
   /**
-   * 批次改动事实（diff 面板供数）：读 `batch-changes` 审计，按项目过滤，
-   * 最新批次在前。只读不回滚 —— 批次成功后快照已 commit 回收，此刻没有
-   * 可靠的单文件回滚路径；界面必须如实标注"此处是事实记录，不是回滚入口"。
+   * 批次改动事实（diff 面板供数，B1）：读 `batch-changes` 审计，按项目过滤，
+   * 最新批次在前。带 `archiveId` 的批次另有 `changes:file`（逐行 diff）与
+   * `changes:revert`（单文件回滚）两个入口 —— 它们的可用性取决于那批备份是否
+   * 还在存档里（容量策略只保留最近 8 批）；没有存档的批次，界面不显示按钮。
    */
   ipcMain.handle("changes:list", (_e, projectId?: string) => {
     const records = ensureAudit().read({ phase: "batch-changes", limit: 1000 });
@@ -171,6 +211,64 @@ export function registerObservabilityHandlers(): void {
     const wanted = typeof projectId === "string" ? projectId : "";
     const mine = wanted === "" ? records : records.filter((r) => r.projectId === wanted);
     return mine.slice(-50).reverse();
+  });
+
+  /**
+   * 逐行 diff（B1 第二半）：存档里的 before × 盘上的 after。
+   *
+   * before 的三种缺席要分开说：文件在存档的 `files` 里但内容读不出来 = 真
+   * 失败；不在 `files` 里 = 本批新建（没有 before）—— 后者是正常形态，
+   * diff 会以 `created` 呈现，不是错误。
+   */
+  ipcMain.handle("changes:file", (_e, input: unknown) => {
+    const req = parseFileRequest(input);
+    if (req === null) return { ok: false as const, reason: "请求形状不对（要 { batchId, path }）" };
+    const layer = ensureAgentLayer(settingsStore().load());
+    const store = layer.snapshots;
+    if (!store) return { ok: false as const, reason: "未配置快照存储，这一批没有存档可看" };
+    const record = store.listArchives().find((a) => a.id === req.batchId);
+    if (!record) return { ok: false as const, reason: "存档不存在（可能已被容量策略回收）" };
+
+    let before: string | undefined;
+    if (record.files.includes(req.path)) {
+      const content = store.readArchived(req.batchId, req.path);
+      if (content === null) return { ok: false as const, reason: "存档内容读不出来（备份损坏或被清掉）" };
+      before = content;
+    }
+    // after：盘上现状。读不到 = 文件已不在（删除后没恢复），按 undefined 交给
+    // diffText 以 `deleted` 呈现 —— 与"文件是空的"是两回事，不能混。
+    let after: string | undefined;
+    try {
+      after = fs.readFileSync(path.join(record.rootAbs, req.path), "utf8");
+    } catch {
+      after = undefined;
+    }
+    return { ok: true as const, diff: diffText(before, after) };
+  });
+
+  /**
+   * 单文件回滚（B1 第二半）：从存档恢复 before；本批新建的文件撤销新建。
+   *
+   * 删除分支的"新建证据"来自审计：该批 `batch-changes` 记录里这个文件的
+   * op 必须是 `create`。证据缺席（files 截断没带上它 / 记录已轮转）时
+   * 保守拒绝 —— 与 SnapshotStore.revert 的同一条纪律：宁可留一个脏文件，
+   * 不删错一个既有文件。
+   */
+  ipcMain.handle("changes:revert", (_e, input: unknown) => {
+    const req = parseFileRequest(input);
+    if (req === null) return { ok: false as const, reason: "请求形状不对（要 { batchId, path }）" };
+    const layer = ensureAgentLayer(settingsStore().load());
+    const store = layer.snapshots;
+    if (!store) return { ok: false as const, reason: "未配置快照存储，无法回滚" };
+    if (!store.hasArchive(req.batchId)) {
+      return { ok: false as const, reason: "存档不存在（可能已被容量策略回收）" };
+    }
+    const created = wasCreatedByBatch(req.batchId, req.path);
+    if (!created && !store.hasBackupFor(req.batchId, req.path)) {
+      // 没有备份、又没有新建证据：这正是"可能是既有文件"的形态，拒绝动手。
+      return { ok: false as const, reason: "无备份、也没有本批新建的证据：这可能是既有文件，不删" };
+    }
+    return store.restoreArchived(req.batchId, req.path, created);
   });
 
   /**

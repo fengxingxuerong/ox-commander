@@ -163,6 +163,13 @@ export interface AgentLayer {
   manifestErrors: ManifestLoadError[];
   /** Manifests that produced no adapter, with the reason. */
   skippedManifests: Array<{ id: string; reason: string }>;
+  /**
+   * The snapshot store backing the BatchGuard (B1 第二半). Present exactly
+   * when `snapshotRoot` was given — the same instance the guard archives
+   * into, so the IPC layer's diff / single-file-revert reads the archives
+   * the guard just wrote instead of a parallel one.
+   */
+  snapshots?: SnapshotStore;
 }
 
 /**
@@ -217,9 +224,12 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
   if (opts.onTaskActivity) schedulerOptions.onTaskActivity = opts.onTaskActivity;
   if (opts.snapshotRoot) {
     const mode = opts.arbitration ?? DEFAULT_ARBITRATION_MODE;
+    // 同一个实例给 guard 的存档与 IPC 层的 diff/回滚读（B1 第二半）——
+    // 两套实例会各生成一套 batchId 序号，同毫秒撞 id 时互相覆盖。
+    const snapshots = new SnapshotStore({ backupRoot: opts.snapshotRoot });
     schedulerOptions.guard = new BatchGuard({
       journal: new FileJournal(),
-      snapshots: new SnapshotStore({ backupRoot: opts.snapshotRoot }),
+      snapshots,
       mode,
       // 2026-09-28：三处条件展开（sharedPaths / onEvent / onVerdict）同理简化 ——
       // BatchGuard 的消费方式是 `opts.sharedPaths ?? DEFAULT_SHARED_PATHS` 与
@@ -229,6 +239,15 @@ export function createAgentLayer(opts: AgentLayerOptions = {}): AgentLayer {
       onEvent: opts.onEvent,
       onVerdict: opts.onVerdict,
     });
+    return {
+      adapters,
+      registry,
+      breaker,
+      schedulerOptions,
+      manifestErrors: loaded.errors,
+      skippedManifests: built.skipped,
+      snapshots,
+    };
   }
   return {
     adapters,

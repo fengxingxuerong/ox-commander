@@ -116,6 +116,25 @@ function makeBridge(): Bridge {
     getAgentStats: vi.fn(async () => ({ circuits: {} })),
     recentAudit: vi.fn(async () => []),
     listChanges: vi.fn(async () => []),
+    // B1 第二半：逐行 diff 与单文件回滚（有 archiveId 的批次才点亮）。
+    fileDiff: vi.fn(async () => ({
+      ok: true as const,
+      diff: {
+        status: "modified" as const,
+        lines: [
+          { kind: "same" as const, text: "line1", beforeNo: 1, afterNo: 1 },
+          { kind: "del" as const, text: "old", beforeNo: 2 },
+          { kind: "add" as const, text: "new", afterNo: 2 },
+          { kind: "same" as const, text: "line3", beforeNo: 3, afterNo: 3 },
+        ],
+        truncated: false,
+        added: 1,
+        deleted: 1,
+        beforeLines: 3,
+        afterLines: 3,
+      },
+    })),
+    revertFile: vi.fn(async () => ({ ok: true as const, action: "restored" as const })),
     setTaskNote: vi.fn(async () => true),
     auditFiles: vi.fn(async () => []),
     exportAudit: vi.fn(async () => ({ ok: true as const, path: "/x/out.jsonl" })),
@@ -360,6 +379,97 @@ describe("BoardPage", () => {
       approvals: [{ requestId: "a-1", command: "npm", args: ["run", "deploy"], resolved: false }],
     });
   }
+
+  /**
+   * 批次改动面板（B1）：第一半"改了哪些文件"，第二半"改了什么、能不能只撤
+   * 这一个"。钉三件事：diff 按钮把 (batchId, path) 原样送进桥、回滚要过
+   * confirm 且成功后重新取数、没有 archiveId 的批次不出现按钮（不放必然
+   * 失败的操作）。
+   */
+  describe("改动文件面板（changes:list + diff / 回滚）", () => {
+    const withArchive = [
+      {
+        ts: "2026-10-17T02:00:00Z",
+        changed: 1,
+        archiveId: "r-1__abc-1",
+        files: [{ path: "src/a.js", op: "modify", bytes: 12 }],
+      },
+    ];
+
+    it("点 diff：桥收到 (batchId, path)，逐行 diff 上屏（增删带 +/- 号不只靠颜色）", async () => {
+      (window.oxCommander.listChanges as ReturnType<typeof vi.fn>).mockResolvedValue(withArchive);
+      seedBoard();
+      render(<BoardPage />);
+
+      // listChanges 是 Promise：等首批记录上屏再点
+      await waitFor(() =>
+        expect(screen.getByTitle("看这一版的逐行 diff（存档旧内容 × 盘上现状）")).toBeTruthy(),
+      );
+      fireEvent.click(screen.getByTitle("看这一版的逐行 diff（存档旧内容 × 盘上现状）"));
+      await waitFor(() => expect(window.oxCommander.fileDiff).toHaveBeenCalledWith("r-1__abc-1", "src/a.js"));
+
+      // del 行与 add 行都在，且带符号
+      expect(screen.getByText("old")).toBeTruthy();
+      expect(screen.getByText("new")).toBeTruthy();
+      expect(screen.getByText("+1 / -1 行")).toBeTruthy();
+      // 汇总行说明这是"有存档"的一批（summary 与底部说明各有一处，取大于 0）
+      expect(screen.getAllByText(/有存档/).length).toBeGreaterThan(0);
+    });
+
+    it("点回滚：confirm 取消就不打桥；确认后打桥、成功后重新取数", async () => {
+      const listChanges = window.oxCommander.listChanges as ReturnType<typeof vi.fn>;
+      listChanges.mockResolvedValue(withArchive);
+      const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+      seedBoard();
+      render(<BoardPage />);
+
+      // 取消 ⇒ 一个 IPC 都不打
+      const revertTitle = "从本批存档恢复这个文件（需二次确认）";
+      fireEvent.click(await waitFor(() => screen.getByTitle(revertTitle)));
+      expect(window.oxCommander.revertFile).not.toHaveBeenCalled();
+
+      // 确认 ⇒ 打桥 + 成功反馈 + 重新取数（盘上变了，列表与 diff 都旧了）
+      confirmSpy.mockReturnValue(true);
+      listChanges.mockClear();
+      fireEvent.click(await waitFor(() => screen.getByTitle(revertTitle)));
+      await waitFor(() =>
+        expect(window.oxCommander.revertFile).toHaveBeenCalledWith("r-1__abc-1", "src/a.js"),
+      );
+      await waitFor(() => expect(screen.getByText("已恢复为存档里的旧内容。")).toBeTruthy());
+      expect(listChanges).toHaveBeenCalled();
+    });
+
+    it("回滚被主进程拒绝时把理由摆出来（不静默）", async () => {
+      (window.oxCommander.listChanges as ReturnType<typeof vi.fn>).mockResolvedValue(withArchive);
+      (window.oxCommander.revertFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: false,
+        reason: "无备份、也没有本批新建的证据：这可能是既有文件，不删",
+      });
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      seedBoard();
+      render(<BoardPage />);
+
+      fireEvent.click(
+        await waitFor(() => screen.getByTitle("从本批存档恢复这个文件（需二次确认）")),
+      );
+      await waitFor(() => expect(screen.getByText(/回滚被拒绝：无备份/)).toBeTruthy());
+    });
+
+    it("没有 archiveId 的批次不出现 diff / 回滚按钮", async () => {
+      (window.oxCommander.listChanges as ReturnType<typeof vi.fn>).mockResolvedValue([
+        { ts: "2026-10-17T01:00:00Z", changed: 1, files: [{ path: "src/b.js", op: "create" }] },
+      ]);
+      seedBoard();
+      render(<BoardPage />);
+
+      // 等面板取数回来（无 archiveId 的那一条）
+      await waitFor(() => expect(screen.getByText("src/b.js")).toBeTruthy());
+      expect(screen.queryByTitle("看这一版的逐行 diff（存档旧内容 × 盘上现状）")).toBeNull();
+      expect(screen.queryByTitle("从本批存档恢复这个文件（需二次确认）")).toBeNull();
+      // 边界写在卡片上，不是藏进文档
+      expect(screen.getByText(/没有存档的批次/)).toBeTruthy();
+    });
+  });
 
   it("renders stages, task attribution, error labels, verification and logs", () => {
     seedBoard();

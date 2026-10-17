@@ -587,6 +587,87 @@ button.small {
   font-family: var(--font-mono);
 }
 
+/* ── 批次改动行（B1 第二半：diff / 回滚入口与逐行 diff 渲染）────────── */
+
+.change-row {
+  margin: 2px 0;
+}
+
+.change-actions {
+  margin-left: 8px;
+  white-space: nowrap;
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--info);
+  cursor: pointer;
+  font-size: 12px;
+  font-family: var(--font-mono);
+  padding: 0 4px;
+  text-decoration: underline;
+}
+
+.link-btn:disabled {
+  color: var(--muted);
+  cursor: default;
+  text-decoration: none;
+}
+
+.diff-view {
+  margin: 4px 0 8px;
+}
+
+.diff-lines {
+  background: #05070b;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  max-height: 320px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.diff-line {
+  display: grid;
+  grid-template-columns: 3em 3em 1.2em 1fr;
+  white-space: pre-wrap;
+  word-break: break-all;
+  padding: 0 6px;
+}
+
+.diff-no {
+  color: var(--muted);
+  text-align: right;
+  padding-right: 8px;
+  user-select: none;
+}
+
+.diff-sign {
+  user-select: none;
+}
+
+/* 增删不只靠颜色：每行有 +/- 号（色觉无障碍）。 */
+.diff-add {
+  background: rgba(46, 160, 67, 0.15);
+}
+
+.diff-add .diff-sign,
+.diff-add .diff-text {
+  color: #56d364;
+}
+
+.diff-del {
+  background: rgba(248, 81, 73, 0.15);
+}
+
+.diff-del .diff-sign,
+.diff-del .diff-text {
+  color: #f85149;
+}
+
 .error-class {
   color: var(--warn);
 }
