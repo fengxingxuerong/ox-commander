@@ -135,6 +135,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  */
 const TARGETS = [
   { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts", tier: 1 },
+  // 2026-10-17：桌面通知判据（C1，竞品缺口「通知」格）——哪些事件值得打扰人
+  // （receipt / escalation / approval-request 三档，其余全不弹）与文案裁剪。
+  // 入表理由：弹窗是 Electron 副作用无法单测，**判据错了就等于通知全错**，
+  // 而错的方向恰好是"该弹的不弹"——没有测试盯着它不会有任何人发现。
+  { file: "electron/notify-rules.ts", test: "src/notify-rules.test.ts", tier: 1 },
   // 2026-09-29：board-recovery 的纯函数推导层（facts/derived split）。新文件
   // 必须显式入表 —— touched 口径靠这张表映射，漏挂=永远无人审计。
   { file: "electron/board-derive.ts", test: "src/board-derive.test.ts", tier: 1 },
@@ -740,14 +745,15 @@ const SITE_BASELINE = {
   "electron/engine/scheduler.ts": 42,
   "electron/engine/verifier.ts": 23,
   "electron/engine/zone-guard.ts": 6,
-  "electron/ipc/agents.ts": 17,
-  "electron/ipc/context.ts": 24,
+  "electron/ipc/agents.ts": 22,
+  "electron/ipc/context.ts": 26,
   "electron/ipc/github.ts": 22,
   "electron/ipc/orchestration.ts": 5,
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
+  "electron/notify-rules.ts": 8,
   "electron/platform.ts": 28,
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
@@ -1045,7 +1051,11 @@ const EQUIVALENT_SITES = [
    * 审计里以"存活"形式重新暴露（fail-safe 又立功）。187 的同型位点（第二处
    * 签名行）已在此前的装配收敛中消失，条目保留作历史锚；现存的
    * enableRouter: … !== false（216/274）是真行为、被用例杀死，不入表。 */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 212 },
+  /* 2026-10-17 再校回：通知接线在 context.ts 顶部加 1 行 import、send() 内加
+   * 7 行 → 212 → 221。论证不变；fail-safe 再次以"存活"形式暴露漂移。
+   * 187 的同型位点（第二处签名行）已在此前的装配收敛中消失，条目保留作历史
+   * 锚；现存的 enableRouter: … !== false（225/283）是真行为、被用例杀死，不入表。 */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 221 },
   { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 232 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
