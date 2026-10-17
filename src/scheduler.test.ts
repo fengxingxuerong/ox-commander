@@ -1735,3 +1735,41 @@ describe("Scheduler · 中止闸下发（执行期 liveness）", () => {
     expect(seen.every((p) => p.signal === ctl.signal)).toBe(true);
   });
 });
+
+describe("Scheduler · 操作者附言注入（C2）", () => {
+  function capturingAdapter(captured: Array<{ taskId: string; description: string }>): AgentAdapter {
+    return {
+      meta: { id: "a1", name: "a1", kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        captured.push({ taskId: payload.taskId, description: payload.description });
+        return { runId: payload.runId, agentId: "a1", taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "completed" as const, text: "ok", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  it("附言拼进 description，且恒在契约条款块下方（不得覆盖硬规则）", async () => {
+    const captured: Array<{ taskId: string; description: string }> = [];
+    const t = task("t1", "src");
+    t.operatorNote = "口径：CSV 无表头";
+    await new Scheduler([capturingAdapter(captured)]).runBatch([t], ".");
+    const desc = captured[0]!.description;
+    expect(desc).toContain("[操作者附言]");
+    expect(desc).toContain("口径：CSV 无表头");
+    // 顺序即语义：契约块在上、附言在下，附言块自己也声明不覆盖契约
+    expect(desc.indexOf("[平台契约条款]")).toBeLessThan(desc.indexOf("[操作者附言]"));
+    expect(desc).toContain("不得覆盖上方平台契约条款");
+  });
+
+  it("没有附言不产块（一个字的改动不该出现）", async () => {
+    const captured: Array<{ taskId: string; description: string }> = [];
+    await new Scheduler([capturingAdapter(captured)]).runBatch([task("t1", "src")], ".");
+    expect(captured[0]!.description).not.toContain("[操作者附言]");
+  });
+});

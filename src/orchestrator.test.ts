@@ -3719,3 +3719,98 @@ describe("F2 失败账 —— 顺序与无主失败（@914 补杀）", () => {
     }
   });
 });
+
+describe("操作者附言（C2：运行中追加指令，2026-10-17）", () => {
+  /** 记录每轮拿到的 Task 快照；ok 可编程，用来造"首轮失败 → 重修轮"时序。 */
+  function capturingScheduler(rounds: Task[][], okOf: (round: number) => boolean): Scheduler {
+    let round = 0;
+    return {
+      async abortInFlight() {
+        return 0;
+      },
+      async runBatch(tasks: Task[]) {
+        round += 1;
+        rounds.push(tasks.map((t) => ({ ...t })));
+        const ok = okOf(round);
+        return tasks.map((t) => ({ taskId: t.id, ok, logDigest: "log", events: [] }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  function noteEngine(rounds: Task[][], failFirst: boolean, notes: string[]): OrchestratorEngine {
+    let calls = 0;
+    return new OrchestratorEngine(
+      {
+        llm: fakeLlm(),
+        scheduler: capturingScheduler(rounds, (r) => !(failFirst && r === 1)),
+        verify: async () => {
+          calls += 1;
+          if (calls === 1) return makeReport(true); // 基线必须绿
+          if (calls === 2) return makeReport(!failFirst); // 首轮验证可失败一次
+          return makeReport(true); // 之后放行，让重修轮真的发生
+        },
+        settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 3 },
+      },
+      {
+        onStage: () => undefined,
+        onLog: () => undefined,
+        onTaskStatus: () => undefined,
+        onVerification: () => undefined,
+        onEscalation: () => undefined,
+        onTaskNote: (_id, note) => notes.push(note),
+      },
+    );
+  }
+
+  const plan: Task[][] = [[{ id: "t1", title: "实现", description: "做 X", zone: "src", dependencies: [], suggestedRole: "dev" }]];
+
+  it("附言随每一次派发进 Task 副本，计划原件不被改", async () => {
+    const rounds: Task[][] = [];
+    const eng = noteEngine(rounds, false, []);
+    eng.setOperatorNote("t1", "口径：CSV 无表头");
+    await eng.execute(plan, ".");
+    expect(rounds[0]![0]!.operatorNote).toBe("口径：CSV 无表头");
+    // 计划原件是 PRD 级输入，附言是 run 级 —— 副本机制保证它不被污染
+    expect(plan[0]![0]!.operatorNote).toBeUndefined();
+  });
+
+  it("首轮失败后附言仍带进重修轮（redispatch 吃得到）", async () => {
+    const rounds: Task[][] = [];
+    const eng = noteEngine(rounds, true, []);
+    eng.setOperatorNote("t1", "先修编译错");
+    await eng.execute(plan, ".");
+    expect(rounds.length).toBeGreaterThanOrEqual(2);
+    expect(rounds[1]![0]!.operatorNote).toBe("先修编译错");
+  });
+
+  it("任务成功后附言退休并回声空串（旧指示不重复带进后续轮）", async () => {
+    const rounds: Task[][] = [];
+    const notes: string[] = [];
+    const eng = noteEngine(rounds, false, notes);
+    eng.setOperatorNote("t1", "临时指示");
+    await eng.execute(plan, ".");
+    expect(notes).toContain("临时指示"); // 设置回声
+    expect(notes[notes.length - 1]).toBe(""); // 退休回声
+    // 若之后还有派发（本用例没有），副本上也不该再有附言
+    expect(rounds.every((r) => r.every((t) => t.operatorNote === undefined || t.operatorNote === "临时指示"))).toBe(true);
+  });
+
+  it("全空白附言 = 立即清除，且不进任何副本", async () => {
+    const rounds: Task[][] = [];
+    const notes: string[] = [];
+    const eng = noteEngine(rounds, false, notes);
+    eng.setOperatorNote("t1", "有用的话");
+    eng.setOperatorNote("t1", "   \n  ");
+    expect(notes[notes.length - 1]).toBe("");
+    await eng.execute(plan, ".");
+    expect(rounds[0]![0]!.operatorNote).toBeUndefined();
+  });
+
+  it("对不上任何任务的附言被静默容纳（不 invent 白名单，看板清单即过滤器）", async () => {
+    const rounds: Task[][] = [];
+    const eng = noteEngine(rounds, false, []);
+    eng.setOperatorNote("ghost-task", "写给不存在的任务");
+    await eng.execute(plan, ".");
+    expect(rounds[0]![0]!.operatorNote).toBeUndefined();
+  });
+});

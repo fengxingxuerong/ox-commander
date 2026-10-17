@@ -653,3 +653,27 @@ describe("项目删除与规划失败的状态收尾", () => {
     expect(s.logs.join("\n")).toContain("规划失败");
   });
 });
+
+describe("handleEvent · task-note（操作者附言回声，C2）", () => {
+  it("附言合并进任务视图；空串 = 连键都不留", () => {
+    emit({ type: "taskStatus", taskId: "t1", status: "running", attempts: 1, title: "x", zone: "src" });
+    emit({ type: "task-note", taskId: "t1", note: "按无表头口径" });
+    expect(useApp.getState().tasks["t1"]!.operatorNote).toBe("按无表头口径");
+    emit({ type: "task-note", taskId: "t1", note: "" });
+    expect("operatorNote" in useApp.getState().tasks["t1"]!).toBe(false);
+  });
+
+  it("失败态任务也收附言（带话重派：先写再点重派）", () => {
+    emit({ type: "taskStatus", taskId: "t2", status: "failed", attempts: 2, title: "y", zone: "tests" });
+    emit({ type: "task-note", taskId: "t2", note: "先修编译错" });
+    const t = useApp.getState().tasks["t2"]!;
+    expect(t.status).toBe("failed"); // 附言不改状态
+    expect(t.operatorNote).toBe("先修编译错");
+  });
+
+  it("未知任务的附言被忽略（不 invent 任务行）", () => {
+    const before = Object.keys(useApp.getState().tasks).length;
+    emit({ type: "task-note", taskId: "ghost", note: "x" });
+    expect(Object.keys(useApp.getState().tasks).length).toBe(before);
+  });
+});

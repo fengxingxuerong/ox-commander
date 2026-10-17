@@ -158,6 +158,7 @@ describe("registerIpc · channel contract", () => {
       "orchestration:planning",
       "orchestration:resume",
       "orchestration:start",
+      "orchestration:task-note",
       "orchestration:update-prd",
       "projects:create",
       "projects:delete",

@@ -1991,3 +1991,39 @@ describe("changes handlers（diff 面板供数，竞品缺口 B1）", () => {
     expect(audit.append).not.toHaveBeenCalledWith(expect.objectContaining({ phase: "batch-changes" }));
   });
 });
+
+describe("task-note handlers（C2 操作者附言）", () => {
+  it("没有在跑的 run 时明确拒绝（不静默成功）", () => {
+    enginesOf().clear();
+    setRunningProjectId(null);
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "t1", "注意口径")).toThrow(
+      /没有在跑的 run/,
+    );
+  });
+
+  it("有 run 时透传到引擎（含空串 = 清除）", () => {
+    const engine = { setOperatorNote: vi.fn() };
+    enginesOf().set("p-run", engine as never);
+    setRunningProjectId("p-run");
+    // 返回值也要断言：handler 的 `return true` 是位点（site 审计实测
+    // `return true → false` 在只验证"引擎被调用"的测试下稳定存活 ——
+    // 调用发生了，返回值错没错没人管）。
+    expect((h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "t1", "  按无表头口径实现  ")).toBe(true);
+    expect(engine.setOperatorNote).toHaveBeenCalledWith("t1", "  按无表头口径实现  ");
+    // 清除走同一条通道：空串是合法值，不是"缺省 undefined"
+    expect((h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "t1", "")).toBe(true);
+    expect(engine.setOperatorNote).toHaveBeenLastCalledWith("t1", "");
+    setRunningProjectId(null);
+    enginesOf().clear();
+  });
+
+  it("拒绝坏形状输入（taskId 空串 / note 非字符串）", () => {
+    setRunningProjectId(null);
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "", "x")).toThrow(
+      /taskId 必须是非空字符串/,
+    );
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "t1", 42)).toThrow(
+      /note 必须是字符串/,
+    );
+  });
+});
