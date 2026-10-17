@@ -180,11 +180,16 @@ describe("detectInstalledClis", () => {
     // 本机（Windows）上 PATH 是 `C:\…` 形态：按 ";" 切才能扫到；默认分支
     // 若取反（`process.platform !== "win32"`）就会按 ":" 切，于是"明明装了
     // 却说没装"。这条在 Linux CI 上同样成立（那边反过来按 ":" 切）。
+    // ⚠️ pathEnv 必须是**两段**（第一段不存在）：单段串在两种切法下都还原成
+    // 同一个目录 —— 2026-10-18 实测，单段版本在 Linux 上放过 @300 的
+    // `===`→`!==` 变异体（那是"平台默认值取反"的真缺口，不是等价变异）。
     const dir = scratch("default-platform");
     fs.writeFileSync(path.join(dir, "claude.cmd"), "@echo off", "utf8");
     fs.writeFileSync(path.join(dir, "claude"), "#!/bin/sh", "utf8");
     const win = process.platform === "win32";
-    const out = detectInstalledClis({ pathEnv: dir }); // 不传 isWindows
+    const missing = path.join(os.tmpdir(), "ox-detect-missing-definitely-not-here");
+    const pathEnv = [missing, dir].join(path.delimiter);
+    const out = detectInstalledClis({ pathEnv }); // 不传 isWindows
     expect(out.find((c) => c.id === "claude-code")!.found).toBe(true);
     expect(win).toBe(process.platform === "win32"); // 断言形状，避免平台逻辑写反
   });
