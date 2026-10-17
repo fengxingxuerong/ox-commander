@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from "react";
-import type { AgentCircuitStats, AgentListResult, AgentSummary } from "../types";
+import type {
+  AgentCircuitStats,
+  AgentListResult,
+  AgentSummary,
+  DetectedCliView,
+} from "../types";
 
 const CIRCUIT_LABELS: Record<AgentCircuitStats["state"], string> = {
   closed: "正常",
@@ -20,6 +25,9 @@ export function AgentsPanel() {
   const [manifestText, setManifestText] = useState("");
   const [message, setMessage] = useState<{ kind: "ok" | "bad"; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
+  // ── 执行器自动探测（C6）──
+  const [detected, setDetected] = useState<DetectedCliView[] | null>(null);
+  const [scanning, setScanning] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -79,6 +87,53 @@ export function AgentsPanel() {
   const loadExample = async () => {
     const example = await window.oxCommander.exampleManifest();
     setManifestText(JSON.stringify(example, null, 2));
+  };
+
+  /**
+   * 扫 PATH 出候选（C6）。扫完不自动接入 —— 装了什么、要不要接，是人的决定；
+   * 扫描本身只读 PATH，不跑任何命令。
+   */
+  const scan = async () => {
+    setScanning(true);
+    setMessage(null);
+    try {
+      setDetected(await window.oxCommander.detectClis());
+    } catch (err) {
+      setMessage({ kind: "bad", text: (err as Error).message });
+    } finally {
+      setScanning(false);
+    }
+  };
+
+  /**
+   * 一键接入：把候选里那份 manifest 直接交给 `registerAgent`（与手写 JSON
+   * 走同一条路径，落盘/覆盖/重启仍在全都一致）。
+   */
+  const adopt = async (cli: DetectedCliView) => {
+    setBusy(true);
+    setMessage(null);
+    try {
+      const res = await window.oxCommander.registerAgent(cli.manifest);
+      if (res.ok && "id" in res) {
+        setMessage({
+          kind: res.persisted?.ok === false ? "bad" : "ok",
+          text:
+            res.persisted?.ok === false
+              ? `已接入 ${res.id}，但没写进 agents.d（${res.persisted.reason ?? "原因未知"}），重启后会丢`
+              : `已接入 ${res.id}${res.persisted?.path ? ` · 已写入 ${res.persisted.path}，重启后仍在` : ""}`,
+        });
+        await refresh();
+        setDetected(await window.oxCommander.detectClis());
+      } else if (res.ok) {
+        setMessage({ kind: "ok", text: "已接入" });
+      } else {
+        setMessage({ kind: "bad", text: res.error });
+      }
+    } catch (err) {
+      setMessage({ kind: "bad", text: (err as Error).message });
+    } finally {
+      setBusy(false);
+    }
   };
 
   const register = async () => {
@@ -199,6 +254,51 @@ export function AgentsPanel() {
           </ul>
         </div>
       )}
+
+      {/* 执行器自动探测（C6）：接入摩擦最大项 —— 以前第一步是手写 JSON */}
+      <div className="edit-list">
+        <h4>扫描本机执行器</h4>
+        <p className="muted">
+          扫 <code>PATH</code> 找已装的编码 CLI，命中即可一键接入（参数取仓内模板，不用手抄）。
+          扫描只读 PATH、不执行任何命令 —— 候选 CLI 不会因为"被扫了一下"就启动一次。
+        </p>
+        <div className="btn-row">
+          <button onClick={() => void scan()} disabled={scanning || busy}>
+            {scanning ? "扫描中…" : "🔍 扫描本机执行器"}
+          </button>
+        </div>
+        {detected === null ? null : (
+          <ul className="plain-list">
+            {detected.map((cli) => (
+              <li className="cli-detect-row" key={cli.id}>
+                <span className={cli.found ? "ok-text" : "muted"}>
+                  {cli.found ? "✓" : "✗"} {cli.displayName}
+                </span>{" "}
+                <span className="muted">
+                  <code>{cli.command}</code>
+                  {cli.absPath ? ` · ${cli.absPath}` : ""}
+                </span>{" "}
+                {/* 没扫到的不给"接入"按钮：派发与扫描用的是同一个 PATH，
+                    扫不到 = 接进来也必红。那种按钮是必然失败的邀请。 */}
+                {cli.registered ? (
+                  <span className="muted">· 已在池中</span>
+                ) : cli.found ? (
+                  <button
+                    className="small"
+                    disabled={busy}
+                    onClick={() => void adopt(cli)}
+                    title={`接入 ${cli.id}（用仓内模板的参数注册，落盘到 agents.d）`}
+                  >
+                    接入
+                  </button>
+                ) : (
+                  <span className="muted"> · 安装：{cli.installHint}</span>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
 
       <div className="edit-list">
         <h4>接入外部智能体</h4>

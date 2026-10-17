@@ -554,6 +554,48 @@ describe("github handlers（摄入半边）", () => {
   });
 });
 
+describe("agents:detect（C6 执行器自动探测）", () => {
+  it("每个候选都带安装提示与可直接注册的 manifest；已在池里的标记 registered", () => {
+    (h.layer.registry.list as Mock).mockReturnValue([
+      { manifest: { id: "claude-code" }, capabilities: {}, enabled: true },
+    ]);
+    const out = (h.ipcMain as FakeIpcMain).invoke("agents:detect") as Array<{
+      id: string;
+      command: string;
+      found: boolean;
+      installHint: string;
+      registered: boolean;
+      manifest: Record<string, unknown>;
+    }>;
+    expect(out.length).toBeGreaterThan(0);
+    for (const c of out) {
+      expect(c.command).toBeTruthy();
+      expect(c.installHint.trim()).not.toBe(""); // 没装的一律要有提示
+      expect(c.manifest.id).toBe(c.id);
+      expect("absPath" in c === false || c.found).toBe(true); // 没找到就不给路径
+    }
+    expect(out.find((c) => c.id === "claude-code")!.registered).toBe(true);
+    expect(out.find((c) => c.id === "codex-cli")!.registered).toBe(false);
+  });
+
+  it("扫不到的候选不编路径：found=false 时 absPath 这个键不出现", () => {
+    (h.layer.registry.list as Mock).mockReturnValue([]);
+    // 用一个不存在的 PATH：所有候选都必须按"未找到"呈现
+    const prev = process.env.PATH;
+    process.env.PATH = "";
+    try {
+      const out = (h.ipcMain as FakeIpcMain).invoke("agents:detect") as Array<{
+        found: boolean;
+        absPath?: string;
+      }>;
+      expect(out.every((c) => c.found === false)).toBe(true);
+      expect(out.every((c) => c.absPath === undefined)).toBe(true);
+    } finally {
+      process.env.PATH = prev;
+    }
+  });
+});
+
 describe("agent handlers", () => {
   it("lists agents with renderer-safe defaults", () => {
     const layer = h.layer;

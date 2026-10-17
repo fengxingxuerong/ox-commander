@@ -133,6 +133,7 @@ describe("registerIpc · channel contract", () => {
     // Deliberately explicit rather than derived: this is the list a reviewer
     // diffs against when a channel changes.
     expect(ipcMain.channels().sort()).toEqual([
+      "agents:detect",
       "agents:example-manifest",
       "agents:list",
       "agents:probe",

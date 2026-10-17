@@ -13,6 +13,7 @@ import {
   saveManifestFile,
 } from "../agents/manifest-loader";
 import { exampleManifest, parseAgentManifest } from "../agents/manifest-schema";
+import { detectInstalledClis } from "../agents/cli-detect";
 import { taskTrail } from "../board-derive";
 import { diffText } from "../../shared/text-diff";
 import type { AgentDescriptor } from "../../shared/agent-contract";
@@ -90,6 +91,20 @@ export function registerAgentHandlers(): void {
   });
 
   ipcMain.handle("agents:example-manifest", () => exampleManifest());
+
+  /**
+   * 扫 PATH 出执行器候选（C6：接入摩擦最大项）。
+   *
+   * 只扫不装、不 spawn：候选存在与否由 PATH 里的文件决定，跑
+   * `<cmd> --version` 既慢又会把用户的 CLI 悄悄叫起来一次（有的首次运行
+   * 会触发登录流）。返回里带三样东西：找到没有、没装的话安装提示是什么、
+   * 以及可直接交给 `agents:register` 的 manifest —— "一键接入"就是这两步。
+   */
+  ipcMain.handle("agents:detect", () => {
+    const layer = ensureAgentLayer(settingsStore().load());
+    const registeredIds = new Set(layer.registry.list().map((d) => d.manifest.id));
+    return detectInstalledClis({ registeredIds });
+  });
 
   ipcMain.handle("agents:register", (_e, raw: unknown) => {
     const settings = settingsStore().load();

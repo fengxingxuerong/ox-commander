@@ -6,6 +6,41 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 新增（执行器自动探测：扫 PATH 出候选 + 一键接入 · 2026-10-17）
+
+竞品缺口 C6，缺口文档里标的是"接入摩擦最大项"—— 以前接入外部执行器的
+第一步是**手写 JSON manifest**，而项目自己 ship 的 `agents.d/*.example.json`
+里已经躺着一份份带实测参数的模板。
+
+- **扫 PATH 出候选**（`shared/cli-detect.ts` + `electron/agents/cli-detect.ts`）：
+  Claude Code / Codex / Aider / Gemini CLI / Goose 五个候选，遍历 PATH 各目录
+  找命令（Windows 额外试 `.cmd`/`.bat`/`.exe`，那是 npm 全局装出来的 shim 形态）。
+  **不 spawn**：探测只是"PATH 里有没有这个文件"，跑 `<cmd> --version` 既慢又
+  会把用户的 CLI 在不知情时被叫起来一次（有的首次运行会触发登录流）。
+- **一键接入**：扫到的候选带一份**可直接注册**的 manifest（逐字取自
+  `agents.d/*.example.json`；codex 那份复用 `exampleManifest()`，与界面
+  "填入示例"同一事实源），点击即走 `agents:register` —— 落盘/覆盖/重启仍在
+  与手写 JSON 完全一致，不是另开一条侧道。
+- **没装的说怎么装**：安装命令 2026-10-17 逐条核实于官方文档 / npm 包页
+  （`@anthropic-ai/claude-code`、`@openai/codex`、`aider-chat`、
+  `@google/gemini-cli`）。**Goose 那一条没核实就不给命令** —— 一句装不上的
+  安装命令比没有提示更糟。
+- **没扫到的不给"接入"按钮**：派发与扫描用的是同一个 PATH，扫不到 = 接进来
+  也必红；那种按钮是必然失败的邀请（与 B1 第二半同一条纪律）。
+- **候选表与 `agents.d/*.example.json` 同源**：有一条守卫测试逐条比对
+  `command` 与 `argsTemplate`（codex 除外，它的事实源是 `exampleManifest()`，
+  只比 command）。参数写错的代价是"配好了但永远跑不起来"（2026-09-20 的
+  codex `--prompt-file` 教训），这层防的就是它。
+- **site 审计抓出的三处**（两处按纪律简化源码，一处补测试）：
+  ① `splitPathEnv` 原先靠"字符串里有没有分号"**猜平台**，Windows 的
+  `C:\bin` 会被切成 `C` + `\bin` ⇒ 什么都扫不到；改成平台由调用方传入。
+  ② 路径拼接的"目录尾部是否已有分隔符"判断两支等价（两岸 fs 都吸收多余
+  分隔符）⇒ 简化成正斜杠直拼。③ `existsSync` 外层 try/catch 是死分支
+  （它的契约就是异常折成 false）⇒ 删掉。
+- 测试 23 条（纯函数 / 模板守卫 / IPC / UI 各一层）；两个新目标 site
+  **9/9 全杀**。位点 1839 → **1848**（目标 77 → **79**）；用例 2194 → **2217**
+  （71 个文件）。`check:doc-claims` PASS。
+
 ### 新增（项目约定注入：项目根的 OX.md / AGENTS.md 自动进规划与执行 · 2026-10-17）
 
 竞品缺口 B3「项目级约定注入（记忆）」。此前的跨 run 持久化只有 agent 成功率

@@ -43,6 +43,28 @@ export interface ManifestPersistResult {
   reason?: string;
 }
 
+/**
+ * 一个被扫到的执行器候选（C6 执行器自动探测）。
+ *
+ * `manifest` 是来源模板里那份**可直接注册**的声明 —— 界面不自己拼参数：
+ * 拼错了就是"配好了但永远跑不起来"（2026-09-20 的 codex `--prompt-file`
+ * 教训：模板里不存在于真 CLI 的参数，健康检查照样绿）。
+ */
+export interface DetectedCliView {
+  id: string;
+  displayName: string;
+  /** 在 PATH 里找的命令名（claude / codex / aider …）。 */
+  command: string;
+  found: boolean;
+  /** 找到的绝对路径；未找到时缺席（不是空串）。 */
+  absPath?: string;
+  /** 没装时给人看的安装提示（核实过的命令；没核实的一律不给命令）。 */
+  installHint: string;
+  /** 已在池里 ⇒ 不显示"接入"。 */
+  registered: boolean;
+  manifest: Record<string, unknown>;
+}
+
 export type AgentMutationResult =
   | { ok: true; id: string; replaced?: boolean; persisted?: ManifestPersistResult }
   | { ok: true; drained: "drained" | "timeout" | "unsupported"; persisted?: ManifestPersistResult }
@@ -259,6 +281,11 @@ declare global {
       verifyReceipt(projectId: string, replay?: boolean): Promise<ReceiptVerifyResult>;
       listAgents(): Promise<AgentListResult>;
       exampleManifest(): Promise<AgentManifest>;
+      /**
+       * 扫 PATH 出执行器候选（C6）。每个候选带来源模板里那份可直接注册的
+       * manifest —— "接入"就是把 manifest 交给 `registerAgent`，不用手写 JSON。
+       */
+      detectClis(): Promise<DetectedCliView[]>;
       registerAgent(manifest: unknown): Promise<AgentMutationResult>;
       unregisterAgent(id: string, graceMs?: number): Promise<AgentMutationResult>;
       toggleAgent(id: string, enabled: boolean): Promise<boolean>;

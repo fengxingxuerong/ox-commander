@@ -109,6 +109,29 @@ function makeBridge(): Bridge {
     resolveApproval: vi.fn(async () => true),
     listAgents: vi.fn(async () => agentList()),
     exampleManifest: vi.fn(async () => ({ id: "example" }) as never),
+    // C6：扫 PATH 出候选。默认给"claude 装了 / codex 没装"这一对经典形态
+    // （界面测试要同时覆盖"有接入按钮"与"有安装提示"两种渲染）。
+    detectClis: vi.fn(async () => [
+      {
+        id: "claude-code",
+        displayName: "Claude Code（本机 CLI）",
+        command: "claude",
+        found: true,
+        absPath: "C:\\bin\\claude.cmd",
+        installHint: "npm i -g @anthropic-ai/claude-code",
+        registered: false,
+        manifest: { id: "claude-code" },
+      },
+      {
+        id: "codex-cli",
+        displayName: "Codex CLI",
+        command: "codex",
+        found: false,
+        installHint: "npm i -g @openai/codex",
+        registered: false,
+        manifest: { id: "codex-cli" },
+      },
+    ]),
     registerAgent: vi.fn(async () => ({ ok: true, id: "x" }) as never),
     unregisterAgent: vi.fn(async () => ({ ok: true, drained: "drained" }) as never),
     toggleAgent: vi.fn(async () => true),
@@ -1067,6 +1090,41 @@ describe("AgentsPanel interactions", () => {
     fireEvent.click(screen.getByRole("button", { name: "注册智能体" }));
     expect(await screen.findByText(/JSON 解析失败/)).toBeTruthy();
     expect(window.oxCommander.registerAgent).not.toHaveBeenCalled();
+  });
+
+  /**
+   * C6 执行器自动探测：扫描按钮 → 候选列表 → 一键接入。
+   *
+   * 三条边界钉在这里：① 装了的才有"接入"（扫不到的按钮不出现，不是按了才报错）；
+   * ② 没装的给安装提示；③ 接入走的是 `registerAgent` 同一条路径（落盘/覆盖/刷新
+   * 与手写 JSON 完全一致），不是另开一条侧道。
+   */
+  it("扫描本机执行器：装了的给接入按钮，没装的给安装提示", async () => {
+    render(<AgentsPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /扫描本机执行器/ }));
+    await waitFor(() => expect(window.oxCommander.detectClis).toHaveBeenCalled());
+
+    expect((await screen.findAllByText(/Claude Code/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/Codex CLI/)).length).toBeGreaterThan(0);
+    // 没装的那条：给安装命令而不是接入按钮
+    expect(await screen.findByText(/安装：npm i -g @openai\/codex/)).toBeTruthy();
+    const adopt = screen.getAllByRole("button", { name: "接入" });
+    expect(adopt).toHaveLength(1); // 只有扫到的 claude-code
+  });
+
+  it("一键接入：把候选里的 manifest 交给 registerAgent，落盘说清楚", async () => {
+    vi.mocked(window.oxCommander.registerAgent).mockResolvedValue({
+      ok: true,
+      id: "claude-code",
+      replaced: false,
+      persisted: { ok: true, path: "/agents.d/claude-code.json" },
+    } as never);
+    render(<AgentsPanel />);
+    fireEvent.click(screen.getByRole("button", { name: /扫描本机执行器/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "接入" }));
+    await waitFor(() => expect(window.oxCommander.registerAgent).toHaveBeenCalled());
+    expect(vi.mocked(window.oxCommander.registerAgent).mock.calls[0]![0]).toEqual({ id: "claude-code" });
+    expect(await screen.findByText(/已接入 claude-code · 已写入 \/agents\.d\/claude-code\.json，重启后仍在/)).toBeTruthy();
   });
 
   it("surfaces the handler's rejection reason for a bad manifest", async () => {

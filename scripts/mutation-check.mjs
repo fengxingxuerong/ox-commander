@@ -188,6 +188,9 @@ const TARGETS = [
   // 匹配悄悄失配。位点少但它是"两处对同一句话"的唯一事实源，值得逐点盯着。
   { file: "shared/github-issue.ts", test: "shared/github-issue.test.ts", tier: 1 },
   { file: "electron/agents/scoped-env.ts", test: "src/scoped-env.test.ts", tier: 1 },
+  // 2026-10-17（C6）：候选表与扫 PATH。它的守卫是那两条"与 agents.d 模板逐条
+  // 比对"的断言 —— 漂移没有别的出口，只能靠门禁拦。
+  { file: "electron/agents/cli-detect.ts", test: "src/cli-detect.test.ts", tier: 1 },
   { file: "shared/zone-coverage.ts", test: "src/zone-coverage.test.ts", tier: 1 },
   // 2026-10-17（B1 第二半）：行级 diff 纯函数。住 shared 是因为 diff 判据
   // （行号、增删统计、截断与二进制的"未知即 null"）双端共用；位点不密但
@@ -198,6 +201,9 @@ const TARGETS = [
   // 拼错一个字符就是"约定带进了提示但读的人看不懂"，而它在测试之外不可见。
   { file: "shared/project-conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
   { file: "electron/engine/conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
+  // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
+  // 分隔符猜错平台就表现为"明明装了却说没装"，而这在本机测不出来。
+  { file: "shared/cli-detect.ts", test: "src/cli-detect.test.ts", tier: 1 },
   // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
   // 并发上限用例（`never exceeds maxParallelRuns` / `treats 0 as unlimited`），
   // 而 `maxParallel()` 的三元就在那个文件里被真实验证。此前只挂 scheduler.test.ts，
@@ -738,6 +744,7 @@ function siteMutant(source, site, op) {
  */
 const SITE_BASELINE = {
   "electron/agents/cli-agent.ts": 21,
+  "electron/agents/cli-detect.ts": 4,
   "electron/agents/http-bridge.ts": 39,
   "electron/agents/index.ts": 10,
   "electron/agents/manifest-loader.ts": 24,
@@ -794,6 +801,7 @@ const SITE_BASELINE = {
   "headless/serve.ts": 68,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
+  "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
   "shared/delivery-receipt.ts": 43,
   "shared/github-issue.ts": 1,

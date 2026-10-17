@@ -31,6 +31,8 @@ const api = {
   // ── Agent pool (P2) ──
   listAgents: () => ipcRenderer.invoke("agents:list"),
   exampleManifest: () => ipcRenderer.invoke("agents:example-manifest"),
+  // ── 执行器自动探测（C6：扫 PATH 出候选，带可直接注册的 manifest）──
+  detectClis: () => ipcRenderer.invoke("agents:detect"),
   registerAgent: (manifest: unknown) => ipcRenderer.invoke("agents:register", manifest),
   unregisterAgent: (id: string, graceMs?: number) =>
     ipcRenderer.invoke("agents:unregister", id, graceMs),
