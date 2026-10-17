@@ -7,6 +7,7 @@ import type { ApprovalGate } from "../sandbox/approval-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
 import { killDevServer, pollDevServerProcess } from "./dev-server";
+import { pageSmokeOf, type PageSmoke } from "../../shared/page-smoke";
 import { scopedEnv } from "../agents/scoped-env";
 
 export interface VerifierDeps {
@@ -49,6 +50,31 @@ const DEFAULT_COMMAND_TIMEOUT_MS = 300_000;
  * one pipe chunk).
  */
 export const MAX_LOG_BYTES = 2 * 1024 * 1024;
+
+/**
+ * 页面冒烟（C3）：dev server 探活成功后再取一次首页正文，交给纯函数判据。
+ *
+ * 返回 `null` = **没看见**正文（假 fetch / 断流 / 超时 / 响应读不出来）——
+ * 那时不判红，也不编一条"页面正常"。判据本身在 `shared/page-smoke.ts`，
+ * 那里写明了"能证伪错误页、不能证明渲染成功"这条边界。
+ */
+export async function pageSmokeFor(url: string, fetchImpl?: typeof fetch): Promise<PageSmoke | null> {
+  const doFetch = fetchImpl ?? fetch;
+  try {
+    const res = await doFetch(url, { method: "GET", signal: AbortSignal.timeout(5_000) });
+    const body = typeof res.text === "function" ? await res.text() : "";
+    if (body === "") return null; // 看不见正文就跳过（不是"页面正常"）
+    return pageSmokeOf({
+      status: res.status,
+      ...(typeof res.headers?.get === "function"
+        ? { contentType: res.headers.get("content-type") ?? "" }
+        : {}),
+      body,
+    });
+  } catch {
+    return null; // 取不到 = 没看见，不判红
+  }
+}
 
 function runOnce(
   cmd: VerificationCommand,
@@ -372,16 +398,21 @@ export async function runSmokeChecks(
           fetchImpl: deps.devServerFetch,
         },
       );
+      // 页面冒烟（C3）：探活只证明"端口活着"，这里再取一次正文看它是不是
+      // 明确的错误页 —— "跑起来 ≠ 页面没白屏"。取不到正文（假 fetch / 断流）
+      // 就跳过，不因为"看不见"判红：一条误报的门禁比漏判更贵。
+      const page = verdict.ok ? await pageSmokeFor(check.devServer.url, deps.devServerFetch) : null;
       killDevServer(server);
       results.push({
         kind: "smoke",
-        ok: verdict.ok,
+        ok: verdict.ok && (page?.ok ?? true),
         exitCode: null,
         logDigest: digest(
           [
             `[smoke] ${check.title}`,
             `命令：${check.command} ${check.args.join(" ")}`,
             `[dev-server] ${check.devServer.url} → ${verdict.detail}（探活 ${verdict.attempts} 次，${verdict.elapsedMs}ms）`,
+            ...(page ? [`[page] ${page.detail}`] : []),
             verdict.ok ? "进程已按约终止" : `进程已终止；尾部输出：${tail.trim() || "（空）"}`,
           ].join("\n"),
         ),

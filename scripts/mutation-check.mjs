@@ -204,6 +204,9 @@ const TARGETS = [
   // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
   // 分隔符猜错平台就表现为"明明装了却说没装"，而这在本机测不出来。
   { file: "shared/cli-detect.ts", test: "src/cli-detect.test.ts", tier: 1 },
+  // 2026-10-18（C3）：页面冒烟判据。它决定"HTTP 200 的页面算不算交付"，
+  // 误报会把好交付挡在门外 —— 所以"空壳不判红"那一格必须被逐点盯着。
+  { file: "shared/page-smoke.ts", test: "src/page-smoke.test.ts", tier: 1 },
   // 2026-09-28：补挂 src/audit-log.test.ts —— 它里面除了 AuditLog，还有 Scheduler 的
   // 并发上限用例（`never exceeds maxParallelRuns` / `treats 0 as unlimited`），
   // 而 `maxParallel()` 的三元就在那个文件里被真实验证。此前只挂 scheduler.test.ts，
@@ -285,9 +288,10 @@ const TARGETS = [
     tests: ["src/schema.test.ts", "src/prompt-injection.test.ts"],
     tier: 2,
   },
-  // verifier 的断言散在四个文件：runSmokeChecks 在 verifier.test.ts，
+  // verifier 的断言散在五个文件：runSmokeChecks 在 verifier.test.ts，
   // verifyProject 在 sandbox-runtime / spawn-plan 两个集成测试里，
-  // dev server 托管分支在 dev-server.test.ts（2026-10-02）。
+  // dev server 托管分支在 dev-server.test.ts（2026-10-02），
+  // 页面冒烟 `pageSmokeFor` 那一段在 page-smoke.test.ts（2026-10-18）。
   {
     file: "electron/engine/verifier.ts",
     tests: [
@@ -295,6 +299,7 @@ const TARGETS = [
       "src/sandbox-runtime.test.ts",
       "src/spawn-plan.test.ts",
       "src/dev-server.test.ts",
+      "src/page-smoke.test.ts",
     ],
     tier: 2,
   },
@@ -766,7 +771,7 @@ const SITE_BASELINE = {
   "electron/engine/orchestrator.ts": 83,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 46,
-  "electron/engine/verifier.ts": 23,
+  "electron/engine/verifier.ts": 30,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
   "electron/ipc/context.ts": 27,
@@ -809,6 +814,7 @@ const SITE_BASELINE = {
   "shared/graph.ts": 8,
   "shared/http-clients.ts": 61,
   "shared/llm-client.ts": 15,
+  "shared/page-smoke.ts": 5,
   "shared/policy-file.ts": 33,
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,

@@ -146,6 +146,39 @@ describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () 
     expect(results[0]!.logDigest).toContain("进程已按约终止");
   });
 
+  /**
+   * C3：探活只看状态码，而"HTTP 200"的页面可能是一张错误页。这两条钉的是
+   * "跑起来 ≠ 页面没白屏"的**可证伪那一半** —— 明确错误页判红；SPA 空壳
+   * 不判红（HTTP 看不见 JS 渲染），但要把它说出来。
+   */
+  it("探活 200 但正文是错误页 ⇒ 判红，digest 带 [page] 行", async () => {
+    const url = await startEndpoint((_q, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("Failed to compile.\n./src/App.js  Module not found");
+    });
+    const results = await runSmokeChecks(
+      [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+      { cwd: tmp },
+    );
+    expect(results[0]!.ok).toBe(false); // 探活绿、页面红 —— 判定以页面为准
+    expect(results[0]!.logDigest).toContain("HTTP 200");
+    expect(results[0]!.logDigest).toContain("[page]");
+    expect(results[0]!.logDigest).toContain("Failed to compile");
+  });
+
+  it("SPA 空壳不判红，但 [page] 行把「没法确认」说出来", async () => {
+    const url = await startEndpoint((_q, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end('<!DOCTYPE html><html><body><div id="root"></div><script src="/b.js"></script></body></html>');
+    });
+    const results = await runSmokeChecks(
+      [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+      { cwd: tmp },
+    );
+    expect(results[0]!.ok).toBe(true); // 不因"看不见渲染"判红
+    expect(results[0]!.logDigest).toContain("真浏览器");
+  });
+
   it("失败路径：子进程立即退出 → ok=false，digest 带退出码与失败说明", async () => {
     const results = await runSmokeChecks(
       [{ title: "起不来", command: process.execPath, args: [exitScript], devServer: { url: "http://127.0.0.1:1/", timeoutMs: 5_000 } }],

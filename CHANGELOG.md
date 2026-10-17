@@ -6,6 +6,45 @@
 
 ## [0.1.8] — 2026-10-08
 
+### 新增（页面冒烟：探活之外再看一眼首页正文 · 2026-10-18）
+
+竞品缺口 C3「浏览器预览 / 端口」。此前 dev server 探活只看 **HTTP 状态码**，
+2xx/3xx 即通过 —— "端口活着、路由可达"钉住了，**"页面有没有内容"没有**。
+前端任务的验证闭环缺这一环：**跑起来 ≠ 页面没白屏**。
+
+- **能做的**：HTTP 正文是现成的，明确的错误页在正文里有稳定标记 ——
+  `Cannot GET`（webpack-dev-server / http-server）、`Internal Server Error`
+  （Vite 编译错误 overlay / Express 默认错误页）、`Failed to compile`（CRA）、
+  `This page could not be found` / `Runtime Error`（Next.js 404 与运行时）。
+  这些能**证伪**。
+- **不能做的**（边界写在 `shared/page-smoke.ts` 顶部）：**不做 DOM 渲染**。
+  JS 崩在运行时、或 SPA 壳里什么都没渲染出来，HTTP 正文看不见 ——
+  `index.html` 永远是那个壳。要断言它得上无头浏览器（几十 MB 依赖 +
+  一个进程模型），**不进验证链**，与 `dev-server.ts` 里"不做页面截图 / DOM 断言"
+  是同一条决定。
+- **口径**：**只判红明确错误页**；空壳（SPA）**不判红**，但把"没法确认、
+  需真浏览器"写进 digest；非 HTML 端点（`application/json`）判 `not-html`
+  且不判红 —— 白屏判据对它不适用。**宁可放过，不误报**：一条误报的门禁会把
+  好交付挡在门外，那比漏判更贵。
+- **取不到正文 = 没看见**（`pageSmokeFor` 返回 `null`）：假 fetch / 断流 /
+  读不出正文时不判红，也**不编一条"页面正常"**。
+- **接线**：只在探活**成功**后才取正文（`verdict.ok ? … : null`）—— 探活都死了
+  再去判页面没有意义；结果 `ok = verdict.ok && (page?.ok ?? true)`，
+  digest 多一行 `[page] …`。
+
+**site 审计抓出的两处**（都在 `pageSmokeFor` 的 headers 那一支）：把
+`typeof res.headers?.get === "function"` 反过来、或互换三元分支，在"假件都带
+headers 且 body 是 HTML"的用例下**没有任何可见差别** —— 真走到这一支要两种
+输入：① Content-Type 真的影响判定（JSON 里带 `Cannot GET` 字样 ⇒
+`not-html` 不红，而漏掉 Content-Type 会被当成错误页误红）；② 响应**没有**
+headers（此时取 Content-Type 会抛、被 catch 吞成 `null`，等于把一次真实判定
+改写成"没看见"）。两条用例补上后 30/30 全杀。
+
+- 测试 14 条（判据 7 + 取正文那一层 5 + dev-server 真子进程真 HTTP 的
+  2 条集成）；`shared/page-smoke.ts` site **5/5 全杀**、`electron/engine/verifier.ts`
+  site **30/30 全杀**。位点 1848 → **1860**（目标 79 → **80**）；
+  用例 2217 → **2231**（72 个文件）。`check:doc-claims` PASS。
+
 ### 新增（执行器自动探测：扫 PATH 出候选 + 一键接入 · 2026-10-17）
 
 竞品缺口 C6，缺口文档里标的是"接入摩擦最大项"—— 以前接入外部执行器的
