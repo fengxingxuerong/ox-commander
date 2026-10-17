@@ -428,10 +428,16 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 ## 文档索引
 
+- [CHANGELOG.md](CHANGELOG.md) — 对外变更日志：做了什么、边界在哪、已知缺口（每个条目的完整工程过程在
+  [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md)）
 - [CONTRIBUTING.md](CONTRIBUTING.md) — 贡献指南：本地开发、提交前的门禁纪律、PR 与 issue 要求
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — **架构与不变量**（面向人）：一次 run 的端到端数据流、
+  三处 zone 判据为什么故意不同、三条承重不变量、平台分支、当前的口径陷阱
+- [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) — 对内工程日志：门禁逐段数字、变异位点账、
+  事故勘查与负结果全程（CHANGELOG 的历史档案版）
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
   门禁逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
-  （`references/gates.md` 与 `references/architecture.md` 是它的两份详表）
+  （`references/gates.md` 是它的门禁详表；原 `references/architecture.md` 已提升为上面的 docs/ARCHITECTURE.md）
 - [docs/2026-09-24-consistency-review.md](docs/2026-09-24-consistency-review.md) — 一致性复核：本轮改了什么、
   以及逐条带证据的**未修**缺陷清单
 - [docs/2026-09-19-real-task-e2e.md](docs/2026-09-19-real-task-e2e.md) — 真实任务交付验收记录（csvstat 第一次真跑，

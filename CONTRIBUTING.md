@@ -1,7 +1,8 @@
 # 贡献指南
 
 OxCommander 是一个**门禁比功能更严**的项目：判错逻辑本身被逐位点变异测试证明过，
-而这一切几乎都写在代码注释与 `.qoder/skills/ox-commander-dev/SKILL.md` 里。
+而这一切几乎都写在代码注释与 `.qoder/skills/ox-commander-dev/SKILL.md` 里
+（面向人的提炼版：`docs/ARCHITECTURE.md` 讲架构与"为什么"，`docs/ENGINEERING-LOG.md` 存工程历史）。
 改错一行注释能让位点数变化，加一个只被测试引用的导出能让门禁红 ——
 **动手前花十分钟读那本手册，比提交后猜半小时为什么红便宜。**
 
@@ -39,7 +40,8 @@ npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <�
   漏挂的文件不参与变异统计，那个 PASS 对它没有含义。
 - **新 `scripts/*.mjs|.cjs` 必须接线**：入口只认 package.json 里引用的脚本。
 - **动 `verify` 链（加/删/换序步骤）必须同批改四处**：README 门禁索引节、
-  CHANGELOG、SKILL.md、`references/gates.md` —— 漏一处的后果由 `check:doc-claims` 判红。
+  CHANGELOG（简洁记账；逐段数字等工程细节进 `docs/ENGINEERING-LOG.md` 的同名条目）、
+  SKILL.md、`references/gates.md` —— 漏一处的后果由 `check:doc-claims` 判红。
 - **别在注释里留裸算子字面量**（`&&`、`||`、`===` 等）—— 它们会被当作位点统计，
   位点总数会变，跨版本数字不可比。
 - 改 `electron/sandbox/` 下的锚点文件前先查 SKILL.md 的行号锚点清单，
@@ -47,8 +49,9 @@ npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <�
 
 ## PR 要求
 
-1. **CHANGELOG.md 记账**：只记对用户/维护者可见的变化，写清边界与已知缺口，
-   不写营销话。本项目的历史记录风格是"诚实的负面事实也写进去"。
+1. **记账分两本**：对用户/维护者可见的变化进 `CHANGELOG.md`（简洁：做了什么、边界在哪、
+   已知缺口，不写营销话）；完整工程过程（门禁数字、变异位点账、事故勘查与负结果）同批写进
+   `docs/ENGINEERING-LOG.md` 的同名条目。本项目的历史记录风格是"诚实的负面事实也写进去"。
 2. 跑过 `npm run verify` 整链并在 PR 里给出退出码（或说明卡在哪一段、为什么）。
 3. 动 verify 链时确认四处文档已同步；动了 `TARGETS` / 白名单时说明登记理由。
 4. 一个 PR 一件事。跨多个不相关改动的 PR 会被要求拆分 —— 归因是这条仓库的

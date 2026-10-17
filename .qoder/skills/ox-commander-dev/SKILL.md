@@ -49,7 +49,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
   （桌面端 mac 产物仍刻意不出，见 `references/gates.md` 的 CI 节与 electron-builder.yml 顶部论证）。
   Windows 本地全绿不代表 Linux 绿（POSIX 上"不可达分支""pid 复用误杀"两类缺陷都真出现过）。
   平台条件用例本仓库的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`。
-- **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`、
+- **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`
+  （简洁记账；逐段数字与事故细节进 `docs/ENGINEERING-LOG.md` 的同名条目）、
   `.qoder/skills/ox-commander-dev/SKILL.md`（本节）、`references/gates.md` 的逐段表与段数。
   **原始口令只说"两处"，就是它导致 `smoke:target-range` 进了串却在 gates.md 里没有行**（2026-10-03 才发现）。
   只改一处等于没改：下一个人照旧会漏。**这条纪律 2026-10-06 起有判据了**：`check:doc-claims` 会把
@@ -103,18 +104,16 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | `check:doc-claims` 红在「读不到声明」 | 文档措辞改了，正则形状（`**N 段**` / `N 通过 + M 跳过`）不再匹配 | 把声明改回那个形状，或同步改正则 —— **别放宽判据**，读不到就当通过等于这道门禁不存在 |
 | `check:doc-claims` 红在「缺行」 | 新段进了 `verify` 但 README / gates.md 没写它 | 两处各补一行（这就是它存在的理由，不是误报） |
 
-## 别信文档，以代码为准（2026-09-24 逐条核过）
+## 别信文档，以代码为准（2026-09-24 逐条核过，2026-10-18 更新）
 
-README/docs 与代码有几处口径不一致，动相关文件前先读
-[references/architecture.md](references/architecture.md) 的「已知不一致」节。最要紧的三条：
-
-- 桌面端把 Key 存进 OS keychain 后，**正式 run 的大脑层拿不到它**（只有「设置 → 测试连接」那条路径做了 seeding）。
-  日常被 `.env` 掩盖，`.env` 一缺就现形。
-- zone 越权仲裁**四档实际只有三种行为**：`deny-all` 与 `report-only` 都不回滚，差异只在日志文案。
-- 内置执行器调 `assertWritable` **不传 zone**，所以"路径七级判定"对它实际只生效到第 4 级，
-  zone 约束完全靠事后 `BatchGuard`。
+README/docs 与代码的口径差异**大部分已修**，当前仍存在的陷阱列在
+[../../../docs/ARCHITECTURE.md](../../../docs/ARCHITECTURE.md) 的「当前的口径陷阱」节。
+当年那三处最要紧的，两条已修（keychain 播种进 run、四档只有三种行为），
+第三条经复核**是设计不是缺陷**：内置执行器写入门不传 zone，zone 约束靠事后 `BatchGuard` ——
+理由（写入门严格前缀会把模型合法的同名文件写入直接拒掉）见该文「沙箱判据」节。
 
 ## Resources
 
 - [references/gates.md](references/gates.md) — 逐段机制（33 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
-- [references/architecture.md](references/architecture.md) — 一次 run 的端到端数据流、分层现状、三类适配器契约、沙箱实际判据、平台分支、确定性隐患、已知不一致
+- [../../../docs/ARCHITECTURE.md](../../../docs/ARCHITECTURE.md) — 面向人的架构与不变量：一次 run 的数据流、
+  分层红线、三类适配器契约、沙箱实际判据、平台分支、口径陷阱（`references/architecture.md` 现为指向它的指针）
