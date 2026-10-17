@@ -5,7 +5,7 @@ name: verify
 # `npm run verify`, the gate has drifted out of `package.json`.
 on:
   push:
-    branches: ["**"]
+    branches: ["**", "!ci-diagnose-ubuntu"]
   pull_request:
   workflow_dispatch:
 

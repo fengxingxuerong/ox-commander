@@ -1,0 +1,33 @@
+name: diagnose
+
+on:
+  push:
+    branches: ["ci-diagnose-ubuntu"]
+
+permissions:
+  contents: read
+  checks: write
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: 1
+
+jobs:
+  diagnose:
+    name: diagnose (ubuntu, segment probes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Probe verify segments
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/diag-verify-segments.mjs
