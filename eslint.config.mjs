@@ -68,6 +68,7 @@ export default [
     // is the one thing `tsc` cannot see, so ESLint is its only semantic layer.
     ignores: [
       "dist/**",
+      "dist-cli/**",
       "dist-electron/**",
       "dist-headless/**",
       "node_modules/**",
