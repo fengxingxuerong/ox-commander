@@ -45,6 +45,28 @@ zone 兄弟文件不误拒；提示词条件化防回归），44/44 绿；变异
 （`SITE_BASELINE` 同批更新）。CI 6/6 绿（含 tier2 分片对 sensenova-api 的
 41 位点 ubuntu 审计）。
 
+### 修复（模型池：SenseNova 轮转表换血 · 2026-10-18）
+
+真演当晚反复出现 `SENSENOVA_API_KEY#i 线路级失败（404）`——不是网络抖动，是
+`SENSENOVA_MODELS` 第三位的 `deepseek-v4-pro` 已被端点下架：`GET /models`
+不再返回它，直连 `chat/completions` 稳定 404 `model is not found`。死线路每被
+轮转摸到一次就吃 30s 冷却，12 条线里有一条纯在空转。
+
+替补用 1-token 探针实测定（`token.sensenova.cn`）：`kimi-k3` 200 可用（跨家族）、
+`glm-5.2` / `sensenova-6.8-flash-lite` 200（在役）、`deepseek-v4.1-flash` 403
+（"not available in the current token plan"）、`deepseek-flash` 429（限流，未证
+可用）、`sensenova-u1.5-lite` 404（在册却调不到）。**取 `kimi-k3` 顶上**——12
+条线路数不变、家族更杂。
+
+改动：`SENSENOVA_MODELS` 第三位 `deepseek-v4-pro` → `kimi-k3`；登记表
+`SENSENOVA_MODELS_EXTRA` 由 kimi-k3 转记 `deepseek-v4.1-flash`；`check-unwired`
+豁免文案、`docs/ARCHITECTURE.md` 与 `src/llm-pool.test.ts` 的钉子（EXTRA 精确值
++ 不在轮转里）同步；12 路线断言（`failover.test.ts` / `platform.test.ts`）零
+改动即过。**登记表机制不动**：它仍是"登记 ≠ 入池"（生产代码零消费者），
+kimi-k3 是走 `SENSENOVA_MODELS`（正当入口）入的池，欠账 #17 描述的机制问题
+不因此改变。本地验证：153 用例过、eslint 0、`check:unwired` PASS、四 tsconfig
+类型全过、touched 变异审计 providers.ts 3/3 逐位点全杀。
+
 ### 门禁与维护（改变异基线必须同批核文档数字 · 2026-10-18）
 
 位点基线 40→41 的那笔提交（`d685a48`）漏跑 `check:doc-claims`，README 与
@@ -89,7 +111,7 @@ SITE_BASELINE 实物核——落笔数字必须等于命令输出）。
   `model is not found`）、`deepseek-v4.1-flash` 403（"not available in the
   current token plan"）、`deepseek-flash` 429（限流，未证可用）、
   `sensenova-u1.5-lite` 404（在册但调用 404）、**`kimi-k3` 200 可用**（跨家族，
-  轮转表替补候选；替换决定与提交待做）。
+  当晚已换入轮转表——见「修复（模型池）」条目）。
 
 ---
 
