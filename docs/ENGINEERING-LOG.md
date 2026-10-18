@@ -17,6 +17,82 @@
 
 ---
 
+## [未发布] — v0.1.9 之后（2026-10-18 →）
+
+### 修复（zone 越权写盘前拒绝 + 测试文件条件化 · 2026-10-18）
+
+**背景（10-18 真演终止事故）**：真跑复验第一轮，`zone=src/core/csv` 的 CSV 任务
+被仲裁判越权——执行器系统提示词无条件命令"测试文件放 `tests/*.test.js`"，模型
+老实地在 zone 外落了 `tests/csv.test.js`。事故链：越权落盘 → 批后仲裁
+`unauthorized-write` 回滚（digest："已回滚 0 个文件、删除 1 个新增文件"）→
+`markBatchFailed` 整批翻红 → 重修三轮复读同一句错误 → 升级终止。同一提示词下
+多个执行尝试犯同一错，说明根因在提示词与写盘通道，不在模型。
+
+**修复（两半）**：
+
+- `electron/agents/sensenova-api.ts` 的 `writeFiles` 增加写前闸：
+  `!isPathInZone(f.path, zone)` 直接拒绝（不落盘），拒绝理由逐条回传并进终态
+  点名。判据刻意复用引擎的 `isPathInZone`（`shared/glob.ts`），与仲裁、批次
+  审计同源——不新造第二套路径语义。**刻意不用 `PathPolicy` 严格前缀**：计划官
+  产出的 zone 常是文件前缀形（`src/core/csv` 对应交付 `src/core/csv.js`），
+  严格前缀会把合法兄弟文件误拒；"前缀 + 同名兄弟文件容忍"才是全链路一致的语义。
+- 系统提示词同批条件化：默认不再命令"测试放 tests/*"，只有 zone 覆盖 `tests/`
+  或任务描述明确要求时才创建，其余路径以"会被沙箱拒绝且不落盘"告知（zone 纪律）。
+- 调用点把 `payload.zone` 下传；`TaskPayload.zone` 本就是必填字段。
+
+**验证**：`src/sensenova-api.test.ts` +3（zone 外写前拒 + `continue` 不退化；前缀
+zone 兄弟文件不误拒；提示词条件化防回归），44/44 绿；变异位点账 40→41 全杀
+（`SITE_BASELINE` 同批更新）。CI 6/6 绿（含 tier2 分片对 sensenova-api 的
+41 位点 ubuntu 审计）。
+
+### 门禁与维护（改变异基线必须同批核文档数字 · 2026-10-18）
+
+位点基线 40→41 的那笔提交（`d685a48`）漏跑 `check:doc-claims`，README 与
+gates.md 的四行数字（用例 2231→2234、位点 1860→1861）未同步，verify
+ubuntu / windows 双平台同红一轮；补记（`0ad1925`）后转绿。**规则**：改变异
+基线 = 同批核文档判据（`check:doc-claims` 对 `vitest list` 现收集数与
+SITE_BASELINE 实物核——落笔数字必须等于命令输出）。
+
+### 实测（真链路复证：5 轮真演，前 4 轮死因也写下 · 2026-10-18）
+
+同一 PRD（csvstat CLI：parseCsv + columnStats + renderReport + cli.run + 三个
+`tests/*.test.js` + 样例数据），loomy（http-bridge）+ sensenova-api 双执行器，
+`scripts/run-multiagent-e2e.mjs --real`：
+
+- **第 1 轮**：上述 zone 越权事故，人工终止（修复动机）。
+- **第 2 轮**（45 分钟预算）：供应商配额风暴吃满预算遭硬杀（`headless exit: null`）。
+  但**全程零越权、零回滚**（日志里 "revert" 字样只剩握手配置名）；契约路径检查
+  准确逮住 t5 只写了 3 个测试文件中的 1 个 → 标记未完成进重修——引擎行为全部
+  正确，死因纯是预算。
+- **第 3 轮**（120 分钟）：风暴升级为全线路 `fetch failed`（含 amd-radeon 自部署
+  线路）→ 规划调用抛错、`exit 1`；遗留快照人工核对过（`%TEMP%\ox-commander-snapshots\
+  batch-mvdojglu-51228-5-t1_t5`：只有 `package.json` 与 `tests/cli.test.js` 的
+  重修前备份，全在 zone 内，无越权残留，可等自动过期回收）。
+- **第 4 轮**（120 分钟）：6 任务交付 5 个；parse-csv 四连败（loomy timeout
+  600s×2、sensenova rate-limit 600s×2）→ 重修上限 3 轮耗尽 → **升级事件**
+  （跳过该任务 / 更换智能体重派 / 终止项目）→ 非交互宿主安全终止——失败语义
+  按设计走完，不是缺陷。
+- **第 5 轮**（120 分钟）：**全绿**。规划先被校验器打回一次（见下"误报"）、
+  重试后落地；批 1 三任务并行全成（loomy 当晚首次交付：csv.js 201s；stats
+  388s；testdata 206s）；批 2 / 3 各 40s 级；批 4 的 t6（写 `tests/*.test.js`——
+  第 1 轮病根场景）首战 600s rate-limit 败，**重修 238s 落地**；契约路径 8/8、
+  终验 build/typecheck/test/smoke 全过（含独立样本冒烟）、`headless exit: 0`。
+  证据：`logs/e2e-real-1018-2109.log`（workspace `ox-real-e2e-1018-2109`）。
+- **规划校验器实证与一次误报**：第 5 轮规划首次产出被校验拦下——t5 描述里的
+  `console.log/console.error` 被斜杠启发式**误当路径**（"不属于任何 zone"），
+  规划携校验错误重试分解后自愈。拦得对（守卫真实存在且工作）、这次拦错了
+  （代码串不是产物路径）——误报本身记债，守卫的"点名路径必须落在某个 zone"
+  这条规则按预期生效。
+- **天气备注**：当晚 SenseNova 配额风暴周期性发作（429 / 300s timeout / 404 /
+  fetch failed 混合），短请求仍能穿过、长生成（规划、整文件实现）必须等窗口；
+  探针实测 `deepseek-v4-pro` 已下架（`/models` 不再返回、直连 404
+  `model is not found`）、`deepseek-v4.1-flash` 403（"not available in the
+  current token plan"）、`deepseek-flash` 429（限流，未证可用）、
+  `sensenova-u1.5-lite` 404（在册但调用 404）、**`kimi-k3` 200 可用**（跨家族，
+  轮转表替补候选；替换决定与提交待做）。
+
+---
+
 ## [0.1.9] — 2026-10-18（v0.1.8 之后：2026-10-08 晚 → 10-18）
 
 ### 新增（页面冒烟：探活之外再看一眼首页正文 · 2026-10-18）
