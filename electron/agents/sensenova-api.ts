@@ -13,6 +13,7 @@ import { createFailoverClient, EXECUTOR_TIMEOUT_MS } from "../../shared/http-cli
 import { withCooldownRetry } from "../../shared/llm-client";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
 import { meteredLlm, type UsageMeter } from "../../shared/usage-meter";
+import { isPathInZone } from "../../shared/glob";
 import { AGENT_PROTOCOL_VERSION, DEFAULT_AGENT_LIMITS, type AgentCapabilities, type AgentLimits } from "../../shared/agent-contract";
 import { PathPolicy } from "../sandbox/path-policy";
 import { TimeoutGate } from "../sandbox/timeout-gate";
@@ -24,7 +25,8 @@ const SYSTEM_PROMPT = [
   "根据任务描述和提供的工作区快照直接产出代码文件，只输出一个 JSON 对象，不要 markdown 代码围栏：",
   '{"files":[{"path":"相对路径","content":"完整文件内容"}]}',
   "约定：CommonJS（require/module.exports）、Node >= 18、禁止任何外部 npm 依赖；",
-  "测试文件放 tests/*.test.js，且第一行必须是 const { test } = require(\"node:test\"); 第二行 const assert = require(\"node:assert\");",
+  "只写 zone（所属区域）范围内的文件：zone 自身、zone 目录下的文件、以及与 zone 同名的兄弟文件（zone=src/core/csv 时 src/core/csv.js 合规）；其余路径会被沙箱拒绝且不落盘，不要浪费输出去写。",
+  "测试文件只在 zone 覆盖 tests/ 或任务描述明确要求写测试时才创建（放 tests/*.test.js，第一行必须是 const { test } = require(\"node:test\"); 第二行 const assert = require(\"node:assert\");），否则一律不要写测试文件。",
   'files 只包含需要新增或修改的文件，未列出的文件保持不变；修改时给出该文件的完整新内容。',
   "禁止输出 package.json、package-lock.json、ox-scripts/ 下的文件。",
 ].join("\n");
@@ -349,7 +351,7 @@ export class SensenovaApiAdapter implements AgentAdapter {
         );
         return;
       }
-      const res = this.writeFiles(payload.projectRoot, generated, session);
+      const res = this.writeFiles(payload.projectRoot, generated, session, payload.zone);
       if (!session.finished) {
         // 终态里带上被拒数量与路径：重修 prompt 传的是这份摘要，只说"写入 N 个"
         // 的话，模型下一轮会原样再写一遍被沙箱拒掉的那条路径，预算空烧。
@@ -489,12 +491,18 @@ private writeFiles(
     projectRoot: string,
     files: Array<{ path: string; content: string }>,
     session: RunSession,
+    zone: string,
   ): { written: number; refused: string[] } {
     // Sandbox gate (P3): the path rules that used to be hard-coded here
     // (project root + protected paths) now live in PathPolicy, so every adapter
-    // shares one implementation. Zone is deliberately left out: this gate uses a
-    // strict prefix, so honouring it here would reject `src/duration.js` for zone
-    // `src/duration` — a write the arbitration gate owns and must not roll back.
+    // shares one implementation.
+    //
+    // zone 闸（2026-10-18）：判据刻意**不用** policy 的严格前缀（它会把 zone
+    // `src/core/csv` 的兄弟文件 `src/core/csv.js` 误拒），而与引擎仲裁共用同一个
+    // `isPathInZone`（shared/glob）—— 适配器在写盘前拒掉的路径，恰是批后仲裁会
+    // 标 unauthorized 并回滚的那一类，不多不少。real 演习实测的失败链是：
+    // 执行器顺手把测试写到 tests/csv.test.js → 落盘 → 仲裁回滚 → 整批判失败 →
+    // 重修三轮复读；写前拒掉同一路径后任务正常收敛，被拒路径照旧逐条点名进终态。
     //
     // `this.forbiddenWrite` 是 policy.d 的**并集**结果（调用方算好的），不是
     // 替换品 —— 省略时 PathPolicy 用内置默认。
@@ -504,6 +512,11 @@ private writeFiles(
     const refused: string[] = [];
     let written = 0;
     for (const f of files) {
+      if (!isPathInZone(f.path, zone)) {
+        session.push("log", `[${this.meta.id}] 跳过：zone 越权：${f.path} 不在 zone「${zone}」内`);
+        refused.push(f.path);
+        continue;
+      }
       const decision = policy.assertWritable(f.path);
       if (!decision.ok) {
         session.push("log", `[${this.meta.id}] 跳过：${decision.reason}`);

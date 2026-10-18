@@ -76,13 +76,13 @@ function tmpRoot(): string {
   return dir;
 }
 
-function run(adapter: SensenovaApiAdapter, root: string, description = "实现 src/add.js") {
+function run(adapter: SensenovaApiAdapter, root: string, description = "实现 src/add.js", zone = "") {
   return adapter.dispatch({
     runId: `r-${Math.random().toString(36).slice(2)}`,
     taskId: "t1",
     title: "加法模块",
     description,
-    zone: "z1",
+    zone,
     projectRoot: root,
   });
 }
@@ -242,6 +242,57 @@ describe("SensenovaApiAdapter", () => {
     expect(joined).not.toContain("模型未返回可写入的文件");
   });
 
+  /**
+   * zone 闸（2026-10-18）：与引擎仲裁共用 `isPathInZone` 判定 —— `src/core/csv`
+   * zone 的兄弟文件 `src/core/csv.js` 合规，而 zone 外的 `tests/csv.test.js`
+   * 在**写盘前**就被拒。real 演习实测：旧实现让越权文件落盘 → 批后仲裁回滚 →
+   * 整批判失败 → 重修三轮复读，任务永远收敛不了。
+   */
+  it("zone 外路径写前拒掉且不触发批后回滚，兄弟文件（zone=src/core/csv → src/core/csv.js）照写", async () => {
+    const root = tmpRoot();
+    const payload = JSON.stringify({
+      files: [
+        { path: "tests/csv.test.js", content: "// out of zone" },
+        { path: "src/core/csv.js", content: "module.exports.parseCsv = () => [];" },
+      ],
+    });
+    const adapter = new SensenovaApiAdapter(scriptedClient([payload]).client);
+    const texts: string[] = [];
+    const handle = await run(adapter, root, "Implement parseCsv in src/core/csv.js", "src/core/csv");
+    for await (const e of adapter.collect(handle)) texts.push(`${e.kind}:${e.text}`);
+    const joined = texts.join(" | ");
+    expect(joined).toContain("completed:写入 1 个文件");
+    expect(joined).toContain("沙箱拒绝 1 个：tests/csv.test.js");
+    expect(joined).toContain("zone 越权");
+    expect(fs.existsSync(path.join(root, "tests", "csv.test.js"))).toBe(false);
+    // 拒掉越权文件后必须**继续**处理后续文件（continue 不能退化成 break）
+    expect(fs.readFileSync(path.join(root, "src", "core", "csv.js"), "utf8")).toContain("parseCsv");
+  });
+
+  it("前缀式 zone 不误拒兄弟文件：zone=src/core/stats 下写 src/core/stats.js 直接落盘", async () => {
+    const root = tmpRoot();
+    const payload = JSON.stringify({ files: [{ path: "src/core/stats.js", content: "// stats" }] });
+    const adapter = new SensenovaApiAdapter(scriptedClient([payload]).client);
+    const texts: string[] = [];
+    const handle = await run(adapter, root, "实现统计模块", "src/core/stats");
+    for await (const e of adapter.collect(handle)) texts.push(`${e.kind}:${e.text}`);
+    const joined = texts.join(" | ");
+    expect(joined).toContain("completed:写入 1 个文件");
+    expect(joined).not.toContain("沙箱拒绝");
+    expect(fs.existsSync(path.join(root, "src", "core", "stats.js"))).toBe(true);
+  });
+
+  it("系统提示词：测试文件条件化 + zone 越权不落盘（旧的无条件措辞不得回归）", async () => {
+    const root = tmpRoot();
+    const { client, prompts } = scriptedClient(['{"files":[{"path":"src/ok.js","content":"// fine"}]}']);
+    const adapter = new SensenovaApiAdapter(client);
+    await terminalText(adapter, await run(adapter, root));
+    const p = prompts[0] ?? "";
+    expect(p).toContain("测试文件只在 zone 覆盖 tests/ 或任务描述明确要求写测试时才创建");
+    expect(p).toContain("会被沙箱拒绝且不落盘");
+    expect(p).not.toContain("测试文件放 tests/*.test.js");
+  });
+
   it("writes model-returned files and completes", async () => {
     const root = tmpRoot();
     const adapter = new SensenovaApiAdapter(
@@ -338,7 +389,7 @@ describe("SensenovaApiAdapter", () => {
       taskId: "t9",
       title: "修复",
       description: "desc",
-      zone: "z",
+      zone: "",
       projectRoot: root2,
       repairContext: { round: 2, errorLogDigest: "TypeError: boom at add()" },
     });

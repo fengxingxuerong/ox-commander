@@ -758,7 +758,7 @@ const SITE_BASELINE = {
   "electron/agents/remote-endpoint.ts": 3,
   "electron/agents/run-session.ts": 7,
   "electron/agents/scoped-env.ts": 5,
-  "electron/agents/sensenova-api.ts": 40,
+  "electron/agents/sensenova-api.ts": 41,
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
