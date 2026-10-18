@@ -57,8 +57,8 @@ describe("provider catalog", () => {
   });
 
   it("keeps the extra model out of the default rotation", () => {
-    expect(SENSENOVA_MODELS_EXTRA).toEqual(["kimi-k3"]);
-    expect(SENSENOVA_MODELS as readonly string[]).not.toContain("kimi-k3");
+    expect(SENSENOVA_MODELS_EXTRA).toEqual(["deepseek-v4.1-flash"]);
+    expect(SENSENOVA_MODELS as readonly string[]).not.toContain("deepseek-v4.1-flash");
   });
 
   it("lists the AMD Radeon endpoint as a first-class provider", () => {

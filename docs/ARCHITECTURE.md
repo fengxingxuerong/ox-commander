@@ -169,7 +169,7 @@ POSIX 上也拒 `^ ! %`，`foo!.js`、`a%b` 这类合法文件名在 Linux 会�
 = 商汤线路，加 AMD 一条兜底；共享一张故障转移冷却表。**别在文档里写死条数** —— 换成另一个数字
 只是把漂移推到下次扩池（README 与设置页现在都表述为"由两张表决定"）。
 
-- `SENSENOVA_MODELS_EXTRA`（kimi-k3）**刻意不进默认轮转**，有测试守着；**它是登记表不是开关**
+- `SENSENOVA_MODELS_EXTRA`（当前登记 `deepseek-v4.1-flash` 候补）**刻意不进默认轮转**，有测试守着；**它是登记表不是开关**
   （生产代码零消费者，填进去 ≠ 入池）。
 - 默认池是 `DEFAULT_LLM_POOL`（单一真源）；NVIDIA / OpenRouter 被排除的理由写在 `providers.ts`
   注释里（实测无响应 / 账号被锁推理）。

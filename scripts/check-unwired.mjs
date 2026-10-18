@@ -61,7 +61,7 @@ const ACCEPTED = new Map([
   ["shared/redact.ts::containsLikelySecret", "断言辅助（注释：assert helper），与 redactSecrets 共享 KEY_PREFIXES/JWT 判定"],
   ["shared/http-clients.ts::countPoolRoutes", "池展开测试的断言辅助：验证 pool 规格 → 线路数，避免构造真实 client"],
   // ---- 配置表：数据而非逻辑，测试用它钉住「默认轮转不含扩展模型」 ----
-  ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表（kimi-k3），刻意不加入默认轮转；测试守着这一点"],
+  ["shared/providers.ts::SENSENOVA_MODELS_EXTRA", "模型名扩展表（deepseek-v4.1-flash 等候补），刻意不加入默认轮转；测试守着这一点"],
   // ---- 诊断：安全地只输出名字，尚未接到生产日志 ----
   // （droppedSecretNames 已于 2026-09-27 接进 cli-agent dispatch 事件流，移出本表）
   //

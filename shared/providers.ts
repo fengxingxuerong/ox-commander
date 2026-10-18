@@ -172,15 +172,14 @@ export function getProvider(id: string, env: NodeJS.ProcessEnv = process.env): P
  * table, so a rate-limited key rotates to another model before another key is
  * tried and vice versa.
  *
- * (`kimi-k3` is also offered by this endpoint; it is deliberately not in the
- * default rotation — 12 routes is the sweet spot before a single cooldown pass
- * costs more latency than it buys in availability. It is registered in
- * `SENSENOVA_MODELS_EXTRA` below.)
+ * 2026-10-18：`deepseek-v4-pro` 实测已从端点下架（`GET /models` 不再返回、
+ * 直连稳定 404 `model is not found`），留一条死线路等于每次轮转白烧一个冷却位；
+ * 由跨家族的 `kimi-k3` 顶上（同批 1-token 探针实测 200）。12 条线路数不变。
  */
 export const SENSENOVA_MODELS = [
   "deepseek-v4-flash",
   "sensenova-6.8-flash-lite",
-  "deepseek-v4-pro",
+  "kimi-k3",
   "glm-5.2",
 ] as const;
 export const SENSENOVA_KEY_VARS = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "SENSENOVA_API_KEY_3"] as const;
@@ -191,13 +190,18 @@ export const SENSENOVA_KEY_VARS = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "
  * ⚠️ 它是**登记表，不是开关**：全仓生产代码零消费者 —— 没有任何一处把它并进
  * 轮转表（`build-llm.ts` 的 models 装配只认 `SENSENOVA_MODELS`）。所以它不构成
  * "两份值域同时参与计算"，而是"一份参与、一份只登记"。
- * `check-unwired` 对它有显式豁免（理由同上），测试钉住两件事：它等于 `["kimi-k3"]`、
- * 且不在 `SENSENOVA_MODELS` 里。
+ * `check-unwired` 对它有显式豁免（理由同上），测试钉住两件事：它等于
+ * `["deepseek-v4.1-flash"]`、且不在 `SENSENOVA_MODELS` 里。
+ *
+ * 2026-10-18：`kimi-k3` 已换入轮转表（顶替下架的 `deepseek-v4-pro`），本表转记
+ * 下一代候补 `deepseek-v4.1-flash`——端点已在册，但本账号 token plan 暂 403
+ * （"model is not available in the current token plan"，探针实测），plan 放开后
+ * 即可考虑顶上。
  *
  * 要真的启用属于**功能变更**（得给 models 装配开一个入口并配用例），不是改个
  * 常量就能生效 —— 别以为填进这里就等于入了池。
  */
-export const SENSENOVA_MODELS_EXTRA = ["kimi-k3"] as const;
+export const SENSENOVA_MODELS_EXTRA = ["deepseek-v4.1-flash"] as const;
 
 /**
  * NVIDIA（z-ai/glm-5.3-flash）deliberately NOT in DEFAULT_LLM_POOL（2026-09-22 实测）：
