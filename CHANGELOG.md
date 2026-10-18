@@ -30,6 +30,11 @@
   （3 键 × 4 模型 = 12 条线路不变）。登记表 `SENSENOVA_MODELS_EXTRA` 转记下一代
   候补 `deepseek-v4.1-flash`（端点在册、本账号 token plan 暂 403）；登记表机制
   （登记 ≠ 入池）不变。
+- **kimi-k3 强制 `temperature=1`**（2026-10-18）。B2 实验夜摸出：kimi-k3 收到
+  `temperature: 0.2` 直接 400（`only 1 is allowed for this model`），且 400 属
+  请求级错误、不进线路冷却——每个轮到它的调用都白烧一个 400。新增模型级覆盖表
+  `MODEL_TEMPERATURE_OVERRIDES`（kimi-k3 → 1），温度解析收敛到客户端唯一一处，
+  **调用方显式传值也服从覆盖**；探针 400→200，+6 用例钉住。
 
 ### 门禁与维护
 
@@ -46,6 +51,17 @@
   干净路径通过。
 - **模型池顺带换血**：真演当晚摸出的 `deepseek-v4-pro` 已下架（404 死线路）当批
   换成 `kimi-k3`（见上方「修复（模型池）」），12 线路不变。
+
+### 实测（B2：zone vs worktree 对照，不进门禁）
+
+- **B2 对照跑完**（2026-10-18/19）。同一 6 任务集（10-18 第 5 轮真演原样，zone
+  互不相交）：zone 侧产品链路 6/6 交付、t6 自动重修 2 次收敛、终验全绿；
+  worktree 侧（worktrunk v0.80.0 + 同池单发执行器、6 全并行）首跑 5/6（t6 被
+  900s 上限杀）、t6 人工喂 3 轮 digest 重修**仍未收敛**（终态 tests/ 3 文件全红，
+  代价落在人身上）。报告与两侧代价项清单：
+  [`docs/2026-10-18-zone-vs-worktree-b2.md`](docs/2026-10-18-zone-vs-worktree-b2.md)；
+  汇总脚本 `scripts/b2-zone-vs-worktree-report.mjs`（`npm run b2:report`）。
+  **不下"快 X%"结论**；执行时代/天气/执行器不对称在报告限制节逐条列明。
 
 ## [0.1.9] — 2026-10-18
 

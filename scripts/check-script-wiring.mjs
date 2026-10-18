@@ -62,6 +62,8 @@ const ACCEPTED_ENTRIES = [
     "外部智能体桥，需对端服务在跑（启动方式记在 agents.d/onboarding-universal.md）；" +
       "它被 run-multiagent-e2e.mjs 引用，而该 runner 同样只在人工验收时跑 —— 链条未接到入口",
   ],
+  ["b2-worktree-run.mjs", "B2 对照实验驱动：需 worktrunk 二进制（--wt）与真实 LLM 凭据，人工按需对跑"],
+  ["b2-worktree-agent.mjs", "B2 对照实验的单任务执行器；被 b2-worktree-run.mjs 以子进程调用，而后者不在入口"],
 ];
 
 /**

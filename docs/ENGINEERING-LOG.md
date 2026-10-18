@@ -113,6 +113,53 @@ SITE_BASELINE 实物核——落笔数字必须等于命令输出）。
   `sensenova-u1.5-lite` 404（在册但调用 404）、**`kimi-k3` 200 可用**（跨家族，
   当晚已换入轮转表——见「修复（模型池）」条目）。
 
+### 修复（模型池：kimi-k3 强制 temperature=1 · 2026-10-18）
+
+换血后 kimi-k3 入池仅半小时，B2 实验（见下）worktree 侧首跑就炸出新型死线路：
+t6 被 900s 上限硬杀，stderr 里 kimi-k3 复读
+`HTTP 400: field Temperature invalid, only 1 is allowed for this model`。
+1-token 探针钉死：kimi-k3 `temperature=0.2` → 400，`temperature=1` → 200
+（对照 `glm-5.2` 0.2 → 200，不是端点整体行为）。**关键**：400 是请求级错误，
+不在 `ROUTE_LEVEL_4XX` 冷却集合里——每个轮到 kimi-k3 的调用照样先发出、白吃
+一个 400 再换线，长生成场景下把预算烧成假超时（t6 首跑死因之一）。
+
+修复：`shared/providers.ts` 新增模型级覆盖表
+`MODEL_TEMPERATURE_OVERRIDES = { "kimi-k3": 1 }` 与唯一解析点
+`resolveTemperature(model, requested)`（**覆盖优先于调用方显式传值**）；
+`shared/http-clients.ts` 的 OpenAiCompatibleClient 改为调用它——此前默认
+`req.temperature ?? 0.2`、而 `sensenova-api.ts` 明确传 0.2，两处都会踩雷，现在
+解析收敛到一处。规则沉淀：**"某模型只接受固定取值"这类事实落覆盖表，不散落到
+调用方**。
+
+验证：`src/llm-pool.test.ts` +4、`src/http-clients.test.ts` +2（含"显式传值也
+服从覆盖"），用例 2234→2240（72 文件）、README / gates.md 同步；
+`mutation-touched --base=HEAD~1` 逐位点全杀（http-clients 61/61、providers 3/3）。
+提交 `9e51f81`。
+
+### 实测（B2：zone 互斥 vs worktree 隔离对照 · 2026-10-18/19）
+
+B2 排期兑现（`docs/2026-10-17-competitor-gap.md`）：同一 6 任务集（10-18 第 5
+轮真演原样，zone 互不相交）在本项目与 worktrunk 各真跑一遍。**专档**：
+`docs/2026-10-18-zone-vs-worktree-b2.md`（含全部数字、复现命令与限制节）；
+汇总脚本 `scripts/b2-zone-vs-worktree-report.mjs`（产物直算，不手抄）。
+
+方法要点：worktree 侧执行器（`scripts/b2-worktree-agent.mjs`）复用产品同一构件
+（`SENSENOVA_MODELS` × `SENSENOVA_KEY_VARS`、同 failover 客户端、同 `chatJson` +
+`parseFilePayload` 协议），但为**单发生成**且无写闸/快照/契约检查/修复环/验证
+——两侧差异刻意限定在"路线 + 外围机制"，并在报告限制节逐条列明执行时代（池
+换血前后）、天气（r4 遇配额风暴）、任务集无冲突场景三类不对称。
+
+主要数字：zone 侧 6/6、任务时长合计 1118.6s、批序列 `[t1,t2,t5] [t3] [t4] [t6]`
+全依赖驱动（zone 冲突切刀 0 次）、t6 attempts=2（600s 限流败 → 重修 238s 收敛）、
+终验全绿。worktree 侧创建 0.7s × 6、6 全并行首跑 5/6（t1 714s / t2 343s /
+t3 328s / t4 132s / t5 4.6s；t6 被 900s 上限杀）、合并 3.3s × 5 冲突 0 自动清理、
+**t6 人工喂 digest 重修 3 轮（218s / 188s / 1260s）终态 tests/ 3 文件全红——
+人工 3 轮未收敛**。结论只立"各自代价项清单"：zone 代价=批串行与机制复杂度、
+worktree 代价（本轮观感）=验证与重修环缺失时全落在人身上；**不下"快 X%"结论**。
+
+副产品：kimi-k3 temperature 死线路（见上条）、以及 worktree 侧执行器提示词里
+"基线只有骨架"的过时文案（t6 晚跑、仓库已有全部文件——如实记在报告限制节）。
+
 ---
 
 ## [0.1.9] — 2026-10-18（v0.1.8 之后：2026-10-08 晚 → 10-18）
