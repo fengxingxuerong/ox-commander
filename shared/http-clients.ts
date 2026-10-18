@@ -1,4 +1,4 @@
-import { getProvider, type ChatMessage, type ProviderConfig } from "./providers";
+import { getProvider, resolveTemperature, type ChatMessage, type ProviderConfig } from "./providers";
 import type { ChatRequest, ChatResponse, LlmClient } from "./llm-client";
 
 interface FetchLikeResponse {
@@ -204,7 +204,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
     const body: Record<string, unknown> = {
       model: this.config.defaultModel,
       messages: req.messages,
-      temperature: req.temperature ?? 0.2,
+      temperature: resolveTemperature(this.config.defaultModel, req.temperature),
       /*
        * 必须显式带上 max_tokens，而且要给到端点允许的最大值。不带时商汤用默认
        * 输出上限；给 16384 仍会在 PLANNING 上截断 —— 因为 sensenova 的模型是

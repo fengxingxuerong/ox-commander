@@ -1,7 +1,7 @@
 # `npm run verify` 的逐段机制（33 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、33 段、
-2234 通过 + 8 跳过，合计 2242 条，分布在 72 个有可执行用例的文件（2026-10-18 现跑：链首到
+2240 通过 + 8 跳过，合计 2248 条，分布在 72 个有可执行用例的文件（2026-10-18 现跑：链首到
 `mutation:baseline` 的 14 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在

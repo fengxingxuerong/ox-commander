@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_LLM_POOL,
+  MODEL_TEMPERATURE_OVERRIDES,
   PROVIDER_CATALOG,
   SENSENOVA_KEY_VARS,
   SENSENOVA_MODELS,
@@ -8,6 +9,7 @@ import {
   baseUrlEnvVar,
   getProvider,
   providerKeyEnvVars,
+  resolveTemperature,
 } from "../shared/providers";
 import {
   countPoolRoutes,
@@ -59,6 +61,29 @@ describe("provider catalog", () => {
   it("keeps the extra model out of the default rotation", () => {
     expect(SENSENOVA_MODELS_EXTRA).toEqual(["deepseek-v4.1-flash"]);
     expect(SENSENOVA_MODELS as readonly string[]).not.toContain("deepseek-v4.1-flash");
+  });
+
+  it("all override models are in the rotation (the table is not a backdoor)", () => {
+    // 覆盖表只有对**轮转表里的模型**才有意义；表里出现轮转外的模型说明有笔误，
+    // 而笔误的后果是"这条覆盖永远不生效"——静默失效正是这张表最坏的失败方式。
+    for (const model of Object.keys(MODEL_TEMPERATURE_OVERRIDES)) {
+      expect(SENSENOVA_MODELS as readonly string[]).toContain(model);
+    }
+  });
+
+  it("pins the kimi-k3 hard requirement: only temperature=1 is accepted", () => {
+    expect(MODEL_TEMPERATURE_OVERRIDES).toEqual({ "kimi-k3": 1 });
+  });
+
+  it("override wins even over an explicit caller value", () => {
+    // sensenova-api.ts 明确传 0.2 —— 覆盖表必须压过它，否则形同虚设。
+    expect(resolveTemperature("kimi-k3", 0.2)).toBe(1);
+    expect(resolveTemperature("kimi-k3")).toBe(1);
+  });
+
+  it("other models keep the caller value, then the 0.2 default", () => {
+    expect(resolveTemperature("glm-5.2", 0.5)).toBe(0.5);
+    expect(resolveTemperature("glm-5.2")).toBe(0.2);
   });
 
   it("lists the AMD Radeon endpoint as a first-class provider", () => {

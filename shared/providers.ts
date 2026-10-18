@@ -196,12 +196,35 @@ export const SENSENOVA_KEY_VARS = ["SENSENOVA_API_KEY", "SENSENOVA_API_KEY_2", "
  * 2026-10-18：`kimi-k3` 已换入轮转表（顶替下架的 `deepseek-v4-pro`），本表转记
  * 下一代候补 `deepseek-v4.1-flash`——端点已在册，但本账号 token plan 暂 403
  * （"model is not available in the current token plan"，探针实测），plan 放开后
- * 即可考虑顶上。
+ * 即可考虑顶上。注意它顶进轮转的另一半是 `MODEL_TEMPERATURE_OVERRIDES`：
+ * `kimi-k3` 只接受 `temperature=1`，其余值直接 400（见下表）。
  *
  * 要真的启用属于**功能变更**（得给 models 装配开一个入口并配用例），不是改个
  * 常量就能生效 —— 别以为填进这里就等于入了池。
  */
 export const SENSENOVA_MODELS_EXTRA = ["deepseek-v4.1-flash"] as const;
+
+/**
+ * 模型对 `temperature` 的硬性要求（端点实测，非偏好）。
+ *
+ * `kimi-k3` 只接受 `1`：传 `0.2`（本项目的默认）返回 400
+ * `field Temperature invalid, only 1 is allowed for this model`。这个 400 在
+ * failover 口径里是**请求级**错误（不冷却、不换线路移除），于是不做覆盖的话，
+ * 每次执行器/大脑调用都会在 kimi 的三条键上白烧一个 400 再轮到下一个模型
+ * （2026-10-18 B2 对照实验的 stderr 实测；精确探针复现：0.2 → 400，1 → 200）。
+ *
+ * 覆盖优先于调用方传值：`sensenova-api.ts` 明确传 `temperature: 0.2`，
+ * 覆盖表仍须把它改写成 1，否则表形同虚设。知识放在这里而不是客户端内联，
+ * 是因为这是**模型目录的属性**：哪些模型带特殊约定，应当和模型名在同一处可读。
+ */
+export const MODEL_TEMPERATURE_OVERRIDES: Readonly<Record<string, number>> = {
+  "kimi-k3": 1,
+};
+
+/** 请求温度的唯一解析点：覆盖表命中即用表值，否则用请求值，缺省 0.2。 */
+export function resolveTemperature(model: string, requested?: number): number {
+  return MODEL_TEMPERATURE_OVERRIDES[model] ?? requested ?? 0.2;
+}
 
 /**
  * NVIDIA（z-ai/glm-5.3-flash）deliberately NOT in DEFAULT_LLM_POOL（2026-09-22 实测）：

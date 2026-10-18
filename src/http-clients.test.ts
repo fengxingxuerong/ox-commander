@@ -40,6 +40,36 @@ describe("OpenAiCompatibleClient", () => {
     expect(body.response_format).toEqual({ type: "json_object" });
   });
 
+  it("forces temperature=1 for kimi-k3 even when the caller asks 0.2", async () => {
+    // 端点实测：kimi-k3 对 0.2 返回 400（只接受 1）。这条线路现在在轮转表里，
+    // 客户端必须替调用方改写，否则每次执行器调用都白烧一个 400。
+    let body: Record<string, unknown> = {};
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), defaultModel: "kimi-k3" },
+      "k",
+      (async (_url: string, init: RequestInit) => {
+        body = JSON.parse(String(init.body));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+      }) as never,
+    );
+    await client.chat({ ...req, temperature: 0.2 });
+    expect(body.temperature).toBe(1);
+  });
+
+  it("sends the caller temperature for models without an override", async () => {
+    let body: Record<string, unknown> = {};
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), defaultModel: "glm-5.2" },
+      "k",
+      (async (_url: string, init: RequestInit) => {
+        body = JSON.parse(String(init.body));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+      }) as never,
+    );
+    await client.chat({ ...req, temperature: 0.5 });
+    expect(body.temperature).toBe(0.5);
+  });
+
   it("throws HttpLlmError on non-2xx", async () => {
     const { HttpLlmError: E } = await import("../shared/http-clients");
     const client = new OpenAiCompatibleClient(getProvider("glm"), "k", (async () => ({
