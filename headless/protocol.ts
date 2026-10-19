@@ -137,6 +137,13 @@ export interface HeadlessSpec {
    */
   raceRedundancy?: number;
   /**
+   * 变体竞争（默认 1 = 关闭）。>1 时每个任务**顺序**派 N 个执行器在各自快照
+   * 窗口里就地跑，批末按回放后的验证命令 + 契约路径读数裁决、赢家回放 ——
+   * 比赛马慢，但输家写入可完整回退，且所有变体在同一起点上比较。
+   * 与 raceRedundancy 同开时本项优先。
+   */
+  variantCount?: number;
+  /**
    * 停用的密钥变量名（账号级开关）。一条线路 = provider × key × model，所以
    * **摘掉一个 key 就是摘掉它名下的整组线路** —— 密钥仍在盘上（随时能开回来），
    * 而池子的形状立刻变小。空数组表示全部启用。
@@ -253,6 +260,7 @@ const KNOWN_FIELDS = new Set<string>([
   "brainTimeoutMs",
   "executorTimeoutMs",
   "raceRedundancy",
+  "variantCount",
   "disabledKeyVars",
 ]);
 
@@ -490,6 +498,17 @@ export function parseSpec(rawText: string): ParseResult {
     }
   }
 
+  // 变体竞争的"关闭"同为 1：0 与负数在调度器里会被夹成 1，协议层留给它们
+  // 的是同样的报错 —— 导语义的事不做静默兼容（与 raceRedundancy 同一口径）。
+  let variantCount: number | undefined;
+  if (raw.variantCount !== undefined) {
+    if (typeof raw.variantCount !== "number" || !Number.isFinite(raw.variantCount) || raw.variantCount < 1) {
+      issues.push("variantCount 必须是不小于 1 的数字（1 = 关闭变体竞争，>1 = 同任务顺序派 N 个执行器并批末裁决）");
+    } else {
+      variantCount = Math.floor(raw.variantCount);
+    }
+  }
+
   let disabledKeyVars: string[] | undefined;
   if (raw.disabledKeyVars !== undefined) {
     if (!Array.isArray(raw.disabledKeyVars) || raw.disabledKeyVars.some((v) => typeof v !== "string" || v.trim() === "")) {
@@ -619,6 +638,7 @@ export function parseSpec(rawText: string): ParseResult {
     ...(brainTimeoutMs !== undefined ? { brainTimeoutMs } : {}),
     ...(executorTimeoutMs !== undefined ? { executorTimeoutMs } : {}),
     ...(raceRedundancy !== undefined ? { raceRedundancy } : {}),
+    ...(variantCount !== undefined ? { variantCount } : {}),
     ...(disabledKeyVars !== undefined ? { disabledKeyVars } : {}),
   };
 

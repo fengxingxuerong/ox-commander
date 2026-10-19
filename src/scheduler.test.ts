@@ -2,7 +2,16 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { admitConcurrency, digest, Scheduler } from "../electron/engine/scheduler";
+import {
+  admitConcurrency,
+  compareVariantRank,
+  digest,
+  Scheduler,
+  type DispatchOutcome,
+  type VariantRateResult,
+} from "../electron/engine/scheduler";
+import type { VariantBackend, VariantWindow } from "../electron/engine/variant-store";
+import type { BatchGuard } from "../electron/engine/batch-guard";
 import { CancelledError } from "../electron/engine/orchestrator";
 import { AgentRegistry } from "../electron/agents/registry";
 import { createCapabilityRouter } from "../electron/engine/router";
@@ -1316,6 +1325,454 @@ describe("Scheduler · 任务级冗余赛马（raceRedundancy）", () => {
     expect(dispatched).toEqual(["solo"]);
     // 单派发路径不组赛马组：摘要里不该出现赛马头（否则就是被当成赛马组处理了）
     expect(outcome.logDigest).not.toContain("[赛马]");
+  });
+});
+
+describe("compareVariantRank（裁决排序的纯函数面）", () => {
+  const r = (passed: number, total: number, firstFailIndex: number | null = null): VariantRateResult => ({
+    passed,
+    total,
+    firstFailIndex,
+    summary: `${passed}/${total}`,
+  });
+
+  it("通过门数多者优 → 首败更晚者优（全过最晚）→ 变体序小者优", () => {
+    // 门数优先：3/3 胜过 1/3，哪怕前者变体序更大
+    expect(compareVariantRank({ rate: r(3, 3), variantIndex: 1 }, { rate: r(1, 3, 0), variantIndex: 0 })).toBeLessThan(0);
+    // 同门数、首败更晚者优
+    expect(compareVariantRank({ rate: r(1, 3, 1), variantIndex: 0 }, { rate: r(1, 3, 0), variantIndex: 1 })).toBeLessThan(0);
+    // 全过（firstFail = null 按最后一门之后计）比"首败在最后一门"更深
+    expect(compareVariantRank({ rate: r(3, 3, null), variantIndex: 1 }, { rate: r(2, 3, 2), variantIndex: 0 })).toBeLessThan(0);
+    // 完全平手：变体序小者优（确定性）
+    expect(compareVariantRank({ rate: r(2, 3), variantIndex: 0 }, { rate: r(2, 3), variantIndex: 1 })).toBeLessThan(0);
+  });
+});
+
+describe("Scheduler · 变体竞争（variantCount）", () => {
+  const rate = (passed: number, total: number, firstFailIndex: number | null = null): VariantRateResult => ({
+    passed,
+    total,
+    firstFailIndex,
+    summary: `门 ${passed}/${total}`,
+  });
+
+  /**
+   * 内存替身：窗口动作全部只记账。`caps` 按捕获顺序给每个变体配置
+   * "现场"（默认 1 个变更文件、可回放）；`fails.revertCalls` 里的第 N 次
+   * revert（1-based 调用序，跨变体统一计数）先记账后抛错 —— 用来钉住
+   * "收不回的窗口把备份留在盘上"这条退路。
+   */
+  function fakeBackend(
+    caps: Array<{ replayable?: boolean; note?: string; files?: number }> = [],
+    log: string[] = [],
+    fails: { revertCalls?: readonly number[] } = {},
+  ): { backend: VariantBackend; log: string[] } {
+    const idxByWin = new Map<string, number>();
+    let captured = 0;
+    let began = 0;
+    let reverts = 0;
+    const backend: VariantBackend = {
+      async beginWindow(opts) {
+        // 窗口序号在开窗时就登记：派发直接抛错的路径不会经过 capture，
+        // 但那一个窗口的 revert/finish 一样要能被记名。
+        idxByWin.set(opts.runId, began);
+        began += 1;
+        log.push(`begin:${opts.zone}`);
+        return {
+          id: opts.runId,
+          rootAbs: opts.root,
+          zone: opts.zone,
+          token: {},
+          journal: {},
+        } as unknown as VariantWindow;
+      },
+      capture(win, meta) {
+        captured += 1;
+        idxByWin.set(win.id, meta.variantIndex);
+        const c = caps[captured - 1] ?? {};
+        log.push(`capture:${meta.variantIndex}`);
+        return {
+          variantIndex: meta.variantIndex,
+          agentId: meta.agentId,
+          changes: Array.from({ length: c.files ?? 1 }, (_, i) => ({
+            path: `z/f${i}.js`,
+            op: "modify" as const,
+          })),
+          forward: new Map(),
+          replayable: c.replayable ?? true,
+          ...(c.note !== undefined ? { note: c.note } : {}),
+        };
+      },
+      async revert(win) {
+        reverts += 1;
+        log.push(`revert:${idxByWin.get(win.id)}`);
+        if (fails.revertCalls?.includes(reverts)) throw new Error(`revert boom #${reverts}`);
+      },
+      apply(_win, capture) {
+        log.push(`apply:${capture.variantIndex}`);
+      },
+      async finish(win) {
+        log.push(`finish:${idxByWin.get(win.id)}`);
+      },
+    };
+    return { backend, log };
+  }
+
+  /** 第 `call` 次派发抛 CancelledError 的适配器（其余行为与 adapterWith 一致）。 */
+  function adapterCancellingOn(
+    id: string,
+    call: number,
+    opts?: { dispatched?: string[] },
+  ): AgentAdapter {
+    let n = 0;
+    return {
+      meta: { id, name: id, kind: "api" },
+      async probe() {
+        return true;
+      },
+      async dispatch(payload) {
+        n += 1;
+        opts?.dispatched?.push(id);
+        if (n === call) throw new CancelledError();
+        return { runId: payload.runId, agentId: id, taskId: payload.taskId };
+      },
+      async *collect() {
+        yield { kind: "completed", text: "done", timestamp: Date.now() };
+      },
+      async abort() {},
+    };
+  }
+
+  it("顺序就地双派 + 批末回放裁决：评级高者赢（不看派发序），赢家回放、输家回退", async () => {
+    const dispatched: string[] = [];
+    const calls: string[] = [];
+    const starts: string[] = [];
+    const completes: DispatchOutcome[] = [];
+    const { backend, log } = fakeBackend();
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    // 池里有第三个候选，但 variantCount=2：成员补齐必须在第二个就停住
+    // （`>=` 的边界位点：换成 `>` 会把 a3 也拉进组，变成三变体竞争）。
+    const a3 = adapterWith("a3", true, { dispatched });
+    const sched = new Scheduler([a1, a2, a3], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex, agentId) => {
+        calls.push(`rate:${variantIndex}:${agentId}`);
+        // 让后派发的变体赢 —— 排序必须是"评级说话"，不是"派发序说话"
+        return variantIndex === 1 ? rate(3, 3) : rate(1, 3, 0);
+      },
+      onRunStart: (agentId, t) => starts.push(`${agentId}:${t.id}`),
+      onRunComplete: (o) => completes.push(o),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+
+    expect(dispatched).toEqual(["a1", "a2"]);
+    expect(calls).toEqual(["rate:0:a1", "rate:1:a2"]);
+    // 组级通知只有一份（start 计划归首选，end 记实际赢家）
+    expect(starts).toEqual(["a1:t1"]);
+    expect(completes).toHaveLength(1);
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("a2");
+    expect(completes[0]!.agentId).toBe("a2");
+    expect(outcomes[0]!.logDigest).toContain("[变体] 共 2 个变体");
+    expect(outcomes[0]!.logDigest).toContain("#1 a2 派发成功 · 门 3/3");
+    // 行级钉住两个标记的归属：互为镜像的变异会把「赢家 / 已回退」整体对调、
+    // 或把「首败」印到全过的行上 —— 全局 contains 断言对这两种都视而不见。
+    const lines = outcomes[0]!.logDigest.split("\n");
+    const winnerLine = lines.find((l) => l.startsWith("[变体] #1"))!;
+    const loserLine = lines.find((l) => l.startsWith("[变体] #0"))!;
+    expect(winnerLine).toContain("← 赢家（已回放）");
+    expect(loserLine).toContain("（已回退）");
+    expect(winnerLine).not.toContain("首败");
+    expect(loserLine).toContain("（首败第 1 门）");
+    // 评级各回放一次，赢家最后再回放一次；两个窗口都收尾
+    expect(log.filter((x) => x.startsWith("apply"))).toEqual(["apply:0", "apply:1", "apply:1"]);
+    expect(log.filter((x) => x.startsWith("finish"))).toEqual(["finish:0", "finish:1"]);
+  });
+
+  it("全员平手 → 变体序小者赢（确定性裁决）", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend();
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(2, 2),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(outcomes[0]!.agentId).toBe("a1");
+    expect(log.filter((x) => x.startsWith("apply"))).toEqual(["apply:0", "apply:1", "apply:0"]);
+  });
+
+  it("评级抛错 = 没资格当赢家（排最后），但不改写派发本身的成败", async () => {
+    const dispatched: string[] = [];
+    const { backend } = fakeBackend();
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex) => {
+        if (variantIndex === 0) throw new Error("boom");
+        return rate(0, 4, 0);
+      },
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(outcomes[0]!.agentId).toBe("a2");
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.logDigest).toContain("门 -1/0");
+    expect(outcomes[0]!.logDigest).toContain("评级失败：boom");
+  });
+
+  it("前向镜像失败：中止后续变体、保留现场（不评级/不回放/不改片），digest 说破", async () => {
+    const dispatched: string[] = [];
+    const calls: string[] = [];
+    const { backend, log } = fakeBackend([{ replayable: false, note: "z/f.js（EACCES）" }]);
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex) => {
+        calls.push(`rate:${variantIndex}`);
+        return rate(1, 1);
+      },
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+
+    expect(dispatched).toEqual(["a1"]); // 第二个变体没有被派
+    expect(calls).toEqual([]); // 不评级
+    // 现场保留：不复位、不回放、也不丢弃备份目录（人工能救）
+    expect(log).toEqual(["begin:z1", "capture:0"]);
+    expect(outcomes[0]!.ok).toBe(true);
+    expect(outcomes[0]!.agentId).toBe("a1");
+    expect(outcomes[0]!.logDigest).toContain("前向镜像失败");
+    expect(outcomes[0]!.logDigest).toContain("保留现场");
+    expect(outcomes[0]!.logDigest).toContain("EACCES");
+  });
+
+  it("镜像失败发生在第二个变体：前一个窗口照常收尾，失败窗口留备份", async () => {
+    const dispatched: string[] = [];
+    const completes: DispatchOutcome[] = [];
+    const { backend, log } = fakeBackend([{}, { replayable: false, note: "z/f.js（EACCES）" }]);
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+      onRunComplete: (o) => completes.push(o),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+
+    expect(dispatched).toEqual(["a1", "a2"]);
+    expect(completes).toHaveLength(1);
+    expect(outcomes[0]!.agentId).toBe("a2");
+    expect(outcomes[0]!.logDigest).toContain("第 2/2 个变体前向镜像失败");
+    // v0 已复位 ⇒ 收尾丢备份；v1 是"现场保留"窗口 ⇒ 跳过收尾（备份留盘）
+    expect(log).toEqual(["begin:z1", "capture:0", "revert:0", "begin:z1", "capture:1", "finish:0"]);
+  });
+
+  it("镜像失败不带 note：digest 说「原因未知」，不把 undefined 带出去", async () => {
+    const dispatched: string[] = [];
+    const { backend } = fakeBackend([{ replayable: false }]);
+    const sched = new Scheduler([adapterWith("a1", true, { dispatched })], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(outcomes[0]!.logDigest).toContain("原因未知");
+    expect(outcomes[0]!.logDigest).not.toContain("undefined");
+  });
+
+  it("note 为空串时原样留空（`??` 不是 `||`：空串是有效取值，不该被替换）", async () => {
+    const dispatched: string[] = [];
+    const { backend } = fakeBackend([{ replayable: false, note: "" }]);
+    const sched = new Scheduler([adapterWith("a1", true, { dispatched })], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(outcomes[0]!.logDigest).toContain("不裁决）：\n");
+    expect(outcomes[0]!.logDigest).not.toContain("原因未知");
+  });
+
+  it("派发中叫停（第一个变体）：在途窗口收回派发前后收尾，只此一个窗口", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend();
+    const a1 = adapterCancellingOn("a1", 1, { dispatched });
+    const sched = new Scheduler([a1], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    await expect(sched.runBatch([task("t1", "z1")], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(dispatched).toEqual(["a1"]);
+    // 复位成功 ⇒ 窗口按"已复位"收尾（丢备份）；还没开过第二个窗口
+    expect(log).toEqual(["begin:z1", "revert:0", "finish:0"]);
+  });
+
+  it("派发中叫停（第二个变体）：在飞窗口复位后收尾，已复位窗口一起收尾", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend();
+    const a1 = adapterCancellingOn("a1", 2, { dispatched });
+    const sched = new Scheduler([a1], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    await expect(sched.runBatch([task("t1", "z1")], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(dispatched).toEqual(["a1", "a1"]);
+    expect(log).toEqual([
+      "begin:z1",
+      "capture:0",
+      "revert:0",
+      "begin:z1",
+      "revert:1",
+      "finish:0",
+      "finish:1",
+    ]);
+  });
+
+  it("派发失败且窗口复位也失败：备份留盘（不 finish），原样上抛", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend([], [], { revertCalls: [1] });
+    const a1 = adapterCancellingOn("a1", 1, { dispatched });
+    const sched = new Scheduler([a1], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    await expect(sched.runBatch([task("t1", "z1")], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(log).toEqual(["begin:z1", "revert:0"]);
+    // 收不回 ⇒ 不丢备份目录：现场比干净重要
+    expect(log.filter((x) => x.startsWith("finish"))).toEqual([]);
+  });
+
+  it("裁决期首槽位回退失败：失败窗口留备份，其余照常收尾后再上抛", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend([], [], { revertCalls: [3, 4] });
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => rate(1, 1),
+    });
+    await expect(sched.runBatch([task("t1", "z1")], ".")).rejects.toThrow(/revert boom/);
+    // 回放已经发生（apply:0），但两次复位都失败 ⇒ 只有 v1 被收尾丢备份
+    expect(log.filter((x) => x.startsWith("apply"))).toEqual(["apply:0"]);
+    expect(log.filter((x) => x.startsWith("finish"))).toEqual(["finish:1"]);
+  });
+
+  it("池里只有一个执行器：退回同一执行器补齐（同一适配器派两次）", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend();
+    const only = adapterWith("solo", true, { dispatched });
+    const sched = new Scheduler([only], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex) => (variantIndex === 0 ? rate(0, 2, 1) : rate(2, 2)),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(dispatched).toEqual(["solo", "solo"]);
+    expect(outcomes[0]!.agentId).toBe("solo");
+    expect(outcomes[0]!.logDigest).toContain("#1 solo 派发成功 · 门 2/2");
+    expect(log.filter((x) => x.startsWith("apply"))).toEqual(["apply:0", "apply:1", "apply:1"]);
+  });
+
+  it("两变体都派发失败：赢家仍是评级更优者，ok 照实为 false", async () => {
+    const dispatched: string[] = [];
+    const { backend } = fakeBackend();
+    const a1 = adapterWith("a1", false, { dispatched });
+    const a2 = adapterWith("a2", false, { dispatched });
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex) => (variantIndex === 0 ? rate(1, 3, 1) : rate(0, 3, 0)),
+    });
+    const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+    expect(outcomes[0]!.ok).toBe(false);
+    expect(outcomes[0]!.agentId).toBe("a1");
+    expect(outcomes[0]!.logDigest).toContain("派发失败 · 门 1/3");
+    // 两条都带首败读数（都是非 null 的格子）：三元被换向时这里会集体消失
+    const lines = outcomes[0]!.logDigest.split("\n");
+    expect(lines.find((l) => l.startsWith("[变体] #0"))).toContain("门 1/3（首败第 2 门）");
+    expect(lines.find((l) => l.startsWith("[变体] #1"))).toContain("门 0/3（首败第 1 门）");
+  });
+
+  it("三件套缺一（开关 / 后端 / 评级）都退回单派发路径", async () => {
+    const cases: Array<Record<string, unknown>> = [
+      { variantCount: 1, hasStore: true, hasRater: true },
+      { variantCount: 2, hasStore: true, hasRater: false },
+      { variantCount: 2, hasStore: false, hasRater: true },
+    ];
+    for (const c of cases) {
+      const dispatched: string[] = [];
+      const { backend, log } = fakeBackend();
+      const a1 = adapterWith("a1", true, { dispatched });
+      const sched = new Scheduler([a1], [], {
+        variantCount: c.variantCount as number,
+        ...(c.hasStore ? { variantStore: backend } : {}),
+        ...(c.hasRater ? { rateVariant: async () => rate(1, 1) } : {}),
+      });
+      const outcomes = await sched.runBatch([task("t1", "z1")], ".");
+      expect(dispatched, JSON.stringify(c)).toEqual(["a1"]);
+      expect(log, JSON.stringify(c)).toEqual([]);
+      expect(outcomes[0]!.logDigest, JSON.stringify(c)).not.toContain("[变体]");
+    }
+  });
+
+  it("裁决先于 guard.settle：批次仲裁看到的是赢家落盘后的状态", async () => {
+    const dispatched: string[] = [];
+    const seq: string[] = [];
+    const { backend } = fakeBackend([], seq);
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    const guard = {
+      async begin() {
+        return "scope";
+      },
+      async settle(_scope: unknown, outcomes: DispatchOutcome[]) {
+        seq.push("settle");
+        return { outcomes, conflicts: [], remedies: [] };
+      },
+    };
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async (_task, variantIndex) => (variantIndex === 1 ? rate(2, 2) : rate(0, 2, 0)),
+      guard: guard as unknown as BatchGuard,
+    });
+    await sched.runBatch([task("t1", "z1")], ".");
+    expect(seq[seq.length - 1]).toBe("settle");
+    expect(seq.filter((x) => x.startsWith("apply"))).toEqual(["apply:0", "apply:1", "apply:1"]);
+  });
+
+  it("裁决中叫停：CancelledError 上抛，窗口全部收尾，赢家不回放", async () => {
+    const dispatched: string[] = [];
+    const { backend, log } = fakeBackend();
+    const a1 = adapterWith("a1", true, { dispatched });
+    const a2 = adapterWith("a2", true, { dispatched });
+    let stop = false;
+    const sched = new Scheduler([a1, a2], [], {
+      variantCount: 2,
+      variantStore: backend,
+      rateVariant: async () => {
+        stop = true; // 第一个变体评级后叫停：下一轮迭代开头的检查点命中
+        return rate(1, 3, 0);
+      },
+    });
+    sched.setShouldStop(() => stop);
+    await expect(sched.runBatch([task("t1", "z1")], ".")).rejects.toBeInstanceOf(CancelledError);
+    expect(dispatched).toEqual(["a1", "a2"]);
+    // 只有 v0 的评级回放发生过，赢家回放一次都没有；两个窗口都已收尾
+    expect(log.filter((x) => x.startsWith("apply"))).toEqual(["apply:0"]);
+    expect(log.filter((x) => x.startsWith("finish"))).toEqual(["finish:0", "finish:1"]);
   });
 });
 

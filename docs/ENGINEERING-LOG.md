@@ -19,6 +19,56 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（变体竞争 + 门禁裁决（B4） · 2026-10-19）
+
+竞品缺口 B4（`docs/2026-10-17-competitor-gap.md`）：cezar「同一任务 ×2/×3 比 diff」、
+orca「N 份 diff 人挑」。我们的翻译：**把"人挑 diff"换成"门禁挑 diff"**——同一任务
+多方案 → 门禁裁决 → 交付赢家。
+
+**拍板口径（三项）**：① 顺序就地 + 变体存档、批末回放裁决（不得像赛马那样并发写
+同一 zone）；② 裁决门禁 = verify 命令（首败即停，与终验同口径）+ 契约路径检查，
+各算一门、契约当最后一门；③ 池里没有第二候选时退回同一执行器补齐（采样层面的
+第二次机会）。
+
+**实现**：
+
+- 新 `electron/engine/variant-store.ts`：`VariantWindow`（SnapshotToken + JournalToken）
+  / `VariantCapture`（zone 内净变更 + 前向镜像 + `replayable`）/ `VariantBackend`
+  接口 + `VariantStore` 实现。`beginWindow` = zone 内全量备份 + 全根变更基线；
+  `capture` = 按 zone 过滤净变更 + 变更后内容（读不出 ⇒ `replayable=false` 并留
+  note）；`revert` = 无选择器整窗复位（还原 + 删新建）；`apply` = 前向镜像
+  （`null` = 删除）；`finish` = 丢备份目录。
+- `scheduler.ts`：`variantCount` / `variantStore` / `rateVariant` 三件套齐才开变体
+  路径（否则与从前一字不差）；`runVariantGroup` 顺序派发（成员 = 首选 + 池内去重
+  补齐 + 同执行器回填；silent 派发、逐条如实记 breaker 与限流账）；批末
+  `adjudicateVariants` → `adjudicateOne`（sticky 降级分支，或"回放评级 → 排序 →
+  赢家回放"），裁决在 `guard.settle` **之前**——批账与存档看到的是赢家落盘后的状态。
+  收尾纪律用 `keep`/`applied` 两个指针表达：只有确定已复位的窗口才 `finish` 丢备份；
+  镜像失败/回退失败的窗口留盘保现场（收尾统一走 `finishWindows` 的豁免名单）。
+- `platform.ts`：`fileExistsProbe` 上提（引擎契约检查与评级契约门共用同一事实源）；
+  `VariantStore` 复用 guard 的 `SnapshotStore` 实例（同一 backupRoot、同一批号空间，
+  防同毫秒撞目录名）；评级器抽成导出工厂 `createVariantRater({commands, verify,
+  fileExists})`。
+- 设置链：`ProjectSettings.variantCount`（默认 1）+ schema + headless spec 字段
+  （≥1、floor，错误文案说破"1 = 关闭 / >1 = 顺序多派 + 批末裁决"）。
+
+**测试**：`src/variant-store.test.ts` 4 条（真文件系统：全生命周期、顺序窗口隔离、
+finish 丢备份、先建后删净空）；scheduler 变体 describe 16 条 + `compareVariantRank`
+1 条；platform 评级器/接线 9 条；schema / headless 协议镜像用例若干。全量 2275
+通过（73 文件），此前 2240（72）。
+
+**变异账（这轮的主要工作）**：首轮 site 审计暴露 scheduler 9 处 + platform 7 处
+存活位点——scheduler 全在旧裁决的 continue 循环与 digest 的两个三元上（全局
+`toContain` 抓不住"赢家 / 已回退"整体对调，需要行级断言），platform 全部落在
+`createPlatform` 体内的内联评级闭包上（单测够不着）。杀法：① 重写裁决（删
+`cleanupVariants`、删槽位 `reverted` 字段、消灭裁决路径全部 continue 分支）；
+② 抽出 `createVariantRater` 直接单测（命令全过 / 首败 / 契约缺 / 无命令四格局）；
+③ 补杀点用例（行级 digest 断言、两条取消路径、两槽位 sticky 的收尾豁免、无 note
+与空 note、两个回退失败路径、第三候选显形 `>=` 边界）。复跑：scheduler 64/64、
+platform 37/37、protocol 120/120（新位点 6 处）、schema 62/62、types 6/6，全 100%。
+位点 1861 → **1894**（`site-baseline --write`）；用例 2240 → **2275**（73 文件），
+README / gates.md 同步，`check:doc-claims` PASS。
+
 ### 修复（zone 越权写盘前拒绝 + 测试文件条件化 · 2026-10-18）
 
 **背景（10-18 真演终止事故）**：真跑复验第一轮，`zone=src/core/csv` 的 CSV 任务

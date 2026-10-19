@@ -396,6 +396,16 @@ export interface ProjectSettings {
    */
   raceRedundancy: number;
   /**
+   * 变体竞争（B4，2026-10-19，默认 1 = 关闭）。>1 时每个任务**顺序**派 N 个
+   * 执行器在独立快照窗口里就地跑（派发 → 捕获前向镜像 → 复位），批末按
+   * "回放后的硬门禁读数"（验证命令 + 契约路径检查）裁决，赢家回放、其余
+   * 整体丢弃 —— 拿时间换"同一起点上可比 + 输家可完整回退"。
+   *
+   * 与 `raceRedundancy` 的区别是明确的：赛马并行抢时间、无写入隔离（同 zone
+   * 并发写是它的已知缺陷）；两者同时配置时本项优先。
+   */
+  variantCount: number;
+  /**
    * Providers whose routes share one failover table, in preference order.
    * SenseNova contributes 3 keys × 4 models = 12 routes; AMD adds one more.
    * Empty ⇒ fall back to the single `llmProvider`.
@@ -561,6 +571,7 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   arbitration: DEFAULT_ARBITRATION_MODE,
   maxParallelRuns: 4,
   raceRedundancy: 1,
+  variantCount: 1,
   // 拷贝而非直接引用：`DEFAULT_LLM_POOL` 是 `as const` 只读元组，
   // 而 SettingsStore 允许调用方原地改 load() 出来的数组。
   llmPool: [...DEFAULT_LLM_POOL],

@@ -167,6 +167,7 @@ describe("parseSettings（settings:save 的入参校验，2026-10-13）", () => 
     arbitration: "revert-batch",
     maxParallelRuns: 4,
     raceRedundancy: 1,
+    variantCount: 1,
     llmPool: ["sensenova"],
   };
 
@@ -193,6 +194,7 @@ describe("parseSettings（settings:save 的入参校验，2026-10-13）", () => 
       ["maxRepairRounds", "3"],
       ["maxParallelRuns", 1.5],
       ["raceRedundancy", null],
+      ["variantCount", -1],
       ["agentRouter", "yes"],
       ["llmProvider", 123],
       ["enabledAgents", "sensenova-api"],

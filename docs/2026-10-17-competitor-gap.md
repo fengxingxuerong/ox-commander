@@ -54,6 +54,12 @@
 | B3 | **项目级约定注入（记忆）** | cezar `.ai/skills/*.md`（`project-conventions` 作为 step 的 skill）、firstmate `AGENTS.md` distro、superset 内置 skills | 跨 run 持久化只有 agent 成功率总账（`electron/sandbox/circuit-breaker.ts`）；**无架构说明/约定文档注入机制** | 每次 run 从零推约定是质量天花板。最低形态：项目根一份 `OX.md`/`AGENTS.md`，自动进规划与执行上下文 |
 | B4 | **变体竞争 + 门禁裁决** | cezar「同一任务 ×2/×3 比 diff」、orca「N 份 diff 人挑」 | 无变体；一次一方案 | 与我们的命题**不冲突反而加强**：把"人挑 diff"换成"**门禁挑 diff**"（同一任务两方案 → 门禁裁决 → 交付赢家）。这是把竞品卖点翻译成我们语言的格子 |
 
+> **B4 已于 2026-10-19 落地**（门禁挑 diff，不是人挑）：`variantCount > 1` 时同任务
+> **顺序**派 N 个执行器（就地 + 变体存档），批末统一回放裁决——评级 = 验证命令
+> （首败即停）+ 契约路径检查各算一门，赢家回放、输家回退；前向镜像失败降级
+> "单派发 + 保留现场"并把事实写进 digest。settings 文件与 headless spec 可用；
+> 桌面 SettingsPage 开关记为后续。
+
 ### C 类：产品面空白——一比就缺
 
 | # | 缺口 | 竞品 | 本项目现状 | 代价 |

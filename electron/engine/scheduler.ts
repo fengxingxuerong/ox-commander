@@ -18,6 +18,7 @@ import type { BatchGuard } from "./batch-guard";
 import { createLoopDetector, LoopDetector, type LoopDetectionOptions } from "../sandbox/loop-detector";
 import { classifyFailure } from "../audit-log";
 import { CancelledError, isCancelled } from "./orchestrator";
+import type { VariantBackend, VariantCapture, VariantWindow } from "./variant-store";
 
 export interface DispatchOutcome {
   taskId: string;
@@ -29,6 +30,58 @@ export interface DispatchOutcome {
   durationMs?: number;
   /** Coarse failure class, for grouping in the UI and the audit trail. */
   errorClass?: FailureClass;
+}
+
+/**
+ * 变体裁决的评级读数（B4）：对某个变体**回放后的现场**跑一遍门禁后的结论。
+ *
+ * `passed/total` 是排序主键（通过门数多者优）；同分时 `firstFailIndex` 更晚
+ * （= 跑到更深的门才败）者优，全过（null）最晚；再同 → 变体序小者优。
+ * 评级失败用 `passed = -1` 表示：永远排最后，但不改变"派发本身成败"的事实
+ * —— 裁决只排序，`outcome.ok` 仍取赢家派发的真实结局。
+ */
+export interface VariantRateResult {
+  passed: number;
+  total: number;
+  /** 首个未过门的序号（0-based）；全过 = null。 */
+  firstFailIndex: number | null;
+  /** 人读摘要（进 logDigest）。 */
+  summary: string;
+}
+
+export type VariantRater = (
+  task: Task,
+  variantIndex: number,
+  agentId: string | undefined,
+  projectRoot: string,
+) => Promise<VariantRateResult>;
+
+/**
+ * 变体排序（确定性）：通过门数多者优 → 首败更晚者优（全过最晚）→ 变体序小者优。
+ * 评级失败（passed = -1）自然排最后；全员同分时退回变体序 —— 总有一个赢家。
+ */
+export function compareVariantRank(
+  a: { rate: VariantRateResult; variantIndex: number },
+  b: { rate: VariantRateResult; variantIndex: number },
+): number {
+  if (a.rate.passed !== b.rate.passed) return b.rate.passed - a.rate.passed;
+  const fa = a.rate.firstFailIndex ?? a.rate.total;
+  const fb = b.rate.firstFailIndex ?? b.rate.total;
+  if (fa !== fb) return fb - fa;
+  return a.variantIndex - b.variantIndex;
+}
+
+/** 裁决计划里的一个变体槽位（派发 → 捕获 → 复位 的现场记录）。 */
+interface VariantSlot {
+  win: VariantWindow;
+  capture?: VariantCapture;
+  outcome?: DispatchOutcome;
+}
+
+/** 一个任务的变体裁决计划（批末按任务序逐项裁决）。 */
+interface VariantTaskPlan {
+  task: Task;
+  slots: VariantSlot[];
 }
 
 export const DEFAULT_MAX_PARALLEL_RUNS = 4;
@@ -126,6 +179,22 @@ export interface SchedulerOptions {
    * 全组归因由赢家的 logDigest 承载（成员、各自结局与时长）。
    */
   raceRedundancy?: number;
+  /**
+   * 变体竞争（B4，2026-10-19）：>1 时该任务**顺序**派 N 个执行器（首选 +
+   * 池中候选补齐，无第二候选时退回同一执行器），每个变体在独立窗口里就地跑：
+   * 开窗备份（zone 内）→ 派发 → 捕获前向镜像 → 复位；批内全部任务落定后
+   * 按 `rateVariant` 的回放评级裁决，赢家回放、其余整体丢弃，然后才进
+   * BatchGuard 的批次仲裁。
+   *
+   * 与 `raceRedundancy` 的区别：赛马是并行抢时间、无写入隔离（同 zone 并发
+   * 写是它的已知缺陷）；变体是顺序 + 存档隔离，拿时间换"同一起点上比较"
+   * 与"输家可完整回退"。两者同时配置时本开关优先。默认 1 = 关闭。
+   */
+  variantCount?: number;
+  /** 变体窗口的后端（platform 装配时与 BatchGuard 共用同一 SnapshotStore 实例）。 */
+  variantStore?: VariantBackend;
+  /** 回放评级回调；缺省（或 variantCount = 1）时变体路径整体关闭。 */
+  rateVariant?: VariantRater;
   /**
    * 429 感知派发节流：一次 rate-limit 失败后，下一个排队任务延迟派发
    * （指数退避，封顶 rateLimitMaxBackoffMs），避免在配额墙上继续撞。
@@ -561,6 +630,14 @@ export class Scheduler {
         }
       : null;
 
+    // 变体计划槽：jobs 并发跑，各自把"要裁决的任务"写进自己那格（任务序）；
+    // 裁决在全部 job 落定后按序进行 —— 批状态必须静止，回放评级才可比。
+    const variantPlans: Array<VariantTaskPlan | undefined> = new Array(tasks.length).fill(undefined);
+    const variantCount = Math.max(1, Math.floor(this.opts.variantCount ?? 1));
+    // 三件套齐了才开变体路径：开关 > 1、窗口后端在、评级回调在。缺一 = 关闭。
+    const variantMode =
+      variantCount > 1 && this.opts.variantStore !== undefined && this.opts.rateVariant !== undefined;
+
     const jobs = tasks.map(async (task, i) => {
       const preferred = agentPool[i];
       if (!preferred) {
@@ -597,6 +674,36 @@ export class Scheduler {
       const noteBlock = buildOperatorNoteBlock(task.operatorNote ?? "");
       const description = noteBlock === "" ? withContract : `${withContract}\n${noteBlock}`;
 
+      const startedAt = Date.now();
+      // 载荷构造器在三条路径（单派发 / 赛马 / 变体）间共用：每次调用生成独立
+      // runId —— 同任务的多个成员不能共用 runId，适配器按它归账。
+      const buildPayload = (): TaskPayload => ({
+        runId: `${task.id}-${Date.now()}-${i}-${(dispatchSeq += 1)}`,
+        taskId: task.id,
+        title: task.title,
+        description,
+        zone: task.zone,
+        projectRoot,
+        repairContext: repair,
+        // 中止闸随载荷下发：run 一诞生就挂在引擎的 cancel 上，不等 abortInFlight 补枪。
+        signal: this.abortSignal,
+      });
+
+      // —— 变体竞争路径（B4）：接管本任务，赛马与单派发分支都不走。
+      if (variantMode) {
+        const { placeholder, plan } = await this.runVariantGroup(
+          task,
+          i,
+          preferred,
+          projectRoot,
+          buildPayload,
+          variantCount,
+          startedAt,
+        );
+        variantPlans[i] = plan;
+        return placeholder;
+      }
+
       // 任务级冗余赛马（§5.3）：redundancy > 1 时同任务派 N 个不同执行器并行，
       // 第一个到终态成功者赢，其余 abort。redundancy = 1 保持单派发路径不变。
       // 成员从**整个可用池**取（agentPool 是 per-task 首选分配，单任务批拿不到
@@ -610,21 +717,9 @@ export class Scheduler {
         }
       }
       const members: AgentAdapter[] = [preferred, ...extras].slice(0, redundancy);
-      const startedAt = Date.now();
       // onRunStart 是组级事实（审计 run-start 一条）：planned 归因记首选执行者，
       // 实际赢家由 run-end 承载 —— 与"start 计划 / end 实际"的既有语义一致。
       this.opts.onRunStart?.(members[0]!.meta.id, task);
-      const buildPayload = (): TaskPayload => ({
-        runId: `${task.id}-${Date.now()}-${i}-${(dispatchSeq += 1)}`,
-        taskId: task.id,
-        title: task.title,
-        description,
-        zone: task.zone,
-        projectRoot,
-        repairContext: repair,
-        // 中止闸随载荷下发：run 一诞生就挂在引擎的 cancel 上，不等 abortInFlight 补枪。
-        signal: this.abortSignal,
-      });
 
       if (members.length === 1) {
         return await this.dispatchOne(members[0]!, task, buildPayload(), { startedAt });
@@ -716,15 +811,243 @@ export class Scheduler {
     });
     const outcomes = await Promise.all(jobs);
 
+    // 变体裁决（B4）：批状态已静止，按任务序回放评级、定赢家、回放赢家/丢弃
+    // 落选者。必须在 guard.settle **之前** —— 批次仲裁与存档看到的是赢家落盘
+    // 后的状态，落选变体的写入一分钟都不能混进批账。
+    const settled = variantMode
+      ? await this.adjudicateVariants(variantPlans, outcomes, projectRoot)
+      : outcomes;
+
     // Zone violations are detected, rolled back and adjudicated by the guard.
     // Without one there is no post-batch check at all: the sandbox still
     // fail-closes every individual write, but nothing can attribute an
     // unauthorized write to the batch that caused it.
     if (settlement) {
-      const verdict = await settlement.guard.settle(settlement.scope, outcomes);
+      const verdict = await settlement.guard.settle(settlement.scope, settled);
       return verdict.outcomes;
     }
-    return outcomes;
+    return settled;
+  }
+
+  /**
+   * 变体组：顺序派发 N 个成员，每个成员一个独立窗口（备份 → 派发 → 捕获 →
+   * 复位）。成员 silent（通知/账目由裁决层统一发，与赛马同一套口径）。
+   *
+   * 返回 `placeholder`（最后一个成员的原始结局，裁决后会被替换 —— 若裁决
+   * 阶段因取消中断，任务结局本就不该被消费）与供批末裁决的计划。
+   */
+  private async runVariantGroup(
+    task: Task,
+    taskIndex: number,
+    preferred: AgentAdapter,
+    projectRoot: string,
+    buildPayload: () => TaskPayload,
+    variantCount: number,
+    startedAt: number,
+  ): Promise<{ placeholder: DispatchOutcome; plan: VariantTaskPlan }> {
+    const store = this.opts.variantStore!;
+    const members: AgentAdapter[] = [preferred];
+    for (const a of await this.availableAgents()) {
+      if (members.length >= variantCount) break;
+      if (members.some((m) => m.meta.id === a.meta.id)) continue;
+      members.push(a);
+    }
+    // 无第二候选：按拍板口径退回同一执行器补齐（采样层面的第二次机会）。
+    while (members.length < variantCount) {
+      members.push(preferred);
+    }
+
+    this.opts.onRunStart?.(members[0]!.meta.id, task);
+    const slots: VariantSlot[] = [];
+    for (let v = 0; v < members.length; v += 1) {
+      const member = members[v]!;
+      const win = await store.beginWindow({
+        runId: `v-${task.id}-${v}-${Date.now().toString(36)}-${taskIndex}-${(dispatchSeq += 1)}`,
+        root: projectRoot,
+        zone: task.zone,
+      });
+      const slot: VariantSlot = { win };
+      slots.push(slot);
+      try {
+        slot.outcome = await this.dispatchOne(member, task, buildPayload(), {
+          silent: true,
+          startedAt,
+        });
+      } catch (err) {
+        // 取消等异常：在途窗口先收回派发前，原样上抛；收得回的窗口照常收尾
+        // （丢备份），收不回的那一个把备份留在盘上保现场 —— 不给裁决层递半成品。
+        const reset = await store.revert(slot.win).then(
+          () => true,
+          () => false,
+        );
+        const droppable = slots.slice(0, -1);
+        if (reset) droppable.push(slot);
+        for (const s of droppable) await store.finish(s.win);
+        throw err;
+      }
+      slot.capture = store.capture(win, { variantIndex: v, agentId: member.meta.id });
+      // 变体成员逐条如实记账（与单派发同一语义）：终态失败是真实失败，照记
+      // breaker 与限流账；"输给裁决"发生在批次后，不是执行失败，不在此记账。
+      this.opts.breaker?.record(member.meta.id, slot.outcome.ok);
+      this.noteRateLimit(slot.outcome.errorClass);
+      if (!slot.capture.replayable) {
+        // 前向镜像失败：现场保留（不复位），中止后续变体 —— 已经写下的东西
+        // 还原不了，硬还原只会把交付弄丢。裁决层据此走"保留现场"降级路径。
+        break;
+      }
+      // 复位到派发前：下一变体在同一起点起跑（顺序就地）。
+      await store.revert(win);
+    }
+    const placeholder = slots[slots.length - 1]!.outcome!;
+    return { placeholder, plan: { task, slots } };
+  }
+
+  /**
+   * 批末变体裁决（按任务序）：逐任务交给 `adjudicateOne`。变体批次里"无人
+   * 可用"的任务没有窗口（计划槽缺位），结局原样放行。
+   */
+  private async adjudicateVariants(
+    plans: Array<VariantTaskPlan | undefined>,
+    outcomes: DispatchOutcome[],
+    projectRoot: string,
+  ): Promise<DispatchOutcome[]> {
+    const final = [...outcomes];
+    for (let i = 0; i < plans.length; i += 1) {
+      const plan = plans[i];
+      if (plan) {
+        final[i] = await this.adjudicateOne(plan, projectRoot);
+      }
+    }
+    return final;
+  }
+
+  /**
+   * 单任务裁决：逐变体回放评级（apply → rate → revert），确定性排序出赢家，
+   * 回放赢家并清场。评级/回放中任何异常都要先把现场收回派发前再上抛。
+   *
+   * 收尾纪律（finally 里的 `finish`）：只有**确定已复位**的窗口才丢弃备份
+   * 目录。前向镜像失败（`keep` = sticky）或回退失败的窗口把备份留在盘上 ——
+   * 现场比干净重要，收尾统一走 `finishWindows` 的豁免名单，不做二次判断。
+   */
+  private async adjudicateOne(plan: VariantTaskPlan, projectRoot: string): Promise<DispatchOutcome> {
+    const store = this.opts.variantStore!;
+    const { task, slots } = plan;
+    /** 可能未复位的窗口（镜像失败 / 回退失败）：跳过收尾，备份留盘保现场。 */
+    let keep: VariantSlot | undefined;
+    /** 已回放、尚未复位收口的窗口：异常时按它补一次复位。 */
+    let applied: VariantSlot | undefined;
+    try {
+      const sticky = slots.find((s) => s.capture !== undefined && !s.capture.replayable);
+      if (sticky) {
+        // 前向镜像失败：现场已保留（该窗口未复位），后续变体已中止；不评级、
+        // 不回放 —— 降级成"单派发"语义，把事实写进 digest。
+        keep = sticky;
+        const out = sticky.outcome!;
+        const merged: DispatchOutcome = {
+          ...out,
+          logDigest: [
+            `[变体] 第 ${sticky.capture!.variantIndex + 1}/${slots.length} 个变体前向镜像失败，` +
+              `中止后续变体并保留现场（不裁决）：${sticky.capture!.note ?? "原因未知"}`,
+            out.logDigest,
+          ]
+            .filter(Boolean)
+            .join("\n"),
+        };
+        this.opts.onRunComplete?.(merged, task);
+        return merged;
+      }
+
+      const rated: Array<{ slot: VariantSlot; rate: VariantRateResult }> = [];
+      for (const slot of slots) {
+        if (this.shouldStop()) throw new CancelledError();
+        applied = slot;
+        store.apply(slot.win, slot.capture!);
+        const rate = await this.rateWith(task, slot, projectRoot);
+        // 无论评级成败都复位：下一变体在同一起点上回放。
+        await store.revert(slot.win);
+        applied = undefined;
+        rated.push({ slot, rate });
+      }
+
+      const winner = [...rated].sort((a, b) =>
+        compareVariantRank(
+          { rate: a.rate, variantIndex: a.slot.capture!.variantIndex },
+          { rate: b.rate, variantIndex: b.slot.capture!.variantIndex },
+        ),
+      )[0]!;
+      // 赢家回放完即"终态落盘"：撤掉豁免，让收尾照常丢弃它的备份。
+      applied = winner.slot;
+      store.apply(winner.slot.win, winner.slot.capture!);
+      applied = undefined;
+      const merged: DispatchOutcome = {
+        ...winner.slot.outcome!,
+        logDigest: [
+          `[变体] 共 ${slots.length} 个变体（顺序就地 + 批末回放裁决）`,
+          ...rated.map(
+            ({ slot, rate }) =>
+              `[变体] #${slot.capture!.variantIndex} ${slot.capture!.agentId ?? "?"} ` +
+              `${slot.outcome!.ok ? "派发成功" : "派发失败"} · 门 ${rate.passed}/${rate.total}` +
+              `${rate.firstFailIndex === null ? "" : `（首败第 ${rate.firstFailIndex + 1} 门）`} · ` +
+              `变更 ${slot.capture!.changes.length} 文件 · ${rate.summary}` +
+              (slot === winner.slot ? " ← 赢家（已回放）" : "（已回退）"),
+          ),
+          winner.slot.outcome!.logDigest,
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      };
+      this.opts.onRunComplete?.(merged, task);
+      return merged;
+    } catch (err) {
+      // 取消/异常：把已回放未收口的窗口收回派发前再上抛；收不回的窗口
+      // 转入收尾豁免，备份留盘。
+      if (applied) {
+        try {
+          await store.revert(applied.win);
+          applied = undefined;
+        } catch {
+          keep = applied;
+        }
+      }
+      throw err;
+    } finally {
+      await this.finishWindows(store, slots, keep);
+    }
+  }
+
+  /** 评级：回调抛错 = 没资格当赢家（passed = -1），不改派发本身的成败。 */
+  private async rateWith(
+    task: Task,
+    slot: VariantSlot,
+    projectRoot: string,
+  ): Promise<VariantRateResult> {
+    try {
+      return await this.opts.rateVariant!(
+        task,
+        slot.capture!.variantIndex,
+        slot.capture!.agentId,
+        projectRoot,
+      );
+    } catch (err) {
+      return {
+        passed: -1,
+        total: 0,
+        firstFailIndex: null,
+        summary: `评级失败：${(err as Error).message}`,
+      };
+    }
+  }
+
+  /** 收尾：丢弃各窗口的备份目录；`keep`（未复位/镜像失败）的窗口跳过。 */
+  private async finishWindows(
+    store: VariantBackend,
+    slots: readonly VariantSlot[],
+    keep?: VariantSlot,
+  ): Promise<void> {
+    for (const slot of slots) {
+      if (slot === keep) continue;
+      await store.finish(slot.win);
+    }
   }
 
   /**

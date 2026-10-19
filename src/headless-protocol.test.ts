@@ -579,6 +579,46 @@ describe("parseSpec · raceRedundancy（CLI/桌面能力差收口）", () => {
   });
 });
 
+describe("parseSpec · variantCount（B4 变体竞争的宿主开关）", () => {
+  it("合法值流进 settings；省略时是内置默认 1（关闭），且都不产生警告", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, variantCount: 3 }));
+    expect(spec.settings.variantCount).toBe(3);
+    expect(spec.warnings).toEqual([]);
+
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.variantCount).toBe(DEFAULT_SETTINGS.variantCount);
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("0 / 负数 / 非数字都被拒绝 —— 调度器会把它们夹成 1，协议层不留这种巧合", () => {
+    for (const bad of [0, -2, Number.NaN, "two", null]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, variantCount: bad }));
+      expect(r.ok, `variantCount=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("variantCount");
+    }
+  });
+
+  it("小数向下取整（变体份数是整数）", () => {
+    expect(parse(JSON.stringify({ ...LEGACY_SPEC, variantCount: 2.9 })).settings.variantCount).toBe(2);
+  });
+
+  it("1e999 溢出成 Infinity 也被拒（漏过会被当成无限份顺序派发）", () => {
+    const r = parseSpec('{"requirement":"x","projectRoot":".","variantCount":1e999}');
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.message).toContain("variantCount");
+  });
+
+  it("协议与平台两头对得上：值真的进了调度器选项", () => {
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, variantCount: 3 }));
+    const platform = createPlatform({
+      settings: spec.settings,
+      promptDir: scratch("variant"),
+      host: { log: () => undefined },
+    });
+    expect(platform.schedulerOptions().variantCount).toBe(3);
+  });
+});
+
 describe("parseSpec · disabledKeyVars（账号级停用开关）", () => {
   it("合法数组流进 settings；空数组 = 全部启用；省略时不产生警告", () => {
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, disabledKeyVars: ["SENSENOVA_API_KEY_2"] }));

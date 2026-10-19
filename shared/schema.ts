@@ -293,6 +293,7 @@ export function parseSettings(raw: unknown): ProjectSettings {
   nonNegativeInt(o, "maxRepairRounds", issues);
   nonNegativeInt(o, "maxParallelRuns", issues);
   nonNegativeInt(o, "raceRedundancy", issues);
+  nonNegativeInt(o, "variantCount", issues);
   finiteNumber(o, "maxTokensPerRun", issues);
   finiteNumber(o, "runWallClockMs", issues);
   finiteNumber(o, "brainTimeoutMs", issues);

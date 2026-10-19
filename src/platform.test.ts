@@ -8,14 +8,23 @@ import {
   contextSourcesFor,
   createFileJournal,
   createPlatform,
+  createVariantRater,
   deliveryRemoteHookFor,
   executorTimeoutMsFor,
 } from "../electron/platform";
 import { createAgentLayer } from "../electron/agents";
+import type { VariantRateResult } from "../electron/engine/scheduler";
 import { buildLlmPool } from "../shared/build-llm";
 import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import { SENSENOVA_MODELS } from "../shared/providers";
-import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
+import {
+  DEFAULT_SETTINGS,
+  type ProjectSettings,
+  type Task,
+  type VerificationCommand,
+  type VerificationKind,
+  type VerificationReport,
+} from "../shared/types";
 import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
 
 /**
@@ -62,6 +71,14 @@ interface ConcreteSchedulerOptions {
   breaker?: unknown;
   onRunStart?: (agentId: string, task: unknown) => void;
   onRunComplete?: (outcome: unknown, task: unknown) => void;
+  variantCount?: number;
+  variantStore?: unknown;
+  rateVariant?: (
+    task: Task,
+    variantIndex: number,
+    agentId: string | undefined,
+    projectRoot: string,
+  ) => Promise<VariantRateResult>;
 }
 
 function options(platform: ReturnType<typeof createPlatform>): ConcreteSchedulerOptions {
@@ -1064,5 +1081,163 @@ describe("createPlatform · 只读外部上下文源接线（P2-1 本地半边�
   it("fetch 拿不到（非法 repo）：抛错且原因可见 —— 交给引擎那句 [context] 失败日志", async () => {
     const srcs = contextSourcesFor(settings({ contextSources: [{ kind: "issues", repo: "bad;repo" }] }));
     await expect(srcs[0]!.fetch()).rejects.toThrow(/仓库名不合法/);
+  });
+});
+
+/**
+ * 变体评级器（B4）。此前它作为闭包活在 `createPlatform` 体内，单测够不着 ——
+ * 变异审计在 platform.ts 的存活点（`|| → &&`、契约 `=== 0`、四个三元分支）
+ * 全都落在这一段上。抽成 `createVariantRater` 后用注入依赖逐位钉死。
+ */
+describe("createVariantRater · 变体评级的门禁口径（B4）", () => {
+  const cmd = (kind: VerificationKind): VerificationCommand => ({ kind, command: "node", args: ["-v"] });
+  function report(results: Array<{ kind: VerificationKind; ok: boolean }>): VerificationReport {
+    return {
+      passed: results.every((r) => r.ok),
+      results: results.map((r) => ({ ...r, exitCode: r.ok ? 0 : 1, logDigest: "", durationMs: 0 })),
+    };
+  }
+  /** 点名文件的声明描述（契约门的目标在 zone 内 ⇒ 归属唯一，可判缺）。 */
+  const TASK: Task = {
+    id: "t1",
+    title: "t1",
+    description: "交付 src/app/greet.js",
+    zone: "src/app",
+    dependencies: [],
+    suggestedRole: "fullstack-dev",
+  };
+
+  it("命令全过 + 契约在场：满分，首败为 null，摘要逐条念命令与契约", async () => {
+    const rater = createVariantRater({
+      commands: [cmd("build"), cmd("test")],
+      verify: async () => report([{ kind: "build", ok: true }, { kind: "test", ok: true }]),
+      fileExists: () => true,
+    });
+    const rate = await rater(TASK, 0, "a1", "/root");
+    expect(rate.passed).toBe(3); // 2 命令 + 契约
+    expect(rate.total).toBe(3);
+    expect(rate.firstFailIndex).toBeNull();
+    expect(rate.summary).toContain("build✓·test✓");
+    expect(rate.summary).toContain("契约✓");
+    expect(rate.summary).not.toContain("✗");
+  });
+
+  it("命令首败即停：passed 少一个、首败序号取实测位；契约照算", async () => {
+    // 验证器首败即停 ⇒ results 是前缀。build 过、test 败，第三条没跑。
+    const rater = createVariantRater({
+      commands: [cmd("build"), cmd("test"), cmd("typecheck")],
+      verify: async () => report([{ kind: "build", ok: true }, { kind: "test", ok: false }]),
+      fileExists: () => true,
+    });
+    const rate = await rater(TASK, 0, "a1", "/root");
+    expect(rate.passed).toBe(2); // build✓ + 契约✓；test 没资格
+    expect(rate.total).toBe(4);
+    expect(rate.firstFailIndex).toBe(1); // 第二门（0-based）败
+    expect(rate.summary).toContain("test✗");
+  });
+
+  it("命令全过但契约缺：契约当最后一门，首败 = 命令条数", async () => {
+    const rater = createVariantRater({
+      commands: [cmd("build"), cmd("test")],
+      verify: async () => report([{ kind: "build", ok: true }, { kind: "test", ok: true }]),
+      fileExists: (_root, rel) => rel !== "src/app/greet.js",
+    });
+    const rate = await rater(TASK, 0, "a1", "/root");
+    expect(rate.passed).toBe(2); // 命令全过；契约没算
+    expect(rate.total).toBe(3);
+    expect(rate.firstFailIndex).toBe(2); // 命令 2 条 → 缺契约记在第 3 门
+    expect(rate.summary).toContain("契约✗（缺 src/app/greet.js）");
+  });
+
+  it("没有验证命令：摘要说破「无验证命令」，不是空串", async () => {
+    // `join("·") || "（无验证命令）"` 的空串位点：命令无 + 契约在场 ⇒ 这句必须出现。
+    const rater = createVariantRater({
+      commands: [],
+      verify: async () => report([]),
+      fileExists: () => true,
+    });
+    const rate = await rater(TASK, 0, "a1", "/root");
+    expect(rate.passed).toBe(1);
+    expect(rate.total).toBe(1);
+    expect(rate.firstFailIndex).toBeNull();
+    expect(rate.summary).toContain("（无验证命令）");
+  });
+
+  it("没有验证命令且契约也缺：首败 = 0（第一门就是契约）", async () => {
+    const rater = createVariantRater({
+      commands: [],
+      verify: async () => report([]),
+      fileExists: () => false,
+    });
+    const rate = await rater(TASK, 0, "a1", "/root");
+    expect(rate.passed).toBe(0);
+    expect(rate.firstFailIndex).toBe(0);
+    expect(rate.summary).toContain("契约✗（缺 src/app/greet.js）");
+  });
+});
+
+describe("createPlatform · 变体竞争接线（B4）", () => {
+  it("variantCount=1（缺省）不建评级器（开关关闭）", () => {
+    const platform = createPlatform({
+      settings: settings(),
+      promptDir: tempDir(),
+      snapshotRoot: tempDir(),
+      host: { log: () => undefined },
+    });
+    expect(options(platform).variantCount).toBe(1);
+    expect(options(platform).rateVariant).toBeUndefined();
+  });
+
+  it("variantCount=3：开关值原样过桥、评级器交给调度器", () => {
+    const platform = createPlatform({
+      settings: settings({ variantCount: 3 }),
+      promptDir: tempDir(),
+      snapshotRoot: tempDir(),
+      host: { log: () => undefined },
+    });
+    expect(options(platform).variantCount).toBe(3);
+    expect(typeof options(platform).rateVariant).toBe("function");
+  });
+
+  it("装配出的评级器真跑一遍：空命令 + 契约缺 ⇒ 第一门就是契约", async () => {
+    // 端到端接线（走真实 verifyProject 链）：命令无 ⇒ 只有契约一门。
+    const root = tempDir();
+    const platform = createPlatform({
+      settings: settings({ variantCount: 2, verificationCommands: [] }),
+      promptDir: tempDir(),
+      snapshotRoot: tempDir(),
+      host: { log: () => undefined },
+    });
+    const rater = options(platform).rateVariant!;
+    const t: Task = {
+      id: "t1",
+      title: "t1",
+      description: "交付 src/app/missing.js",
+      zone: "src/app",
+      dependencies: [],
+      suggestedRole: "fullstack-dev",
+    };
+    const rate = await rater(t, 0, "a1", root);
+    expect(rate.passed).toBe(0);
+    expect(rate.total).toBe(1);
+    expect(rate.firstFailIndex).toBe(0);
+    expect(rate.summary).toContain("（无验证命令）");
+    expect(rate.summary).toContain("契约✗（缺 src/app/missing.js）");
+  });
+
+  it("快照根给了就有窗口后端；没给就没有（与 guard 同一条生命条件）", () => {
+    const withRoot = createPlatform({
+      settings: settings({ variantCount: 2 }),
+      promptDir: tempDir(),
+      snapshotRoot: tempDir(),
+      host: { log: () => undefined },
+    });
+    const withoutRoot = createPlatform({
+      settings: settings({ variantCount: 2 }),
+      promptDir: tempDir(),
+      host: { log: () => undefined },
+    });
+    expect(options(withRoot).variantStore).toBeDefined();
+    expect(options(withoutRoot).variantStore).toBeUndefined();
   });
 });

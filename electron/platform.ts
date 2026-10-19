@@ -15,12 +15,12 @@
 import fs from "node:fs";
 import path from "node:path";
 import { writeFileAtomic } from "./atomic-file";
-import { OrchestratorEngine, Scheduler, verifyProject } from "./engine";
+import { OrchestratorEngine, Scheduler, VariantStore, verifyProject } from "./engine";
 import { exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
 import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from "./engine/git-remote";
 import { fetchGithubContext } from "./context/github-readonly";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
-import type { DispatchOutcome } from "./engine/scheduler";
+import type { DispatchOutcome, VariantRater } from "./engine/scheduler";
 import type { BatchScope, BatchVerdict } from "./engine/batch-guard";
 import { createAgentLayer, agentRoutingLogLine, type AgentLayer } from "./agents";
 import { ActionGate } from "./sandbox/action-gate";
@@ -29,6 +29,7 @@ import { EXECUTOR_TIMEOUT_MS, type LineHealth } from "../shared/http-clients";
 import type { LlmClient } from "../shared/llm-client";
 import { budgetBlindNote, formatUsageLine, meteredLlm, UsageMeter, type UsageSnapshot } from "../shared/usage-meter";
 import { formatReceiptLine, pairConflict, type ReceiptConflict } from "../shared/delivery-receipt";
+import { checkContractPaths } from "../shared/zone-coverage";
 import {
   commandPolicyOverrides,
   describePolicy,
@@ -77,6 +78,39 @@ export function brainTimeoutMsFor(settings: Pick<ProjectSettings, "brainTimeoutM
 export function executorTimeoutMsFor(settings: Pick<ProjectSettings, "executorTimeoutMs">): number {
   const v = settings.executorTimeoutMs;
   return v !== undefined && v > 0 ? v : EXECUTOR_TIMEOUT_MS;
+}
+
+/**
+ * 变体评级工厂（B4）：对一个变体**回放后的现场**跑一遍门禁的结论。
+ *
+ * 评级 = 验证命令 + 契约路径检查，各算一门：命令按配置顺序跑（首败即停，
+ * 与终验同一短路口径），契约当最后一门 —— 命令全过但点名的文件没交出来，
+ * 照样不算过。抽成工厂（依赖注入而非直接读 settings）是为了让平台真正
+ * 装配的那个评级器可被单测钉死：闭包原本藏在 `createPlatform` 体内，
+ * 测试只够得着它的镜像，变异审计在体外的存活点就是从这来的。
+ */
+export function createVariantRater(deps: {
+  commands: readonly VerificationCommand[];
+  verify: (projectRoot: string) => Promise<VerificationReport>;
+  fileExists: (root: string, rel: string) => boolean;
+}): VariantRater {
+  const { commands, verify, fileExists } = deps;
+  return async (task, _variantIndex, _agentId, projectRoot) => {
+    const report = await verify(projectRoot);
+    const passedCommands = report.results.filter((r) => r.ok).length;
+    const cmdFail = report.results.findIndex((r) => !r.ok);
+    const contract = checkContractPaths([task], (rel) => fileExists(projectRoot, rel));
+    const contractOk = contract.gaps.length === 0;
+    return {
+      passed: passedCommands + (contractOk ? 1 : 0),
+      total: commands.length + 1,
+      firstFailIndex: cmdFail >= 0 ? cmdFail : contractOk ? null : commands.length,
+      summary: [
+        report.results.map((r) => `${r.kind}${r.ok ? "✓" : "✗"}`).join("·") || "（无验证命令）",
+        `契约${contractOk ? "✓" : `✗（缺 ${contract.gaps.map((g) => g.path).join("、")}）`}`,
+      ].join(" · "),
+    };
+  };
 }
 
 /** What the platform needs to know about its host. */
@@ -408,6 +442,10 @@ export function createPlatform(config: PlatformConfig): Platform {
     onRunComplete: host.onRunComplete,
     // 任务级冗余赛马（§5.3）：默认 1 = 关闭；>1 时同任务并行派 N 个执行器。
     raceRedundancy: settings.raceRedundancy,
+    // 变体竞争（B4）：默认 1 = 关闭；>1 时该任务顺序多派 + 批末回放裁决。
+    variantCount: settings.variantCount,
+    variantStore,
+    rateVariant,
     // One gate per platform (= per project): the scheduler feeds it every
     // agent log line, the engine resets it at batch boundaries, the verifier
     // queries it before spawning. All three hold the same instance.
@@ -517,6 +555,32 @@ export function createPlatform(config: PlatformConfig): Platform {
       ...(approvalGate ? { approvalGate } : {}),
     });
 
+  /**
+   * 契约路径探针：宿主注入优先，缺省 = 真 `existsSync`。两处消费 ——
+   * 引擎 Stage 3.5 的契约检查与变体裁决的契约门（同一语义，不能各算各的）。
+   */
+  const fileExistsProbe =
+    config.fileExists ?? ((root: string, rel: string) => fs.existsSync(path.join(root, rel)));
+
+  /**
+   * 变体竞争（B4）：开关在 settings（默认 1 = 关）。窗口后端必须复用 guard 的
+   * `SnapshotStore` 实例 —— 同一 backupRoot、同一批号空间，另起实例会同毫秒
+   * 撞目录名（与 IPC 层读存档同一条纪律）。
+   *
+   * 评级 = 该变体**回放后的现场**上跑一遍验证命令 + 契约路径检查，各算一门：
+   * 命令按 settings.verificationCommands 顺序跑（首败即停，与终验同一短路口径），
+   * 契约当最后一门 —— 命令全过但点名的文件没交出来，照样不算过。
+   */
+  const variantStore = layer.snapshots ? new VariantStore(layer.snapshots) : undefined;
+  const rateVariant: VariantRater | undefined =
+    settings.variantCount > 1
+      ? createVariantRater({
+          commands: settings.verificationCommands,
+          verify: (root) => runVerification(settings.verificationCommands, () => root),
+          fileExists: fileExistsProbe,
+        })
+      : undefined;
+
   // 远端分发（5.7 远端半边）：没配 / `mode:"off"` ⇒ `undefined`，引擎侧判空即"没接"。
   // 刻意**不用三元**拼 deps —— "接不接"是引擎的判空语义，宿主这里不该再长一个
   // 不可观察的分支（那种分支在变异审计里活下来只能靠登记等价锚点，是纯负债）。
@@ -558,7 +622,7 @@ export function createPlatform(config: PlatformConfig): Platform {
       actionGate: gate,
       // 契约路径合规的探针。引擎已把路径过成"干净相对路径"（`isProbeableRel`），
       // 所以这里只做 join + existsSync，不在两处重复判定。
-      fileExists: config.fileExists ?? ((root, rel) => fs.existsSync(path.join(root, rel))),
+      fileExists: fileExistsProbe,
       // 审批门与 actionGate 同一生命单位：批次边界一起 reset（"本批次已批准"不该跨批）。
       ...(approvalGate ? { approvalGate } : {}),
     },

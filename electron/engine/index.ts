@@ -1,4 +1,17 @@
-export { Scheduler, digest, type DispatchOutcome } from "./scheduler";
+export {
+  Scheduler,
+  digest,
+  compareVariantRank,
+  type DispatchOutcome,
+  type VariantRateResult,
+  type VariantRater,
+} from "./scheduler";
+export {
+  VariantStore,
+  type VariantBackend,
+  type VariantCapture,
+  type VariantWindow,
+} from "./variant-store";
 export { verifyProject, type VerifierDeps } from "./verifier";
 export { ZoneGuard, isInsideZone, type WorkspaceSnapshot, type WorkspaceDiff } from "./zone-guard";
 export {
