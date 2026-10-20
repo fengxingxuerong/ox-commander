@@ -53,8 +53,12 @@ function splitForStream(text, size) {
 /**
  * 假大脑：按脚本依次应答，并把每轮收到的 messages 攒下来供断言。
  *
- * `sse: true` 时按请求里的 `stream` 字段决定要不要真发 SSE：不发（`sse: false`）
- * 就是"端点把 stream 当未知字段忽略"的形状，用来验**零增量退回**这条路径。
+ * `sse: true` 时按请求里的 `stream` 字段决定要不要真发 SSE。
+ *
+ * ⚠️ 脚本**只在"这次应答会被用上"时才消耗**：客户端先发一次流式请求，端点不认
+ * `stream` 时会再发一次整段请求（零增量退回）。假端点若在流式那一次也 shift，
+ * 脚本就会整体错位一格 —— 表现是"第二轮没拿到工具结果""只问了一次审批"，
+ * 看起来像平台坏了，其实是假的端点把脚本吃重了。所以流式尝试一律**偷看**不消耗。
  */
 function startFakeBrain(replies, { sse = false } = {}) {
   const requests = [];
@@ -64,10 +68,12 @@ function startFakeBrain(replies, { sse = false } = {}) {
     req.on("end", () => {
       const parsed = JSON.parse(body);
       requests.push(parsed);
-      const next = replies.shift();
-      if (sse && parsed.stream === true) {
+      const peek = replies[0];
+      const isStreamAttempt = parsed.stream === true;
+      if (sse && isStreamAttempt) {
+        const mine = replies.shift();
         res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
-        const text = (next?.message?.content ?? "(脚本用完)").toString();
+        const text = (mine?.message?.content ?? "(脚本用完)").toString();
         for (const piece of splitForStream(text, 6)) {
           res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece } }] })}\n\n`);
         }
@@ -78,6 +84,9 @@ function startFakeBrain(replies, { sse = false } = {}) {
         res.end();
         return;
       }
+      // 端点不认 `stream`：形状是整段 JSON（客户端因此判零增量、退回重问），
+      // 内容照给 —— 但**不消耗脚本**，重问那一次才该拿走这一份。
+      const next = isStreamAttempt ? peek : replies.shift();
       if (!next) {
         res.writeHead(200, { "content-type": "application/json" });
         res.end(JSON.stringify({ choices: [{ message: { content: "(脚本用完)" } }], model: "fake" }));
@@ -176,10 +185,12 @@ async function scenario_toolLoop() {
     "tool_result",
     "assistant",
   ].every((k) => t.entries.some((e) => e.kind === k)), JSON.stringify(t.entries.map((e) => e.kind)));
-  const second = brain.requests[1];
+  // 按内容找而不是按下标：端点不认 stream 时同一轮会有两次请求（先试流、后退
+  // 整段），下标会漂；"工具结果有没有回到请求里"才是要钉的事实。
   check(
-    "第二轮请求里带着 read_file 的真内容（不是模型假装读过）",
-    JSON.stringify(second.messages).includes("const a = 1;"),
+    "后续某一轮请求里带着 read_file 的真内容（不是模型假装读过）",
+    brain.requests.some((r) => JSON.stringify(r.messages ?? []).includes("const a = 1;")),
+    JSON.stringify(brain.requests.map((r) => ({ stream: r.stream, msgs: (r.messages ?? []).length }))),
   );
   check(
     "补丁真的落了盘，且只动那一行",
@@ -238,8 +249,8 @@ async function scenario_approval() {
 
   check("第一次被拒 ⇒ 问人的那一刻盘上还没有那个文件", existedAtFirstAsk === false, JSON.stringify(existedAtFirstAsk));
   check(
-    "拒绝理由回灌进了第二轮的请求（否则模型只会原样重试同一个动作）",
-    JSON.stringify(brain.requests[1]?.messages ?? []).includes("别新建这个文件"),
+    "拒绝理由回灌进了后续的请求（否则模型只会原样重试同一个动作）",
+    brain.requests.some((r) => JSON.stringify(r.messages ?? []).includes("别新建这个文件")),
   );
   check("第二次批准 ⇒ 文件落了盘", fs.existsSync(path.join(project, "guarded.txt")));
   check("答过『本会话不再问』之后没有再打扰人", answers.length === 2, `实际问了 ${answers.length} 次`);
