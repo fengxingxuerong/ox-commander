@@ -67,6 +67,54 @@
 
 **明确未做（P1）**：流式 token、上下文压缩、多会话并行、MCP client、审批持久规则、
 模型/推理档切换、`@` 文件补全、网络隔离；`danger-full-access` 仍受代码地板约束。
+（其中「流式 token」已于同日稍后落地，见下一节。）
+
+### 新增（流式 token · P1-1 · 2026-10-20）
+
+**动机**：P0 的会话循环是"等模型把整段话说完再显示"，长答复期间界面看着像卡住；Codex 类
+产品的手感就来自"字一个一个到"。而流式能不能用**不能靠端点文档声明** —— 兼容层把
+`stream` 当未知字段忽略是常态，声明支持的也可能直接回一整段 JSON。
+
+**实现**：
+
+- `shared/sse.ts`（新，纯逻辑）：`createSseDecoder` 按行切（跨 chunk 边界、`\r\n`、
+  多行 `data:`、`:` 心跳注释）；OpenAI 与 Anthropic 两套聚合器分别把 `choices[].delta`
+  与 `content_block_*` 事件收成"正文 + reasoning + 工具碎片"，工具参数按 `index` 拼成
+  字符串再整段 `JSON.parse`；坏帧进 `problems` 而不是抛异常 —— 解析器的错不该变成模型的错。
+- `shared/http-clients.ts`：新增 `postSse`（拿不到流句柄的响应按同一条 SSE 口径再切一遍，
+  否则整份 SSE 文本会被当成**一条** `data`）；两个客户端 `chat()` 改成**流式优先** ——
+  给了 `onDelta` 且这条线没被判定过不支持时先发 `stream: true`，**零增量**即整段退回并
+  按实例记住（端点覆盖让同一 provider id 可能指向不同服务器，能力不能跨 baseUrl 传染）；
+  `looksLikeStreamUnsupported` 只让 400/404/405/415/422 退回，5xx 直接抛（服务端坏了不该
+  静默变成第二次请求）；流里 `finish_reason=length` 与整段路径同一口径。
+- `FailoverLlmClient`：`committed` 闸 —— 吐过字就地失败（换线路重试就是同一段话说两遍），
+  但仍 `recordFailure` + 冷却；一个字都没吐时照常轮换（闸门没把 failover 关掉）。
+- 接线：`ChatSession` 新增 `stream` 选项（默认开）把增量映射成 `chat:delta`；`src/store.ts`
+  的 `streaming` 预览在 entry / done / error / 中止 / 切会话时清空；`ChatPage` 渲染实时行
+  （`data-testid="chat-streaming"`，光标用 `::after` 画 —— 不进 DOM，免得污染文本断言）；
+  `headless/chat-main.ts` 非 `--json` 形态逐字打到终端，并按"增量已显示过且与落定正文
+  一致"去重（文本协议下正文会被剥掉围栏，两者不同就照常打印干净版本）。
+
+**测试**：`src/sse.test.ts` 29 条（跨 chunk 拼接、工具碎片、Anthropic 事件、坏帧、
+非 `tool_use` 的 start 不产生调用、缺 `partial_json` 的增量不拼字面量 undefined）；
+`src/http-clients.test.ts` +13（真流 / 零增量退回 / 400 退回 / 500 不退回 / 已吐字断线
+不重来 / usage 缺席不补 0 / 无流句柄退化 / Anthropic 两侧）；`failover` +3（committed
+不轮换、没吐字照常轮换、committed 仍记账）；`chat-session` +3、`store` +6、`chat-ui` +2。
+**真进程 IT**：假大脑支持真 SSE（`scripts/chat-agent-it.mjs` 新场景：一次请求 + 多块增量，
+不开 SSE 时两次请求退回整段且一个增量都不发），`scripts/chat-cli-it.mjs` 断言 `--json`
+真的带 `chat:delta` 且拼起来就是正文。
+
+**变异账（site 逐点）**：http-clients 129/129（基线 96 → 129；首轮 126/129，存活的三处是
+`onDelta && !streamUnsupported` 的 `&&`、`out.usageTokens !== undefined` 的条件与三元分支
+—— 补"Anthropic 侧不给 onDelta 就不试流""流里带/不带 usage"两条杀掉）、stream.ts 51/51
+（首轮 49/51）、chat-events 15/15、session 25/25（24 → 25）、store 44/44（43 → 44）。
+基线 2396 → **2482**（96 目标）；用例 2530 → **2590**（+8 跳过，83 个有可执行用例的文件）。
+
+**事故（本轮，值得记住）**：`mutation-check` 的"上次被强杀 → 恢复源码"逻辑拿
+`scripts/.mutation-pending/*.orig` 还原文件，而那批 `.orig` 是**更早一轮**的快照 ——
+`shared/http-clients.ts` / `electron/chat/session.ts` / `shared/chat-events.ts` 三处未提交的
+流式改动被整份抹掉，且 `git status` 看不出来（等于静默回退到 HEAD）。教训：
+**跑变异/审计类脚本前先提交**（或至少留一个可恢复的快照）；过期台账目录已清理。
 
 ### 新增（运行预览：dev server 保活 · 2026-10-20）
 

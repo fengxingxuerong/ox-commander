@@ -405,3 +405,9 @@ ox chat list                                 # 当前工作区的会话列表
   `2` = 达到轮次上限或被中止。
 - 工具结果以 `chat:entry` 事件原样输出（含 `result.changes` 的 before/after 全文），
   需要机器消费时请自行截断/脱敏。
+- **流式**：`--json` 会把正在流入的正文以 `chat:delta` 事件逐条输出
+  （`{"type":"chat:delta","sessionId":"…","text":"…"}`）；它是「正在打字」层，
+  **不是转录** —— 消费方把 `text` 拼成预览，收到下一条 `chat:entry` / `chat:done` /
+  `chat:error` 就清空。非 `--json` 的 REPL 形态则是直接逐字打到终端上。
+  端点不支持流式时**不发** `chat:delta`（客户端零增量即整段退回），
+  所以"没有增量事件"只能读作"这次没流"，不能读作"模型没说话"。

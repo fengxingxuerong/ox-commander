@@ -152,7 +152,7 @@ const TARGETS = [
   // 2026-10-20（P1-1）：流式读取层（SSE 切分 / 两种端点形状的增量聚合 / 工具碎片
   // 拼接）。入表理由：切错一个 chunk 边界或少拼一段参数都不会抛错 —— 前者表现为
   // "模型偶尔不回话"，后者表现为"模型调用失败"，两条都会被当成模型的问题。
-  { file: "shared/stream.ts", tests: ["src/stream.test.ts"], tier: 1 },
+  { file: "shared/sse.ts", tests: ["src/sse.test.ts"], tier: 1 },
   // 2026-10-20：工具执行层（读/列/检索/补丁/命令）。入表理由：它是唯一真正
   // 落盘与起进程的一层，任何"放过"直接等于越权被执行。
   {
@@ -827,7 +827,7 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/chat/runtime.ts": 12,
   "electron/chat/session-store.ts": 38,
-  "electron/chat/session.ts": 24,
+  "electron/chat/session.ts": 25,
   "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -885,7 +885,7 @@ const SITE_BASELINE = {
   "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,
-  "shared/http-clients.ts": 96,
+  "shared/http-clients.ts": 129,
   "shared/llm-client.ts": 15,
   "shared/page-smoke.ts": 17,
   "shared/policy-file.ts": 33,
@@ -897,6 +897,7 @@ const SITE_BASELINE = {
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 77,
+  "shared/sse.ts": 51,
   "shared/text-diff.ts": 38,
   "shared/tools/patch.ts": 49,
   "shared/tools/policy.ts": 20,
@@ -905,7 +906,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 43,
+  "src/store.ts": 44,
 };
 
 /**

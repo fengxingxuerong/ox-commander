@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createAnthropicStreamReader, createOpenAiStreamReader, createSseDecoder } from "../shared/stream";
+import { createAnthropicStreamReader, createOpenAiStreamReader, createSseDecoder } from "../shared/sse";
 
 /**
  * 流式读取层。

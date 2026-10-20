@@ -475,6 +475,22 @@ describe("OpenAiCompatibleClient · 流式", () => {
     expect(res.content).not.toBe("");
   });
 
+  it("流里的 usage 只在端点给了才带（缺席 ≠ 0，不给假数字）", async () => {
+    const { fetchImpl } = recorder([
+      () => sseResponse([textChunk("x"), sse({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { total_tokens: 42 } }), DONE]),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.usageTokens).toBe(42);
+  });
+
+  it("流里没有 usage 时连键都不留（'不知道'不能被写成 0）", async () => {
+    const { fetchImpl } = recorder([() => sseResponse([textChunk("x"), DONE])]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect("usageTokens" in res).toBe(false);
+  });
+
   it("响应没有流句柄时，整段文本仍按 SSE 口径切开（退化路径不是黑盒）", async () => {
     const body = `${textChunk("降")}${textChunk("级")}${DONE}`;
     const fetchImpl = (async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => body })) as never;
@@ -525,6 +541,18 @@ describe("AnthropicClient · 流式", () => {
     const client = new AnthropicClient(getProvider("anthropic"), "ak", fetchImpl);
     const res = await client.chat({ ...req, onDelta: () => undefined });
     expect(res.toolCalls).toEqual([{ id: "tu_1", name: "run_command", args: { cmd: "ls" } }]);
+  });
+
+  it("没给 onDelta 就不试流式（不给回调 = 不流，这条线连 SSE 请求都不发）", async () => {
+    const { fetchImpl, calls } = recorder([
+      () => jsonResponse({ model: "claude", content: [{ type: "text", text: "whole" }] }),
+    ]);
+    const client = new AnthropicClient(getProvider("anthropic"), "ak", fetchImpl);
+    const res = await client.chat(req);
+    expect(res.content).toBe("whole");
+    expect(calls).toHaveLength(1);
+    expect("stream" in calls[0].body).toBe(false);
+    expect(calls[0].headers.accept).toBeUndefined();
   });
 
   it("零增量时退回整段（Anthropic 侧同一套先试后退）", async () => {

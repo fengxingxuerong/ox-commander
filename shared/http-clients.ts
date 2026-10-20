@@ -5,7 +5,7 @@ import {
   createOpenAiStreamReader,
   createSseDecoder,
   type RawToolCallFragment,
-} from "./stream";
+} from "./sse";
 import type { ToolCall, ToolSpec } from "./tools/spec";
 
 interface FetchLikeResponse {
@@ -208,7 +208,7 @@ abstract class BaseHttpLlmClient implements LlmClient {  constructor(
   /**
    * SSE 请求：逐条把 `data` 交给 `onData`，读完整条流才返回。
    *
-   * 读取层与聚合层分开（切分在 `shared/stream.ts`）：这里只管"把网络上的字节
+   * 读取层与聚合层分开（切分在 `shared/sse.ts`）：这里只管"把网络上的字节
    * 变成一条条 data"，至于 data 里是正文还是工具碎片，由各客户端的 reader 决定。
    */
   protected async postSse(

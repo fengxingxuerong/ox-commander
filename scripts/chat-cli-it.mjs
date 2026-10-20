@@ -38,7 +38,19 @@ function check(name, cond, detail = "") {
 
 const tool = (name, args) => `\`\`\`tool\n${JSON.stringify({ tool: name, arguments: args })}\n\`\`\``;
 
-function startBrain() {
+/** 按「字」切：按字节切中文会变乱码，看起来像模型说胡话。 */
+function splitForStream(text, size) {
+  const chars = Array.from(text);
+  const out = [];
+  for (let i = 0; i < chars.length; i += size) out.push(chars.slice(i, i + size).join(""));
+  return out.length > 0 ? out : [""];
+}
+
+/**
+ * 假大脑。`sse: true` 且请求带 `stream: true` 时发真 SSE；
+ * 不开就是"端点忽略 stream"的形状（用来验零增量退回）。
+ */
+function startBrain({ sse = false } = {}) {
   const requests = [];
   const server = http.createServer((req, res) => {
     let body = "";
@@ -70,8 +82,23 @@ function startBrain() {
         content = tool("run_command", { command: "node", args: ["marker.js"] });
       } else if (lastUser.includes("继续")) {
         content = "第二轮完成";
+      } else if (lastUser.includes("流式")) {
+        // 够长才有"多块"这件事：短的回复只能证明"确实没报错"。
+        content = "流式第一段；流式第二段；流式第三段。";
       } else {
         content = "好的";
+      }
+      if (sse && parsed.stream === true) {
+        res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache" });
+        for (const piece of splitForStream(content, 6)) {
+          res.write(`data: ${JSON.stringify({ choices: [{ delta: { content: piece } }] })}\n\n`);
+        }
+        res.write(
+          `data: ${JSON.stringify({ choices: [{ delta: {}, finish_reason: "stop" }], usage: { total_tokens: 5 } })}\n\n`,
+        );
+        res.write("data: [DONE]\n\n");
+        res.end();
+        return;
       }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(
@@ -203,6 +230,42 @@ async function main() {
     const repl = await runCli([], env, "/help\n/exit\n");
     check("REPL exit 0", repl.code === 0, `exit=${repl.code}`);
     check("REPL 打印帮助", `${repl.stdout}`.includes("ox chat - interactive coding agent"));
+
+    console.log("流式：--json 里真的带 chat:delta（真进程真 HTTP）");
+    const sseBrain = await startBrain({ sse: true });
+    try {
+      const sseRun = await runCli(
+        [
+          "exec",
+          "流式地说一句",
+          "--cwd",
+          project,
+          "--base-url",
+          `http://127.0.0.1:${sseBrain.port}/v1`,
+          "--model",
+          "fake",
+          "--json",
+          "--approval",
+          "never",
+        ],
+        env,
+      );
+      const sseEvents = parseEvents(sseRun.stdout);
+      const deltas = sseEvents.filter((e) => e.type === "chat:delta").map((e) => String(e.text ?? ""));
+      check("exit 0", sseRun.code === 0, `exit=${sseRun.code} stderr=${sseRun.stderr.slice(0, 200)}`);
+      check("增量不止一条（逐块到达，不是攒完一次给）", deltas.length > 1, `实际 ${deltas.length} 条`);
+      check(
+        "增量拼起来就是最终正文",
+        deltas.join("") === "流式第一段；流式第二段；流式第三段。",
+        JSON.stringify(deltas.join("")),
+      );
+      check(
+        "正文 entry 仍然只落一条（预览不重复进转录）",
+        sseEvents.filter((e) => e.type === "chat:entry" && e.entry?.kind === "assistant").length === 1,
+      );
+    } finally {
+      sseBrain.server.close();
+    }
   } finally {
     brain.server.close();
     for (const dir of [project, home]) fs.rmSync(dir, { recursive: true, force: true, maxRetries: 6, retryDelay: 80 });
