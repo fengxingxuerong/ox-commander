@@ -219,6 +219,12 @@ describe("会话循环（session）", () => {
       chat: async (req) => {
         seenSignal = req.signal;
         if (!req.signal) throw new Error("signal 没有转发给客户端");
+        // 保真度补一条：进来时信号已经落下也不能算成功（http-clients 在发请求前
+        // 先看 aborted）。少了这一句，abort 早于请求建立时会静默等满 5s 然后判
+        // done —— "取消没生效"被伪装成"模型答完了"。
+        if (req.signal.aborted) {
+          throw req.signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+        }
         await new Promise<void>((resolve, reject) => {
           req.signal?.addEventListener(
             "abort",
@@ -237,7 +243,11 @@ describe("会话循环（session）", () => {
       signal: controller.signal,
     });
     const sending = session.send("看看");
-    // send 的同步段已经走到在途调用，listener 此刻已挂上。
+    // 不再赌"send 的同步段已经走到在途调用"：每轮模型调用前多了一次 await
+    // （压缩前置检查），同步段到不了 chat。推进到 signal 真的转出来为止，
+    // 先断言、再中止 —— 时序不对就让这一步红，而不是让结论变红。
+    for (let i = 0; i < 100 && !seenSignal; i++) await Promise.resolve();
+    expect(seenSignal).toBe(controller.signal);
     controller.abort();
     const t = await sending;
     expect(t.meta.status).toBe("aborted");
@@ -371,6 +381,89 @@ describe("流式增量的接线（session → chat:delta）", () => {
     await session.send("hi");
     expect(client.requests[0].onDelta).toBeUndefined();
     expect(events.some((e) => e.type === "chat:delta")).toBe(false);
+  });
+});
+
+/**
+ * 上下文压缩（P1-2）。
+ *
+ * 钉的是三条**处置**而不是"压成功了"：该压时真的压（旧原文不再逐字发给模型）、
+ * 压失败时说破并继续用原文、压不动时明说 —— 三条都错在"静默"，静默的后果是
+ * 模型看不见开头而界面一片绿。
+ */
+describe("上下文压缩（session → shared/chat-compress）", () => {
+  /** 短 system + native 协议：工具目录不进提示，估算才好算。 */
+  const build = (
+    opts: Partial<ConstructorParameters<typeof ChatSession>[0]> & { summaries?: string[] },
+  ): { session: ChatSession; sources: string[] } => {
+    const sources: string[] = [];
+    const session = new ChatSession({
+      client: new ScriptedClient([assistant("一"), assistant("二"), assistant("三")]),
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      systemPrompt: "S",
+      toolProtocol: "native",
+      summarize: async (source: string) => {
+        sources.push(source);
+        const next = opts.summaries?.shift();
+        if (next === undefined) return "【摘要】前面读过 a.ts，内容是 const a = 1;";
+        if (next === "") return "";
+        return next;
+      },
+      ...opts,
+    });
+    return { session, sources };
+  };
+
+  it("超预算时真的压：旧原文不再逐字发给模型，转录里仍然看得到", async () => {
+    const { session, sources } = build({ compact: { maxPromptTokens: 60 } });
+    await session.send("x".repeat(120));
+    expect(sources).toHaveLength(0);
+    await session.send("y".repeat(120));
+
+    expect(sources).toHaveLength(1);
+    expect(sources[0]).toContain("x");
+    const t = session.transcript();
+    // 界面上必须能看见"为什么正文忽然少了"
+    expect(t.entries.some((e) => e.kind === "system" && /已压缩 \d+ 条历史消息/.test(e.text))).toBe(true);
+    // 转录不删条目：原文还在（被换掉的只是给模型的那一段）
+    expect(t.entries.some((e) => e.kind === "user" && e.text.startsWith("xxx"))).toBe(true);
+    // 下一轮请求：带摘要、不带被压掉的第一轮原文
+    const last = (session as unknown as { client: ScriptedClient }).client.requests.at(-1);
+    const text = JSON.stringify(last?.messages ?? []);
+    expect(text).toContain("【历史压缩摘要】");
+    expect(text).not.toContain("xxx");
+    expect(text).toContain("yyy");
+  });
+
+  it("compact: false 时一次都不压（宿主可以整条关掉）", async () => {
+    const { session, sources } = build({ compact: false });
+    await session.send("x".repeat(120));
+    await session.send("y".repeat(120));
+    expect(sources).toHaveLength(0);
+  });
+
+  it("压缩失败：说破，并继续用原文（不压缩好过把上下文弄丢）", async () => {
+    const { session } = build({
+      compact: { maxPromptTokens: 60 },
+      summarize: async () => {
+        throw new Error("压缩端点 429");
+      },
+    });
+    await session.send("x".repeat(120));
+    await session.send("y".repeat(120));
+    const t = session.transcript();
+    expect(t.entries.some((e) => e.kind === "system" && e.text.includes("上下文压缩失败") && e.text.includes("429"))).toBe(true);
+    const last = (session as unknown as { client: ScriptedClient }).client.requests.at(-1);
+    // fail-open：原文还在请求里
+    expect(JSON.stringify(last?.messages ?? [])).toContain("xxx");
+  });
+
+  it("压不动就明说（尾部本身装不下，不能假装压过）", async () => {
+    const { session } = build({ compact: { maxPromptTokens: 1 } });
+    await session.send("x".repeat(120));
+    const t = session.transcript();
+    expect(t.entries.some((e) => e.kind === "system" && e.text.includes("压不动"))).toBe(true);
   });
 });
 

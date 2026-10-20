@@ -53,6 +53,14 @@ interface ChatArgs {
   sandbox?: SandboxMode;
   approval?: ApprovalPolicy;
   maxTurns?: number;
+  /**
+   * 上下文压缩预算的 token 数（缺省 48000；给 0 表示整条关掉）。
+   *
+   * 为什么在 CLI 上开这个口子：长会话压掉"看不见的开头"是一次**不可逆的取舍** ——
+   * 摘要永远比原文少。做脚本批处理的人往往更愿意让它撞窗口也要保留原文，
+   * 而交互用户要的是不中断。所以这个开关属于宿主，不该写死在会话层。
+   */
+  compactTokens?: number;
   sessionId?: string;
   continueLatest: boolean;
 }
@@ -86,6 +94,7 @@ function usage(): string {
     "  --sandbox <mode>                read-only | workspace-write | danger-full-access",
     "  --approval <policy>             untrusted | on-request | never",
     "  --max-turns <n>                 tool-loop ceiling for one send",
+  "  --compact-tokens <n>            context budget before summarizing old turns (0 = off)",
     "  --session <id>                  resume this session (exec)",
     "  --continue                      resume the latest session",
     "",
@@ -154,6 +163,13 @@ function parseArgs(argv: string[]): ChatArgs {
       const n = Number.parseInt(r.value, 10);
       if (!Number.isInteger(n) || n <= 0) throw new CliError(`--max-turns 必须是正整数：${r.value}`);
       args.maxTurns = n;
+      i = r.next - 1;
+    } else if (token === "--compact-tokens" || token.startsWith("--compact-tokens=")) {
+      const r = takeValue(argv, i, "--compact-tokens");
+      const n = Number.parseInt(r.value, 10);
+      // 0 是"关"这一档，不是"预算为零"（那会把每一轮的尾部都压成空）。
+      if (!Number.isInteger(n) || n < 0) throw new CliError(`--compact-tokens 必须是非负整数：${r.value}`);
+      args.compactTokens = n;
       i = r.next - 1;
     } else if (token === "--session" || token.startsWith("--session=")) {
       const r = takeValue(argv, i, "--session");
@@ -370,6 +386,9 @@ function makeBundle(
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     ...(args.maxTurns ? { maxTurns: args.maxTurns } : {}),
+    ...(args.compactTokens !== undefined
+      ? { compact: args.compactTokens === 0 ? false : { maxPromptTokens: args.compactTokens } }
+      : {}),
     signal: controller.signal,
     onEvent,
     onPersist: (snapshot) => {

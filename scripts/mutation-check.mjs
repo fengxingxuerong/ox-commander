@@ -160,6 +160,11 @@ const TARGETS = [
     tests: ["src/chat-session.test.ts", "src/chat-security.test.ts", "src/chat-tool-runner.test.ts"],
     tier: 1,
   },
+  // 2026-10-20（P1-2）：上下文压缩的纯逻辑（估算 / 切点 / 拼装）。
+  // 入表理由：这三样错了都不抛错 —— 估少了漏压（模型从第 N 轮开始看不见开头），
+  // 切点劈开工具回合则是端点 400（失败发生在平台之外，最难归因），
+  // 压不动却报"压过了"会让"已压缩"变成一句无法验证的话。
+  { file: "shared/chat-compress.ts", tests: ["src/chat-compress.test.ts", "src/chat-session.test.ts"], tier: 1 },
   // 2026-10-20：会话循环。入表理由：中断与 fail-closed 两条行为错了都不会抛错，
   // 只表现为"点了没反应"或"没人答却执行了"——后者是必须被证明不会发生的那类。
   { file: "electron/chat/session.ts", tests: ["src/chat-session.test.ts"], tier: 1 },
@@ -827,7 +832,7 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/chat/runtime.ts": 12,
   "electron/chat/session-store.ts": 38,
-  "electron/chat/session.ts": 25,
+  "electron/chat/session.ts": 32,
   "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -877,6 +882,7 @@ const SITE_BASELINE = {
   "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
+  "shared/chat-compress.ts": 14,
   "shared/chat-events.ts": 15,
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,

@@ -7,6 +7,14 @@ import { TOOL_NAMES, TOOL_SPECS } from "../../shared/tools/spec";
 import { parseToolTurn, toolCatalogBlock, toolResultBlock } from "../../shared/tools/protocol";
 import type { ApprovalPolicy, SandboxMode } from "../../shared/tools/policy";
 import {
+  COMPACTION_INSTRUCTION,
+  buildCompactedMessages,
+  compactionNote,
+  estimateMessagesTokens,
+  planCompaction,
+  type CompactionPlan,
+} from "../../shared/chat-compress";
+import {
   describeToolCall,
   describeToolResult,
   type ChatEntry,
@@ -64,6 +72,18 @@ export interface ChatSessionOptions {
    * 策略是「给了回调才流」，所以这里关掉等于一次普通请求，不是另一种结果。
    */
   stream?: boolean;
+  /**
+   * 上下文压缩（P1-2）。给 `false` 关掉；给对象则按给的预算跑。
+   *
+   * 为什么默认开一个具体的数：长会话撞上下文窗口是**必然**而不是意外，而撞了
+   * 之后的症状（"模型忘了开头说过什么"）在界面上完全看不出成因。
+   */
+  compact?: CompactOptions | false;
+  /**
+   * 压缩器。注入是为了让这一层可测（也是宿主换模型的口子）；缺省用同一个客户端
+   * 发一条不带工具的总结请求。
+   */
+  summarize?: (source: string, signal?: AbortSignal) => Promise<string>;
   onEvent?: (event: ChatEvent) => void;
   signal?: AbortSignal;
   /** 注入时钟，测试才写得动时间戳。 */
@@ -71,6 +91,22 @@ export interface ChatSessionOptions {
 }
 
 export const DEFAULT_MAX_TURNS = 24;
+
+/**
+ * 压缩触发的提示预算。
+ *
+ * 端点窗口在平台这一侧是**未知的**（provider 目录里没有窗口字段），所以取一个
+ * 保守值：多数兼容端点在 32k–128k 之间，压在 48k 触发意味着"还远没到窗口就先
+ * 整理一次"，代价是多一次总结请求，收益是不会突然看不见开头。
+ */
+export const DEFAULT_MAX_PROMPT_TOKENS = 48_000;
+
+export interface CompactOptions {
+  /** 触发预算（token）。超过就压。 */
+  maxPromptTokens?: number;
+  /** 压完后尾部要占预算的比例（0–1），默认 0.5。 */
+  keepTailRatio?: number;
+}
 
 export class AbortedError extends Error {
   constructor() {
@@ -93,6 +129,8 @@ export class ChatSession {
   private readonly signal?: AbortSignal;
   private readonly now: () => number;
   private readonly stream: boolean;
+  private readonly compact: CompactOptions | false;
+  private readonly summarize?: (source: string, signal?: AbortSignal) => Promise<string>;
   private readonly messages: ChatMessage[] = [];
   private readonly entries: ChatEntry[] = [];
   private readonly meta: ChatSessionMeta;
@@ -119,6 +157,8 @@ export class ChatSession {
     this.signal = opts.signal;
     this.now = opts.now ?? Date.now;
     this.stream = opts.stream ?? true;
+    this.compact = opts.compact === undefined ? {} : opts.compact;
+    this.summarize = opts.summarize;
     // 会话 id 会进文件名与恢复索引：`Math.random` 既不满足仓库"零随机"
     // 的约定，也没有跨进程唯一性保证。UUID 是宿主层能力，放这里不污染 shared。
     this.sessionId = opts.sessionId ?? opts.history?.sessionId ?? `chat-${randomUUID()}`;
@@ -263,6 +303,78 @@ export class ChatSession {
     return this.transcript();
   }
 
+  /**
+   * 上下文压缩（P1-2）：把"已经发生过、但不会再被逐字用到"的旧消息换成一段摘要。
+   *
+   * 三条处置都是**说破**而不是静默：
+   *   1. 压不动（尾部本身就装不下）⇒ 落一条 system 条目，让人知道"后面可能看不到开头"；
+   *   2. 压缩器失败 ⇒ 落一条 system 条目并**继续用原文**（不压缩好过把上下文弄丢）；
+   *   3. 压完 ⇒ 落一条 system 条目说明压掉了几条、估算从多少到多少。
+   * 转录本身**从不删条目** —— 界面上仍能看到全部原文，被换掉的只是给模型的那段。
+   */
+  private async maybeCompact(): Promise<void> {
+    if (this.compact === false) return;
+    const maxPromptTokens = this.compact.maxPromptTokens ?? DEFAULT_MAX_PROMPT_TOKENS;
+    // 与真正发请求同一口径：**连 system 一起估**。不这么做会踩两种错 ——
+    // ① 传 `this.messages`（它从来不含 system）时，planCompaction 会把第一条普通
+    //    消息当成"要保留的头"跳过，最老的一条用户消息永远进不了压缩原文；
+    // ② 不把 systemPrompt 计入预算，工具目录很长时会系统性低估。
+    const full: ChatMessage[] = [{ role: "system", content: this.systemPrompt }, ...this.messages];
+    const plan: CompactionPlan = planCompaction({
+      messages: full,
+      maxPromptTokens,
+      ...(this.compact.keepTailRatio !== undefined ? { keepTailRatio: this.compact.keepTailRatio } : {}),
+    });
+    if (!plan.needed) return;
+    const before = estimateMessagesTokens(full);
+    if (plan.stuck) {
+      this.push({
+        kind: "system",
+        text: `上下文已超预算（约 ${before} tokens）但压不动：剩下的尾部本身就装不下。后面的回答可能看不到开头的内容。`,
+      });
+      return;
+    }
+    let summary = "";
+    try {
+      summary = (await this.runSummarizer(plan.source)).trim();
+    } catch (e) {
+      // fail-open：压缩失败不该让这一轮跑不下去，但不许静默 —— 静默的后果是
+      // "模型忽然答非所问"而没有任何线索。
+      this.push({
+        kind: "system",
+        text: `上下文压缩失败（继续用原文，可能撞上下文窗口）：${(e as Error).message}`,
+      });
+      return;
+    }
+    if (summary === "") {
+      this.push({ kind: "system", text: "上下文压缩返回空摘要（继续用原文）" });
+      return;
+    }
+    const system = full[0];
+    const next = buildCompactedMessages(system, summary, plan.tail);
+    // 写回时**去掉 system**：`this.messages` 从来不含它（每次请求由 loop 现拼），
+    // 留着会让下一轮消息里出现两条系统提示。
+    // `messages` 是 readonly 字段：就地换内容而不是重新赋值。
+    this.messages.splice(0, this.messages.length, ...next.slice(1));
+    this.push({ kind: "system", text: compactionNote(plan.cutIndex - 1, before, estimateMessagesTokens(next)) });
+    this.persist();
+  }
+
+  private async runSummarizer(source: string): Promise<string> {
+    if (this.summarize) return this.summarize(source, this.signal);
+    // 缺省实现：**不带工具**地问一次 —— 压缩请求绝不能再触发工具循环，
+    // 否则"整理上下文"会变成"又去读了一遍文件"。
+    const res = await this.client.chat({
+      messages: [
+        { role: "system", content: COMPACTION_INSTRUCTION },
+        { role: "user", content: source },
+      ],
+      temperature: 0,
+      ...(this.signal ? { signal: this.signal } : {}),
+    });
+    return res.content;
+  }
+
   private async loop(): Promise<void> {
     this.setStatus("running");
     // 轮次是**会话累计值**，不是每次 send 从 1 重数：撤销按 turn 分组，
@@ -274,6 +386,9 @@ export class ChatSession {
         throw new AbortedError();
       }
       this.meta.turns = baseTurns + turn;
+      // 每轮模型调用前先看一眼预算：工具结果回灌最容易把上下文撑爆，
+      // 等端点报"超窗"再处理已经晚了（那一轮的活白干）。
+      await this.maybeCompact();
       const res = await this.client.chat({
         messages: [{ role: "system", content: this.systemPrompt }, ...this.messages],
         ...(this.toolProtocol === "native"
