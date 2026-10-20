@@ -173,6 +173,8 @@ export function ChatPage() {
   const loadTranscript = useApp((s) => s.loadChatTranscript);
   const resolveApproval = useApp((s) => s.resolveChatApproval);
   const revertChat = useApp((s) => s.revertChat);
+  const reviewOpen = useApp((s) => s.reviewOpen);
+  const setReviewOpen = useApp((s) => s.setReviewOpen);
   const [reason, setReason] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
@@ -215,6 +217,18 @@ export function ChatPage() {
             <button type="button" className="small" onClick={() => void newChat()} disabled={busy}>
               新会话
             </button>
+            {/* 右栏收起后的唯一回归入口。放在状态行而不是只放在右栏自己的
+                "收起"按钮上 —— 收起之后那一栏已经不见了，没处点。 */}
+            {!reviewOpen ? (
+              <button
+                type="button"
+                className="small"
+                onClick={() => setReviewOpen(true)}
+                title="展开右栏：这个线程动过哪些文件、每处能不能退回去"
+              >
+                改动审查
+              </button>
+            ) : null}
             {busy ? (
               <button type="button" className="small danger" onClick={() => void abortChat()}>
                 停止

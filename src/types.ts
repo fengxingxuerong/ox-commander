@@ -206,6 +206,12 @@ export interface AppState {
   page: Page;
   chat: ChatView;
   chatInput: string;
+  /**
+   * 右栏（改动审查）是否展开（M2）。默认展开 —— 它是对 Codex 工作台最直接的
+   * 对标，也是"它到底动了什么"的常驻答案。收起是为了窄屏与专注模式，
+   * 所以默认值取"开着"而不是"收着"。
+   */
+  reviewOpen: boolean;
   projects: Array<{ id: string; name: string; stage: string; requirement: string }>;
   activeProjectId?: string;
   stage: Stage;
@@ -266,6 +272,8 @@ export interface AppState {
 
   setPage(page: Page): void;
   setChatInput(text: string): void;
+  /** 展开 / 收起右栏改动审查（M2）。显式给值，不做无参翻转 —— 翻转在多处触发时会分不清谁翻的。 */
+  setReviewOpen(open: boolean): void;
   /**
    * 发一句话给会话。立刻返回（会话在后台跑，过程由 `ox:event` 逐条推），
    * 所以这里必须把"已发出"与"已完成"分开：界面上的"停止"按钮依据的是 status。

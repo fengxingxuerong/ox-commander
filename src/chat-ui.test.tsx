@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./pages/ChatPage";
 import { ThreadRail } from "./components/ThreadRail";
+import { ReviewRail } from "./components/ReviewRail";
 import { useApp } from "./store";
 import type { ChatApprovalRequest, ChatEntry } from "../shared/chat-events";
 
@@ -305,6 +306,99 @@ describe("会话页（ChatPage）", () => {
     const sub = document.querySelector(".card-sub")?.textContent ?? "";
     expect(sub).toMatch(/可改项目内文件/);
     expect(sub).toMatch(/审批：只问审批名单里的命令/);
+  });
+});
+
+/**
+ * 右栏 · 改动审查（M2）。
+ *
+ * 钉四条**会静默退化**的契约：
+ * 1. 补丁改动从转录里聚合出来，文件行可点开看逐行 diff；
+ * 2. 撤销调的是 (turn, path) —— 同一个文件被多轮改过时撤的是最近一轮，
+ *    不是"一键还原到初始"（那会恢复出一个谁都没见过的状态）；
+ * 3. 不可撤销的改动仍列出来，按钮缺席但行在；
+ * 4. 收起之后中栏给出回归入口（右栏自己已经不在屏幕上了）。
+ */
+describe("右栏（ReviewRail）", () => {
+  const change = (over: Record<string, unknown> = {}) => ({
+    path: "src/a.ts",
+    before: "旧行\n",
+    after: "新行\n新增\n",
+    created: false,
+    turn: 1,
+    revertable: true,
+    ...over,
+  });
+
+  const patchEntry = (changes: unknown[]): ChatEntry =>
+    entry({
+      id: `e-${Math.random()}`,
+      kind: "tool_result",
+      text: "补丁",
+      result: { id: "t1", name: "apply_patch", ok: true, output: "", changes } as unknown as ChatEntry["result"],
+    });
+
+  it("聚合补丁改动并渲染逐行 diff", () => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        entries: [entry({ id: "u1", kind: "user", text: "改一下" }), patchEntry([change()])],
+      },
+    });
+    render(<ReviewRail onClose={() => undefined} />);
+    expect(screen.getByTestId("review-files")).toBeTruthy();
+    expect(screen.getByText("src/a.ts")).toBeTruthy();
+    // 头部总数说破：几个文件、几处改动
+    expect(screen.getByText("1 个文件 · 1 处改动")).toBeTruthy();
+  });
+
+  it("撤销按 (turn, path) 调桥接层（同一文件多轮时撤最近一轮）", async () => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        entries: [patchEntry([change({ turn: 1 }), change({ path: "src/b.ts", turn: 2 })])],
+      },
+    });
+    render(<ReviewRail onClose={() => undefined} />);
+    fireEvent.click(screen.getByText("src/b.ts"));
+    fireEvent.click(screen.getByRole("button", { name: "撤销此文件" }));
+    await vi.waitFor(() =>
+      expect(bridge.revertChat).toHaveBeenCalledWith({
+        projectId: "p-1",
+        sessionId: "chat-1",
+        turn: 2,
+        path: "src/b.ts",
+      }),
+    );
+  });
+
+  it("不可撤销的改动仍列出来，但没有可点的撤销按钮", () => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        entries: [patchEntry([change({ revertable: false, before: null, after: null })])],
+      },
+    });
+    render(<ReviewRail onClose={() => undefined} />);
+    // 头部与文件行各出现一次"不可撤销"：一个是总数说破，一个是那一行的标注。
+    expect(screen.getAllByText(/不可撤销/).length).toBeGreaterThanOrEqual(2);
+    fireEvent.click(screen.getByText("src/a.ts"));
+    expect(screen.queryByRole("button", { name: "撤销此文件" })).toBeNull();
+  });
+
+  it("没有补丁时说清楚为什么空着", () => {
+    useApp.setState({ chat: { ...useApp.getState().chat, entries: [entry({ id: "u1", kind: "user", text: "读一下" })] } });
+    render(<ReviewRail onClose={() => undefined} />);
+    expect(screen.getByText(/还没有补丁改动/)).toBeTruthy();
+    expect(screen.queryByTestId("review-files")).toBeNull();
+  });
+
+  it("收起右栏后，中栏状态行给出回归入口", () => {
+    useApp.setState({ reviewOpen: false });
+    render(<ChatPage />);
+    expect(screen.getByRole("button", { name: "改动审查" })).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "改动审查" }));
+    expect(useApp.getState().reviewOpen).toBe(true);
   });
 });
 

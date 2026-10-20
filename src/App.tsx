@@ -3,6 +3,7 @@ import { useApp } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HudNav } from "./components/HudNav";
 import { ThreadRail } from "./components/ThreadRail";
+import { ReviewRail } from "./components/ReviewRail";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -13,14 +14,16 @@ export function App() {
   const page = useApp((s) => s.page);
   const handleEvent = useApp((s) => s.handleEvent);
   const refreshProjects = useApp((s) => s.refreshProjects);
+  const reviewOpen = useApp((s) => s.reviewOpen);
+  const setReviewOpen = useApp((s) => s.setReviewOpen);
 
   useEffect(() => {
     void refreshProjects();
     return api_unsubscribe(handleEvent);
   }, [handleEvent, refreshProjects]);
 
-  // 会话页走**三栏工作台**（M1，对标 Codex）：左栏项目与线程树常驻，
-  // 中栏是执行流。其余四页仍单栏 —— 它们的正文宽度就是它们的内容宽度，
+  // 会话页走**三栏工作台**（M1/M2，对标 Codex）：左栏项目与线程树、中栏执行流、
+  // 右栏改动审查。其余四页仍单栏 —— 它们的正文宽度就是它们的内容宽度，
   // 硬套三栏只会给看板与设置页各添两条空边。
   const shell = page === "chat" ? "app-shell app-shell-three" : "app-shell";
 
@@ -36,6 +39,7 @@ export function App() {
             <CurrentPage page={page} />
           </ErrorBoundary>
         </main>
+        {page === "chat" && reviewOpen ? <ReviewRail onClose={() => setReviewOpen(false)} /> : null}
       </div>
       <div className="app-scanlines" aria-hidden="true" />
     </div>

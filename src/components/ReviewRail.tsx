@@ -1,0 +1,145 @@
+import { useEffect, useMemo, useState } from "react";
+import { useApp } from "../store";
+import {
+  changeStat,
+  changesHeadline,
+  collectChangedFiles,
+  type FileChangeView,
+} from "../../shared/chat-changes";
+import { diffText } from "../../shared/text-diff";
+
+/**
+ * 右栏 · 改动审查（M2，对标 Codex 的 Changes 面板）。
+ *
+ * 与左栏的分工：左栏选**哪条线**，这一栏看**这条线动过什么**。它从中栏转录里
+ * 聚合补丁改动（`shared/chat-changes` 的纯逻辑），所以不需要新的 IPC ——
+ * 数据本来就在会话条目里，此前的问题是它被摊在几百行工具输出中间，要滚到底
+ * 才看得见。
+ *
+ * 三条纪律：
+ * 1. **撤销按 (turn, path) 做**：同一个文件被多个回合改过时，默认撤的是最近
+ *    一次，恢复到"那次补丁之前"，不是恢复到项目初始状态。界面上每轮都可选，
+ *    不把这件事藏成"一键还原"。
+ * 2. **不可撤销的改动仍然列出来**（超过记录上限、没存 before/after 的那些）——
+ *    藏起来等于瞒；按钮缺席、原因写在行里。
+ * 3. 空态说清楚"这里为什么是空的"：没有补丁 ≠ 没有干活（它可能只读了文件）。
+ */
+
+const DIFF_MARK: Record<string, string> = { same: " ", add: "+", del: "-" };
+
+function DiffBody({ change }: { change: FileChangeView }) {
+  const d = diffText(change.before ?? undefined, change.after ?? undefined);
+  if (d.lines.length === 0) {
+    return (
+      <p className="muted">
+        {change.revertable ? "内容未变" : "没有记录可显示的内容（超出记录上限）"}
+      </p>
+    );
+  }
+  return (
+    <pre className="chat-diff review-diff">
+      {d.lines.slice(0, 600).map((line, i) => (
+        <span key={i} className={`diff-${line.kind}`}>
+          {`${DIFF_MARK[line.kind] ?? " "}${line.text}\n`}
+        </span>
+      ))}
+    </pre>
+  );
+}
+
+export function ReviewRail({ onClose }: { onClose: () => void }) {
+  const entries = useApp((s) => s.chat.entries);
+  const status = useApp((s) => s.chat.status);
+  const revertChat = useApp((s) => s.revertChat);
+  const [selected, setSelected] = useState<string | null>(null);
+
+  const groups = useMemo(() => collectChangedFiles(entries), [entries]);
+  const busy = status === "running" || status === "awaiting-approval";
+
+  // 选中项随聚合结果收敛：文件被撤掉后它不该继续留在选中态（那会渲染一个
+  // 空面板，看着像"加载中"）。
+  useEffect(() => {
+    if (selected !== null && !groups.some((g) => g.path === selected)) setSelected(null);
+  }, [groups, selected]);
+
+  const active = groups.find((g) => g.path === selected) ?? null;
+
+  return (
+    <aside className="review-rail" aria-label="改动审查">
+      <div className="review-rail-head">
+        <span className="hud-stat-label">改动</span>
+        <button type="button" className="small" onClick={onClose} title="收起右栏（窄屏时自动折叠）">
+          收起
+        </button>
+      </div>
+
+      {groups.length === 0 ? (
+        <p className="muted review-rail-empty">
+          本线程还没有补丁改动。它可能只读了文件、跑了命令 —— 那些不在这里，在中间的转录里。
+        </p>
+      ) : (
+        <>
+          <p className="muted review-rail-headline">{changesHeadline(groups)}</p>
+          <div className="review-rail-files" data-testid="review-files">
+            {groups.map((g) => {
+              const stat = changeStat(g.latest);
+              return (
+                <button
+                  key={g.path}
+                  type="button"
+                  className={`review-file${g.path === selected ? " active" : ""}`}
+                  onClick={() => setSelected(g.path === selected ? null : g.path)}
+                  title={g.path}
+                >
+                  <span className="review-file-path">{g.path}</span>
+                  <span className="muted review-file-meta">
+                    {g.edits > 1 ? `${g.edits} 轮 · ` : ""}第 {g.latest.turn} 轮
+                    {stat ? ` · +${stat.added}/-${stat.deleted}` : ""}
+                    {g.latest.created ? " · 新建" : ""}
+                    {g.revertable ? "" : " · 不可撤销"}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+
+          {active ? (
+            <div className="review-rail-detail" data-testid="review-detail">
+              <div className="review-rail-detail-head">
+                <span className="hud-stat-label">{active.path}</span>
+                {/* 不可撤销时按钮**缺席**而不是置灰：这一行已经有"不可撤销"的
+                    标注与 title 说明，再摆一个点不动的按钮只是重复同一句话。 */}
+                {active.latest.revertable ? (
+                  <button
+                    type="button"
+                    className="small danger"
+                    disabled={busy}
+                    onClick={() => void revertChat(active.latest.turn, active.path)}
+                    title={`恢复到第 ${active.latest.turn} 轮补丁之前（不是项目初始状态）`}
+                  >
+                    撤销此文件
+                  </button>
+                ) : (
+                  <span className="muted">不可撤销</span>
+                )}
+              </div>
+
+              {active.history.length > 1 ? (
+                <div className="review-turns" data-testid="review-turns">
+                  <span className="hud-stat-label">各轮改动</span>
+                  {active.history.map((h) => (
+                    <span key={h.turn} className="muted review-turn">
+                      第 {h.turn} 轮{h.revertable ? "" : "（不可撤销）"}
+                    </span>
+                  ))}
+                </div>
+              ) : null}
+
+              <DiffBody change={active.latest} />
+            </div>
+          ) : null}
+        </>
+      )}
+    </aside>
+  );
+}

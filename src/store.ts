@@ -60,12 +60,14 @@ export const useApp = create<AppState>((set, get) => ({
     streaming: "",
   },
   chatInput: "",
+  reviewOpen: true,
 
   setPage: (page) => set({ page }),
   setNewProjectName: (newProjectName) => set({ newProjectName }),
   setNewRequirement: (newRequirement) => set({ newRequirement }),
 
   setChatInput: (chatInput) => set({ chatInput }),
+  setReviewOpen: (reviewOpen) => set({ reviewOpen }),
 
   sendChat: async () => {
     const text = get().chatInput.trim();

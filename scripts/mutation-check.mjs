@@ -165,6 +165,11 @@ const TARGETS = [
   // 切点劈开工具回合则是端点 400（失败发生在平台之外，最难归因），
   // 压不动却报"压过了"会让"已压缩"变成一句无法验证的话。
   { file: "shared/chat-compress.ts", tests: ["src/chat-compress.test.ts", "src/chat-session.test.ts"], tier: 1 },
+  // 2026-10-21（M2）：右栏改动审查的聚合逻辑（转录 → 文件组）。入表理由：
+  // 它错了不抛异常，而且错的方向全是"瞒"—— 同一文件多轮改动只留最后一次会让
+  // "撤销"恢复出一个谁都没见过的中间态；不可撤销的改动被过滤掉则让操作者
+  // 以为那个文件没被动过。顺序不稳定还会让列表抖动。
+  { file: "shared/chat-changes.ts", tests: ["src/chat-changes.test.ts"], tier: 1 },
   // 2026-10-20：会话循环。入表理由：中断与 fail-closed 两条行为错了都不会抛错，
   // 只表现为"点了没反应"或"没人答却执行了"——后者是必须被证明不会发生的那类。
   { file: "electron/chat/session.ts", tests: ["src/chat-session.test.ts"], tier: 1 },
@@ -882,6 +887,7 @@ const SITE_BASELINE = {
   "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
+  "shared/chat-changes.ts": 10,
   "shared/chat-compress.ts": 14,
   "shared/chat-events.ts": 15,
   "shared/cli-detect.ts": 5,
