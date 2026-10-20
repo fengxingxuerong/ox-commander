@@ -77,6 +77,7 @@ const api = {
   /** 有活会话就返回，否则恢复该项目最近一条记录；没有记录返回 null。 */
   chatLatest: (input: { projectId: string }) => ipcRenderer.invoke("chat:latest", input),
   listChatSessions: (input: { projectId: string }) => ipcRenderer.invoke("chat:list", input),
+  listChatFiles: (input: { projectId: string }) => ipcRenderer.invoke("chat:files", input),
   loadChatSession: (input: { sessionId: string }) => ipcRenderer.invoke("chat:load", input),
   resumeChat: (input: { projectId: string; sessionId: string }) => ipcRenderer.invoke("chat:resume", input),
   forkChat: (input: { projectId: string; sessionId: string }) => ipcRenderer.invoke("chat:fork", input),

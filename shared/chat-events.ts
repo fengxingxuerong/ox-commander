@@ -90,6 +90,11 @@ export interface ChatSessionSummary {
   usageTokens: number;
 }
 
+export interface ChatFileIndex {
+  files: string[];
+  truncated: boolean;
+}
+
 /**
  * 当会话从一种工具协议恢复到另一种时，旧消息里的原生 `toolCalls` / `tool`
  * 消息对文本协议端点没有意义；把它们降级成普通正文，避免恢复后的第一个

@@ -8,6 +8,7 @@ import {
 } from "../../shared/chat-events";
 import { describeSandbox, type ApprovalPolicy, type SandboxMode } from "../../shared/tools/policy";
 import { diffText } from "../../shared/text-diff";
+import { insertMention, mentionCandidates, mentionTokenAt, type MentionToken } from "../chat-mention";
 
 /**
  * 交互式会话页（对标 Codex 的 TUI 那一层）。
@@ -175,8 +176,20 @@ export function ChatPage() {
   const revertChat = useApp((s) => s.revertChat);
   const reviewOpen = useApp((s) => s.reviewOpen);
   const setReviewOpen = useApp((s) => s.setReviewOpen);
+  const clearComments = useApp((s) => s.clearInlineComments);
+  const activeProjectId = useApp((s) => s.activeProjectId);
   const [reason, setReason] = useState("");
+  const [fileIndex, setFileIndex] = useState<{ projectId: string; files: string[]; truncated: boolean } | null>(null);
+  const [mention, setMention] = useState<MentionToken | null>(null);
+  const [mentionActive, setMentionActive] = useState(0);
+  const [mentionError, setMentionError] = useState("");
   const bottomRef = useRef<HTMLDivElement | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement | null>(null);
+  const loadingFileProject = useRef<string | null>(null);
+  const candidates =
+    mention && fileIndex && fileIndex.projectId === activeProjectId
+      ? mentionCandidates(fileIndex.files, mention.query)
+      : [];
 
   useEffect(() => {
     void loadTranscript();
@@ -191,6 +204,43 @@ export function ChatPage() {
   }, [chat.entries.length, chat.streaming]);
 
   const busy = chat.status === "running" || chat.status === "awaiting-approval";
+
+  const loadFiles = (projectId: string) => {
+    if (fileIndex?.projectId === projectId || loadingFileProject.current === projectId) return;
+    loadingFileProject.current = projectId;
+    void window.oxCommander
+      .listChatFiles({ projectId })
+      .then((index) => {
+        setFileIndex({ projectId, ...index });
+        setMentionError("");
+      })
+      .catch((e) => {
+        setMentionError((e as Error).message);
+      })
+      .finally(() => {
+        if (loadingFileProject.current === projectId) loadingFileProject.current = null;
+      });
+  };
+
+  const syncMention = (box: HTMLTextAreaElement) => {
+    const token = mentionTokenAt(box.value, box.selectionStart ?? box.value.length);
+    setMention(token);
+    setMentionActive(0);
+    if (token && activeProjectId) loadFiles(activeProjectId);
+  };
+
+  const chooseMention = (file: string) => {
+    if (!mention) return;
+    const next = insertMention(input, mention, file);
+    setInput(next.text);
+    setMention(null);
+    window.setTimeout(() => {
+      const box = inputRef.current;
+      if (!box) return;
+      box.focus();
+      box.setSelectionRange(next.caret, next.caret);
+    }, 0);
+  };
 
   return (
     <div className="page">
@@ -313,22 +363,106 @@ export function ChatPage() {
           </div>
         ) : null}
 
-        <textarea
-          className="chat-input"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            // Enter 发送、Shift+Enter 换行：与主流编码智能体的 composer 一致。
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void sendChat();
-            }
-          }}
-          placeholder="说一句要它做什么（Enter 发送，Shift+Enter 换行）"
-          aria-label="会话输入"
-        />
+        {/* 待处理评论条（M3a）：评论加在右栏的 diff 行上，但"发出去"发生在
+            这里的输入框 —— 两处必须互相看得见，否则用户会以为评论丢了。
+            只处理评论、不写正文也是合法操作，所以发送按钮不能因输入为空而禁用。 */}
+        {chat.comments.length > 0 ? (
+          <div className="chat-comment-banner" data-testid="chat-comment-banner">
+            <span>
+              {chat.comments.length} 条行级评论待处理 —— 随下一条消息一起发出，没有评论涉及的代码严格保持不动
+            </span>
+            <span className="btn-row">
+              <button type="button" className="small" onClick={() => setReviewOpen(true)}>
+                去右栏看
+              </button>
+              <button type="button" className="small" onClick={() => clearComments()}>
+                全部丢弃
+              </button>
+            </span>
+          </div>
+        ) : null}
+
+        <div className="chat-compose">
+          {mention ? (
+            <div className="chat-mention" role="listbox" aria-label="文件补全">
+              {candidates.length > 0 ? (
+                candidates.map((file, index) => (
+                  <button
+                    key={file}
+                    type="button"
+                    role="option"
+                    aria-selected={index === mentionActive}
+                    className={`chat-mention-item${index === mentionActive ? " active" : ""}`}
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      chooseMention(file);
+                    }}
+                  >
+                    {file}
+                  </button>
+                ))
+              ) : (
+                <p className="chat-mention-empty">
+                  {mentionError ||
+                    (fileIndex?.projectId === activeProjectId ? "没有匹配的文件" : "正在读取项目文件…")}
+                </p>
+              )}
+              {fileIndex?.truncated ? <p className="chat-mention-empty">文件太多，只显示部分候选</p> : null}
+            </div>
+          ) : null}
+          <textarea
+            ref={inputRef}
+            className="chat-input"
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value);
+              syncMention(e.currentTarget);
+            }}
+            onSelect={(e) => syncMention(e.currentTarget)}
+            onBlur={() => setMention(null)}
+            onKeyDown={(e) => {
+              if (mention && e.key === "Escape") {
+                e.preventDefault();
+                setMention(null);
+                return;
+              }
+              if (mention && candidates.length > 0) {
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setMentionActive((index) => (index + 1) % candidates.length);
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setMentionActive((index) => (index - 1 + candidates.length) % candidates.length);
+                  return;
+                }
+                if (e.key === "Enter" || e.key === "Tab") {
+                  e.preventDefault();
+                  chooseMention(candidates[Math.min(mentionActive, candidates.length - 1)]);
+                  return;
+                }
+              }
+              // Enter 发送、Shift+Enter 换行：与主流编码智能体的 composer 一致。
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                setMention(null);
+                void sendChat();
+              }
+            }}
+            placeholder="说一句要它做什么（Enter 发送，Shift+Enter 换行，@ 引用文件）"
+            aria-label="会话输入"
+          />
+        </div>
         <div className="btn-row">
-          <button type="button" onClick={() => void sendChat()} disabled={busy || input.trim() === ""}>
+          <button
+            type="button"
+            onClick={() => {
+              setMention(null);
+              void sendChat();
+            }}
+            disabled={busy || (input.trim() === "" && chat.comments.length === 0)}
+          >
             发送
           </button>
         </div>

@@ -33,6 +33,7 @@ import {
   messagesForProtocol,
   type ChatApprovalAnswer,
   type ChatApprovalRequest,
+  type ChatFileIndex,
   type ChatHistory,
   type ChatRevertResult,
   type ChatSessionSnapshot,
@@ -239,6 +240,81 @@ function sessionIdOf(input: unknown, channel: string): string {
   return sessionId;
 }
 
+const MENTION_IGNORED_DIRS = new Set([
+  ".git",
+  ".hg",
+  ".svn",
+  ".next",
+  ".nuxt",
+  ".turbo",
+  ".cache",
+  ".parcel-cache",
+  ".venv",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".idea",
+  ".vscode",
+  ".ox",
+  ".qoder",
+  ".workbuddy",
+  "__pycache__",
+  "bower_components",
+  "build",
+  "coverage",
+  "dist",
+  "logs",
+  "node_modules",
+  "out",
+  "target",
+  "venv",
+]);
+
+const MENTION_FILE_LIMIT = 2000;
+
+function ignoredMentionDir(name: string): boolean {
+  const lower = name.toLowerCase();
+  return MENTION_IGNORED_DIRS.has(lower) || lower.startsWith("dist-") || lower.startsWith("release");
+}
+
+function collectProjectFiles(rootAbs: string, runtime: ChatRuntime): ChatFileIndex {
+  const files: string[] = [];
+  let truncated = false;
+
+  const walk = (absDir: string, relDir: string): void => {
+    if (files.length >= MENTION_FILE_LIMIT) {
+      truncated = true;
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(absDir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (files.length >= MENTION_FILE_LIMIT) {
+        truncated = true;
+        return;
+      }
+      if (entry.isSymbolicLink()) continue;
+      const rel = relDir === "" ? entry.name : `${relDir}/${entry.name}`;
+      if (entry.isDirectory()) {
+        if (!ignoredMentionDir(entry.name)) walk(path.join(absDir, entry.name), rel);
+        continue;
+      }
+      if (!entry.isFile() || /\s/.test(rel)) continue;
+      if (!runtime.pathPolicy.assertReadable(rel)) continue;
+      files.push(rel);
+    }
+  };
+
+  walk(rootAbs, "");
+  files.sort((a, b) => a.localeCompare(b));
+  return { files, truncated };
+}
+
 export function registerChatHandlers(): void {
   // 重新装配 IPC（测试里每个用例都会走一次）不能把上一个会话的控制器与
   // 挂起的审批带进来；生产只在启动时调用一次，这里等于空操作。
@@ -287,6 +363,13 @@ export function registerChatHandlers(): void {
   ipcMain.handle("chat:list", (_e, input: unknown) => {
     const projectId = projectIdOf(input, "chat:list");
     return chatStore().list(projectId);
+  });
+
+  ipcMain.handle("chat:files", (_e, input: unknown) => {
+    const projectId = projectIdOf(input, "chat:files");
+    const rootAbs = requireProjectRoot(projectId, "列出项目文件");
+    const runtime = runtimeOf(rootAbs, settingsStore().load());
+    return collectProjectFiles(rootAbs, runtime);
   });
 
   ipcMain.handle("chat:load", (_e, input: unknown) => {

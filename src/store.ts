@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import type { AppState, TaskView } from "./types";
+import type { AppState, InlineComment, TaskView } from "./types";
 import type { Stage, TaskStatus } from "../shared/types";
 import { isFailureClass } from "../shared/types";
 import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
@@ -35,6 +35,32 @@ export const REMEDY_VERB: Record<string, string> = {
   none: "仅记录",
 };
 
+/**
+ * 把行级评论拼成下一条消息的附录（M3a）。
+ *
+ * 为什么用附录而不是让模型"自己去看"：评论挂在 diff 行上，而 diff 来自**会话内
+ * 的快照**，不是盘上现状。不把 (文件, 轮次, 行号, 改前/改后, 原文) 一次说全，
+ * 模型只能靠猜是哪一行 —— 而"猜错行"正是纯文本描述（"上面那个函数第三行不对"）
+ * 效率低的全部原因。
+ *
+ * 两条硬性要求写进提示里：逐条处理、**没有评论涉及的代码严格保持不动**。
+ * 少了后半句， agent 会顺手重构周边（Codex 用户的经典抱怨）。
+ */
+export function appendCommentAppendix(text: string, comments: readonly InlineComment[]): string {
+  if (comments.length === 0) return text;
+  const lines = comments.map((c) => {
+    const side = c.side === "before" ? "改前" : "改后";
+    return `- ${c.path} 第 ${c.turn} 轮改动 · ${side}第 ${c.line} 行：${c.text.trim()}`;
+  });
+  const appendix = [
+    "",
+    `【行级评论 ${comments.length} 条，请逐条处理】`,
+    ...lines,
+    "没有评论涉及的代码严格保持不动，不要顺手重构周边。",
+  ].join("\n");
+  return `${text}${appendix}`;
+}
+
 export const useApp = create<AppState>((set, get) => ({
   page: "projects",
   projects: [],
@@ -58,6 +84,7 @@ export const useApp = create<AppState>((set, get) => ({
     approvalPolicy: "on-request",
     notice: "",
     streaming: "",
+    comments: [],
   },
   chatInput: "",
   reviewOpen: true,
@@ -71,22 +98,52 @@ export const useApp = create<AppState>((set, get) => ({
 
   sendChat: async () => {
     const text = get().chatInput.trim();
-    if (text === "") return;
     const projectId = get().activeProjectId;
     if (!projectId) {
       set((s) => ({ chat: { ...s.chat, notice: "先在「项目库」里打开一个项目：会话的工具边界就是它的工作区" } }));
       return;
     }
-    set((s) => ({ chat: { ...s.chat, notice: "" }, chatInput: "" }));
+    // 行级评论是**一次性附录**（M3a）：拼在这条消息里发出，发完即清。
+    // 空文本 + 有评论 = 合法操作（"只处理这几条评论，别的别动"）。
+    const comments = get().chat.comments;
+    const payload = text === "" && comments.length > 0 ? "" : text;
+    if (payload === "" && comments.length === 0) return;
+    const outgoing = appendCommentAppendix(payload, comments);
+    set((s) => ({
+      chat: { ...s.chat, notice: "", comments: [] },
+      chatInput: "",
+    }));
     try {
-      const res = await api().sendChat({ text, projectId });
+      const res = await api().sendChat({ text: outgoing, projectId });
       set((s) => ({ chat: { ...s.chat, sessionId: res.sessionId, status: "running" } }));
       // 首条用户消息落盘后列表会出现这条会话；刷新一次让侧栏不用等下一轮。
       void get().loadChatSessions();
     } catch (e) {
-      set((s) => ({ chat: { ...s.chat, notice: `发送失败：${(e as Error).message}` } }));
+      // 失败要把评论**还回去**：它们没发出去，静默丢掉等于用户白写。
+      set((s) => ({ chat: { ...s.chat, notice: `发送失败：${(e as Error).message}`, comments }, chatInput: text }));
     }
   },
+
+  addInlineComment: (c) =>
+    set((s) => ({
+      chat: {
+        ...s.chat,
+        comments: [...s.chat.comments, { ...c, id: `ic-${s.chat.comments.length}-${c.turn}-${c.path}-${c.line}`, ts: Date.now() }],
+      },
+    })),
+
+  removeInlineComment: (id) =>
+    set((s) => ({ chat: { ...s.chat, comments: s.chat.comments.filter((c) => c.id !== id) } })),
+
+  dropInlineCommentsFor: (path, turn) =>
+    set((s) => ({
+      chat: {
+        ...s.chat,
+        comments: s.chat.comments.filter((c) => !(c.path === path && c.turn === turn)),
+      },
+    })),
+
+  clearInlineComments: () => set((s) => ({ chat: { ...s.chat, comments: [] } })),
 
   abortChat: async () => {
     await api().abortChat();

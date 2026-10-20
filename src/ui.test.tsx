@@ -204,6 +204,7 @@ function makeBridge(): Bridge {
     chatTranscript: vi.fn(async () => null),
     chatLatest: vi.fn(async () => null),
     listChatSessions: vi.fn(async () => []),
+    listChatFiles: vi.fn(async () => ({ files: [], truncated: false })),
     loadChatSession: vi.fn(async () => null),
     resumeChat: vi.fn(async () => null as never),
     forkChat: vi.fn(async () => null as never),

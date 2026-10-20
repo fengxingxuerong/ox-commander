@@ -9,6 +9,7 @@ import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 import type {
   ChatApprovalRequest,
   ChatEntry,
+  ChatFileIndex,
   ChatRevertResult,
   ChatSessionSummary,
   ChatStatus,
@@ -200,6 +201,31 @@ export interface ChatView {
    * entry / done / error 就清空，落盘与恢复都不带它。
    */
   streaming: string;
+  /**
+   * 挂在 diff 行上的待处理评论（M3a）。**一次性附录**：下一条消息发出时整批
+   * 拼进 prompt 并清空 —— 它不是持久化数据，恢复会话不带回（转录里那条
+   * 系统说明会留下"当时附了 N 条评论"的痕迹）。
+   */
+  comments: InlineComment[];
+}
+
+/**
+ * 一条行级评论（M3a，对标 Codex 的 inline comments）。
+ *
+ * 绑定的是 (path, turn, line, side)：撤销那一轮之后这条评论就失去了指涉对象，
+ * 所以 UI 在那一轮的改动消失时要把孤儿评论也清掉（见 ReviewRail 的收敛 effect）。
+ * `side` 不能省 —— 同一个行号在 before/after 里是不同的代码。
+ */
+export interface InlineComment {
+  id: string;
+  path: string;
+  /** 所属改动轮次（右栏一次 diff 的来源）。 */
+  turn: number;
+  /** 1-based 行号。 */
+  line: number;
+  side: "before" | "after";
+  text: string;
+  ts: number;
 }
 
 export interface AppState {
@@ -296,6 +322,15 @@ export interface AppState {
    * 拒绝理由会回灌给模型 —— 不给理由，它只会原样重试同一个动作。
    */
   resolveChatApproval(granted: boolean, scope?: "once" | "session", reason?: string): Promise<void>;
+  /**
+   * 行级评论（M3a）。`id` 与 `ts` 由 store 生成 —— 组件不该自己造随机数
+   * （同一个文件同一行连点两次会撞 id）。
+   */
+  addInlineComment(c: Omit<InlineComment, "id" | "ts">): void;
+  removeInlineComment(id: string): void;
+  /** 清掉指向某一轮改动的孤儿评论（那一轮被撤销/消失后它们失去了指涉对象）。 */
+  dropInlineCommentsFor(path: string, turn: number): void;
+  clearInlineComments(): void;
   setNewProjectName(name: string): void;
   setNewRequirement(text: string): void;
   refreshProjects(): Promise<void>;
@@ -470,6 +505,7 @@ declare global {
       /** 有活会话返回它，否则恢复当前项目最近一条；没有记录返回 null。 */
       chatLatest(input: { projectId: string }): Promise<ChatTranscript | null>;
       listChatSessions(input: { projectId: string }): Promise<ChatSessionSummary[]>;
+      listChatFiles(input: { projectId: string }): Promise<ChatFileIndex>;
       loadChatSession(input: { sessionId: string }): Promise<ChatTranscript | null>;
       resumeChat(input: { projectId: string; sessionId: string }): Promise<ChatTranscript>;
       forkChat(input: { projectId: string; sessionId: string }): Promise<ChatTranscript>;

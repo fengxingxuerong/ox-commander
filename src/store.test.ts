@@ -699,6 +699,7 @@ describe("handleEvent · chat 流式预览", () => {
         approvalPolicy: "on-request",
         notice: "",
         streaming: "",
+        comments: [],
       },
     });
   };
@@ -752,5 +753,95 @@ describe("handleEvent · chat 流式预览", () => {
     const chat = useApp.getState().chat;
     expect(chat.streaming).toBe("");
     expect(chat.status).toBe("aborted");
+  });
+});
+
+/**
+ * 行级评论（M3a）。
+ *
+ * 这一层守四件事，全部是"错了不抛异常"的类型：
+ *   ① 评论拼进 outgoing 的附录里，且带 (文件, 轮次, 行号, 改前/改后) 四样 ——
+ *      少一样模型就只能靠猜是哪一行，而"猜错行"正是纯文本描述效率低的全部原因；
+ *   ② 发完即清（一次性附录，不是持久化数据）；
+ *   ③ 发送失败要把评论**还回去** —— 静默丢掉等于用户白写；
+ *   ④ 只有评论、没有正文也是合法发送（"只处理这几条，别的别动"）。
+ */
+describe("sendChat · 行级评论附录", () => {
+  const sent: string[] = [];
+  const bridge = {
+    sendChat: async (input: { text: string }) => {
+      sent.push(input.text);
+      return { sessionId: "chat-1", accepted: true as const };
+    },
+    listChatSessions: async () => [],
+  };
+
+  beforeEach(() => {
+    reset();
+    sent.length = 0;
+    useApp.setState({ activeProjectId: "p-1", chatInput: "" });
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = { ...(g.oxCommander as object), ...bridge };
+  });
+
+  it("评论作为附录拼进 outgoing，四样定位信息都在", async () => {
+    useApp.getState().addInlineComment({
+      path: "src/a.ts",
+      turn: 2,
+      line: 12,
+      side: "after",
+      text: "这里复用外层 buffer",
+    });
+    useApp.setState({ chatInput: "按评论改" });
+    await useApp.getState().sendChat();
+
+    expect(sent).toHaveLength(1);
+    const outgoing = sent[0];
+    expect(outgoing.startsWith("按评论改")).toBe(true);
+    expect(outgoing).toContain("【行级评论 1 条，请逐条处理】");
+    expect(outgoing).toContain("src/a.ts 第 2 轮改动 · 改后第 12 行：这里复用外层 buffer");
+    // 少了这半句，agent 会顺手重构周边（Codex 用户的经典抱怨）。
+    expect(outgoing).toContain("没有评论涉及的代码严格保持不动");
+  });
+
+  it("发完即清（一次性附录，不留给下一条）", async () => {
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 3, side: "before", text: "删掉这行" });
+    useApp.setState({ chatInput: "改" });
+    await useApp.getState().sendChat();
+    expect(useApp.getState().chat.comments).toEqual([]);
+  });
+
+  it("只有评论、没有正文也发得出去（只处理评论是合法操作）", async () => {
+    const seen: string[] = [];
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      sendChat: async (input: { text: string }) => {
+        seen.push(input.text);
+        return { sessionId: "chat-1", accepted: true as const };
+      },
+    };
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 3, side: "after", text: "加个判空" });
+    await useApp.getState().sendChat();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain("行级评论 1 条");
+    expect(seen[0]).toContain("a.ts 第 1 轮改动 · 改后第 3 行：加个判空");
+  });
+
+  it("发送失败把评论还回去（不静默丢掉用户写的东西）", async () => {
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      sendChat: async () => {
+        throw new Error("网络断了");
+      },
+    };
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 3, side: "after", text: "别丢" });
+    useApp.setState({ chatInput: "原文" });
+    await useApp.getState().sendChat();
+    expect(useApp.getState().chat.comments).toHaveLength(1);
+    expect(useApp.getState().chat.notice).toContain("网络断了");
+    // 正文也要还原：发送失败不该把输入框吃掉。
+    expect(useApp.getState().chatInput).toBe("原文");
   });
 });

@@ -29,6 +29,10 @@ const bridge = {
     async (_input: { projectId: string }): Promise<import("../shared/chat-events").ChatTranscript | null> => null,
   ),
   listChatSessions: vi.fn(async (_input: { projectId: string }) => [] as import("../shared/chat-events").ChatSessionSummary[]),
+  listChatFiles: vi.fn(async (_input: { projectId: string }) => ({
+    files: [] as string[],
+    truncated: false,
+  })),
   loadChatSession: vi.fn(async (_input: { sessionId: string }) => null),
   resumeChat: vi.fn(async (_input: { projectId: string; sessionId: string }) => transcript([])),
   forkChat: vi.fn(async (_input: { projectId: string; sessionId: string }) => transcript([])),
@@ -68,6 +72,7 @@ beforeEach(() => {
       approvalPolicy: "on-request",
       notice: "",
       streaming: "",
+      comments: [],
     },
   });
 });
@@ -117,6 +122,41 @@ describe("会话页（ChatPage）", () => {
     expect(bridge.sendChat).not.toHaveBeenCalled();
     fireEvent.keyDown(box, { key: "Enter" });
     expect(bridge.sendChat).toHaveBeenCalled();
+  });
+
+  it("@ 触发文件补全：方向键选择后插入路径，不会误发送", async () => {
+    bridge.listChatFiles.mockResolvedValueOnce({
+      files: ["src/alpha.ts", "src/beta.ts"],
+      truncated: false,
+    });
+    render(<ChatPage />);
+    const box = screen.getByLabelText("会话输入") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "看看 @src" } });
+    box.setSelectionRange(7, 7);
+    fireEvent.select(box);
+
+    await vi.waitFor(() => expect(bridge.listChatFiles).toHaveBeenCalledWith({ projectId: "p-1" }));
+    const options = await screen.findAllByRole("option");
+    expect(options.map((option) => option.textContent)).toEqual(["src/alpha.ts", "src/beta.ts"]);
+
+    fireEvent.keyDown(box, { key: "ArrowDown" });
+    expect(screen.getByRole("option", { name: "src/beta.ts" }).getAttribute("aria-selected")).toBe("true");
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    expect(useApp.getState().chatInput).toBe("看看 @src/beta.ts ");
+    expect(bridge.sendChat).not.toHaveBeenCalled();
+  });
+
+  it("Esc 关闭文件补全", async () => {
+    bridge.listChatFiles.mockResolvedValueOnce({ files: ["src/a.ts"], truncated: false });
+    render(<ChatPage />);
+    const box = screen.getByLabelText("会话输入") as HTMLTextAreaElement;
+    fireEvent.change(box, { target: { value: "@src" } });
+    box.setSelectionRange(4, 4);
+    fireEvent.select(box);
+    await screen.findByRole("listbox");
+    fireEvent.keyDown(box, { key: "Escape" });
+    expect(screen.queryByRole("listbox")).toBeNull();
   });
 
   it("转录逐条渲染：用户、模型、工具调用与结果各占一行", () => {
@@ -399,6 +439,99 @@ describe("右栏（ReviewRail）", () => {
     expect(screen.getByRole("button", { name: "改动审查" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "改动审查" }));
     expect(useApp.getState().reviewOpen).toBe(true);
+  });
+});
+
+/**
+ * 行级评论（M3a）。
+ *
+ * 钉的是**回路是否闭着**：评论加在右栏 diff 行上 → 中栏出现待处理条 → 发送时
+ * 带走 → 发完两处都清。任何一环断了，用户看到的是"我评了但好像没用"，
+ * 而这正是纯文本描述（"上面那个函数第三行不对"）一直被容忍的原因。
+ */
+describe("行级评论（M3a）", () => {
+  const patchEntry = (changes: unknown[]): ChatEntry =>
+    entry({
+      id: `e-${Math.random()}`,
+      kind: "tool_result",
+      text: "补丁",
+      result: { id: "t1", name: "apply_patch", ok: true, output: "", changes } as unknown as ChatEntry["result"],
+    });
+
+  const seedPatch = () =>
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        entries: [
+          patchEntry([
+            {
+              path: "src/a.ts",
+              before: "第一行\n第二行\n",
+              after: "第一行\n改过的第二行\n第三行\n",
+              created: false,
+              turn: 1,
+              revertable: true,
+            },
+          ]),
+        ],
+      },
+    });
+
+  it("diff 行可加评论；中栏待处理条与右栏计数同步出现", () => {
+    seedPatch();
+    render(<ReviewRail onClose={() => undefined} />);
+    fireEvent.click(screen.getByText("src/a.ts"));
+    // 行尾 + 按钮：hover 才可见，测试里直接点（jsdom 不跑 CSS）
+    const adds = document.querySelectorAll(".review-line-add");
+    expect(adds.length).toBeGreaterThan(0);
+    fireEvent.click(adds[0]);
+    const box = screen.getByLabelText("行级评论内容") as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "这行要加判空" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    // 右栏计数
+    expect(screen.getByRole("button", { name: /评论 1/ })).toBeTruthy();
+    // 中栏待处理条（它和"发送"在同一个组件里，必须互相看得见）
+    cleanup();
+    render(<ChatPage />);
+    expect(screen.getByTestId("chat-comment-banner")).toBeTruthy();
+    expect(screen.getByText(/1 条行级评论待处理/)).toBeTruthy();
+  });
+
+  it("发送后评论清空（一次性附录，不留给下一条）", async () => {
+    seedPatch();
+    render(<ReviewRail onClose={() => undefined} />);
+    fireEvent.click(screen.getByText("src/a.ts"));
+    const adds = document.querySelectorAll(".review-line-add");
+    fireEvent.click(adds[0]);
+    const box = screen.getByLabelText("行级评论内容") as HTMLInputElement;
+    fireEvent.change(box, { target: { value: "改" } });
+    fireEvent.keyDown(box, { key: "Enter" });
+
+    cleanup();
+    render(<ChatPage />);
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await vi.waitFor(() => expect(bridge.sendChat).toHaveBeenCalled());
+    expect(useApp.getState().chat.comments).toEqual([]);
+  });
+
+  it("只有评论时发送按钮也可用（不写正文是合法操作）", () => {
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 1, side: "after", text: "看看这行" });
+    render(<ChatPage />);
+    const btn = screen.getByRole("button", { name: "发送" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(false);
+  });
+
+  it("评论可整批丢弃，也可单条删", () => {
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 1, side: "after", text: "甲" });
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 2, side: "after", text: "乙" });
+    render(<ChatPage />);
+    fireEvent.click(screen.getByRole("button", { name: "全部丢弃" }));
+    expect(useApp.getState().chat.comments).toEqual([]);
+
+    useApp.getState().addInlineComment({ path: "a.ts", turn: 1, line: 1, side: "after", text: "甲" });
+    useApp.getState().removeInlineComment(useApp.getState().chat.comments[0].id);
+    expect(useApp.getState().chat.comments).toEqual([]);
   });
 });
 

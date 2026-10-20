@@ -2732,6 +2732,32 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(transcript.entries[1].text).toBe("收到");
   });
 
+  it("chat:files 只列可读文件，跳过重目录与密钥文件", () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
+    fs.mkdirSync(path.join(root, "dist"), { recursive: true });
+    fs.writeFileSync(path.join(root, "README.md"), "readme");
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "export {};");
+    fs.writeFileSync(path.join(root, ".env"), "SECRET=1");
+    fs.writeFileSync(path.join(root, ".env.example"), "SECRET=");
+    fs.writeFileSync(path.join(root, "node_modules", "pkg", "index.js"), "");
+    fs.writeFileSync(path.join(root, "dist", "out.js"), "");
+
+    const out = (h.ipcMain as FakeIpcMain).invoke("chat:files", { projectId: "p-chat" }) as {
+      files: string[];
+      truncated: boolean;
+    };
+    expect(out.files).toContain("README.md");
+    expect(out.files).toContain("src/a.ts");
+    expect(out.files).toContain(".env.example");
+    expect(out.files).not.toContain(".env");
+    expect(out.files.some((file) => file.startsWith("node_modules/"))).toBe(false);
+    expect(out.files.some((file) => file.startsWith("dist/"))).toBe(false);
+    expect(out.files).toEqual([...out.files].sort((a, b) => a.localeCompare(b)));
+    expect(out.truncated).toBe(false);
+  });
+
   it("沙箱/审批设置变化后重建会话（工具边界更新，但对话历史保留）", async () => {
     seedChatWorkspace();
     h.llmChat.mockReset();
