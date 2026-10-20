@@ -156,9 +156,25 @@
    "进来时已中止就拒"（真实 `http-clients` 的行为），并把用例里"赌同步段"的写法换成
    显式推进到 signal 转出为止。
 
-**变异账**：新目标 `shared/chat-compress.ts` 入 tier 1（14 处位点）；
-`electron/chat/session.ts` 位点 25 → 32。BASELINE 从 96 目标 / 2482 位点 → **97 / 2503**；
-用例 2590 → **2610**（84 个有可执行用例的文件）。四处文档数字（README / gates.md）同步。
+**变异账**：`shared/chat-compress.ts` 14 个位点（逐点杀死 13 + 等价白名单 1）；
+`electron/chat/session.ts` 32 个位点逐点全杀（基线 25 → 32）。BASELINE
+从 96 目标 / 2482 位点 → **97 / 2503**；用例 2590 → **2615**（84 个有可执行用例的文件）。
+
+**site 口径又抓出来的三条覆盖缺口**（本来是全绿的压缩实现）：
+
+1. `renderCompactionSource` 的 assistant 分支把 `&&` 换成 `||` 时存活 ——
+   一条**没带工具调用**的 assistant 也会被渲染成「调用了 …」的形状，把叙述说成调度动作。
+2. 同一方法里 tool 分支的 `continue` 换成 `break` 也存活 —— 工具结果之后的
+   所有消息会被静默丢掉，而现有 fixture 恰好都把 tool 摆在最后一条。
+3. `keepTailRatio` 与压缩请求的中止信号**两条接线**都没钉：前者被变异成"永不透传"
+   （用户给的值被默认 0.5 吞掉）时不红，后者少了它会让"停止"掐不掉整理上下文这一步。
+   补的都是对象级证据（`Expect(seen).toBe(controller.signal)` 那种）。
+4. `isSafeCut` 的 `index <= 0` 守卫是**可证明不可达**（唯一调用点的 cut 恒落在
+   `[1, length-1]`），按"防御冗余、有意保留"入 `EQUIVALENT_SITES`，锚点漂移会重新暴露。
+
+四处文档数字（README / CHANGELOG / ENGINEERING-LOG / gates.md）同批同步；
+其中"变异账"这一段本身就是个教训：**写出来那一刻的数字会被自己的后续轮推翻**，
+所以本轮又跑了一次全量与 site，把 2610 改成 2615。
 
 **已知缺口（诚实版）**：桌面端仍走默认预算、没有 UI 开关；`--compact-tokens` 只有单元
 覆盖，没有真进程 IT；默认压缩器复用会话同一个客户端，会消耗同一张冷却表，线路紧张时

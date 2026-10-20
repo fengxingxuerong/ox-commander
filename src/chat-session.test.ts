@@ -459,6 +459,63 @@ describe("上下文压缩（session → shared/chat-compress）", () => {
     expect(JSON.stringify(last?.messages ?? [])).toContain("xxx");
   });
 
+  it("keepTailRatio 真被传下去（给了就少压几条，而不是被默认值吞掉）", async () => {
+    const droppedOf = async (keepTailRatio?: number): Promise<string> => {
+      const { session } = build({
+        compact: {
+          maxPromptTokens: 60,
+          ...(keepTailRatio !== undefined ? { keepTailRatio } : {}),
+        },
+      });
+      await session.send("x".repeat(120));
+      await session.send("y".repeat(120));
+      const note = session
+        .transcript()
+        .entries.find((e) => e.kind === "system" && e.text.includes("已压缩"));
+      return note?.text ?? "";
+    };
+    // 默认 0.5 ⇒ 尾部预算 30，只留下最新一条；给到 0.95 ⇒ 预算 57，能多留一条。
+    expect(await droppedOf()).toContain("已压缩 2 条");
+    expect(await droppedOf(0.95)).toContain("已压缩 1 条");
+  });
+
+  it("压缩请求也带同一个中止信号（「停止」必须连整理上下文这一步一起掐掉）", async () => {
+    const controller = new AbortController();
+    let seen: AbortSignal | undefined;
+    const { session } = build({
+      compact: { maxPromptTokens: 60 },
+      signal: controller.signal,
+      summarize: async (_source: string, signal?: AbortSignal) => {
+        seen = signal;
+        return "【摘要】前面读过 a.ts";
+      },
+    });
+    await session.send("x".repeat(120));
+    await session.send("y".repeat(120));
+    // 对象级证据：转出去的就是会话那一个，同一性是比出来的而不是嘴上说的。
+    expect(seen).toBe(controller.signal);
+  });
+
+  it("不注入 summarize 时，缺省压缩器那条请求同样挂着中止信号", async () => {
+    const controller = new AbortController();
+    const client = new ScriptedClient([assistant("一"), assistant("【摘要】前面读过 a.ts"), assistant("二")]);
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      systemPrompt: "S",
+      toolProtocol: "native",
+      compact: { maxPromptTokens: 60 },
+      signal: controller.signal,
+    });
+    await session.send("x".repeat(120));
+    await session.send("y".repeat(120));
+    const summaryReq = client.requests.find((r) => JSON.stringify(r.messages ?? []).includes("可续用的上下文"));
+    expect(summaryReq).toBeTruthy();
+    // 少了这条旁路，用户点了停止之后还会有一条压缩请求在默默烧 token。
+    expect(summaryReq?.signal).toBe(controller.signal);
+  });
+
   it("压不动就明说（尾部本身装不下，不能假装压过）", async () => {
     const { session } = build({ compact: { maxPromptTokens: 1 } });
     await session.send("x".repeat(120));

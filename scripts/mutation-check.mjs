@@ -1135,6 +1135,22 @@ const EQUIVALENT_SITES = [
  */
   { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 403 },
   /**
+   * `shared/chat-compress.ts:62` 的 `return false → true` —— **可证明不可达**（一级）。
+   *
+   * 62 行是 `isSafeCut` 的头部守卫 `if (index <= 0) return false;`（index 指不到
+   * 一条真实前置消息时不算安全切点）。唯一的调用点在 `planCompaction`：cut 初值是
+   * `messages.length - 1`，循环下界守到 1，其后的对齐循环只增不减 —— 传进来的
+   * index 恒落在 `[1, length-1]`，于是这个守卫的结论永远是 false 分支。
+   *
+   * 防御冗余，刻意保留：`isSafeCut` 是纯函数导出，将来若被别处的切点计算直接
+   * 调用（那时 index 由外部给出，可能是 0），这一行是唯一拦住"下标 −1"的地方。
+   * 删掉它会让"切点有效"这件事只剩调用侧的隐式约定。
+   *
+   * ⚠️ 行号锚点：该文件结构变化（改动 62 行以上）会让此位点重新暴露为存活，
+   * 那时按新行号校回并再次确认调用点区间没有放宽 —— 这是 fail-safe 的方向。
+   */
+  { file: "shared/chat-compress.ts", op: "return false → true", line: 62 },
+  /**
    * `electron/ipc/context.ts:177` 的 `settingsValue.agentRouter !== false` → `=== false`
    * —— **可证明等价**（一级）。
    *

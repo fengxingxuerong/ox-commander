@@ -146,6 +146,24 @@ describe("renderCompactionSource", () => {
     expect(text).toContain("本条已截断");
   });
 
+  it("不带调用的 assistant 不能渲染成「调用了」（叙述与调动工具是两回事）", () => {
+    const text = renderCompactionSource([msg("assistant", "我先读一下再答"), msg("user", "好")]);
+    expect(text).toContain("assistant：我先读一下再答");
+    expect(text).not.toContain("调用了");
+  });
+
+  it("工具结果后面还有内容也要继续渲染（压缩不许悄悄吃掉后半段）", () => {
+    const text = renderCompactionSource([
+      msg("assistant", "", { toolCalls: [{ id: "t1", name: "read_file", args: { path: "a.ts" } }] }),
+      msg("tool", "const a = 1;", { toolCallId: "t1" }),
+      msg("user", "就按这个改"),
+    ]);
+    expect(text).toContain("tool 结果（t1）：const a = 1;");
+    expect(text).toContain("user：就按这个改");
+    // 顺序也不能反：先有结果，才有基于这个结果提出的新要求
+    expect(text.indexOf("tool 结果")).toBeLessThan(text.indexOf("就按这个改"));
+  });
+
   it("上一份摘要排在最前（压了又压时不丢前情）", () => {
     const text = renderCompactionSource([msg("user", "现在")], "之前做过 X");
     expect(text.indexOf("之前做过 X")).toBeLessThan(text.indexOf("现在"));
