@@ -1878,6 +1878,20 @@ select {
   color: #cfe6d8;
 }
 
+/* 流式预览行：逐字追加，正文 entry 一到就被 store 清空顶替。
+   光标用 ::after 画，不进 DOM —— 断言流式文本时读到的是模型原文，不掺假字符。 */
+.chat-streaming {
+  border-left-style: dashed;
+  opacity: 0.94;
+}
+
+.chat-streaming .chat-entry-text::after {
+  content: "▊";
+  margin-left: 2px;
+  color: var(--neon);
+  animation: blink 1.1s steps(1, end) infinite;
+}
+
 .chat-tool_call {
   border-left-color: var(--violet);
 }

@@ -49,6 +49,7 @@ beforeEach(() => {
     saveSettings: async () => true,
     resolveEscalation: async () => true,
     resolveApproval: async () => true,
+    abortChat: async () => true,
   };
 });
 
@@ -675,5 +676,81 @@ describe("handleEvent · task-note（操作者附言回声，C2）", () => {
     const before = Object.keys(useApp.getState().tasks).length;
     emit({ type: "task-note", taskId: "ghost", note: "x" });
     expect(Object.keys(useApp.getState().tasks).length).toBe(before);
+  });
+});
+
+/**
+ * 流式预览的归约（P1-1）。
+ *
+ * 这一层守两件事：增量**只进预览、不进转录**（否则同一段话在界面上出现两遍）；
+ * 预览在"落定事实"到达时立刻清空（entry / done / error 三条路都要清）。
+ */
+describe("handleEvent · chat 流式预览", () => {
+  const resetChat = (): void => {
+    useApp.setState({
+      chat: {
+        sessionId: "c1",
+        entries: [],
+        sessions: [],
+        status: "idle",
+        turns: 0,
+        usageTokens: 0,
+        mode: "workspace-write",
+        approvalPolicy: "on-request",
+        notice: "",
+        streaming: "",
+      },
+    });
+  };
+
+  beforeEach(resetChat);
+
+  it("chat:delta 累加进预览，不落转录", () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "你" });
+    emit({ type: "chat:delta", sessionId: "c1", text: "好" });
+    const chat = useApp.getState().chat;
+    expect(chat.streaming).toBe("你好");
+    expect(chat.entries).toEqual([]);
+  });
+
+  it("空增量不改状态（心跳式空块不该触发重绘）", () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "" });
+    emit({ type: "chat:delta", sessionId: "c1" });
+    expect(useApp.getState().chat.streaming).toBe("");
+  });
+
+  it("正文 entry 落定即清空预览（不叠加同一段话）", () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "半句" });
+    emit({ type: "chat:entry", sessionId: "c1", entry: { id: "e1", ts: 1, kind: "assistant", text: "半句收尾" } });
+    const chat = useApp.getState().chat;
+    expect(chat.streaming).toBe("");
+    expect(chat.entries).toHaveLength(1);
+    expect(chat.entries[0].text).toBe("半句收尾");
+  });
+
+  it("chat:done 清空预览并收束状态", () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "半句" });
+    emit({ type: "chat:done", sessionId: "c1", turns: 2, usageTokens: 99 });
+    const chat = useApp.getState().chat;
+    expect(chat.streaming).toBe("");
+    expect(chat.status).toBe("done");
+    expect(chat.usageTokens).toBe(99);
+  });
+
+  it("chat:error 也清空预览（半句字不能留在屏幕上假装还在跑）", () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "半句" });
+    emit({ type: "chat:error", sessionId: "c1", message: "连接断了" });
+    const chat = useApp.getState().chat;
+    expect(chat.streaming).toBe("");
+    expect(chat.status).toBe("error");
+    expect(chat.pendingApproval).toBeUndefined();
+  });
+
+  it("中止立即清空预览（停止是当场动作，不等收尾事件）", async () => {
+    emit({ type: "chat:delta", sessionId: "c1", text: "半句" });
+    await useApp.getState().abortChat();
+    const chat = useApp.getState().chat;
+    expect(chat.streaming).toBe("");
+    expect(chat.status).toBe("aborted");
   });
 });

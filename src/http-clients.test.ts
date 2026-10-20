@@ -288,3 +288,254 @@ describe("caller signal · 取消要真的下传到 fetch", () => {
     expect(err?.name).toBe("TimeoutError");
   });
 });
+
+/* ------------------------------------------------------------------ *
+ * 流式（P1-1）：先试后退
+ *
+ * 三条纪律各有用例：① 真流能把增量交出去；② **零增量**整段退回（能力不绑在
+ * "端点声明支持"上）；③ 已经吐过字之后的失败**不重来**（否则同一段话说两遍）。
+ * ------------------------------------------------------------------ */
+
+interface Call {
+  url: string;
+  body: Record<string, unknown>;
+  headers: Record<string, string>;
+}
+
+/** 假 SSE 响应：按 chunk 顺序吐，读完 done。`failAt` = 第几次 read 抛错（模拟断线）。 */
+function sseResponse(chunks: string[], failAt?: number): never {
+  let i = 0;
+  return {
+    ok: true,
+    status: 200,
+    headers: { get: () => null },
+    body: {
+      getReader: () => ({
+        read: async (): Promise<{ done: boolean; value?: Uint8Array }> => {
+          if (failAt !== undefined && i === failAt) throw new Error("connection reset");
+          return i < chunks.length ? { done: false, value: new TextEncoder().encode(chunks[i++]) } : { done: true };
+        },
+      }),
+    },
+  } as never;
+}
+
+function jsonResponse(payload: unknown): never {
+  return { ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(payload) } as never;
+}
+
+function httpError(status: number): never {
+  return { ok: false, status, headers: { get: () => null }, text: async () => `http ${status}` } as never;
+}
+
+/** 按顺序回放响应，并把每次请求的 url/body/headers 记下来。 */
+function recorder(responses: Array<() => never>): { fetchImpl: never; calls: Call[] } {
+  const calls: Call[] = [];
+  const fetchImpl = (async (url: string, init: RequestInit): Promise<never> => {
+    calls.push({
+      url,
+      body: JSON.parse(String(init.body)),
+      headers: (init.headers ?? {}) as Record<string, string>,
+    });
+    const next = responses.shift();
+    if (!next) throw new Error("请求次数超出预期");
+    return next();
+  }) as never;
+  return { fetchImpl, calls };
+}
+
+const sse = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`;
+const textChunk = (text: string): string => sse({ choices: [{ delta: { content: text } }] });
+const DONE = "data: [DONE]\n\n";
+
+describe("OpenAiCompatibleClient · 流式", () => {
+  it("给了 onDelta 就发 stream:true，边收边交增量，全文仍返回", async () => {
+    const { fetchImpl, calls } = recorder([() => sseResponse([textChunk("你"), textChunk("好"), DONE])]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const deltas: string[] = [];
+    const res = await client.chat({ ...req, onDelta: (d) => deltas.push(d) });
+    expect(deltas).toEqual(["你", "好"]);
+    expect(res.content).toBe("你好");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].body.stream).toBe(true);
+    expect(calls[0].headers.accept).toBe("text/event-stream");
+  });
+
+  it("没给 onDelta 就不发 stream 字段（普通请求一条不少）", async () => {
+    const { fetchImpl, calls } = recorder([
+      () => jsonResponse({ model: "m", choices: [{ message: { content: "whole" } }] }),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat(req);
+    expect(res.content).toBe("whole");
+    expect("stream" in calls[0].body).toBe(false);
+    expect(calls[0].headers.accept).toBeUndefined();
+  });
+
+  it("端点把 stream 当未知字段、直接回整段 JSON：自动退回，且此后不再试流式", async () => {
+    const whole = { model: "m", choices: [{ message: { content: "whole" } }] };
+    const { fetchImpl, calls } = recorder([
+      // 没有 `data:` 前缀 ⇒ 解出零个事件 ⇒ 判定"这条线不流"，退回整段
+      () => sseResponse([JSON.stringify(whole)]),
+      () => jsonResponse(whole),
+      () => jsonResponse(whole),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const first = await client.chat({ ...req, onDelta: () => undefined });
+    expect(first.content).toBe("whole");
+    expect(calls[0].body.stream).toBe(true);
+    // 退回的那一次必须是**非流式**请求：否则等于把同一个坏形状再发一遍
+    expect("stream" in calls[1].body).toBe(false);
+    // 记忆生效：第二次连流式都不试，直接一条普通请求
+    await client.chat({ ...req, onDelta: () => undefined });
+    expect(calls).toHaveLength(3);
+    expect("stream" in calls[2].body).toBe(false);
+  });
+
+  it("流通了但一个字都没有：同样退回整段（不把空回复当结果）", async () => {
+    const { fetchImpl, calls } = recorder([
+      () => sseResponse([sse({ choices: [{ delta: { role: "assistant" } }] }), DONE]),
+      () => jsonResponse({ choices: [{ message: { content: "real" } }] }),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.content).toBe("real");
+    expect(calls).toHaveLength(2);
+  });
+
+  it("已吐字后断线：原样抛出，不换整段重来（同一段话不能出现两遍）", async () => {
+    const { fetchImpl, calls } = recorder([() => sseResponse([textChunk("半句")], 1)]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const deltas: string[] = [];
+    const err = await client
+      .chat({ ...req, onDelta: (d) => deltas.push(d) })
+      .then(() => null, (e) => e as Error);
+    expect(deltas).toEqual(["半句"]);
+    expect(err?.message).toBe("connection reset");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("流式被 400 拒：退回整段（能力不依赖端点在文档里承认 stream）", async () => {
+    const { fetchImpl, calls } = recorder([
+      () => httpError(400),
+      () => jsonResponse({ choices: [{ message: { content: "ok" } }] }),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.content).toBe("ok");
+    expect(calls).toHaveLength(2);
+    expect("stream" in calls[1].body).toBe(false);
+  });
+
+  it("流式被 500 拒：直接抛，不退回（服务端坏了就别再打一遍）", async () => {
+    const { fetchImpl, calls } = recorder([() => httpError(500)]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const err = await client
+      .chat({ ...req, onDelta: () => undefined })
+      .then(() => null, (e) => e as HttpLlmError);
+    expect(err).toBeInstanceOf(HttpLlmError);
+    expect(err?.status).toBe(500);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("流里 finish_reason=length 判截断（与整段路径同一口径）", async () => {
+    const { fetchImpl } = recorder([
+      () => sseResponse([textChunk("abcdefgh"), sse({ choices: [{ delta: {}, finish_reason: "length" }] })]),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const err = await client
+      .chat({ ...req, onDelta: () => undefined })
+      .then(() => null, (e) => e as Error);
+    expect(err?.message).toContain("finish_reason=length");
+  });
+
+  it("工具调用碎片在流里拼回 ToolCall（名字一块、参数两块）", async () => {
+    const { fetchImpl } = recorder([
+      () =>
+        sseResponse([
+          sse({ choices: [{ delta: { tool_calls: [{ index: 0, id: "c1", function: { name: "read_file", arguments: '{"pa' } }] } }] }),
+          sse({ choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: 'th":"a.ts"}' } }] } }] }),
+          DONE,
+        ]),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.toolCalls).toEqual([{ id: "c1", name: "read_file", args: { path: "a.ts" } }]);
+    expect(res.content).toBe("");
+  });
+
+  it("正文为空而 reasoning 有内容时用 reasoning 兜底（与整段路径一致）", async () => {
+    const { fetchImpl } = recorder([
+      () => sseResponse([sse({ choices: [{ delta: { reasoning_content: "答案" } }] }), DONE]),
+    ]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.content).toBe("答案");
+    // reasoning 是**思考**，不是正文增量：不能替模型"边想边说"。
+    expect(res.content).not.toBe("");
+  });
+
+  it("响应没有流句柄时，整段文本仍按 SSE 口径切开（退化路径不是黑盒）", async () => {
+    const body = `${textChunk("降")}${textChunk("级")}${DONE}`;
+    const fetchImpl = (async () => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => body })) as never;
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const deltas: string[] = [];
+    const res = await client.chat({ ...req, onDelta: (d) => deltas.push(d) });
+    expect(deltas).toEqual(["降", "级"]);
+    expect(res.content).toBe("降级");
+  });
+});
+
+describe("AnthropicClient · 流式", () => {
+  const aEvent = (payload: unknown): string => `data: ${JSON.stringify(payload)}\n\n`;
+
+  it("走 /messages 且带 x-api-key；正文与 usage 都按事件口径聚合", async () => {
+    const { fetchImpl, calls } = recorder([
+      () =>
+        sseResponse([
+          aEvent({ type: "message_start", message: { usage: { input_tokens: 10 } } }),
+          aEvent({ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hi" } }),
+          aEvent({ type: "message_delta", usage: { output_tokens: 5 } }),
+          aEvent({ type: "message_stop" }),
+        ]),
+    ]);
+    const client = new AnthropicClient(getProvider("anthropic"), "ak", fetchImpl);
+    const deltas: string[] = [];
+    const res = await client.chat({ ...req, onDelta: (d) => deltas.push(d) });
+    expect(deltas).toEqual(["hi"]);
+    expect(res.content).toBe("hi");
+    expect(res.usageTokens).toBe(15);
+    expect(calls[0].url).toBe("https://api.anthropic.com/v1/messages");
+    expect(calls[0].headers["x-api-key"]).toBe("ak");
+    expect(calls[0].headers.accept).toBe("text/event-stream");
+    expect(calls[0].body.stream).toBe(true);
+  });
+
+  it("tool_use 事件流拼回 ToolCall", async () => {
+    const { fetchImpl } = recorder([
+      () =>
+        sseResponse([
+          aEvent({ type: "message_start", message: { usage: { input_tokens: 1 } } }),
+          aEvent({ type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "tu_1", name: "run_command" } }),
+          aEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '{"cmd":' } }),
+          aEvent({ type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: '"ls"}' } }),
+          aEvent({ type: "message_stop" }),
+        ]),
+    ]);
+    const client = new AnthropicClient(getProvider("anthropic"), "ak", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.toolCalls).toEqual([{ id: "tu_1", name: "run_command", args: { cmd: "ls" } }]);
+  });
+
+  it("零增量时退回整段（Anthropic 侧同一套先试后退）", async () => {
+    const { fetchImpl, calls } = recorder([
+      () => sseResponse([aEvent({ type: "message_start", message: {} }), aEvent({ type: "message_stop" })]),
+      () => jsonResponse({ model: "claude", content: [{ type: "text", text: "whole" }] }),
+    ]);
+    const client = new AnthropicClient(getProvider("anthropic"), "ak", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.content).toBe("whole");
+    expect(calls).toHaveLength(2);
+    expect("stream" in calls[1].body).toBe(false);
+  });
+});

@@ -1,5 +1,11 @@
 import { getProvider, resolveTemperature, type ChatMessage, type ProviderConfig } from "./providers";
 import type { ChatRequest, ChatResponse, LlmClient } from "./llm-client";
+import {
+  createAnthropicStreamReader,
+  createOpenAiStreamReader,
+  createSseDecoder,
+  type RawToolCallFragment,
+} from "./stream";
 import type { ToolCall, ToolSpec } from "./tools/spec";
 
 interface FetchLikeResponse {
@@ -198,6 +204,84 @@ abstract class BaseHttpLlmClient implements LlmClient {  constructor(
       throw new MalformedResponseError(raw);
     }
   }
+
+  /**
+   * SSE 请求：逐条把 `data` 交给 `onData`，读完整条流才返回。
+   *
+   * 读取层与聚合层分开（切分在 `shared/stream.ts`）：这里只管"把网络上的字节
+   * 变成一条条 data"，至于 data 里是正文还是工具碎片，由各客户端的 reader 决定。
+   */
+  protected async postSse(
+    url: string,
+    headers: Record<string, string>,
+    body: unknown,
+    signal: AbortSignal | undefined,
+    onData: (data: string) => void,
+  ): Promise<void> {
+    const signals = [AbortSignal.timeout(this.timeoutMs)];
+    if (signal) signals.push(signal);
+    const res = await this.fetchImpl(url, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream", ...headers },
+      body: JSON.stringify(body),
+      signal: AbortSignal.any(signals),
+    });
+    if (!res.ok) {
+      const text = await readCappedErrorBody(res);
+      throw new HttpLlmError(res.status, text, parseRetryAfterMs(res.headers?.get("retry-after")), requestIdOf(res));
+    }
+    const reader = res.body?.getReader?.();
+    if (!reader) {
+      // 拿不到流句柄的响应（测试替身 / 老 polyfill）：整段文本按同一条 SSE 口径
+      // 再切一遍，形状与真流一致 —— 否则这里会把整份 SSE 文本当成**一条** data。
+      const fallback = createSseDecoder();
+      for (const data of fallback.push(await res.text())) onData(data);
+      for (const data of fallback.flush()) onData(data);
+      return;
+    }
+    const decoder = new TextDecoder();
+    const sse = createSseDecoder();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      for (const data of sse.push(decoder.decode(value!, { stream: true }))) onData(data);
+    }
+    for (const data of sse.push(decoder.decode())) onData(data);
+    for (const data of sse.flush()) onData(data);
+  }
+}
+
+/**
+ * 流式碎片 → `ToolCall`（OpenAI 侧）：拼好的参数串交给既有的
+ * `parseOpenAiToolCalls`，参数不是合法 JSON 时的报错口径因此与整段路径一致。
+ */
+function openAiCallsFromFragments(fragments: readonly RawToolCallFragment[]): ToolCall[] {
+  return parseOpenAiToolCalls({
+    tool_calls: fragments.map((f) => ({
+      ...(f.id !== undefined ? { id: f.id } : {}),
+      function: { ...(f.name !== undefined ? { name: f.name } : {}), arguments: f.argumentsJson },
+    })),
+  });
+}
+
+/** 流式碎片 → `ToolCall`（Anthropic 侧）：参数串解析成对象再走同一个收窄器。 */
+function anthropicCallsFromFragments(fragments: readonly RawToolCallFragment[]): ToolCall[] {
+  return parseAnthropicToolCalls(
+    fragments.map((f) => {
+      let input: unknown = {};
+      try {
+        input = f.argumentsJson === "" ? {} : JSON.parse(f.argumentsJson);
+      } catch {
+        throw new MalformedResponseError(`工具调用 ${f.name ?? "?"} 的 arguments 不是合法 JSON：${f.argumentsJson.slice(0, 80)}`);
+      }
+      return { type: "tool_use", ...(f.id !== undefined ? { id: f.id } : {}), name: f.name, input };
+    }),
+  );
+}
+
+/** 这些状态码说明"这条线路不认这个请求形状"（含 `stream: true`），退回整段是安全的。 */
+function looksLikeStreamUnsupported(e: unknown): boolean {
+  return e instanceof HttpLlmError && [400, 404, 405, 415, 422].includes(e.status);
 }
 
 /**
@@ -270,7 +354,15 @@ export function parseOpenAiToolCalls(raw: unknown): ToolCall[] {
 }
 
 export class OpenAiCompatibleClient extends BaseHttpLlmClient {
-  async chat(req: ChatRequest): Promise<ChatResponse> {
+  /**
+   * 这条线路在"零增量"上失败过一次 ⇒ 本次进程内不再试流式。
+   *
+   * 为什么按实例记而不是按 provider 记：端点覆盖（`OX_LLM_BASE_URL_*`）让同一个
+   * provider id 可能指向完全不同的服务器，能力不能跨 baseUrl 传染。
+   */
+  private streamUnsupported = false;
+
+  private buildBody(req: ChatRequest, stream: boolean): Record<string, unknown> {
     const body: Record<string, unknown> = {
       model: this.config.defaultModel,
       messages: toOpenAiMessages(req.messages),
@@ -295,10 +387,21 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
     if (this.config.tools === "native" && req.tools && req.tools.length > 0) {
       body.tools = toOpenAiTools(req.tools);
     }
+    // 流式字段同样只发给"这次真的想要增量"的请求（理由见 `ChatRequest.onDelta`）。
+    if (stream) body.stream = true;
+    return body;
+  }
+
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    // 先试后退：能力不绑在"端点在文档里承认 stream"上，绑在**它有没有真的流**。
+    if (req.onDelta && !this.streamUnsupported) {
+      const streamed = await this.tryChatStream(req);
+      if (streamed) return streamed;
+    }
     const data = await this.postJson(
       `${this.config.baseUrl}/chat/completions`,
       this.authHeaders(),
-      body,
+      this.buildBody(req, false),
       req.signal,
     );
     const choices = data.choices as
@@ -318,6 +421,55 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       provider: this.config.id,
       model: String(data.model ?? this.config.defaultModel),
       usageTokens: usage?.total_tokens,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    };
+  }
+
+  /**
+   * 流式尝试。返回 `null` = 这条线路不支持（或这次没流起来）且**一个字都没吐**，
+   * 调用方应整段退回；已经吐过字之后的失败原样抛出（收不回来，不能假装重来）。
+   */
+  private async tryChatStream(req: ChatRequest): Promise<ChatResponse | null> {
+    const reader = createOpenAiStreamReader();
+    let committed = false;
+    try {
+      await this.postSse(
+        `${this.config.baseUrl}/chat/completions`,
+        this.authHeaders(),
+        this.buildBody(req, true),
+        req.signal,
+        (data) => {
+          const delta = reader.pushData(data);
+          if (delta !== null) {
+            committed = true;
+            req.onDelta?.(delta);
+          }
+        },
+      );
+    } catch (e) {
+      if (req.signal?.aborted) throw e;
+      if (committed) throw e;
+      if (!looksLikeStreamUnsupported(e)) throw e;
+      this.streamUnsupported = true;
+      return null;
+    }
+    const out = reader.finish();
+    if (out.text === "" && out.reasoning === "" && out.toolCalls.length === 0) {
+      // 一个字都没有：多半是端点把 `stream` 当未知字段忽略、或直接回了整段 JSON。
+      // 不当作"空回复"交出去 —— 退回整段请求，让真实结果说话。
+      this.streamUnsupported = true;
+      return null;
+    }
+    if (out.finishReason === "length") {
+      throw new MalformedResponseError(`输出因长度限制被截断（finish_reason=length）：${out.text.slice(0, 80)}`);
+    }
+    const toolCalls = openAiCallsFromFragments(out.toolCalls);
+    const content = out.text.trim() !== "" ? out.text : out.reasoning;
+    return {
+      content,
+      provider: this.config.id,
+      model: this.config.defaultModel,
+      ...(out.usageTokens !== undefined ? { usageTokens: out.usageTokens } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }
@@ -395,7 +547,10 @@ export function parseAnthropicToolCalls(blocks: unknown): ToolCall[] {
 }
 
 export class AnthropicClient extends BaseHttpLlmClient {
-  async chat(req: ChatRequest): Promise<ChatResponse> {
+  /** 同 OpenAI 侧：这条线路在"零增量"上失败过一次就不再试流式。 */
+  private streamUnsupported = false;
+
+  private buildBody(req: ChatRequest, stream: boolean): Record<string, unknown> {
     const system = req.messages.find((m) => m.role === "system")?.content;
     const body: Record<string, unknown> = {
       model: this.config.defaultModel,
@@ -407,10 +562,19 @@ export class AnthropicClient extends BaseHttpLlmClient {
     if (this.config.tools === "native" && req.tools && req.tools.length > 0) {
       body.tools = toAnthropicTools(req.tools);
     }
+    if (stream) body.stream = true;
+    return body;
+  }
+
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    if (req.onDelta && !this.streamUnsupported) {
+      const streamed = await this.tryChatStream(req);
+      if (streamed) return streamed;
+    }
     const data = await this.postJson(
       `${this.config.baseUrl}/messages`,
       this.authHeaders(),
-      body,
+      this.buildBody(req, false),
       req.signal,
     );
     const blocks = data.content as Array<{ type: string; text?: string }> | undefined;
@@ -422,6 +586,46 @@ export class AnthropicClient extends BaseHttpLlmClient {
       provider: this.config.id,
       model: String(data.model ?? this.config.defaultModel),
       usageTokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
+    };
+  }
+
+  /** 返回 `null` = 零增量且这条线路不认流式，调用方整段退回（见 OpenAI 侧同名方法）。 */
+  private async tryChatStream(req: ChatRequest): Promise<ChatResponse | null> {
+    const reader = createAnthropicStreamReader();
+    let committed = false;
+    try {
+      await this.postSse(
+        `${this.config.baseUrl}/messages`,
+        this.authHeaders(),
+        this.buildBody(req, true),
+        req.signal,
+        (data) => {
+          const delta = reader.pushData(data);
+          if (delta !== null) {
+            committed = true;
+            req.onDelta?.(delta);
+          }
+        },
+      );
+    } catch (e) {
+      if (req.signal?.aborted) throw e;
+      if (committed) throw e;
+      if (!looksLikeStreamUnsupported(e)) throw e;
+      this.streamUnsupported = true;
+      return null;
+    }
+    const out = reader.finish();
+    if (out.text === "" && out.toolCalls.length === 0) {
+      this.streamUnsupported = true;
+      return null;
+    }
+    const toolCalls = anthropicCallsFromFragments(out.toolCalls);
+    return {
+      content: out.text,
+      provider: this.config.id,
+      model: this.config.defaultModel,
+      ...(out.usageTokens !== undefined ? { usageTokens: out.usageTokens } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }
@@ -685,8 +889,27 @@ export class FailoverLlmClient implements LlmClient {
     for (let k = 0; k < attempts.length; k++) {
       const { client, comboKey } = attempts[k];
       const t0 = this.now();
+      /*
+       * 流式：记住**这一次尝试**有没有把字说出去。
+       *
+       * 说过之后不能换线路重试 —— 同一段话会被说两遍，而用户没法把已经看到的
+       * 字退回去。这是流式与整段请求在重试语义上的唯一区别：整段请求失败什么
+       * 都没发生，可以放心轮换。
+       */
+      let committed = false;
+      const onDelta = req.onDelta;
       try {
-        const res = await client.chat(req);
+        const res = await client.chat(
+          onDelta
+            ? {
+                ...req,
+                onDelta: (delta: string) => {
+                  committed = true;
+                  onDelta(delta);
+                },
+              }
+            : req,
+        );
         // 成功且此前在冷却 ⇒ 健康状态变了（那条线路回到可服务），推一份。
         if (this.cooldowns.delete(comboKey)) this.onHealth?.(this.health());
         // 成功一次即清零连续失败账（冷却升级回档）；账目变了同样推一份。
@@ -712,6 +935,23 @@ export class FailoverLlmClient implements LlmClient {
            * 拉进冷却池会因为一次取消惩罚后面所有 run。所以原样抛出、不冷却。
            */
           this.onEvent?.(`${comboKey} 已被调用方取消，停止轮询（不计入冷却）`);
+          throw e;
+        }
+        if (committed) {
+          /*
+           * 增量已经发出去了：**就地失败**。仍然记账（这条线路可能真坏了，下次
+           * 该跳过它），但不退避、不换线路 —— 换了就等于把同一段话说两遍。
+           */
+          const committedStatus = e instanceof HttpLlmError ? e.status : undefined;
+          if (isTransient(e) || isRouteLevel(e)) {
+            this.recordFailure(comboKey, committedStatus);
+            const cd = this.setCooldown(comboKey, e);
+            this.onEvent?.(
+              `${comboKey} 流式中途失败（${errorDigest(e)}），已吐出内容不重试；${escalatedDigest(this.stats, comboKey, cd)}`,
+            );
+          } else {
+            this.onEvent?.(`${comboKey} 流式中途失败（${errorDigest(e)}），已吐出内容不重试`);
+          }
           throw e;
         }
         const status = e instanceof HttpLlmError ? e.status : undefined;

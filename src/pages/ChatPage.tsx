@@ -190,7 +190,8 @@ export function ChatPage() {
     // 没这个函数就不滚 —— 自动滚动是体验，不该让整页在测试环境里挂掉。
     const el = bottomRef.current as (HTMLDivElement & { scrollIntoView?: (o: unknown) => void }) | null;
     el?.scrollIntoView?.({ block: "end" });
-  }, [chat.entries.length]);
+    // 流式增量也要跟着滚：否则逐字变长的那一行会顶出可视区，看着像卡住了。
+  }, [chat.entries.length, chat.streaming]);
 
   const busy = chat.status === "running" || chat.status === "awaiting-approval";
 
@@ -289,13 +290,24 @@ export function ChatPage() {
         ) : null}
 
         <div className="chat-transcript" data-testid="chat-transcript">
-          {chat.entries.length === 0 ? (
+          {chat.entries.length === 0 && chat.streaming === "" ? (
             <p className="muted">还没有对话。说一句要它做什么，过程会在这里逐条展开。</p>
           ) : (
             chat.entries.map((e) => (
               <EntryRow key={e.id} entry={e} busy={busy} onRevert={(turn, path) => void revertChat(turn, path)} />
             ))
           )}
+          {/* 正在打字的那一行：只此一行，正文一到就被顶替（不叠加，避免同一段话double）。 */}
+          {chat.streaming !== "" ? (
+            <div className="chat-entry chat-assistant chat-streaming" data-testid="chat-streaming">
+              <div className="chat-entry-head">
+                <span className="chat-mark" aria-hidden="true">
+                  {KIND_MARK.assistant}
+                </span>
+                <span className="chat-entry-text">{chat.streaming}</span>
+              </div>
+            </div>
+          ) : null}
           <div ref={bottomRef} />
         </div>
 

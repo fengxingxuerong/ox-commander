@@ -37,6 +37,22 @@ export interface ChatRequest {
    * `FailoverLlmClient.chat`.
    */
   signal?: AbortSignal;
+  /**
+   * 增量正文回调。给了它 = 想要流式：客户端先按 SSE 发一次请求，边收边把正文
+   * 增量交出去（**不累积**，调用方自己拼），并仍然返回完整的 `ChatResponse`。
+   *
+   * 为什么是"给回调才流"而不是"总是流"：
+   *   - 大脑层（PRD/任务分解）要的是**整段 JSON**，流式对它没有价值，多一层
+   *     解析只增加故障面；
+   *   - 端点是否支持 `stream: true` **没有实测结论**（与 `ProviderConfig.tools`
+   *     同一条纪律）。所以客户端先试一次流式，**在还没吐出任何增量之前**失败就
+   *     整段退回普通请求（见 `OpenAiCompatibleClient.chat`）—— 能力不依赖
+   *     "端点恰好支持"，也不会把不认识的字段硬发给端点后变成一连串 400。
+   *
+   * ⚠️ 已经吐出的字收不回来：failover 在**有过增量**（committed）之后不换线路
+   * 重试 —— 否则同一段话会被说两遍（`FailoverLlmClient.chat`）。
+   */
+  onDelta?: (delta: string) => void;
 }
 
 export interface ChatResponse {

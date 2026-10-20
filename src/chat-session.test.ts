@@ -314,6 +314,66 @@ describe("会话循环（session）", () => {
   });
 });
 
+/** 会吐增量的假大脑：模拟真实客户端的"边收边交"（正文与增量通常一致）。 */
+class StreamingClient implements LlmClient {
+  readonly requests: ChatRequest[] = [];
+  constructor(
+    private readonly chunks: string[],
+    private readonly text: string,
+  ) {}
+  async chat(req: ChatRequest): Promise<ChatResponse> {
+    this.requests.push(req);
+    for (const chunk of this.chunks) req.onDelta?.(chunk);
+    return assistant(this.text);
+  }
+}
+
+describe("流式增量的接线（session → chat:delta）", () => {
+  it("客户端每交一段就发一条 chat:delta；正文仍只落一条 entry", async () => {
+    const events: ChatEvent[] = [];
+    const client = new StreamingClient(["你", "好"], "你好");
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      sessionId: "s-stream",
+      onEvent: (e) => events.push(e),
+    });
+    const t = await session.send("hi");
+    const deltas = events.filter((e) => e.type === "chat:delta").map((e) => (e.type === "chat:delta" ? e.text : ""));
+    expect(deltas).toEqual(["你", "好"]);
+    // 增量是"正在打字"层，不是转录：落定的 assistant 条目仍然只有一条。
+    expect(t.entries.filter((e) => e.kind === "assistant")).toHaveLength(1);
+    expect(t.entries.at(-1)?.text).toBe("你好");
+  });
+
+  it("不传 stream 选项时默认要增量（缺省 = 流）", async () => {
+    const client = new StreamingClient(["y"], "y");
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+    });
+    await session.send("hi");
+    expect(typeof client.requests[0].onDelta).toBe("function");
+  });
+
+  it("stream:false 时一个 onDelta 都不给（不想流的下游可以整条关掉）", async () => {
+    const events: ChatEvent[] = [];
+    const client = new StreamingClient(["x"], "x");
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      stream: false,
+      onEvent: (e) => events.push(e),
+    });
+    await session.send("hi");
+    expect(client.requests[0].onDelta).toBeUndefined();
+    expect(events.some((e) => e.type === "chat:delta")).toBe(false);
+  });
+});
+
 describe("工具执行层（tool-runner，真盘真进程）", () => {
   let root = "";
 

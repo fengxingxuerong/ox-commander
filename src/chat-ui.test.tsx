@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { act, render, screen, fireEvent, cleanup } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./pages/ChatPage";
@@ -65,6 +65,7 @@ beforeEach(() => {
       mode: "workspace-write",
       approvalPolicy: "on-request",
       notice: "",
+      streaming: "",
     },
   });
 });
@@ -302,5 +303,44 @@ describe("会话页（ChatPage）", () => {
     const sub = document.querySelector(".card-sub")?.textContent ?? "";
     expect(sub).toMatch(/可改项目内文件/);
     expect(sub).toMatch(/审批：只问审批名单里的命令/);
+  });
+});
+
+/**
+ * 流式预览行（P1-1）。
+ *
+ * 钉两条：① 增量要在**同一条**实时行里逐字变长（不是每段新起一行）；② 正文
+ * entry 一到，这一行必须消失 —— 留着就是同一段话显示两遍。
+ */
+describe("会话页 · 流式预览", () => {
+  it("有增量时渲染实时行，正文落定后消失", () => {
+    useApp.setState({ chat: { ...useApp.getState().chat, streaming: "正在读 a.ts" } });
+    render(<ChatPage />);
+    const row = screen.getByTestId("chat-streaming");
+    expect(row.textContent).toContain("正在读 a.ts");
+
+    act(() => {
+      useApp.getState().handleEvent({ type: "chat:delta", sessionId: "chat-1", text: "，然后改" });
+    });
+    // 同一个节点继续变长：不是又起了一行。
+    expect(screen.getAllByTestId("chat-streaming")).toHaveLength(1);
+    expect(screen.getByTestId("chat-streaming").textContent).toContain("正在读 a.ts，然后改");
+
+    act(() => {
+      useApp.getState().handleEvent({
+        type: "chat:entry",
+        sessionId: "chat-1",
+        entry: entry({ id: "e-s1", kind: "assistant", text: "改完了" }),
+      });
+    });
+    expect(screen.queryByTestId("chat-streaming")).toBeNull();
+    expect(screen.getByText("改完了")).toBeTruthy();
+  });
+
+  it("首轮还没有任何条目时，实时行顶替空态提示（不能一边说'还没有对话'一边在打字）", () => {
+    useApp.setState({ chat: { ...useApp.getState().chat, entries: [], streaming: "先说一句" } });
+    render(<ChatPage />);
+    expect(screen.queryByText(/还没有对话/)).toBeNull();
+    expect(screen.getByTestId("chat-streaming").textContent).toContain("先说一句");
   });
 });

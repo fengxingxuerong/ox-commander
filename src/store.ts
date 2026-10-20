@@ -57,6 +57,7 @@ export const useApp = create<AppState>((set, get) => ({
     mode: "workspace-write",
     approvalPolicy: "on-request",
     notice: "",
+    streaming: "",
   },
   chatInput: "",
 
@@ -87,7 +88,8 @@ export const useApp = create<AppState>((set, get) => ({
 
   abortChat: async () => {
     await api().abortChat();
-    set((s) => ({ chat: { ...s.chat, status: "aborted", pendingApproval: undefined } }));
+    // 打字预览一并收掉：停止是用户当场看到的动作，不该等收尾事件回来才消失。
+    set((s) => ({ chat: { ...s.chat, status: "aborted", pendingApproval: undefined, streaming: "" } }));
   },
 
   newChat: async () => {
@@ -108,6 +110,7 @@ export const useApp = create<AppState>((set, get) => ({
           usageTokens: 0,
           pendingApproval: undefined,
           notice: "",
+          streaming: "",
         },
       }));
     } catch (e) {
@@ -137,13 +140,20 @@ export const useApp = create<AppState>((set, get) => ({
             mode: t.meta.mode,
             approvalPolicy: t.meta.approvalPolicy,
             pendingApproval: undefined,
+            streaming: "",
           },
         }));
       } else {
         // 没有记录时不清空内存里的条目：页面刚挂载时状态本来就是空的，
         // 而删除当前会话那条路径会显式先清空再调这里。
         set((s) => ({
-          chat: { ...s.chat, sessionId: undefined, status: "idle", pendingApproval: undefined },
+          chat: {
+            ...s.chat,
+            sessionId: undefined,
+            status: "idle",
+            pendingApproval: undefined,
+            streaming: "",
+          },
         }));
       }
     } catch (e) {
@@ -183,6 +193,7 @@ export const useApp = create<AppState>((set, get) => ({
           approvalPolicy: t.meta.approvalPolicy,
           pendingApproval: undefined,
           notice: "",
+          streaming: "",
         },
       }));
       await get().loadChatSessions();
@@ -211,6 +222,7 @@ export const useApp = create<AppState>((set, get) => ({
           approvalPolicy: t.meta.approvalPolicy,
           pendingApproval: undefined,
           notice: "",
+          streaming: "",
         },
       }));
       await get().loadChatSessions();
@@ -224,7 +236,14 @@ export const useApp = create<AppState>((set, get) => ({
       await api().deleteChat({ sessionId });
       if (get().chat.sessionId === sessionId) {
         set((s) => ({
-          chat: { ...s.chat, sessionId: undefined, entries: [], status: "idle", pendingApproval: undefined },
+          chat: {
+            ...s.chat,
+            sessionId: undefined,
+            entries: [],
+            status: "idle",
+            pendingApproval: undefined,
+            streaming: "",
+          },
         }));
         await get().loadChatTranscript();
       } else {
@@ -684,7 +703,13 @@ export const useApp = create<AppState>((set, get) => ({
       }
       case "chat:entry": {
         const entry = (p as { entry: ChatEntry }).entry;
-        set((s) => ({ chat: { ...s.chat, entries: [...s.chat.entries, entry] } }));
+        // 落定的事实到了：正在打字的预览清空（正文以 entry 为准，不重复显示）。
+        set((s) => ({ chat: { ...s.chat, entries: [...s.chat.entries, entry], streaming: "" } }));
+        break;
+      }
+      case "chat:delta": {
+        const text = String((p as { text?: string }).text ?? "");
+        if (text !== "") set((s) => ({ chat: { ...s.chat, streaming: s.chat.streaming + text } }));
         break;
       }
       case "chat:status": {
@@ -700,13 +725,15 @@ export const useApp = create<AppState>((set, get) => ({
       }
       case "chat:done": {
         const { turns, usageTokens } = p as { turns: number; usageTokens: number };
-        set((s) => ({ chat: { ...s.chat, status: "done", turns, usageTokens, pendingApproval: undefined } }));
+        set((s) => ({
+          chat: { ...s.chat, status: "done", turns, usageTokens, pendingApproval: undefined, streaming: "" },
+        }));
         break;
       }
       case "chat:error": {
         const message = String(p.message ?? "");
         set((s) => ({
-          chat: { ...s.chat, status: "error", pendingApproval: undefined },
+          chat: { ...s.chat, status: "error", pendingApproval: undefined, streaming: "" },
           logs: [...s.logs.slice(-500), `── 会话出错：${message} ──`],
         }));
         break;

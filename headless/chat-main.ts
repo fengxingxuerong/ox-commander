@@ -253,13 +253,35 @@ function makePrinter(json: boolean): (event: ChatEvent) => void {
     error: "✖",
     approval: "🛂",
   };
+  // 非 json 模式的"正在打字"状态：已经直接写到 stdout 的增量。正文落定时用它
+  // 去重 —— 同一段字不打印两遍（桌面端是清空预览行，终端里就只能是"别再打一次"）。
+  let streamed = "";
+  const endStream = (): void => {
+    if (streamed === "") return;
+    process.stdout.write("\n");
+    streamed = "";
+  };
   return (event) => {
     if (json) {
       writeJson(event as unknown as Record<string, unknown>);
       return;
     }
+    if (event.type === "chat:delta") {
+      if (event.text === "") return;
+      // 第一条增量前补上行首标记，让流式行与落定行长得一样。
+      if (streamed === "") process.stdout.write(`${marks.assistant} `);
+      streamed += event.text;
+      process.stdout.write(event.text);
+      return;
+    }
     if (event.type === "chat:entry") {
       const mark = marks[event.entry.kind] ?? "·";
+      // 增量已经原样显示过且与落定正文一致：只换行（文本协议下正文会被剥掉围栏，
+      // 两者不同，那就照常打印干净版本 —— 宁可多一行，不给半个坏块）。
+      const shown =
+        event.entry.kind === "assistant" && streamed !== "" && streamed.trim() === event.entry.text.trim();
+      endStream();
+      if (shown) return;
       process.stdout.write(`${mark} ${event.entry.text}\n`);
       if (event.entry.kind === "tool_result" && event.entry.result?.output) {
         const body = redactSecrets(event.entry.result.output);
@@ -272,10 +294,13 @@ function makePrinter(json: boolean): (event: ChatEvent) => void {
       return;
     }
     if (event.type === "chat:done") {
+      endStream();
       process.stdout.write(`— 会话收束（${event.turns} 次模型回合，${event.usageTokens} tokens）—\n`);
       return;
     }
     if (event.type === "chat:error") {
+      // 出错时增量可能停在半句上：先收行，错误信息才不会粘在句尾。
+      endStream();
       process.stderr.write(`✖ ${event.message}\n`);
     }
   };

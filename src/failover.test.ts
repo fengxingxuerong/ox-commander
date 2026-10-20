@@ -830,3 +830,82 @@ describe("线路级永久错误与冷却升级（2026-10-02 竞品弹性库特�
     expect(events.some((t) => t.includes("[req=req-abc-123]"))).toBe(true);
   });
 });
+
+/**
+ * 流式与重试语义的交界（P1-1）。
+ *
+ * 整段请求失败时"什么都没发生过"，换线路重排完全安全；流式不是 —— 已经交出去的
+ * 字收不回来，换线路重试的结果是**同一段话说两遍**。所以这一组用例守的是一条
+ * 分界线：吐过字 = 就地失败，没吐过 = 照常轮换。
+ */
+describe("FailoverLlmClient · 流式 committed 语义", () => {
+  it("已经吐过增量后失败：就地失败，不换下一条线路", async () => {
+    const calls: string[] = [];
+    const a: LlmClient = {
+      async chat(r) {
+        calls.push("a");
+        // 真实客户端就是"先交了一段字，然后连接断了"
+        r.onDelta?.("半句");
+        throw new Error("connection reset");
+      },
+    };
+    const b: LlmClient = {
+      async chat() {
+        calls.push("b");
+        return { content: "整段重来", provider: "t", model: "m-b" };
+      },
+    };
+    const events: string[] = [];
+    const client = new FailoverLlmClient([group("g1", [a, b])], async () => {}, {
+      onEvent: (t) => events.push(t),
+    });
+    const deltas: string[] = [];
+    const err = await client
+      .chat({ ...REQ, onDelta: (d) => deltas.push(d) })
+      .then(() => null, (e) => e as Error);
+    expect(calls).toEqual(["a"]);
+    expect(deltas).toEqual(["半句"]);
+    expect(err?.message).toBe("connection reset");
+    // 说破原因：日志里必须能看出"为什么没有轮换"，否则像卡住了。
+    expect(events.some((t) => t.includes("已吐出内容不重试"))).toBe(true);
+  });
+
+  it("一个字都没吐时照常轮换（闸门没把 failover 关掉）", async () => {
+    const calls: string[] = [];
+    const a: LlmClient = {
+      async chat() {
+        calls.push("a");
+        throw new HttpLlmError(429, "rate limited");
+      },
+    };
+    const b: LlmClient = {
+      async chat(r) {
+        calls.push("b");
+        r.onDelta?.("换线之后");
+        return { content: "换线之后", provider: "t", model: "m-b" };
+      },
+    };
+    const client = new FailoverLlmClient([group("g1", [a, b])], async () => {});
+    const deltas: string[] = [];
+    const res = await client.chat({ ...REQ, onDelta: (d) => deltas.push(d) });
+    expect(calls).toEqual(["a", "b"]);
+    expect(res.content).toBe("换线之后");
+    expect(deltas).toEqual(["换线之后"]);
+  });
+
+  it("committed 后失败仍要记账：坏线路下次该被跳过", async () => {
+    const a: LlmClient = {
+      async chat(r) {
+        // 先交一段字，再撞限流：committed 只是"不重试"，不是"不记账"。
+        r.onDelta?.("半句");
+        throw new HttpLlmError(429, "rate limited");
+      },
+    };
+    const client = new FailoverLlmClient([group("g1", [a])], async () => {});
+    await expect(client.chat({ ...REQ, onDelta: () => undefined })).rejects.toBeInstanceOf(HttpLlmError);
+    const line = client.health()[0];
+    expect(line.cooling).toBe(true);
+    expect(line.rateLimitHits).toBe(1);
+    expect(line.consecutiveFailures).toBe(1);
+  });
+});

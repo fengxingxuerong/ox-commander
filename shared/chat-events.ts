@@ -136,6 +136,14 @@ export interface ChatApprovalAnswer {
 
 export type ChatEvent =
   | { type: "chat:entry"; sessionId: string; entry: ChatEntry }
+  /**
+   * 正在流入的正文增量（P1-1）。
+   *
+   * 它是「正在打字」层，**不是转录**：消费方拼出预览，收到下一条 entry / done /
+   * error 就清空。落盘与恢复都不带它 —— 所以崩溃后重开会话看不到半句话，那是
+   * 对的：半句话不是事实。
+   */
+  | { type: "chat:delta"; sessionId: string; text: string }
   | { type: "chat:status"; sessionId: string; status: ChatStatus; turns: number }
   | { type: "chat:approval-request"; sessionId: string; request: ChatApprovalRequest }
   | { type: "chat:done"; sessionId: string; turns: number; usageTokens: number }

@@ -57,6 +57,13 @@ export interface ChatSessionOptions {
   maxTurns?: number;
   mode?: SandboxMode;
   approvalPolicy?: ApprovalPolicy;
+  /**
+   * 要不要把正文增量（`chat:delta`）发出去。默认开。
+   *
+   * 关掉它只在"下游根本没人看增量"时才有意义（比如一次性脚本）—— 客户端的
+   * 策略是「给了回调才流」，所以这里关掉等于一次普通请求，不是另一种结果。
+   */
+  stream?: boolean;
   onEvent?: (event: ChatEvent) => void;
   signal?: AbortSignal;
   /** 注入时钟，测试才写得动时间戳。 */
@@ -85,6 +92,7 @@ export class ChatSession {
   private readonly onPersist?: (snapshot: ChatSessionSnapshot) => void;
   private readonly signal?: AbortSignal;
   private readonly now: () => number;
+  private readonly stream: boolean;
   private readonly messages: ChatMessage[] = [];
   private readonly entries: ChatEntry[] = [];
   private readonly meta: ChatSessionMeta;
@@ -110,6 +118,7 @@ export class ChatSession {
     this.onPersist = opts.onPersist;
     this.signal = opts.signal;
     this.now = opts.now ?? Date.now;
+    this.stream = opts.stream ?? true;
     // 会话 id 会进文件名与恢复索引：`Math.random` 既不满足仓库"零随机"
     // 的约定，也没有跨进程唯一性保证。UUID 是宿主层能力，放这里不污染 shared。
     this.sessionId = opts.sessionId ?? opts.history?.sessionId ?? `chat-${randomUUID()}`;
@@ -271,6 +280,15 @@ export class ChatSession {
           ? { tools: TOOL_SPECS.filter((s) => this.tools.includes(s.name)) }
           : {}),
         ...(this.signal ? { signal: this.signal } : {}),
+        // 给了回调 = 想要增量：客户端先试 SSE，**零增量**就整段退回普通请求，
+        // 所以这里不需要判断"端点支不支持流"。
+        ...(this.stream
+          ? {
+              onDelta: (delta: string) => {
+                this.emit({ type: "chat:delta", sessionId: this.sessionId, text: delta });
+              },
+            }
+          : {}),
       });
       this.meta.usageTokens += res.usageTokens ?? 0;
 

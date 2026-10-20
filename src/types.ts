@@ -195,6 +195,11 @@ export interface ChatView {
   pendingApproval?: ChatApprovalRequest;
   /** 需要人看着时给的一句话（如"没有选项目"）——空串表示没有。 */
   notice: string;
+  /**
+   * 正在流入的正文片段（`chat:delta` 拼起来）。**不是转录**：收到下一条
+   * entry / done / error 就清空，落盘与恢复都不带它。
+   */
+  streaming: string;
 }
 
 export interface AppState {
