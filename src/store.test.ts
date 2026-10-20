@@ -811,6 +811,22 @@ describe("sendChat · 行级评论附录", () => {
     expect(useApp.getState().chat.comments).toEqual([]);
   });
 
+  it("撤销某轮只清该 (path, turn) 的评论：同文件其他轮、同轮其他文件都保留", () => {
+    const add = (path: string, turn: number, text: string) =>
+      useApp.getState().addInlineComment({ path, turn, line: 1, side: "after", text });
+    add("src/a.ts", 1, "本轮要清");
+    add("src/a.ts", 2, "同文件下一轮");
+    add("src/b.ts", 1, "同轮别的文件");
+
+    useApp.getState().dropInlineCommentsFor("src/a.ts", 1);
+
+    expect(useApp.getState().chat.comments.map((comment) => comment.text)).toEqual([
+      "同文件下一轮",
+      "同轮别的文件",
+    ]);
+    useApp.getState().clearInlineComments();
+  });
+
   it("只有评论、没有正文也发得出去（只处理评论是合法操作）", async () => {
     const seen: string[] = [];
     const g = globalThis as { window?: unknown; oxCommander?: unknown };

@@ -851,7 +851,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 77,
+  "electron/ipc/chat.ts": 83,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -918,7 +918,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 45,
+  "src/store.ts": 57,
 };
 
 /**

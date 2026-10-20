@@ -2737,12 +2737,17 @@ describe("chat handlers（交互式编码会话）", () => {
     fs.mkdirSync(path.join(root, "src"), { recursive: true });
     fs.mkdirSync(path.join(root, "node_modules", "pkg"), { recursive: true });
     fs.mkdirSync(path.join(root, "dist"), { recursive: true });
+    fs.mkdirSync(path.join(root, "dist-old"), { recursive: true });
+    fs.mkdirSync(path.join(root, "release-notes"), { recursive: true });
     fs.writeFileSync(path.join(root, "README.md"), "readme");
     fs.writeFileSync(path.join(root, "src", "a.ts"), "export {};");
+    fs.writeFileSync(path.join(root, "with space.txt"), "");
     fs.writeFileSync(path.join(root, ".env"), "SECRET=1");
     fs.writeFileSync(path.join(root, ".env.example"), "SECRET=");
     fs.writeFileSync(path.join(root, "node_modules", "pkg", "index.js"), "");
     fs.writeFileSync(path.join(root, "dist", "out.js"), "");
+    fs.writeFileSync(path.join(root, "dist-old", "out.js"), "");
+    fs.writeFileSync(path.join(root, "release-notes", "notes.md"), "");
 
     const out = (h.ipcMain as FakeIpcMain).invoke("chat:files", { projectId: "p-chat" }) as {
       files: string[];
@@ -2752,8 +2757,11 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(out.files).toContain("src/a.ts");
     expect(out.files).toContain(".env.example");
     expect(out.files).not.toContain(".env");
+    expect(out.files).not.toContain("with space.txt");
     expect(out.files.some((file) => file.startsWith("node_modules/"))).toBe(false);
     expect(out.files.some((file) => file.startsWith("dist/"))).toBe(false);
+    expect(out.files.some((file) => file.startsWith("dist-old/"))).toBe(false);
+    expect(out.files.some((file) => file.startsWith("release-notes/"))).toBe(false);
     expect(out.files).toEqual([...out.files].sort((a, b) => a.localeCompare(b)));
     expect(out.truncated).toBe(false);
   });

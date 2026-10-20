@@ -142,12 +142,12 @@
 - 测试：`src/chat-mention.test.ts` 钉 token/排序/插入；`chat-ui.test.tsx` 钉键盘选择与
   "不会误发送"；`ipc-handlers.test.ts` 钉禁读文件与重目录过滤。
 
-**门禁现状**：用例 2648 → **2654 通过 + 8 跳过**（86 个有可执行用例的文件）；
-`electron/ipc/chat.ts` 位点 77 → 86。**本轮没有跑 site 审计**（M3a/M3b 尚未提交，
-先跑变异有覆盖未提交改动的风险），所以 `SITE_BASELINE` 仍停在 2514 / 98 目标 ——
-`mutation:baseline` 会红，这是"新位点没人逐点审计过"的正确信号，不是漏改。
-提交后先 `mutation:site`（或等价 `--file=electron/ipc/chat.ts --mode=site --limit=999`），
-绿了再 `npm run mutation:baseline:write` 把基线写到 2535 并同步 README/gates。
+**门禁现状**：用例 2648 → **2655 通过 + 8 跳过**（86 个有可执行用例的文件）；
+`electron/ipc/chat.ts` 位点 77 → **83**（去掉两条 `continue` 后从 86 降下），
+`src/store.ts` 位点 45 → 57。site 审计已逐点跑完：chat.ts **83/83**、store.ts **57/57**
+全部杀死；`SITE_BASELINE` 写到 **2532 / 98 目标**，README/gates 已同步。
+审计期间补出的断言：`dist-*`/`release-*` 目录独立过滤、含空白路径不进候选、
+删除评论只命中 `(path, turn)` 同时相等的那一条。
 
 ### 新增（行级评论 M3a · 2026-10-21）
 

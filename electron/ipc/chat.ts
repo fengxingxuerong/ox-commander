@@ -298,15 +298,12 @@ function collectProjectFiles(rootAbs: string, runtime: ChatRuntime): ChatFileInd
         truncated = true;
         return;
       }
-      if (entry.isSymbolicLink()) continue;
       const rel = relDir === "" ? entry.name : `${relDir}/${entry.name}`;
       if (entry.isDirectory()) {
         if (!ignoredMentionDir(entry.name)) walk(path.join(absDir, entry.name), rel);
-        continue;
+      } else if (entry.isFile() && !/\s/.test(rel) && runtime.pathPolicy.assertReadable(rel)) {
+        files.push(rel);
       }
-      if (!entry.isFile() || /\s/.test(rel)) continue;
-      if (!runtime.pathPolicy.assertReadable(rel)) continue;
-      files.push(rel);
     }
   };
 
