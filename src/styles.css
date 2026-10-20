@@ -121,6 +121,154 @@ body {
   position: relative;
 }
 
+/*
+ * 三栏工作台（M1，会话页专用）。
+ *
+ * 顶栏之下是一条横向 flex（`.app-body`）：左栏定宽、中栏吃掉剩余宽度。
+ * 刻意**不用 grid**：中栏的内容（转录 + 输入框）需要能自己滚，而 grid 子项
+ * 默认会被内容顶高，滚起来的是整页而不是那一栏。右栏（M2）接进来时在 main
+ * 之后再加一条即可，这条 flex 不用改。
+ *
+ * 窄屏（<1080px）折成单栏：左栏变成内容区上方的一条横带 —— 折的不是
+ * "有没有左栏"，而是它占的方向。
+ */
+.app-shell-three {
+  flex-direction: column;
+}
+
+.app-shell-three .app-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 0;
+}
+
+.app-shell-three .app-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.thread-rail {
+  width: 264px;
+  flex: 0 0 264px;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 14px 12px 24px;
+  border-right: 1px solid var(--color-border-tertiary, rgba(255, 255, 255, 0.12));
+  background: var(--color-background-secondary, rgba(255, 255, 255, 0.03));
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.thread-rail-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.thread-rail-threads {
+  flex: 1;
+  min-height: 0;
+}
+
+.thread-rail-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.thread-rail-project-name {
+  margin: 0;
+  font-size: 12px;
+}
+
+.thread-rail-empty {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.thread-rail-projects {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.thread-rail-project {
+  text-align: left;
+  padding: 7px 10px;
+  border-radius: var(--border-radius-md, 8px);
+  border: 1px solid transparent;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-rail-project:hover {
+  background: rgba(127, 119, 221, 0.12);
+}
+
+.thread-rail-project.active {
+  border-color: rgba(127, 119, 221, 0.55);
+  background: rgba(127, 119, 221, 0.18);
+}
+
+.thread-rail .chat-sessions {
+  border: none;
+  padding: 0;
+  background: transparent;
+}
+
+.thread-rail .chat-session {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 2px 6px;
+  padding: 7px 8px;
+  border-radius: var(--border-radius-md, 8px);
+  border: 1px solid transparent;
+}
+
+.thread-rail .chat-session.active {
+  border-color: rgba(127, 119, 221, 0.45);
+  background: rgba(127, 119, 221, 0.12);
+}
+
+.thread-rail .chat-session-title {
+  text-align: left;
+}
+
+.thread-rail .chat-session-meta {
+  grid-column: 1;
+}
+
+.thread-rail .chat-session .btn-row,
+.thread-rail .chat-session > .small {
+  grid-column: 2;
+}
+
+@media (max-width: 1080px) {
+  .app-shell-three .app-body {
+    flex-direction: column;
+  }
+
+  .thread-rail {
+    width: 100%;
+    flex: 0 0 auto;
+    max-height: 190px;
+    border-right: none;
+    border-bottom: 1px solid var(--color-border-tertiary, rgba(255, 255, 255, 0.12));
+  }
+}
+
 /* 全局扫描线：纯装饰、不拦截鼠标。两层：细密底纹 + 一道缓慢下扫的高光。 */
 .app-scanlines {
   position: fixed;

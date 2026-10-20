@@ -912,7 +912,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 44,
+  "src/store.ts": 45,
 };
 
 /**

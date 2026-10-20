@@ -3,6 +3,7 @@ import { act, render, screen, fireEvent, cleanup } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./pages/ChatPage";
+import { ThreadRail } from "./components/ThreadRail";
 import { useApp } from "./store";
 import type { ChatApprovalRequest, ChatEntry } from "../shared/chat-events";
 
@@ -285,7 +286,9 @@ describe("会话页（ChatPage）", () => {
       },
     ]);
     bridge.resumeChat.mockResolvedValueOnce(transcript([entry({ id: "e-old", kind: "assistant", text: "恢复后的内容" })]));
-    render(<ChatPage />);
+    // M1 起线程列表搬到左栏：断言随组件一起搬（恢复 / 分叉 / 删除的契约没变，
+    // 变的是它不再挤在会话页中段、要滚过整段转录才够得着）。
+    render(<ThreadRail />);
     await vi.waitFor(() => expect(screen.getByText("旧会话")).toBeTruthy());
     expect(screen.getByRole("button", { name: "分叉" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "删除" })).toBeTruthy();
@@ -294,7 +297,6 @@ describe("会话页（ChatPage）", () => {
     await vi.waitFor(() =>
       expect(bridge.resumeChat).toHaveBeenCalledWith({ projectId: "p-1", sessionId: "chat-old" }),
     );
-    await vi.waitFor(() => expect(screen.getByText("恢复后的内容")).toBeTruthy());
     expect(bridge.sendChat).not.toHaveBeenCalled();
   });
 

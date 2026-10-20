@@ -172,13 +172,8 @@ export function ChatPage() {
   const newChat = useApp((s) => s.newChat);
   const loadTranscript = useApp((s) => s.loadChatTranscript);
   const resolveApproval = useApp((s) => s.resolveChatApproval);
-  const sessions = useApp((s) => s.chat.sessions);
-  const resumeChat = useApp((s) => s.resumeChat);
-  const forkChat = useApp((s) => s.forkChat);
-  const deleteChat = useApp((s) => s.deleteChat);
   const revertChat = useApp((s) => s.revertChat);
   const [reason, setReason] = useState("");
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -230,51 +225,8 @@ export function ChatPage() {
 
         {chat.notice ? <p className="muted">⚠ {chat.notice}</p> : null}
 
-        {sessions.length > 0 ? (
-          <div className="chat-sessions" data-testid="chat-sessions">
-            <span className="hud-stat-label">历史会话</span>
-            {sessions.slice(0, 8).map((s) => (
-              <div key={s.sessionId} className={`chat-session${s.sessionId === chat.sessionId ? " active" : ""}`}>
-                <button
-                  type="button"
-                  className="chat-session-title"
-                  onClick={() => void resumeChat(s.sessionId)}
-                  disabled={busy || s.sessionId === chat.sessionId}
-                  title={s.title}
-                >
-                  {s.title || "新会话"}
-                </button>
-                <span className="muted chat-session-meta">
-                  {s.turns} 轮 · {STATUS_TEXT[s.status] ?? s.status}
-                </span>
-                {confirmDelete === s.sessionId ? (
-                  <>
-                    <button type="button" className="small danger" onClick={() => void deleteChat(s.sessionId)}>
-                      确认删除
-                    </button>
-                    <button type="button" className="small" onClick={() => setConfirmDelete(null)}>
-                      取消
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    <button type="button" className="small" onClick={() => void forkChat(s.sessionId)} disabled={busy}>
-                      分叉
-                    </button>
-                    <button
-                      type="button"
-                      className="small"
-                      onClick={() => setConfirmDelete(s.sessionId)}
-                      disabled={busy}
-                    >
-                      删除
-                    </button>
-                  </>
-                )}
-              </div>
-            ))}
-          </div>
-        ) : null}
+        {/* 线程列表已搬到左栏（M1）：它在常驻位置，不随转录滚走。
+            恢复 / 分叉 / 删除的交互与断言一起搬到了 SessionList 与 ThreadRail。 */}
 
         {chat.entries.length > 0 ? (
           // 摘要给的是"它动过哪些文件、调了几次工具"—— 转录逐条往下翻之前，

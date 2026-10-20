@@ -2,6 +2,7 @@ import { useEffect } from "react";
 import { useApp } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HudNav } from "./components/HudNav";
+import { ThreadRail } from "./components/ThreadRail";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -18,16 +19,24 @@ export function App() {
     return api_unsubscribe(handleEvent);
   }, [handleEvent, refreshProjects]);
 
+  // 会话页走**三栏工作台**（M1，对标 Codex）：左栏项目与线程树常驻，
+  // 中栏是执行流。其余四页仍单栏 —— 它们的正文宽度就是它们的内容宽度，
+  // 硬套三栏只会给看板与设置页各添两条空边。
+  const shell = page === "chat" ? "app-shell app-shell-three" : "app-shell";
+
   return (
-    <div className="app-shell">
+    <div className={shell}>
       {/* 顶栏在 ErrorBoundary **之外**：页面渲染炸了也还能切到别的模块、
           而不是整块黑屏。崩溃信息由边界自己渲染在内容区里。 */}
       <HudNav />
-      <main className="app-main">
-        <ErrorBoundary>
-          <CurrentPage page={page} />
-        </ErrorBoundary>
-      </main>
+      <div className="app-body">
+        {page === "chat" ? <ThreadRail /> : null}
+        <main className="app-main">
+          <ErrorBoundary>
+            <CurrentPage page={page} />
+          </ErrorBoundary>
+        </main>
+      </div>
       <div className="app-scanlines" aria-hidden="true" />
     </div>
   );

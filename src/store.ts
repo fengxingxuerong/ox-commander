@@ -385,6 +385,26 @@ export const useApp = create<AppState>((set, get) => ({
     });
   },
 
+  /**
+   * 左栏点项目（M1，见 `AppState.focusProject` 的注释）。
+   *
+   * 顺序是「先落页面、再取数」：反过来（await 完再 set page）会让一次慢的
+   * `chatLatest` 把点击表现得像没反应 —— 界面要立刻有反馈，数据随后跟上。
+   * 同项目重复点击不重取：那会打断正在读的转录。
+   */
+  focusProject: async (projectId: string) => {
+    if (get().activeProjectId === projectId) return;
+    set({ activeProjectId: projectId, page: "chat", projectsError: undefined });
+    try {
+      await get().loadChatTranscript();
+    } catch (err) {
+      // loadChatTranscript 内部已把失败写进 notice；这里只兜"它自己抛出来"
+      // 的那种，不吞也不重复报。
+      const message = (err as Error).message;
+      set((s) => ({ chat: { ...s.chat, notice: `切换项目失败：${message}` } }));
+    }
+  },
+
   /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
   beginProject: (projectId: string) => {
     set({

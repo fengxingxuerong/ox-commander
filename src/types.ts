@@ -305,6 +305,15 @@ export interface AppState {
    *   还是上一个项目 —— 点了没反应，这是"看不出点在起作用"的典型。）
    */
   openProject(projectId: string): void;
+  /**
+   * 左栏点项目（M1）：切当前项目并进会话页。
+   *
+   * 与 `openProject` 的分工是刻意的：那个去**看板**（编排流水线的进度），
+   * 这个去**会话页**（线程与执行流）。同一次点击里做两件会互相打断的事
+   * 是 Codex 式工作台要避免的 —— 切项目不是"开始跑"，只是换一块工作区。
+   * 失败不跳页：先在原地说，不带着空白页走。
+   */
+  focusProject(projectId: string): Promise<void>;
   /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
   beginProject(projectId: string): void;
   runPlanning(): Promise<void>;

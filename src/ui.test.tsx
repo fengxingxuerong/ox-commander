@@ -14,6 +14,7 @@ import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AgentsPanel } from "./components/AgentsPanel";
 import { AuditPanel } from "./components/AuditPanel";
+import { ThreadRail } from "./components/ThreadRail";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -265,6 +266,73 @@ describe("App", () => {
     expect(await screen.findByText("线路池（多 API 同时工作）")).toBeTruthy();
     useApp.setState({ page: "projects" });
     expect(await screen.findByText("新建项目")).toBeTruthy();
+  });
+
+  // M1：三栏壳只在会话页出现。这条钉的是"别把左栏安到所有页上"——
+  // 看板与设置页的正文宽度就是它们的内容宽度，硬套三栏只会多两条空边。
+  it("shows the thread rail only on the chat page", async () => {
+    render(<App />);
+    expect(screen.queryByLabelText("项目与线程")).toBeNull();
+    useApp.setState({ page: "chat" });
+    expect(await screen.findByLabelText("项目与线程")).toBeTruthy();
+    useApp.setState({ page: "board" });
+    // 用 waitFor 而不是同步断言：zustand 的 setState 在 act 之外时要等一拍才
+    // 反映到 DOM（同一套写法在 262 行那条也是配 findBy*）。
+    await waitFor(() => expect(screen.queryByLabelText("项目与线程")).toBeNull());
+  });
+});
+
+/**
+ * 左栏 · 项目与线程（M1，对标 Codex 的 sidebar）。
+ *
+ * 钉的是三条容易悄悄退化的契约：
+ * 1. 点项目 = 切项目 + 进会话页，且**不**开始规划（导航不发起动作）；
+ * 2. 同项目重复点击不重取（那会打断正在读的转录）；
+ * 3. 运行 / 等审批时禁用一切切换 —— 换线程会让在途的工具结果串到另一条线上。
+ */
+describe("左栏（ThreadRail）", () => {
+  const project = (id: string, name: string) => ({ id, name, stage: "IDLE", requirement: `需求 ${name}` });
+
+  it("点项目切过去并读它的线程；重复点击不重复读", async () => {
+    useApp.setState({ projects: [project("p-1", "一"), project("p-2", "二")], activeProjectId: "p-1" });
+    render(<ThreadRail />);
+    expect(screen.getByRole("button", { name: "二" })).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "二" }));
+    await waitFor(() => {
+      expect(useApp.getState().activeProjectId).toBe("p-2");
+      expect(useApp.getState().page).toBe("chat");
+    });
+    // 切项目读的是"最近一条会话"而不是列表本身：chatLatest 是那条链的第一步。
+    expect(window.oxCommander.chatLatest).toHaveBeenCalled();
+    const calls = (window.oxCommander.chatLatest as unknown as { mock: { calls: unknown[] } }).mock.calls.length;
+
+    fireEvent.click(screen.getByRole("button", { name: "二" }));
+    await Promise.resolve();
+    expect(
+      (window.oxCommander.chatLatest as unknown as { mock: { calls: unknown[] } }).mock.calls.length,
+    ).toBe(calls);
+  });
+
+  it("没有项目时说明白去哪新建，而不是摆一个空树", () => {
+    useApp.setState({ projects: [], activeProjectId: undefined });
+    render(<ThreadRail />);
+    expect(screen.getByText(/项目库/)).toBeTruthy();
+    // 按钮在但禁用：没有项目时可点的"新线程"只会造出一条没有工作区的线。
+    // 摆一个按不动的按钮，也比藏起来更让人觉得"这里能开线程"。
+    const btn = screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+  });
+
+  it("运行中禁用切换（在途的工具结果不许串到另一条线上）", async () => {
+    useApp.setState({
+      projects: [project("p-1", "一"), project("p-2", "二")],
+      activeProjectId: "p-1",
+      chat: { ...useApp.getState().chat, status: "running" },
+    });
+    render(<ThreadRail />);
+    expect((screen.getByRole("button", { name: "二" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

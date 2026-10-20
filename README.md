@@ -11,7 +11,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **97 个目标** / 基线 **2503 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **97 个目标** / 基线 **2504 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -53,7 +53,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**逐行 diff + 单文件回滚**（B1 第二半）：批次成功后备份转**存档**（容量策略只保留最近 8 批），diff 是"存档旧内容 × 盘上现状"；回滚从该批存档恢复，新建文件须有审计里的 `create` 证据才肯删（没证据宁可留一个脏文件）；存档过期或未配置快照存储时按钮不出现，边界写在卡片上。**本次产物 + 怎么验收**（最后一米）：run 收束后按任务分组列出产物路径，点开即读只读全文（不用开工作目录）；同时给出凭据里的复跑命令与 `package.json` 的 `dev/start/preview/serve` 启动命令，一键复制。同一份结构（`shared/delivery-guide`）经 `acceptance` 事件进 serve 状态页，两端不会各说各的 |
 > | 项目约定 | 项目根的 **`OX.md` / `AGENTS.md`** 自动进上下文：规划（PRD 提示）与每个任务的派发描述都带，顺序是 **任务描述 → 约定 → 平台契约 → 操作者附言**。约定块自己声明"不覆盖契约"；单文件上限 256KB、总注入上限 8000 字符，截断时**说破**原长度；读不动的文件只报不抛 |
 > | 执行器自动探测 | 智能体页「扫描本机执行器」：扫 `PATH` 找已装的编码 CLI（Claude Code / Codex / Aider / Gemini / Goose），命中即可**一键接入** —— 参数取仓内带实测参数的模板，不用手写 JSON manifest。扫描**只读 PATH、不执行任何命令**（候选 CLI 不会因为"被扫了一下"就启动一次）；没装的那条给安装命令，且**不显示"接入"**（派发与扫描用同一个 PATH，扫不到 = 接进来也必红） |
-> | 交互式编码会话 | 桌面「会话」页与 CLI（`ox chat` / `exec` / `resume`）共用同一套工具循环：模型自己 `read_file` / `grep_files` / `apply_patch` / `run_command`，平台逐条展示并审批。会话落盘可恢复/分叉；补丁带逐行 diff 与单文件/整轮撤销；沙箱读路径走 realpath、禁读 `.env`，命令子进程走 `scopedEnv`，批准后的命令可被停止真杀。项目根的 `AGENTS.md`/`OX.md`、`.ox/config.json` 与全局/项目 `policy.d` 一起进边界；正文**流式**逐块到达（桌面实时行 + CLI 逐字；端点不支持时自动退回整段；长会话到预算后自动压缩历史：旧消息换成摘要并当场说明压掉了几条，转录原文一条不少，`ox chat --compact-tokens 0` 可整条关掉）；**尚未做**多会话并行（P1） |
+> | 交互式编码会话 | 桌面「会话」页与 CLI（`ox chat` / `exec` / `resume`）共用同一套工具循环：模型自己 `read_file` / `grep_files` / `apply_patch` / `run_command`，平台逐条展示并审批。会话落盘可恢复/分叉；补丁带逐行 diff 与单文件/整轮撤销；沙箱读路径走 realpath、禁读 `.env`，命令子进程走 `scopedEnv`，批准后的命令可被停止真杀。项目根的 `AGENTS.md`/`OX.md`、`.ox/config.json` 与全局/项目 `policy.d` 一起进边界；正文**流式**逐块到达（桌面实时行 + CLI 逐字；端点不支持时自动退回整段；长会话到预算后自动压缩历史：旧消息换成摘要并当场说明压掉了几条，转录原文一条不少，`ox chat --compact-tokens 0` 可整条关掉）；会话页为**三栏工作台**（左：项目与线程树，中：执行流；切项目/切线程只导航不发起动作）；**尚未做**右栏改动审查、@文件补全、Skills、MCP client、Automations 桌面化与多会话并行 |
 > | 人在回路 | 任务附言：运行中给任务挂一句纠偏指示，**下一次派发生效**（执行器是一问一答形态，没有在途插话通道，界面不暗示实时送达）；任务行与升级卡（"带话重派"）都有入口；成功后自动退休。只对在跑的 run 有效 —— 运行前的 steering 归 PRD 评审页 |
 > | 通知 | 桌面系统通知（只三类：run 出结论 / 任务待决策 / 命令待审批）—— 长任务切走后"该回工位了"由操作系统喊，判据是纯函数可逐点审计；`isSupported` 为 false 安静降级 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
@@ -274,7 +274,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
   空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
   空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
-→ vitest（2026-10-20 现跑 2615 通过 + 8 跳过，合计 2623 条，分布在 84 个有可执行用例的文件；
+→ vitest（2026-10-20 现跑 2619 通过 + 8 跳过，合计 2627 条，分布在 84 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -385,7 +385,7 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/` | Renderer（React18 + Zustand）：projects / prd-review / board / chat / settings 五页 + AgentsPanel |
+| `src/` | Renderer（React18 + Zustand）：projects / prd-review / board / chat / settings 五页 + AgentsPanel；会话页为三栏工作台（`components/ThreadRail` 左栏：项目与线程树 + `components/SessionList` 线程列表） |
 | `electron/engine/` | 编排器（六阶段 + repair loop）、调度器（批内 zone 互斥 + 并发闸）、能力路由、验证器、仲裁 |
 | `electron/chat/` | 交互式编码智能体：`ChatSession` 工具循环、`ToolRunner` 沙箱执行、会话记录仓、运行时边界（项目配置/约定/policy.d） |
 | `electron/agents/` | 统一适配层：`local-llm`（SenseNova 执行器）/ `cli`（Codex 等）/ `http-bridge`（WorkBuddy 等）+ 注册表 + manifest 校验 |
