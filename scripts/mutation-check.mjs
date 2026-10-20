@@ -135,6 +135,43 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
  */
 const TARGETS = [
   { file: "electron/sandbox/path-policy.ts", test: "src/sandbox-path.test.ts", tier: 1 },
+  // 2026-10-20：交互式会话的**工具层契约**（工具表 / 参数校验 / 截断说破）与
+  // **文本协议解析**（tool 块 → ToolCall）。入表理由：工具名或必填参数判错一次，
+  // 模型那一轮调用的结果就是静默丢失 —— 表现是"模型假装读过了"，不落任何错误。
+  { file: "shared/tools/spec.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  { file: "shared/tools/protocol.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  // 2026-10-20：补丁解析与应用。入表理由：上下文匹配是补丁的**唯一**防漂移机制，
+  // 模糊匹配会把"改错地方"变成"改了别的地方"——而后者在验收里是一片绿。
+  { file: "shared/tools/patch.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  // 2026-10-20：工具裁决（沙箱三档 × 审批策略）。入表理由：这一层同时决定
+  // "read-only 下能不能写"与"要不要先问人"，两件事判反都不报错、只漏防护。
+  { file: "shared/tools/policy.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  // 2026-10-20：会话事件契约与转录派生（摘要/一行说明）。入表理由：摘要是用户
+  // 决定"该不该停下来看一眼"的那一行，口径错了没人会发现。
+  { file: "shared/chat-events.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  // 2026-10-20：工具执行层（读/列/检索/补丁/命令）。入表理由：它是唯一真正
+  // 落盘与起进程的一层，任何"放过"直接等于越权被执行。
+  {
+    file: "electron/chat/tool-runner.ts",
+    tests: ["src/chat-session.test.ts", "src/chat-security.test.ts", "src/chat-tool-runner.test.ts"],
+    tier: 1,
+  },
+  // 2026-10-20：会话循环。入表理由：中断与 fail-closed 两条行为错了都不会抛错，
+  // 只表现为"点了没反应"或"没人答却执行了"——后者是必须被证明不会发生的那类。
+  { file: "electron/chat/session.ts", tests: ["src/chat-session.test.ts"], tier: 1 },
+  // 2026-10-20：会话宿主编排（首条消息建会话、设置/项目切换重建、会话列表/恢复/
+  // 分叉/撤销的 IPC）。入表理由：首条消息空指针与"恢复后消息序列错位"都是
+  // 页面照样能点、只是行为错的那类缺陷。
+  { file: "electron/ipc/chat.ts", tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"], tier: 1 },
+  // 2026-10-20：会话运行时边界（项目约定 + .ox/config.json + 全局/项目 policy.d）。
+  // 入表理由：任何一条合并不是"更严"而是"被静默放宽"时，界面仍显示旧档位。
+  { file: "electron/chat/runtime.ts", tests: ["src/chat-runtime.test.ts", "src/ipc-handlers.test.ts"], tier: 1 },
+  // 2026-10-20：会话记录仓（原子索引、坏文件跳过、fork/delete、重启恢复）。
+  // 入表理由：恢复错一条消息或把源会话覆盖成分叉，都不会抛错。
+  { file: "electron/chat/session-store.ts", tests: ["src/chat-store.test.ts", "src/ipc-handlers.test.ts"], tier: 1 },
+  // 2026-10-20：项目级 `.ox/config.json` 归一化。入表理由：未知版本/非法档位
+  // 必须整份忽略并说破，不能被半懂不懂地执行成一次放宽。
+  { file: "shared/project-config.ts", tests: ["src/chat-runtime.test.ts"], tier: 1 },
   // 2026-10-17：桌面通知判据（C1，竞品缺口「通知」格）——哪些事件值得打扰人
   // （receipt / escalation / approval-request 三档，其余全不弹）与文案裁剪。
   // 入表理由：弹窗是 Electron 副作用无法单测，**判据错了就等于通知全错**，
@@ -179,7 +216,10 @@ const TARGETS = [
   // 2026-10-01 补挂：策略即代码（P2-2）的契约层。落地时漏登记，本次与审批门同批补上 ——
   // 它承载"只加严不放宽"这条安全语义（归一化 / 合并 / 只产出 denyMore），
   // 在执行面接线位点之外还该有自己的逐位点保护。
-  { file: "shared/policy-file.ts", tests: ["src/policy-file.test.ts", "src/platform.test.ts"], tier: 2 },
+  { file: "shared/policy-file.ts", tests: ["src/policy-file.test.ts", "src/platform.test.ts", "src/chat-runtime.test.ts"], tier: 2 },
+  // 2026-10-20：策略目录多来源合并（全局 + 项目 `.ox/policy.d`）。入表理由：
+  // 并集写错会静默丢规则，而日志仍会说"已加载 N 份"。
+  { file: "electron/sandbox/policy-dir.ts", test: "electron/sandbox/policy-dir.test.ts", tier: 1 },
   { file: "shared/glob.ts", test: "src/glob.test.ts", tier: 1 },
   { file: "shared/redact.ts", test: "src/redact.test.ts", tier: 1 },
   { file: "shared/prompt-text.ts", test: "src/prompt-injection.test.ts", tier: 1 },
@@ -196,11 +236,15 @@ const TARGETS = [
   // （行号、增删统计、截断与二进制的"未知即 null"）双端共用；位点不密但
   // 每一处都是"面板上的数字对不对"的直接来源，值得逐点盯着。
   { file: "shared/text-diff.ts", test: "src/text-diff.test.ts", tier: 1 },
+  // 2026-10-19（交付成果面）：本次运行边界的判定、按任务 zone 分组、跨批去重、
+  // 凭据命令与 package.json 启动脚本。桌面看板与 serve 状态页共用这份推导 ——
+  // 判错不抛异常，只会让"本次产物"混进上一次 run 或漏掉文件。
+  { file: "shared/delivery-guide.ts", test: "src/delivery-guide.test.ts", tier: 1 },
   // 2026-10-17（B3）：项目约定注入。纯函数（拼接/截断/空块）与读盘
   // （OX.md / AGENTS.md、单文件上限、读不动只报不抛）各一条目标 ——
   // 拼错一个字符就是"约定带进了提示但读的人看不懂"，而它在测试之外不可见。
   { file: "shared/project-conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
-  { file: "electron/engine/conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
+  { file: "electron/engine/conventions.ts", tests: ["src/project-conventions.test.ts", "src/chat-runtime.test.ts"], tier: 1 },
   // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
   // 分隔符猜错平台就表现为"明明装了却说没装"，而这在本机测不出来。
   { file: "shared/cli-detect.ts", test: "src/cli-detect.test.ts", tier: 1 },
@@ -221,7 +265,7 @@ const TARGETS = [
   { file: "electron/sandbox/kill-tree.ts", test: "src/kill-tree.test.ts", tier: 1 },
   {
     file: "src/store.ts",
-    tests: ["src/store.test.ts", "src/store-errors.test.ts", "src/ui.test.tsx"],
+    tests: ["src/store.test.ts", "src/store-errors.test.ts", "src/ui.test.tsx", "src/chat-ui.test.tsx"],
     tier: 1,
   },
   { file: "electron/engine/orchestrator.ts", test: "src/orchestrator.test.ts", tier: 2 },
@@ -278,6 +322,9 @@ const TARGETS = [
       "src/retry-after.test.ts",
       "src/failover.test.ts",
       "src/llm-pool.test.ts",
+      // 原生 function calling 的映射/解析（OpenAI + Anthropic）住在 chat-tools.test.ts；
+      // 漏挂它会把这 20+ 个位点全报成"存活"，而断言其实在没跑的文件里。
+      "src/chat-tools.test.ts",
     ],
     tier: 2,
   },
@@ -378,6 +425,18 @@ const TARGETS = [
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
     tier: 2,
   },
+  // 2026-10-19（交付成果面）：delivery:guide / delivery:read 的 IO 边界。
+  // 只读预览的路径判定（字面 + realpath 两道）与截断/二进制边界是安全与可用性
+  // 的交界；判错不抛异常，只会在界面上"读不到"或"读到树外"。
+  {
+    file: "electron/ipc/delivery.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
+  // 2026-10-19（item 2）：dev server 保活的生命周期（单实例替换、TTL 防误停、
+  // 日志尾部、退出/停止清理、已死进程不接管）。判错会表现为"旧进程占着端口"
+  // 或"预览被别人的定时器停掉"，都不抛异常。
+  { file: "electron/preview-manager.ts", test: "src/preview-manager.test.ts", tier: 1 },
   // context.ts 是全部单例状态与桌面装配的家：密钥播种、审计落盘、journal、
   // layer 缓存都在这里，变异一露头就说明装配语义可被悄悄改变。
   {
@@ -762,6 +821,10 @@ const SITE_BASELINE = {
   "electron/atomic-file.ts": 2,
   "electron/audit-log.ts": 20,
   "electron/board-derive.ts": 40,
+  "electron/chat/runtime.ts": 12,
+  "electron/chat/session-store.ts": 38,
+  "electron/chat/session.ts": 24,
+  "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
   "electron/engine/conventions.ts": 2,
@@ -771,10 +834,12 @@ const SITE_BASELINE = {
   "electron/engine/orchestrator.ts": 83,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
-  "electron/engine/verifier.ts": 30,
+  "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/context.ts": 27,
+  "electron/ipc/chat.ts": 77,
+  "electron/ipc/context.ts": 28,
+  "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
   "electron/ipc/orchestration.ts": 11,
   "electron/ipc/projects.ts": 12,
@@ -782,7 +847,8 @@ const SITE_BASELINE = {
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
   "electron/notify-rules.ts": 8,
-  "electron/platform.ts": 37,
+  "electron/platform.ts": 38,
+  "electron/preview-manager.ts": 12,
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
   "electron/sandbox/circuit-breaker.ts": 26,
@@ -790,7 +856,8 @@ const SITE_BASELINE = {
   "electron/sandbox/file-journal.ts": 18,
   "electron/sandbox/kill-tree.ts": 11,
   "electron/sandbox/loop-detector.ts": 5,
-  "electron/sandbox/path-policy.ts": 40,
+  "electron/sandbox/path-policy.ts": 48,
+  "electron/sandbox/policy-dir.ts": 5,
   "electron/sandbox/snapshot-store.ts": 33,
   "electron/sandbox/spawn-plan.ts": 8,
   "electron/sandbox/timeout-gate.ts": 3,
@@ -800,34 +867,41 @@ const SITE_BASELINE = {
   "headless/mcp.ts": 78,
   "headless/protocol.ts": 120,
   "headless/receipt-verify-main.ts": 8,
-  "headless/run-spec.ts": 30,
+  "headless/run-spec.ts": 33,
   "headless/schedule-core.ts": 21,
   "headless/serve-main.ts": 43,
-  "headless/serve.ts": 68,
+  "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
+  "shared/chat-events.ts": 15,
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
+  "shared/delivery-guide.ts": 31,
   "shared/delivery-receipt.ts": 43,
   "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,
-  "shared/http-clients.ts": 61,
+  "shared/http-clients.ts": 96,
   "shared/llm-client.ts": 15,
-  "shared/page-smoke.ts": 5,
+  "shared/page-smoke.ts": 17,
   "shared/policy-file.ts": 33,
+  "shared/project-config.ts": 16,
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,
   "shared/prompts.ts": 6,
   "shared/providers.ts": 3,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
-  "shared/schema.ts": 62,
+  "shared/schema.ts": 77,
   "shared/text-diff.ts": 38,
+  "shared/tools/patch.ts": 49,
+  "shared/tools/policy.ts": 20,
+  "shared/tools/protocol.ts": 13,
+  "shared/tools/spec.ts": 27,
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 36,
+  "src/store.ts": 43,
 };
 
 /**
@@ -964,7 +1038,6 @@ const EQUIVALENT_SITES = [
    */
   { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 352 },
   { file: "electron/engine/scheduler.ts", op: "return true → false", line: 352 },
-  { file: "shared/schema.ts", op: "|| → &&", line: 184 },
   /**
    * `electron/sandbox/spawn-plan.ts:96` `return false → true`（`isFile` 的 catch）。
    *
@@ -1085,7 +1158,7 @@ const EQUIVALENT_SITES = [
    *    router 分量（与 187 同文件同型）。取反只改缓存签名的一个比特：签名内容
    *    决定的是 layer 何时重建（缓存失效粒度），不是行为正确性 —— 双射下
    *    agentRouter 真假与签名比特的绑定方向不可观察，缓存命中边界恒等。
-   * 2. `electron/ipc/orchestration.ts:230` approval-decide handler 的
+   * 2. `electron/ipc/orchestration.ts:265` approval-decide handler 的
    *    `return true`（`true → false`）。throw 路径（无 pending 的 requestId）
    *    由 ipc.test.ts 的 ghost 用例钉住；正常路径的返回值渲染端**不消费**
    *    （store 的 resolveApproval 只 await，不看结果）—— 变异只改 IPC 返回值，
@@ -1111,7 +1184,7 @@ const EQUIVALENT_SITES = [
    * 187 的同型位点（第二处签名行）已在此前的装配收敛中消失，条目保留作历史
    * 锚；现存的 enableRouter: … !== false（225/283）是真行为、被用例杀死，不入表。 */
   { file: "electron/ipc/context.ts", op: "!== → ===", line: 221 },
-  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 232 },
+  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 267 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
   /*
@@ -1152,6 +1225,27 @@ const EQUIVALENT_SITES = [
    */
   { file: "electron/engine/scheduler.ts", op: "return true → false", line: 346 },
   { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 346 },
+  /**
+   * `shared/tools/spec.ts` `validateToolArgs` 的 boolean 类型分支 —— **当前
+   * 工具表闭合，不可达**。
+   *
+   * `TOOL_SPECS` 是闭合集合（未登记名字在 toolSpecOf 就抛错），而表里六个
+   * 工具没有任何参数声明 `type: "boolean"` —— string / number / boolean /
+   * array 四个类型分支里只有 boolean 这条永远取不到：变异
+   * `typeof value !== "boolean"` → `=== "boolean"` 要在"值真是布尔"时报错，
+   * 而该分支连值都读不到（前置合取 `prop.type === "boolean"` 恒假）。
+   *
+   * 分支刻意保留：它是 JSON Schema 类型分派的完整Dispatch，将来给工具加布尔
+   * 参数时这条就是承重的那一个；删掉它等于给未来的参数埋"任何值都放行"的坑。
+   * 位点重回分母即提示重新核对（与 scheduler 的 spare 查找、kill-tree 的双重
+   * 防线同一处置逻辑：防御冗余，有意保留）。
+   *
+   * 2026-10-20 交互式会话轮接入：逐位点审计（site 口径）实测该变异不可杀后
+   * 入表。同行 203 行的 number 分支同型不同命 —— grep_files 的 maxMatches
+   * 真在表里，那条由 src/chat-tools.test.ts 的「给数字放行、给字符串报错」
+   * 两条断言钉住，不入表。
+   */
+  { file: "shared/tools/spec.ts", op: "!== → ===", line: 204 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

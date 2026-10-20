@@ -10,7 +10,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { loadPolicyDir } from "./policy-dir";
+import { loadPolicyDir, loadPolicyDirs } from "./policy-dir";
 
 const created: string[] = [];
 
@@ -157,5 +157,40 @@ describe("loadPolicyDir · 合成语义", () => {
     expect(r.errors).toHaveLength(1);
     expect(r.errors[0].file).toMatch(/multi\.json\[1\]$/);
     expect(r.policy.denyCommands).toEqual(["a"]);
+  });
+});
+
+describe("loadPolicyDirs · 全局 + 项目多目录", () => {
+  it("两个目录取并集，预算取更小者，files 是两份之和", () => {
+    const global = tmpDir();
+    const project = tmpDir();
+    put(global, "g.json", { version: 1, denyCommands: ["curl"], maxTokensPerRun: 900 });
+    put(project, "p.json", { version: 1, approvalCommands: ["node"], maxTokensPerRun: 400 });
+
+    const r = loadPolicyDirs([global, project]);
+    expect(r.files).toBe(2);
+    expect(r.policy.denyCommands).toEqual(["curl"]);
+    expect(r.policy.approvalCommands).toEqual(["node"]);
+    expect(r.policy.maxTokensPerRun).toBe(400);
+    expect(r.errors).toEqual([]);
+  });
+
+  it("重复目录只算一次（避免同一份预算/规则被重复叠加）", () => {
+    const d = tmpDir();
+    put(d, "a.json", { version: 1, maxTokensPerRun: 100 });
+    const r = loadPolicyDirs([d, d, undefined]);
+    expect(r.files).toBe(1);
+    expect(r.policy.maxTokensPerRun).toBe(100);
+  });
+
+  it("一个目录坏文件不影响另一个目录的规则", () => {
+    const good = tmpDir();
+    const bad = tmpDir();
+    put(good, "good.json", { version: 1, denyCommands: ["rm"] });
+    put(bad, "bad.json", "{ nope");
+    const r = loadPolicyDirs([bad, good]);
+    expect(r.files).toBe(1);
+    expect(r.errors).toHaveLength(1);
+    expect(r.policy.denyCommands).toEqual(["rm"]);
   });
 });

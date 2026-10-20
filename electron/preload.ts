@@ -48,6 +48,14 @@ const api = {
   revertFile: (batchId: string, path: string) =>
     ipcRenderer.invoke("changes:revert", { batchId, path }),
   taskTrail: (taskId: string) => ipcRenderer.invoke("audit:trail", taskId),
+  // ── 交付成果面：本次产物清单 + 怎么验收（B1 最后一米）──
+  deliveryGuide: (projectId?: string) => ipcRenderer.invoke("delivery:guide", projectId),
+  readDeliveryFile: (projectId: string, path: string) =>
+    ipcRenderer.invoke("delivery:read", projectId, path),
+  // ── 保活预览（item 2）：探活成功的 dev server 由主进程持有 ──
+  previewStatus: () => ipcRenderer.invoke("preview:status"),
+  previewOpen: () => ipcRenderer.invoke("preview:open"),
+  previewStop: () => ipcRenderer.invoke("preview:stop"),
   auditFiles: () => ipcRenderer.invoke("audit:files"),
   exportAudit: () => ipcRenderer.invoke("audit:export"),
   boardRecovery: () => ipcRenderer.invoke("board:recovery"),
@@ -59,6 +67,30 @@ const api = {
   // "没复跑就不等于结论为真"同一条纪律，界面不能替用户默认勾选）。
   verifyReceipt: (projectId: string, replay?: boolean) =>
     ipcRenderer.invoke("receipt:verify", projectId, replay ? { replay: true } : undefined),
+  // ── 交互式会话（对标 Codex TUI 那一层）──
+  // 会话在后台跑、过程由 ox:event 逐条推，所以 send 立刻返回 sessionId。
+  sendChat: (input: { text: string; projectId: string }) =>
+    ipcRenderer.invoke("chat:send", input),
+  abortChat: () => ipcRenderer.invoke("chat:abort"),
+  newChat: (input: { projectId: string }) => ipcRenderer.invoke("chat:new", input),
+  chatTranscript: () => ipcRenderer.invoke("chat:transcript"),
+  /** 有活会话就返回，否则恢复该项目最近一条记录；没有记录返回 null。 */
+  chatLatest: (input: { projectId: string }) => ipcRenderer.invoke("chat:latest", input),
+  listChatSessions: (input: { projectId: string }) => ipcRenderer.invoke("chat:list", input),
+  loadChatSession: (input: { sessionId: string }) => ipcRenderer.invoke("chat:load", input),
+  resumeChat: (input: { projectId: string; sessionId: string }) => ipcRenderer.invoke("chat:resume", input),
+  forkChat: (input: { projectId: string; sessionId: string }) => ipcRenderer.invoke("chat:fork", input),
+  deleteChat: (input: { sessionId: string }) => ipcRenderer.invoke("chat:delete", input),
+  revertChat: (input: { projectId: string; sessionId: string; turn: number; path?: string }) =>
+    ipcRenderer.invoke("chat:revert", input),
+  /**
+   * 审批三选一：允许一次 / 本次会话不再问 / 拒绝并说明理由。
+   * 理由会回灌给模型（不给理由它只会原样重试同一个动作）。
+   */
+  resolveChatApproval: (
+    requestId: string,
+    answer: { granted: boolean; scope?: "once" | "session"; reason?: string },
+  ) => ipcRenderer.invoke("chat:approval-decide", requestId, answer),
   onEvent: (handler: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown) => handler(payload);
     ipcRenderer.on("ox:event", listener);

@@ -1,12 +1,33 @@
+import type { ToolCall, ToolSpec } from "./tools/spec";
+
 export interface ChatMessage {
-  role: "system" | "user" | "assistant";
+  role: "system" | "user" | "assistant" | "tool";
   content: string;
+  /**
+   * 原生 function calling 路径下，**assistant** 消息携带的工具调用。
+   *
+   * 为什么必须能带：OpenAI 兼容端点要求「assistant 发了 tool_calls，下一轮就必须
+   * 有对应的 tool 消息」，缺了直接 400。于是不把工具调用回灌进历史的话，
+   * 第二轮调用会在端点侧炸掉 —— 失败发生在平台之外，最难查。
+   */
+  toolCalls?: ToolCall[];
+  /** 原生路径下 **tool** 消息对应的调用 id。 */
+  toolCallId?: string;
 }
 
 export interface ChatRequest {
   messages: ChatMessage[];
   temperature?: number;
   jsonMode?: boolean;
+  /**
+   * 本轮开放给模型的工具表。`undefined` 或空数组 = 不开放（行为与以前一致）。
+   *
+   * 平台侧是否真的把它发进请求体，由 `ProviderConfig.tools` 决定：未声明原生
+   * 支持的端点走文本协议（工具表进 system 提示），声明了的才透传。这是为了让
+   * 「工具能力」不依赖"端点恰好支持" —— 否则默认线路不支持时，这条能力对
+   * 默认用户就是不可用的。
+   */
+  tools?: readonly ToolSpec[];
   /**
    * Caller-side cancellation (run aborted / run deadline tripped).
    *
@@ -23,6 +44,12 @@ export interface ChatResponse {
   provider: string;
   model: string;
   usageTokens?: number;
+  /**
+   * 模型要求调用的工具（原生路径下由端点结构化返回；文本路径下平台从正文里
+   * 解析后再填进这里）。两种来源对下游是**同一个结构** —— 这是工具循环只写
+   * 一份的理由。
+   */
+  toolCalls?: ToolCall[];
 }
 
 export interface ProviderConfig {
@@ -32,6 +59,20 @@ export interface ProviderConfig {
   baseUrl: string;
   defaultModel: string;
   apiKeyEnvVar: string;
+  /**
+   * 端点对**原生** function calling 的支持情况。
+   *
+   * 缺省即 `text`：未实测过的端点一律不发 `tools` 字段 —— 发一个端点不认识的
+   * 字段会把整条线路打成 400，而 400 在本项目的 failover 口径里是**请求级**的
+   * （不冷却、只重试），于是故障会表现成"每次调用都慢一点"而不是"工具坏了"。
+   *
+   * ⚠️ 当前 `native` 名单的依据是**厂商公开协议**（OpenAI / Anthropic /
+   * DeepSeek / GLM / Qwen / Kimi / Ollama 均公开支持 function calling），
+   * **不是本项目实测**；商汤与 AMD 未见声明，故保持 `text`。要改这一项，
+   * 请先用 `scripts/probe-endpoints.cjs` 实测并把结论写进注释 —— 这里是
+   * "谁支持什么"的唯一登记点，散在各处判断必然漏掉其中一条。
+   */
+  tools?: "native" | "text";
 }
 
 /** All providers below speak OpenAI-compatible /chat/completions except Anthropic. API keys come from env vars (never hardcoded). */
@@ -73,6 +114,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://api.deepseek.com/v1",
     defaultModel: "deepseek-chat",
+    tools: "native",
     apiKeyEnvVar: "DEEPSEEK_API_KEY",
   },
   {
@@ -81,6 +123,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     defaultModel: "glm-4-plus",
+    tools: "native",
     apiKeyEnvVar: "GLM_API_KEY",
   },
   {
@@ -89,6 +132,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     defaultModel: "qwen-max",
+    tools: "native",
     apiKeyEnvVar: "DASHSCOPE_API_KEY",
   },
   {
@@ -97,6 +141,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://api.moonshot.cn/v1",
     defaultModel: "moonshot-v1-32k",
+    tools: "native",
     apiKeyEnvVar: "MOONSHOT_API_KEY",
   },
   {
@@ -105,6 +150,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "https://api.openai.com/v1",
     defaultModel: "gpt-4o",
+    tools: "native",
     apiKeyEnvVar: "OPENAI_API_KEY",
   },
   {
@@ -113,6 +159,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "openai-compatible",
     baseUrl: "http://localhost:11434/v1",
     defaultModel: "qwen2.5:14b",
+    tools: "native",
     apiKeyEnvVar: "",
   },
   {
@@ -121,6 +168,7 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     protocol: "anthropic",
     baseUrl: "https://api.anthropic.com/v1",
     defaultModel: "claude-sonnet-4-20250514",
+    tools: "native",
     apiKeyEnvVar: "ANTHROPIC_API_KEY",
   },
   {

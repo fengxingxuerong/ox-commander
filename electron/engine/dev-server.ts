@@ -10,14 +10,33 @@ import type { ChildProcess } from "node:child_process";
  *   · 不做页面截图 / DOM 断言 —— 那是无头浏览器的事，依赖与体积都不该进
  *     验证链；"HTTP 200"已经把"端口活着、路由可达"钉住了；
  *   · 不猜端口 —— URL 由声明给出（大脑产物或 spec），探活器只管按它轮询；
- *   · 不保留进程 —— 无论探活成败，进程树都被杀掉。dev server 是验证道具，
- *     不是长驻服务（要长驻的预览走 serve 形态）。
+ *   · **默认不保留进程**：验证道具跑完即杀。探活通过后由宿主的
+ *     `keepDevServer` 回调决定是否接管为预览（桌面看板用它做保活）；
+ *     没有回调/接管失败时仍按老路径杀掉。
  *
  * fetch 与 sleep 都可注入：测试用假 fetch（不联网、不真等），逐位点审才
  * 审得到轮询节奏与判定边界（4xx 算死、5xx 算死、异常算死）。
  */
 
 export type ProbeVerdict = "alive" | "dead";
+
+/**
+ * 探活通过后交给宿主的 dev server 事实。
+ *
+ * `child` 的所有权随之移交：宿主返回 `true` 时必须负责在合适的时机
+ * kill 它（桌面看板用 PreviewManager 管理生命周期）；返回 `false`/抛错时
+ * 验证器仍按老路径杀掉，验证结论不受影响。
+ */
+export interface DevServerKeepInfo {
+  title: string;
+  url: string;
+  command: string;
+  args: string[];
+  cwd: string;
+  child: ChildProcess;
+  /** 验证期间已收集的输出尾部（接管后宿主继续追加）。 */
+  log: string;
+}
 
 /** 2xx/3xx 算活 —— 301/302 是 dev server 的正常重定向（尾斜杠、https 升级）。 */
 export function probeVerdictOf(status: number): ProbeVerdict {
@@ -57,7 +76,13 @@ export async function pollDevServer(url: string, opts: PollOptions = {}): Promis
   for (;;) {
     attempts += 1;
     try {
-      const res = await doFetch(url, { method: "GET", signal: AbortSignal.timeout(Math.max(intervalMs, 2_000)) });
+      // `redirect: "manual"`：跟随重定向会把 fetch 带出回环（SSRF 逃逸面）；
+      // 3xx 本身按 alive 处理，不需要跟到目标页。
+      const res = await doFetch(url, {
+        method: "GET",
+        redirect: "manual",
+        signal: AbortSignal.timeout(Math.max(intervalMs, 2_000)),
+      });
       if (probeVerdictOf(res.status) === "alive") {
         return { ok: true, attempts, elapsedMs: now() - startedAt, detail: `HTTP ${res.status}` };
       }

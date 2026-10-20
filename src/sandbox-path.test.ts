@@ -268,6 +268,69 @@ describe("PathPolicy.assertReadable", () => {
     expect(p.assertReadable("src/a.js")).toBe(true);
     expect(p.assertReadable("../a.js")).toBe(false);
     expect(p.assertReadable("")).toBe(false);
+    expect(p.assertReadable(path.join(root, "src/a.js"))).toBe(false);
+  });
+
+  it("拒绝密钥文件读取，但允许 .env.example 这类文档模板", () => {
+    fs.writeFileSync(path.join(root, ".env"), "SECRET=1\n", "utf8");
+    fs.writeFileSync(path.join(root, ".env.local"), "SECRET=1\n", "utf8");
+    fs.writeFileSync(path.join(root, ".env.example"), "SECRET=\n", "utf8");
+    const p = policy();
+    expect(p.assertReadable(".env")).toBe(false);
+    expect(p.assertReadable(".env.local")).toBe(false);
+    expect(p.assertReadable(".git/config")).toBe(false);
+    expect(p.assertReadable(".env.example")).toBe(true);
+  });
+
+  it("绝对路径（POSIX / 盘符）一律拒绝，不能被 normalizeRel 变成根内路径", () => {
+    const p = policy();
+    expect(p.assertReadable("/etc/passwd")).toBe(false);
+    expect(p.assertReadable("D:/secret.txt")).toBe(false);
+  });
+
+  it("项目内链接指向根内密钥文件也拒绝（按真实路径判）", () => {
+    fs.writeFileSync(path.join(root, ".env"), "SECRET=1\n", "utf8");
+    const link = path.join(root, "leak");
+    try {
+      fs.symlinkSync(root, link, process.platform === "win32" ? "junction" : "dir");
+    } catch {
+      return; // 该机器没有创建链接的权限；Linux CI 会真跑这条断言
+    }
+    try {
+      expect(policy().assertReadable("leak/.env")).toBe(false);
+    } finally {
+      if (process.platform === "win32") fs.rmdirSync(link);
+      else fs.unlinkSync(link);
+    }
+  });
+
+  it("forbiddenRead 的大小写归一与平台一致", () => {
+    const caseInsensitive = isCaseInsensitiveFs();
+    // 规则大写、路径小写：Windows/mac 应命中；Linux 不应命中。
+    expect(policy({ forbiddenRead: ["SECRET/**"] }).assertReadable("secret/x")).toBe(!caseInsensitive);
+    // 规则小写、路径大写：同上，反过来覆盖 isForbiddenRead 里的另一条分支。
+    expect(policy({ forbiddenRead: [".secret/**"] }).assertReadable(".SECRET/x")).toBe(!caseInsensitive);
+  });
+
+  it("按真实路径判定：项目内链接指向外部时拒绝读取", () => {
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-outside-"));
+    const link = path.join(root, "escape");
+    try {
+      fs.writeFileSync(path.join(outside, "secret.txt"), "OUTSIDE_SECRET\n", "utf8");
+      try {
+        fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+      } catch {
+        return; // 该机器没有创建链接的权限；Linux CI 会真跑这条断言
+      }
+      try {
+        expect(policy().assertReadable("escape/secret.txt")).toBe(false);
+      } finally {
+        if (process.platform === "win32") fs.rmdirSync(link);
+        else fs.unlinkSync(link);
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 });
 

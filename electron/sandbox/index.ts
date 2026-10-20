@@ -11,6 +11,7 @@
 export {
   PathPolicy,
   DEFAULT_FORBIDDEN_WRITE,
+  DEFAULT_FORBIDDEN_READ,
   createWorkspacePathPolicy,
   type SandboxConfig,
   type WritableDecision,

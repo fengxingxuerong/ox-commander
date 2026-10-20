@@ -1128,6 +1128,41 @@ describe("runSpec", () => {
     );
   });
 
+  it("交付成果面：acceptance 在 done 之前发一次，带 package.json 的启动命令", async () => {
+    const root = scratch("headless-acceptance");
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite", test: "vitest" } }),
+      "utf8",
+    );
+    const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));
+    const { events, emit } = collect();
+
+    const code = await runSpec(spec, {
+      emit,
+      llm: tasksResponse([fakeTask("t1", "src")]),
+      layer: createAgentLayer({ adapters: [fakeAdapter("worker")] }),
+      verify: async () => pass,
+    });
+
+    expect(code).toBe(0);
+    const acceptance = events.find((e) => e.type === "acceptance") as
+      | Extract<HeadlessEvent, { type: "acceptance" }>
+      | undefined;
+    expect(acceptance).toBeDefined();
+    expect(acceptance!.guide.hasReceipt).toBe(true);
+    expect(acceptance!.guide.totalFiles).toBe(0);
+    expect(acceptance!.guide.commands).toEqual([
+      { kind: "start", label: "启动 · dev", command: "npm", args: ["run", "dev"] },
+    ]);
+    // 顺序：receipt → acceptance → done。宿主按行处理，产物面不能早于凭据。
+    const receiptAt = events.findIndex((e) => e.type === "receipt");
+    const acceptanceAt = events.findIndex((e) => e.type === "acceptance");
+    const doneAt = events.findIndex((e) => e.type === "done");
+    expect(receiptAt).toBeLessThan(acceptanceAt);
+    expect(acceptanceAt).toBeLessThan(doneAt);
+  });
+
   it("零验证命令的交付：凭据自己说破未经构建/测试验证", async () => {
     const root = scratch("headless-receipt-unverified");
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, projectRoot: root, verificationCommands: [] }));

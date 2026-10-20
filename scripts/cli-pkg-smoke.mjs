@@ -7,7 +7,7 @@
  * 这些在仓库里跑测试时全看不见（没人从 dist-cli 里启动过它）。
  *
  * 冒烟盯的是**包本身**，不是 headless 的协议行为（后者由 `smoke:artifact` / `smoke:demo` 管）：
- *   · 包是自洽的：bin 指向的文件真在盘上，四个入口都在；
+ *   · 包是自洽的：bin 指向的文件真在盘上，五个入口都在；
  *   · 版本与仓库一致（不与根 package.json 漂移）；
  *   · 转发真的工作：非法 spec 走 run 入口拿到协议层的 `error` 事件 + 退出码 1；
  *   · 子命令路由真的工作：`receipt` 拿到的是复核工具的报错，而不是 run 的报错；
@@ -28,7 +28,7 @@ const BUILDER = path.join(ROOT, "scripts", "build-cli-pkg.mjs");
 const OUT = path.join(ROOT, "dist-cli");
 const BIN = path.join(OUT, "bin", "ox.js");
 const ENTRY_DIR = path.join(OUT, "dist-headless", "headless");
-const ENTRIES = ["headless-main.js", "serve-main.js", "mcp-main.js", "receipt-verify-main.js"];
+const ENTRIES = ["headless-main.js", "serve-main.js", "mcp-main.js", "receipt-verify-main.js", "chat-main.js"];
 
 let failures = 0;
 
@@ -85,7 +85,7 @@ function main() {
   check("files 白名单含 bin 与 dist-headless", files.includes("bin") && files.includes("dist-headless"), JSON.stringify(files));
   check("不带 devDependencies", manifest.devDependencies === undefined, "发布包不该带 electron/ vitest 等");
 
-  // ③ 四个入口都在（少一个 = 那个子命令一按就崩）
+  // ③ 五个入口都在（少一个 = 那个子命令一按就崩）
   for (const entry of ENTRIES) {
     check(`入口存在 ${entry}`, fs.existsSync(path.join(ENTRY_DIR, entry)), path.join(ENTRY_DIR, entry));
   }
@@ -96,8 +96,8 @@ function main() {
     `exit=${version.status} out=${(version.stdout || "").trim()}`);
   const help = runBin(["--help"]);
   const helpText = help.stdout || "";
-  check("--help 列出四个子命令", help.status === 0
-    && ["serve", "mcp", "receipt"].every((word) => helpText.includes(word)),
+  check("--help 列出子命令", help.status === 0
+    && ["serve", "mcp", "receipt", "chat"].every((word) => helpText.includes(word)),
     `exit=${help.status}`);
 
   // ⑤ 转发非空转：非法 spec 必须走 run 入口、拿到协议层的 error 事件（不是 CLI 自己编的错）
@@ -112,7 +112,13 @@ function main() {
   check("receipt 子命令路由到复核入口", receipt.status === 1 && receiptErr.includes("读不了凭据"),
     `exit=${receipt.status} out=${receiptErr.slice(0, 120)}`);
 
-  // ⑦ 发布面干净：不带 sourceMap、不带 node_modules
+  // ⑦ 新增 chat 子命令也真的路由到自己的入口（不是被当成 run 转发）
+  const chatHelp = runBin(["chat", "--help"]);
+  check("chat 子命令路由到 chat 入口", chatHelp.status === 0
+    && `${chatHelp.stdout || ""}`.includes("ox chat - interactive coding agent"),
+    `exit=${chatHelp.status} out=${(chatHelp.stdout || chatHelp.stderr || "").slice(0, 160)}`);
+
+  // ⑧ 发布面干净：不带 sourceMap、不带 node_modules
   const packed = walk(OUT);
   check("包内无 sourceMap", packed.every((p) => !p.endsWith(".map")),
     packed.filter((p) => p.endsWith(".map")).slice(0, 3).join(" / "));

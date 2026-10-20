@@ -6,6 +6,8 @@ import type {
   VerificationKind,
 } from "./types";
 import { ARBITRATION_MODES, ESCALATION_POLICY_SETTINGS, isArbitrationMode, isEscalationPolicySetting } from "./types";
+import { isLoopbackHttpUrl } from "./page-smoke";
+import { APPROVAL_POLICIES, SANDBOX_MODES, isApprovalPolicy, isSandboxMode } from "./tools/policy";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
 
@@ -188,6 +190,32 @@ export function parseDecompose(raw: unknown): DecomposePlan {
         const stdin = typeof s.stdin === "string" ? s.stdin : undefined;
         const expectContains =
           s.expectContains === undefined ? [] : requireStringArray(s, "expectContains", issues);
+        let devServer: SmokeCheck["devServer"];
+        if (s.devServer !== undefined) {
+          if (!isObject(s.devServer)) {
+            issues.push(`smoke[${i}].devServer must be an object`);
+          } else {
+            const url = requireString(s.devServer, "url", issues);
+            if (url !== "" && !isLoopbackHttpUrl(url)) {
+              issues.push(
+                `smoke[${i}].devServer.url must be a loopback http(s) URL (127.0.0.1 / localhost / ::1)`,
+              );
+            }
+            const timeoutMs = s.devServer.timeoutMs;
+            if (
+              timeoutMs !== undefined &&
+              (typeof timeoutMs !== "number" || !Number.isFinite(timeoutMs) || timeoutMs <= 0)
+            ) {
+              issues.push(`smoke[${i}].devServer.timeoutMs must be a positive number`);
+            }
+            if (url !== "") {
+              devServer = typeof timeoutMs === "number" ? { url, timeoutMs } : { url };
+            }
+          }
+          if (stdin !== undefined || expectContains.length > 0) {
+            issues.push(`smoke[${i}]: devServer is mutually exclusive with stdin/expectContains`);
+          }
+        }
         // （2026-10-13）此处原本有 `if (!title || !command) return;` —— 冗余分支：
         // requireString 在缺字段时**已经**把 issue 推进同一个数组，函数末尾必然
         // 抛错，"跳过 push 与否"不可观察。冗余分支在逐位点审计里长出等价变异
@@ -198,6 +226,7 @@ export function parseDecompose(raw: unknown): DecomposePlan {
           args,
           ...(stdin !== undefined ? { stdin } : {}),
           expectContains,
+          ...(devServer !== undefined ? { devServer } : {}),
         });
       });
     }
@@ -308,6 +337,9 @@ export function parseSettings(raw: unknown): ProjectSettings {
   stringArrayOpt(o, "llmPool", issues);
   stringArrayOpt(o, "disabledKeyVars", issues);
   enumOpt(o, "arbitration", isArbitrationMode, Object.keys(ARBITRATION_MODES).join("/"), issues);
+  enumOpt(o, "sandboxMode", isSandboxMode, Object.keys(SANDBOX_MODES).join("/"), issues);
+  enumOpt(o, "approvalPolicy", isApprovalPolicy, Object.keys(APPROVAL_POLICIES).join("/"), issues);
+  stringArrayOpt(o, "approvalCommands", issues);
   enumOpt(
     o,
     "escalationPolicy",

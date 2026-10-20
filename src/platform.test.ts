@@ -468,6 +468,26 @@ describe("createPlatform · policy.d 接线（策略即代码）", () => {
     expect(logs.filter((l) => l.includes("已加载"))).toEqual([]);
   });
 
+  it("policyDirs 多目录取并集：全局与项目规则同时生效", async () => {
+    const logs: string[] = [];
+    const root = tempDir();
+    const platform = createPlatform({
+      settings: settings({
+        verificationCommands: [{ kind: "build", command: "node", args: ["-v"] }],
+        maxRepairRounds: 0,
+      }),
+      promptDir: tempDir(),
+      policyDirs: [
+        policyDirWith("global.json", { version: 1, denyCommands: ["node"] }),
+        policyDirWith("project.json", { version: 1, denyNpmSubcommands: ["publish"] }),
+      ],
+      host: { log: (t) => logs.push(t) },
+    });
+    await expect(platform.engine.execute([], root)).rejects.toThrow(/repair rounds/);
+    expect(logs.join("\n")).toContain("已加载 2 份");
+    expect(logs.join("\n")).toContain("命令被沙箱禁止");
+  });
+
   it("有策略文件 ⇒ 日志说出加载了几份，且该规则真的管住了验证命令", async () => {
     const logs: string[] = [];
     const root = tempDir();

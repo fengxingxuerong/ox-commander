@@ -39,6 +39,13 @@ describe("buildDecomposePrompt", () => {
     const p = buildDecomposePrompt(PRD);
     expect(p).toMatch(/empty "smoke" array/);
   });
+
+  it("教规划器声明可选的 devServer（回环 URL；否则保活预览永远是死代码）", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).toContain('"devServer"');
+    expect(p).toMatch(/loopback http\(s\) URL/);
+    expect(p).toMatch(/mutually exclusive/);
+  });
 });
 
 describe("平台契约模板（STANDARD_CONTRACT_RULES）", () => {

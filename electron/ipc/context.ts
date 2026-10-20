@@ -283,6 +283,12 @@ export function buildPlatformLayer(
     enableRouter: settingsValue.agentRouter !== false,
     arbitration: settingsValue.arbitration,
     maxParallelRuns: settingsValue.maxParallelRuns,
+    // 策略即代码：全局目录 + 项目 `.ox/policy.d`。两者都只加严；此前桌面
+    // 装配根本没传 policyDir，导致文档里的 policy.d 在生产中是一条死线。
+    policyDirs: [
+      path.join(app.getPath("userData"), "policy.d"),
+      ...(overrides.projectId ? [path.join(workspaceRoot(overrides.projectId), ".ox", "policy.d")] : []),
+    ],
     // The pool is a singleton so runtime registration survives engine rebuilds.
     layer: ensureAgentLayer(settingsValue),
     // Every brain client this platform builds seeds from the key store, the

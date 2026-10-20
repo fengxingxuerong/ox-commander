@@ -6,8 +6,8 @@ import type { ActionGateLike } from "../sandbox/action-gate";
 import type { ApprovalGate } from "../sandbox/approval-gate";
 import { buildSpawnSpec } from "../sandbox/spawn-plan";
 import { killTree } from "../sandbox/kill-tree";
-import { killDevServer, pollDevServerProcess } from "./dev-server";
-import { pageSmokeOf, type PageSmoke } from "../../shared/page-smoke";
+import { killDevServer, pollDevServerProcess, type DevServerKeepInfo } from "./dev-server";
+import { isLoopbackHttpUrl, pageSmokeOf, type PageSmoke } from "../../shared/page-smoke";
 import { scopedEnv } from "../agents/scoped-env";
 
 export interface VerifierDeps {
@@ -61,7 +61,8 @@ export const MAX_LOG_BYTES = 2 * 1024 * 1024;
 export async function pageSmokeFor(url: string, fetchImpl?: typeof fetch): Promise<PageSmoke | null> {
   const doFetch = fetchImpl ?? fetch;
   try {
-    const res = await doFetch(url, { method: "GET", signal: AbortSignal.timeout(5_000) });
+    // 同 pollDevServer：不跟随重定向，避免 dev server 把页面冒烟的 fetch 带出回环。
+    const res = await doFetch(url, { method: "GET", redirect: "manual", signal: AbortSignal.timeout(5_000) });
     const body = typeof res.text === "function" ? await res.text() : "";
     if (body === "") return null; // 看不见正文就跳过（不是"页面正常"）
     return pageSmokeOf({
@@ -244,6 +245,21 @@ export async function verifyProject(
   return { passed: results.every((r) => r.ok), results };
 }
 
+/**
+ * 进程级 dev server 接管器（桌面宿主经 `setDevServerKeeper` 安装）。
+ *
+ * 为什么是模块级而不是逐层透传：引擎的 `runSmokeChecks` 是唯一知道
+ * "探活通过 + 页面冒烟通过"这一刻的地方，而宿主只在桌面端需要保活；
+ * headless 进程不会安装它（= 历史行为：跑完即杀）。`SmokeRunnerDeps`
+ * 上的同名字段仍然优先，测试用它做局部注入。
+ */
+let devServerKeeper: ((info: DevServerKeepInfo) => boolean | void) | undefined;
+
+/** 桌面宿主安装/卸载（`undefined`）保活接管器；headless 不调用。 */
+export function setDevServerKeeper(keeper: ((info: DevServerKeepInfo) => boolean | void) | undefined): void {
+  devServerKeeper = keeper;
+}
+
 export interface SmokeRunnerDeps {
   cwd: string;
   spawnImpl?: typeof spawn;
@@ -257,6 +273,11 @@ export interface SmokeRunnerDeps {
   onEvent?: (text: string) => void;
   /** dev server 探活用的 fetch（测试注入假件；缺省用全局 fetch 走真 HTTP）。 */
   devServerFetch?: typeof fetch;
+  /**
+   * 探活通过后接管 dev server 进程（可选）。返回 `true` = 宿主保留并负责
+   * 终止；返回 `false`/抛错 = 验证器按老路径杀掉。验证结论与它无关。
+   */
+  keepDevServer?: (info: DevServerKeepInfo) => boolean | void;
 }
 
 /**
@@ -307,6 +328,20 @@ export async function runSmokeChecks(
   const timeoutMs = deps.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
 
   for (const check of checks) {
+    // dev server 探活会把 URL 交给 fetch（SSRF 面）。schema 已挡一层；这里再挡
+    // 一层是因为桌面端从 `smokeJson` 直接 JSON.parse，绕过了 parseDecompose。
+    if (check.devServer && !isLoopbackHttpUrl(check.devServer.url)) {
+      results.push({
+        kind: "smoke",
+        ok: false,
+        exitCode: null,
+        logDigest: `[dev-server] 拒绝非本机回环地址：${check.devServer.url}\n[${check.title}]`,
+        durationMs: 0,
+        command: check.command,
+        args: check.args,
+      });
+      break;
+    }
     const verdict = policy.check(check.command, check.args);
     if (!verdict.ok) {
       results.push({
@@ -402,10 +437,37 @@ export async function runSmokeChecks(
       // 明确的错误页 —— "跑起来 ≠ 页面没白屏"。取不到正文（假 fetch / 断流）
       // 就跳过，不因为"看不见"判红：一条误报的门禁比漏判更贵。
       const page = verdict.ok ? await pageSmokeFor(check.devServer.url, deps.devServerFetch) : null;
-      killDevServer(server);
+      const passed = verdict.ok && (page?.ok ?? true);
+      // 保活预览（item 2）：只有整条冒烟通过才允许接管；接管失败/无宿主时
+      // 仍按验证道具处理（kill）。预览是增强，**绝不改变冒烟判定**。
+      const keeper = deps.keepDevServer ?? devServerKeeper;
+      let kept = false;
+      let keepNote = "";
+      if (passed && keeper) {
+        try {
+          kept =
+            keeper({
+              title: check.title,
+              url: check.devServer.url,
+              command: check.command,
+              args: check.args,
+              cwd: deps.cwd,
+              child: server,
+              log: tail,
+            }) === true;
+        } catch (err) {
+          keepNote = `预览接管失败：${(err as Error).message}`;
+        }
+      }
+      if (!kept) killDevServer(server);
+      let processNote: string;
+      if (kept) processNote = "进程保留为预览（可从看板打开）";
+      else if (keepNote) processNote = `${keepNote}；进程已终止`;
+      else if (passed) processNote = "进程已按约终止";
+      else processNote = `进程已终止；尾部输出：${tail.trim() || "（空）"}`;
       results.push({
         kind: "smoke",
-        ok: verdict.ok && (page?.ok ?? true),
+        ok: passed,
         exitCode: null,
         logDigest: digest(
           [
@@ -413,7 +475,7 @@ export async function runSmokeChecks(
             `命令：${check.command} ${check.args.join(" ")}`,
             `[dev-server] ${check.devServer.url} → ${verdict.detail}（探活 ${verdict.attempts} 次，${verdict.elapsedMs}ms）`,
             ...(page ? [`[page] ${page.detail}`] : []),
-            verdict.ok ? "进程已按约终止" : `进程已终止；尾部输出：${tail.trim() || "（空）"}`,
+            processNote,
           ].join("\n"),
         ),
         durationMs: Date.now() - startedAt,

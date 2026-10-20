@@ -34,6 +34,8 @@ export interface SandboxConfig {
   delegatedWrite?: string[];
   /** Overrides `DEFAULT_FORBIDDEN_WRITE` when provided. */
   forbiddenWrite?: string[];
+  /** Overrides `DEFAULT_FORBIDDEN_READ` when provided. */
+  forbiddenRead?: string[];
   /**
    * `legacy` (default) keeps the historic meaning of `zone: "."` (owns the
    * whole tree). `strict` reinterprets it as "root-level files only", so an
@@ -96,6 +98,38 @@ function resolveExistingReal(target: string): string {
   }
 }
 
+/**
+ * Paths that may not be *read* by an agent tool even when they sit inside the
+ * project. Writes already had a floor (`DEFAULT_FORBIDDEN_WRITE`); reads did
+ * not, and the interactive chat tools made that gap executable: `read_file`
+ * could hand `.env` or `.git/config` (remote URLs with embedded tokens) to the
+ * model, which then sends them to a third-party endpoint.
+ *
+ * `.env.example` / `.env.sample` / `.env.template` / `.env.dist` are explicitly
+ * readable — they are documentation, not credentials, and blocking them makes
+ * the agent unable to learn the expected variable names.
+ *
+ * Declared below `resolveExistingReal` on purpose: the mutation site audit
+ * anchors `electron/sandbox/path-policy.ts:92` to the `parent === cur` line.
+ */
+export const DEFAULT_FORBIDDEN_READ: readonly string[] = [
+  ".env",
+  ".env.*",
+  ".git/**",
+  ".npmrc",
+  ".yarnrc",
+  ".yarnrc.yml",
+  ".pypirc",
+  ".netrc",
+  "_netrc",
+  ".git-credentials",
+  ".ssh/**",
+  ".aws/**",
+];
+
+/** `.env.*` 的文档型例外：只有这几个后缀可读，其它仍然按密钥文件处理。 */
+const READABLE_DOC_ENV = [".env.example", ".env.sample", ".env.template", ".env.dist"];
+
 /** Strips `./`, leading slashes and trailing slashes; keeps the value relative. */
 function normalizeRel(raw: string): string {
   return toPosix(raw.trim()).replace(/^\.\/+/, "").replace(/^\/+/, "").replace(/\/+$/, "");
@@ -132,6 +166,8 @@ export class PathPolicy {
   private readonly writableRootsAbs: string[];
   private readonly forbidden: readonly string[];
   private readonly forbiddenLower: readonly string[] | null;
+  private readonly forbiddenRead: readonly string[];
+  private readonly forbiddenReadLower: readonly string[] | null;
   private readonly delegated: readonly string[];
   private readonly zoneMode: ZoneMode;
 
@@ -146,6 +182,8 @@ export class PathPolicy {
     ).map((r) => resolveExistingReal(path.isAbsolute(r) ? path.resolve(r) : path.resolve(this.rootAbs, r)));
     this.forbidden = cfg.forbiddenWrite ?? DEFAULT_FORBIDDEN_WRITE;
     this.forbiddenLower = CASE_INSENSITIVE_FS ? this.forbidden.map((p) => p.toLowerCase()) : null;
+    this.forbiddenRead = cfg.forbiddenRead ?? DEFAULT_FORBIDDEN_READ;
+    this.forbiddenReadLower = CASE_INSENSITIVE_FS ? this.forbiddenRead.map((p) => p.toLowerCase()) : null;
     this.delegated = (cfg.delegatedWrite ?? []).map(normalizeRel);
     this.zoneMode = cfg.zoneMode ?? "legacy";
   }
@@ -154,11 +192,36 @@ export class PathPolicy {
     return this.rootAbs;
   }
 
-  /** True when the path may be read (all in-project paths are, by construction). */
+  /**
+   * True when the path may be read.
+   *
+   * Realpath is load-bearing here just like it is for writes: a symlink or
+   * Windows junction inside the project can point anywhere on disk, and a
+   * lexical `path.resolve` sees only the link's name. Reads now use the same
+   * real-location containment as writes; the secret-file floor is applied to
+   * both the requested path and its real location.
+   */
   assertReadable(relPath: string): boolean {
+    if (path.isAbsolute(relPath) || /^[A-Za-z]:/.test(relPath.trim())) return false;
     const rel = normalizeRel(relPath);
     if (rel === "" || hasTraversal(rel)) return false;
-    return isInsideAbs(path.resolve(this.rootAbs, rel), this.rootAbs);
+    // `rel` 已经去掉了绝对前缀与穿越段，词法 resolve 必然落在根内；真正可能
+    // 逃逸的是链接，由下面的 realpath 判定兜住。保留一条永远成立的检查只会
+    // 多出一个无法被输入区分的变异位点。
+    const abs = path.resolve(this.rootAbs, rel);
+    const realAbs = resolveExistingReal(abs);
+    if (!isInsideAbs(realAbs, this.rootAbs)) return false;
+    const relReal = toPosix(path.relative(this.rootAbs, realAbs));
+    return !this.isForbiddenRead(rel) && !this.isForbiddenRead(relReal);
+  }
+
+  private isForbiddenRead(rel: string): boolean {
+    const p = rel.toLowerCase();
+    if (READABLE_DOC_ENV.some((allowed) => p === allowed)) return false;
+    return matchesAnyGlob(
+      CASE_INSENSITIVE_FS ? p : rel,
+      this.forbiddenReadLower ?? this.forbiddenRead,
+    );
   }
 
   isDelegated(relPath: string): boolean {

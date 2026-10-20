@@ -87,6 +87,7 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
 | `escalation` | `taskId, summary` | 重修耗尽需要宿主决策（`escalationPolicy=abort/skip/redispatch_once` 时） |
 | `usage` | `totalTokens, calls, measuredCalls, byModel{}, limit?` | 本次运行的 token 用量（进程内：大脑层 + 内置执行器）。在 `done`/`error` **之前**发一次，成功 / 取消 / 抛错三条路径都会到。`calls - measuredCalls` 是端点**没有**上报用量的次数，即这份数字的可信边界；外部 CLI / HTTP 桥接智能体跑在别的进程里，不计入 |
 | `receipt` | `receipt`（交付凭据，见 §2.2） | 一次运行的**结论**：验证结论 + 任务账 + 越权处置 + 用量。在 `done`/`error` **之前**发一次，且只发两条出口（交付成功 / 重修耗尽） |
+| `acceptance` | `guide`（本次产物 + 怎么验收） | 交付成果面：按任务分组的改动文件 + 凭据里的复跑命令 + `package.json` 的 `dev/start/preview/serve` 启动命令。**只在凭据存在时发**（取消/崩溃不发），顺序是 `receipt → acceptance → done/error` |
 | `done` | `passed, report` | 终态：交付 |
 | `error` | `message, exhausted?` | 终态：致命错误。`exhausted: true` 对应退出码 2 |
 
@@ -138,7 +139,9 @@ echo '<spec-json>' | node dist-headless/headless/headless-main.js
    要真正防伪造需要密钥分发，那是另一件事，本字段刻意不假装解决它。复核方式见第 9 节。
 
 桌面端同一份对象走 `ox:event` 的 `receipt` 事件进看板，并落进项目记录（`receiptJson`），
-所以重载窗口后仍然看得到上次交付的结论。
+所以重载窗口后仍然看得到上次交付的结论。紧随其后的 `acceptance` 事件是**成果面**：
+它把同一批审计事实按任务 zone 归组，并列出可独立复跑的验收命令 —— 桌面看板与 serve
+状态页渲染的是同一个共享结构（`shared/delivery-guide`），不是两份各写各的清单。
 
 ### 2.1 被中断时宿主能看到什么
 
@@ -298,8 +301,8 @@ node dist-headless/headless/serve-main.js --port=8787
 
 | 端点 | 方法 | 返回 |
 | --- | --- | --- |
-| `/` | GET | 一页自包含 HTML：状态 + 最近一份交付凭据 + 最近 30 条事件（页面活着时经 SSE 追加） |
-| `/state` | GET | `{status, events[], receipt?, exitCode?, updatedAt?}`，`status` 为 `idle`/`running`/`delivered`/`failed` |
+| `/` | GET | 一页自包含 HTML：状态 + 最近一份交付凭据 + 本次产物/怎么验收 + 最近 30 条事件（页面活着时经 SSE 追加） |
+| `/state` | GET | `{status, events[], receipt?, acceptance?, exitCode?, updatedAt?}`，`status` 为 `idle`/`running`/`delivered`/`failed` |
 | `/events` | GET | SSE 流。**先补齐历史事件**（带 `id:` 序号，可 `Last-Event-ID` 续），再推后续 |
 | `/run` | POST | body 是 spec JSON → 立即 `202 {"accepted":true}`，run 在后台跑；已在跑则 `409`，body 非法 JSON 则 `400` |
 
@@ -378,3 +381,27 @@ node dist-headless/headless/receipt-verify-main.js receipt.json --replay --cwd=/
 ⚠️ `--replay` 会执行凭据里记下的命令。它们走与生产验证同一套 `CommandPolicy` 沙箱
 （破坏性程序、shell 元字符照样拒绝），但那道地板是用来防"智能体写坏脚本"的，
 不是用来防"有人递给你一份恶意凭据"的 —— **只对你自己信任的凭据用 `--replay`**。
+
+## 11. `ox chat`（独立于本协议的单智能体入口）
+
+`chat-main` **不读写本文件的 spec/JSONL 协议**；它把同一套 `ChatSession` / `ToolRunner` /
+会话记录仓暴露成 CLI：
+
+```bash
+ox chat                                      # REPL：/new /resume /sessions /help /exit
+ox chat exec "把失败的测试修好" --json        # 单发；stdout 是 ChatEvent JSONL
+ox chat exec "继续" --session=<chat-id>      # 跨进程恢复
+ox chat resume [sessionId]                   # REPL 形态继续最近/指定会话
+ox chat list                                 # 当前工作区的会话列表
+```
+
+- 会话记录在 `$OX_HOME/chat`（默认 `~/.ox/chat`），与桌面端 `userData/chat` 同构但分目录。
+- `--cwd` 指定工作区；`--sandbox` / `--approval` 覆盖设置；`--provider` / `--base-url` /
+  `--model` 选择端点（本地/代理/测试）。
+- **审批**：交互形态用 readline 问人；`--json` 或 stdin 非 TTY 时没有审批通道，需要审批的
+  动作一律拒绝（fail-closed）。要显式跳过审批必须传 `--approval never`，并且应当已经在
+  外部沙箱里。
+- 退出码：`0` = 会话正常收束；`1` = 致命错误（会话状态 error / 参数外的运行失败）；
+  `2` = 达到轮次上限或被中止。
+- 工具结果以 `chat:entry` 事件原样输出（含 `result.changes` 的 before/after 全文），
+  需要机器消费时请自行截断/脱敏。

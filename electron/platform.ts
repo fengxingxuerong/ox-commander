@@ -37,7 +37,7 @@ import {
   effectiveTokenBudget,
   pathPolicyOverrides,
 } from "../shared/policy-file";
-import { loadPolicyDir } from "./sandbox/policy-dir";
+import { loadPolicyDirs } from "./sandbox/policy-dir";
 import { CommandPolicy } from "./sandbox/command-policy";
 import { ApprovalGate } from "./sandbox/approval-gate";
 import { DEFAULT_FORBIDDEN_WRITE } from "./sandbox/path-policy";
@@ -188,6 +188,11 @@ export interface PlatformConfig {
    * policy 描述"做到哪为止"（只增不减 —— 契约里没有"允许"这一格）。
    */
   policyDir?: string;
+  /**
+   * 多目录策略（全局 `<userData>/policy.d` + 项目 `.ox/policy.d`）。
+   * 与 `policyDir` 同时存在时取并集；两个来源都只能加严。
+   */
+  policyDirs?: readonly string[];
   /** Enable capability routing; defaults to `settings.agentRouter !== false`. */
   enableRouter?: boolean;
   arbitration?: ArbitrationMode;
@@ -334,7 +339,10 @@ export function createPlatform(config: PlatformConfig): Platform {
    * 要参与 `UsageMeter` 的构造，而 meter 是所有 LLM 客户端的共用上游。
    * 策略加载本身不依赖它们（只读磁盘上的 JSON），所以可以安全前置。
    */
-  const loaded = loadPolicyDir(config.policyDir);
+  const loaded = loadPolicyDirs([
+    ...(config.policyDir ? [config.policyDir] : []),
+    ...(config.policyDirs ?? []),
+  ]);
   const policy = loaded.files > 0 ? loaded.policy : undefined;
   for (const err of loaded.errors) log(`[policy] ${err.file}：${err.issues.join("；")}`);
   if (policy) log(`[policy] 已加载 ${loaded.files} 份策略：${describePolicy(policy)}`);

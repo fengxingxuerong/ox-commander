@@ -1,5 +1,6 @@
 // 默认 provider 池的真源在 `shared/providers.ts`（它与 PROVIDER_CATALOG 同处，
 // 改池子时两张表必须一起看）。这里只引用，不再第二份字面量。
+import type { ApprovalPolicy, SandboxMode } from "./tools/policy";
 import { DEFAULT_LLM_POOL } from "./providers";
 
 export type Stage =
@@ -176,8 +177,11 @@ export interface SmokeCheck {
   expectContains?: string[];
   /**
    * dev server 托管检查（竞品清单 5.4，学 Vibe Kanban）：存在时本检查是
-   * **驻留进程** —— spawn 后不等退出，轮询 HTTP 探活，2xx 即通过；无论探活
-   * 结果如何，进程树都会在检查结束时被杀掉（不留给后续批次）。
+   * **驻留进程** —— spawn 后不等退出，轮询 HTTP 探活，2xx 即通过。
+   *
+   * 默认在检查结束时杀掉进程树；**桌面端**在探活与页面冒烟都通过后可以把
+   * 进程交给宿主保活为预览（`keepDevServer`，默认 30 分钟自动停止），
+   * 失败/无宿主时仍按验证道具处理。保活不影响本检查的判定。
    *
    * 与普通 smoke 互斥：`stdin` / `expectContains` 在本模式下被忽略（判定只看
    * HTTP 状态码 —— R1：探活判据独立于被判定方，dev server 无法通过往 stdout
@@ -384,6 +388,27 @@ export interface ProjectSettings {
   /** Zone-violation handling; defaults to rolling the offending changes back. */
   arbitration: ArbitrationMode;
   /**
+   * 交互式会话的沙箱档位（对齐 Codex 的三档）：
+   * `read-only`（只看不改）/ `workspace-write`（默认：可改项目内、可跑命令，
+   * 仍受路径与命令白名单约束）/ `danger-full-access`（不做分档拦截）。
+   *
+   * 注意它**不是防火墙**：三档都只管"能不能写、能不能跑"，出网目标不受它约束
+   * （README「安全边界」那一节同口径）。
+   */
+  sandboxMode?: SandboxMode;
+  /**
+   * 交互式会话的审批策略（对齐 Codex）：`untrusted`（写与执行都先问）/
+   * `on-request`（只问 `approvalCommands` 点名的命令，默认）/
+   * `never`（从不询问）。
+   *
+   * 它与 `sandboxMode` 是**两个轴**：前者是"能不能"，这里是"问不问"。
+   * `never` 只有在档位本身兜得住时才安全，所以设置页把两者放在一起呈现 ——
+   * 单独读其中一个会得到错误的安全感。
+   */
+  approvalPolicy?: ApprovalPolicy;
+  /** `on-request` 档下点名要问的命令（basename 口径，如 `git` / `npm`）。空数组 = 不额外点名。 */
+  approvalCommands?: string[];
+  /**
    * Platform-wide ceiling on concurrently running agents. The pool may be wide,
    * but the provider quota is not — a 10-task batch on a 3-key pool would
    * otherwise stampede into 429s. `0` means unlimited.
@@ -569,6 +594,11 @@ export const DEFAULT_SETTINGS: ProjectSettings = {
   llmProvider: "sensenova",
   agentRouter: true,
   arbitration: DEFAULT_ARBITRATION_MODE,
+  sandboxMode: "workspace-write",
+  approvalPolicy: "on-request",
+  // 默认空：默认路径上不该多出人工环节（与 approval-gate.ts 头注释同一条纪律 ——
+  // 逐次问人会把审批变噪音，而噪音会被习惯性点掉）。
+  approvalCommands: [],
   maxParallelRuns: 4,
   raceRedundancy: 1,
   variantCount: 1,

@@ -28,10 +28,28 @@ export interface ReadConventionsResult {
   skipped: Array<{ name: string; bytes: number }>;
 }
 
-export function readProjectConventions(rootAbs: string): ReadConventionsResult {
+export interface ConventionSource {
+  /** 写进提示块的小节名（如 `~/.ox/AGENTS.md`）。 */
+  name: string;
+  /** 绝对路径。 */
+  abs: string;
+}
+
+/**
+ * 读约定文件。默认只读项目根的 `OX.md` / `AGENTS.md`；`extra` 用来在它们
+ * **之前**插入全局约定（chat 的 `~/.ox/AGENTS.md`），顺序是"个人偏好 →
+ * 项目约定"，与 Codex 的合并方向一致。
+ */
+export function readProjectConventions(
+  rootAbs: string,
+  extra: readonly ConventionSource[] = [],
+): ReadConventionsResult {
   const out: ReadConventionsResult = { files: [], unreadable: [], skipped: [] };
-  for (const name of CONVENTION_FILE_NAMES) {
-    const abs = path.join(rootAbs, name);
+  const sources: ConventionSource[] = [
+    ...extra,
+    ...CONVENTION_FILE_NAMES.map((name) => ({ name, abs: path.join(rootAbs, name) })),
+  ];
+  for (const { name, abs } of sources) {
     let bytes: number;
     try {
       bytes = fs.statSync(abs).size;

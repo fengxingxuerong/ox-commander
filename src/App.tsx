@@ -1,9 +1,11 @@
 import { useEffect } from "react";
 import { useApp } from "./store";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { HudNav } from "./components/HudNav";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
+import { ChatPage } from "./pages/ChatPage";
 import { SettingsPage } from "./pages/SettingsPage";
 
 export function App() {
@@ -17,9 +19,17 @@ export function App() {
   }, [handleEvent, refreshProjects]);
 
   return (
-    <ErrorBoundary>
-      <CurrentPage page={page} />
-    </ErrorBoundary>
+    <div className="app-shell">
+      {/* 顶栏在 ErrorBoundary **之外**：页面渲染炸了也还能切到别的模块、
+          而不是整块黑屏。崩溃信息由边界自己渲染在内容区里。 */}
+      <HudNav />
+      <main className="app-main">
+        <ErrorBoundary>
+          <CurrentPage page={page} />
+        </ErrorBoundary>
+      </main>
+      <div className="app-scanlines" aria-hidden="true" />
+    </div>
   );
 }
 
@@ -29,6 +39,8 @@ function CurrentPage({ page }: { page: ReturnType<typeof useApp.getState>["page"
       return <BoardPage />;
     case "prd-review":
       return <PrdReviewPage />;
+    case "chat":
+      return <ChatPage />;
     case "settings":
       return <SettingsPage />;
     case "projects":

@@ -11,7 +11,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **80 个目标** / 基线 **1894 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **95 个目标** / 基线 **2396 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -50,15 +50,17 @@ Electron 桌面端 + headless CLI 双入口。
 > | 特征 | OxCommander |
 > | --- | --- |
 > | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染 |
-> | 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**逐行 diff + 单文件回滚**（B1 第二半）：批次成功后备份转**存档**（容量策略只保留最近 8 批），diff 是"存档旧内容 × 盘上现状"；回滚从该批存档恢复，新建文件须有审计里的 `create` 证据才肯删（没证据宁可留一个脏文件）；存档过期或未配置快照存储时按钮不出现，边界写在卡片上 |
+> | 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**逐行 diff + 单文件回滚**（B1 第二半）：批次成功后备份转**存档**（容量策略只保留最近 8 批），diff 是"存档旧内容 × 盘上现状"；回滚从该批存档恢复，新建文件须有审计里的 `create` 证据才肯删（没证据宁可留一个脏文件）；存档过期或未配置快照存储时按钮不出现，边界写在卡片上。**本次产物 + 怎么验收**（最后一米）：run 收束后按任务分组列出产物路径，点开即读只读全文（不用开工作目录）；同时给出凭据里的复跑命令与 `package.json` 的 `dev/start/preview/serve` 启动命令，一键复制。同一份结构（`shared/delivery-guide`）经 `acceptance` 事件进 serve 状态页，两端不会各说各的 |
 > | 项目约定 | 项目根的 **`OX.md` / `AGENTS.md`** 自动进上下文：规划（PRD 提示）与每个任务的派发描述都带，顺序是 **任务描述 → 约定 → 平台契约 → 操作者附言**。约定块自己声明"不覆盖契约"；单文件上限 256KB、总注入上限 8000 字符，截断时**说破**原长度；读不动的文件只报不抛 |
 > | 执行器自动探测 | 智能体页「扫描本机执行器」：扫 `PATH` 找已装的编码 CLI（Claude Code / Codex / Aider / Gemini / Goose），命中即可**一键接入** —— 参数取仓内带实测参数的模板，不用手写 JSON manifest。扫描**只读 PATH、不执行任何命令**（候选 CLI 不会因为"被扫了一下"就启动一次）；没装的那条给安装命令，且**不显示"接入"**（派发与扫描用同一个 PATH，扫不到 = 接进来也必红） |
+> | 交互式编码会话 | 桌面「会话」页与 CLI（`ox chat` / `exec` / `resume`）共用同一套工具循环：模型自己 `read_file` / `grep_files` / `apply_patch` / `run_command`，平台逐条展示并审批。会话落盘可恢复/分叉；补丁带逐行 diff 与单文件/整轮撤销；沙箱读路径走 realpath、禁读 `.env`，命令子进程走 `scopedEnv`，批准后的命令可被停止真杀。项目根的 `AGENTS.md`/`OX.md`、`.ox/config.json` 与全局/项目 `policy.d` 一起进边界；**尚未做**流式输出、上下文压缩与多会话并行（P1） |
 > | 人在回路 | 任务附言：运行中给任务挂一句纠偏指示，**下一次派发生效**（执行器是一问一答形态，没有在途插话通道，界面不暗示实时送达）；任务行与升级卡（"带话重派"）都有入口；成功后自动退休。只对在跑的 run 有效 —— 运行前的 steering 归 PRD 评审页 |
 > | 通知 | 桌面系统通知（只三类：run 出结论 / 任务待决策 / 命令待审批）—— 长任务切走后"该回工位了"由操作系统喊，判据是纯函数可逐点审计；`isSupported` 为 false 安静降级 |
 > | 执行器 | **自带 SenseNova LLM 池执行器** + Codex/Claude CLI + HTTP 桥（不依赖订阅） |
 > | 并行隔离 | zone 互斥批 + 冲突仲裁（回滚/隔离/报告四档） |
-> | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：驻留进程轮询 HTTP，跑完即杀）+ **页面冒烟**（探活 2xx 后再取一次首页正文，**只判红明确错误页**：Vite/webpack/CRA/Next 的失败页、`Cannot GET`；SPA 空壳不判红但把"没法确认"写进 digest —— 不做 DOM 渲染，那要无头浏览器，不进验证链） |
-> | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、循环输出检测（卡死空转即中止）、快照回滚 |
+> | 验证 | **动手前先跑基线** + build/typecheck/test 硬门禁 + repair loop 归因重修 + 产物冒烟 + **dev server 探活**（前端任务可选：规划器可在 smoke 里声明 `devServer: {url, timeoutMs?}`，只接受回环 http(s)；驻留进程轮询 HTTP；桌面端在探活与页面冒烟都通过后**保活为运行预览**，默认 30 分钟自动停止，看板可打开系统浏览器、看日志尾部、手动停止）+ **页面冒烟**（探活 2xx 后再取一次首页正文，**只判红明确错误页**：Vite/webpack/CRA/Next 的失败页、`Cannot GET`；SPA 空壳不判红但把"没法确认"写进 digest —— 不做 DOM 渲染，那要无头浏览器，不进验证链） |
+> | 运行预览 | dev server 冒烟（探活 + 页面冒烟）通过后，桌面主进程把它保活为预览：单实例（新预览替换旧的）、日志尾部 16KiB、默认 30 分钟自动停止，应用退出/新一轮开始前清理；看板可**在系统浏览器打开**、看日志、手动停止。地址只接受本机回环 `http(s)`；headless/serve 不保活（仍跑完即杀） |
+| 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、循环输出检测（卡死空转即中止）、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算） |
 > | 交付分发（可选，默认关） | 过硬门禁后把 zone 内改动导出成 **git 分支 + commit**（**默认不 push**）；显式开关后可推到指定 remote / 开 PR / 等 CI 结论 —— **CI 结论只回流，不自动重修**；不碰凭据、永不 `--force` |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）+ **反向 MCP server**（agent 生态节点：查状态/取凭据/派单/暂停继续） |
@@ -76,11 +78,13 @@ npx oxcommander --help
 echo '{"requirement":"...","projectRoot":"."}' | npx oxcommander   # 一次交付，stdout 出 JSONL 事件
 npx oxcommander serve --port=8787    # 常驻服务：状态页 + SSE + POST /run
 npx oxcommander mcp                  # MCP stdio server，接进 agent 生态
+npx oxcommander chat                 # 交互式编码智能体（REPL）
+npx oxcommander chat exec "修好失败的测试" --json
 npx oxcommander receipt receipt.json --replay   # 独立复核一份交付凭据
 ```
 
 > CLI 包由 `npm run build:cli` 从 `dist-headless/` 产出（`dist-cli/`，git 忽略），
-> `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、四个入口齐全、转发真的到达协议层。
+> `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、五个入口齐全、转发真的到达协议层。
 > 发布：`cd dist-cli && npm publish`。桌面安装包见下方「获取与安装」。
 
 ## 快速开始
@@ -228,8 +232,8 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**33 段**，3–11 min —— 时长几乎全挂在
-`mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 14 个静态段
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**35 段**，3–11 min —— 时长几乎全挂在
+`mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 16 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
 
 ```
@@ -270,7 +274,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它同时自测「把新基线写回源码」这一步（`--selftest`：连写两次逐字节相同 / 块尾攒出的
   空语句一次收敛 / 无漂移时不误伤，条数由脚本自己打印）—— 旧实现每跑一次 `--write` 就多一个
   空语句，而 `check:scripts` 视空语句为合法，所以它只会静默累积）
-→ vitest（2026-10-19 现跑 2275 通过 + 8 跳过，合计 2283 条，分布在 73 个有可执行用例的文件；
+→ vitest（2026-10-20 现跑 2530 通过 + 8 跳过，合计 2538 条，分布在 82 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -280,6 +284,10 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → vite build + tsc headless 构建
 → smoke:artifact（产物层离线冒烟：dist 产物存在性、dist-electron 全量语法检查、
    headless 二进制协议退出码——防止"源码全绿但产物坏了"）
+→ smoke:chat-agent（交互式会话**真进程** IT：假 HTTP 大脑 + 真工具循环/补丁落盘/
+   审批拒绝理由回灌/会话中止；零配额、随机端口）
+→ smoke:chat-cli（CLI 会话**真进程** IT：`exec --json` 工具结果回灌、第二个进程
+   `--session` 恢复、项目 policy.d 拦命令、非交互 untrusted fail-closed、REPL `/help`）
 → smoke:receipt-verify（交付凭据复核工具 `receipt-verify-main.js` 的端到端冒烟：
    8 例覆盖五档裁决与五个退出码，含"复跑的命令真的执行了"与
    "指纹不符时即使给了 --replay 也不复跑"两条非空转证据）
@@ -292,7 +300,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
    真起 dist-headless，由测试扮演"人"读写 inbox/outbox，6 场景钉住协议字段、越权整批拒、
    失败终态映射、deadline 收口与队列清理；随机端口、零配额）
 → smoke:cli-pkg（`npx oxcommander` 那一格的分发包冒烟：自己构建 `dist-cli/`，再断言
-  bin 指向的文件真在盘上、四个入口齐全、版本不与仓库漂移、非法 spec 真转发到协议层、
+  bin 指向的文件真在盘上、五个入口（含 `chat-main.js`）齐全、版本不与仓库漂移、非法 spec 真转发到协议层、
   `receipt` 子命令真路由到复核入口、包内不带 sourceMap 与 node_modules。
   它盯的是「包自洽」这一类**表面正常**的坏法：`--version` 照样打印、包照样能 pack，
   但 `dist-headless` 少拷一个入口时只有真从 dist-cli 里启动才现形）
@@ -377,12 +385,13 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
 
 | 目录 | 职责 |
 | --- | --- |
-| `src/` | Renderer（React18 + Zustand）：projects / prd-review / board / settings 四页 + AgentsPanel |
+| `src/` | Renderer（React18 + Zustand）：projects / prd-review / board / chat / settings 五页 + AgentsPanel |
 | `electron/engine/` | 编排器（六阶段 + repair loop）、调度器（批内 zone 互斥 + 并发闸）、能力路由、验证器、仲裁 |
+| `electron/chat/` | 交互式编码智能体：`ChatSession` 工具循环、`ToolRunner` 沙箱执行、会话记录仓、运行时边界（项目配置/约定/policy.d） |
 | `electron/agents/` | 统一适配层：`local-llm`（SenseNova 执行器）/ `cli`（Codex 等）/ `http-bridge`（WorkBuddy 等）+ 注册表 + manifest 校验 |
 | `electron/sandbox/` | PathPolicy / CommandPolicy / TimeoutGate / CircuitBreaker / FileJournal / SnapshotStore / spawn 规划 |
 | `shared/` | 双端共享大脑层：LLM 客户端与 failover、契约、glob、routing、prompt、schema（纯逻辑，不碰 node/DOM API —— 这条由 `eslint.config.mjs` 的 `no-restricted-imports` 机制强制，不是约定） |
-| `headless/` | JSONL 协议三层：protocol（契约）/ run-spec（执行）/ headless-main（胶水） |
+| `headless/` | JSONL 协议三层：protocol（契约）/ run-spec（执行）/ headless-main（胶水）；`chat-main` 是同一套会话的 CLI 形态 |
 | `agents.d/` | 声明式智能体接入文档与示例（运行时读 `%APPDATA%\OxCommander\agents.d\`） |
 
 智能体接入契约（capabilities / credential / limits）见 [agents.d/README.md](agents.d/README.md)。

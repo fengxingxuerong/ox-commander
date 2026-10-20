@@ -6,8 +6,35 @@
  * 判据的硬边界（写进 `shared/page-smoke.ts` 顶部，别把它当成浏览器验证）。
  */
 import { describe, expect, it, vi } from "vitest";
-import { pageSmokeOf } from "../shared/page-smoke";
+import { pageSmokeOf, isLoopbackHttpUrl } from "../shared/page-smoke";
 import { pageSmokeFor } from "../electron/engine/verifier";
+
+describe("isLoopbackHttpUrl", () => {
+  it("只接受本机回环的 http(s)", () => {
+    for (const url of [
+      "http://127.0.0.1:5173/",
+      "https://127.0.0.1/",
+      "http://localhost:3000",
+      "https://localhost/",
+      "http://[::1]:8080/",
+    ]) {
+      expect(isLoopbackHttpUrl(url), url).toBe(true);
+    }
+  });
+
+  it("拒绝远端、非 HTTP(S) 与非法 URL", () => {
+    for (const url of [
+      "https://example.com/",
+      "http://192.168.1.10:5173/",
+      "file:///etc/passwd",
+      "javascript:alert(1)",
+      "not-a-url",
+      "",
+    ]) {
+      expect(isLoopbackHttpUrl(url), url).toBe(false);
+    }
+  });
+});
 
 describe("pageSmokeOf", () => {
   it("HTTP 状态码不在 2xx/3xx ⇒ http-dead 且判红", () => {
@@ -80,6 +107,20 @@ describe("pageSmokeFor（取正文那一层）", () => {
   it("正文读不出来 ⇒ 返回 null（没看见，不编一条「页面正常」）", async () => {
     const fetchImpl = vi.fn(async () => ({ status: 200 })) as unknown as typeof fetch;
     expect(await pageSmokeFor("http://127.0.0.1:5173/", fetchImpl)).toBeNull();
+  });
+
+  it("页面冒烟不跟随重定向（dev server 不能把 fetch 带出回环）", async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl = vi.fn(async (_url: string, opts?: RequestInit) => {
+      init = opts;
+      return {
+        status: 200,
+        headers: { get: () => "text/html" },
+        text: async () => "<h1>hi</h1>",
+      };
+    }) as unknown as typeof fetch;
+    expect((await pageSmokeFor("http://127.0.0.1:5173/", fetchImpl))!.ok).toBe(true);
+    expect(init?.redirect).toBe("manual");
   });
 
   it("取到错误页正文 ⇒ 判红；取到正常页 ⇒ 通过", async () => {

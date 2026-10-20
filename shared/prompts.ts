@@ -129,7 +129,8 @@ Respond with ONLY a JSON object (no markdown fences) matching:
       "command": string,
       "args": string[],
       "stdin": string,
-      "expectContains": string[]
+      "expectContains": string[],
+      "devServer": { "url": string, "timeoutMs": number }
     }
   ]
 }
@@ -156,6 +157,7 @@ Smoke rules (the anti-self-confirmation layer — the tests you write may share 
 - expectContains: 2-4 short substrings that the correct output MUST contain (e.g. computed stat values, column names). They must be derived from the sample data by hand, not copied from the implementation.
 - Include at least one edge case when the requirement implies data formats (empty values, quoted fields, unicode) — the exact blind spot that self-written tests miss.
 - command/args must pass a strict sandbox policy: no shell metacharacters, no destructive programs; stdin carries sample piped data when needed.
+- A smoke entry may carry "devServer" ONLY when the deliverable is a long-running HTTP server: command/args must start that server, and "url" MUST be a loopback http(s) URL with an explicit port (e.g. http://127.0.0.1:3000/); optional timeoutMs (positive). It is mutually exclusive with stdin/expectContains, and at most one such entry. The platform probes it and (on desktop) may keep it alive as a preview.
 - If the deliverable has no runnable entrypoint, return an empty "smoke" array.
 
 PRD:

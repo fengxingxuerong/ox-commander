@@ -70,6 +70,13 @@ const EXEMPT = [
     file: "electron/ipc.ts",
     reason: "只做 registerIpc() 的一行转发，逻辑在 electron/ipc/*.ts（那些文件都在表里）。",
   },
+  {
+    file: "headless/chat-main.ts",
+    reason:
+      "CLI 入口胶水：参数解析、readline 与事件打印，没有可单测的纯分支；" +
+      "行为由 `scripts/chat-cli-it.mjs` 真进程覆盖（工具循环 / resume / policy / fail-closed / REPL）。" +
+      "变异门禁的 tests 数组只调度 vitest 文件，把子进程 IT 挂进去会变成另一个 runner。",
+  },
 ];
 
 function fail(msg) {

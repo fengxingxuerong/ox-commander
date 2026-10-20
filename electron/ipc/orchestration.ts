@@ -29,6 +29,7 @@ import {
 import type { EscalationAction, PrdDocument, SmokeCheck, Task } from "../../shared/types";
 import { parsePrd } from "../../shared/schema";
 import { deriveBoardView } from "../board-derive";
+import { stopPreview } from "../preview-manager";
 
 /**
  * Scaffold scripts written into each project workspace. The workspace is a plain
@@ -101,6 +102,9 @@ export function ensureWorkspace(projectId: string): string {
  * running is blocked by the runningProjectId checks in the handlers.
  */
 export function buildEngine(projectId: string): OrchestratorEngine {
+  // 新一次规划/执行开始 = 上一轮预览已过期。先停掉，避免旧 dev server 占着
+  // 端口让新的冒烟起不来（预览是增强，不能反过来绊倒验证）。
+  stopPreview();
   const projectStore = stores();
   const settings = settingsStore().load();
   const journal = {

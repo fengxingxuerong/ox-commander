@@ -4,6 +4,7 @@ import type { Stage, TaskStatus } from "../shared/types";
 import { isFailureClass } from "../shared/types";
 import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
 import { renderIssueRequirement, type GithubIssue } from "../shared/github-issue";
+import type { ChatApprovalRequest, ChatEntry, ChatStatus } from "../shared/chat-events";
 
 const api = () => window.oxCommander;
 
@@ -47,10 +48,229 @@ export const useApp = create<AppState>((set, get) => ({
   planningError: undefined,
   newProjectName: "",
   newRequirement: "",
+  chat: {
+    entries: [],
+    sessions: [],
+    status: "idle",
+    turns: 0,
+    usageTokens: 0,
+    mode: "workspace-write",
+    approvalPolicy: "on-request",
+    notice: "",
+  },
+  chatInput: "",
 
   setPage: (page) => set({ page }),
   setNewProjectName: (newProjectName) => set({ newProjectName }),
   setNewRequirement: (newRequirement) => set({ newRequirement }),
+
+  setChatInput: (chatInput) => set({ chatInput }),
+
+  sendChat: async () => {
+    const text = get().chatInput.trim();
+    if (text === "") return;
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set((s) => ({ chat: { ...s.chat, notice: "先在「项目库」里打开一个项目：会话的工具边界就是它的工作区" } }));
+      return;
+    }
+    set((s) => ({ chat: { ...s.chat, notice: "" }, chatInput: "" }));
+    try {
+      const res = await api().sendChat({ text, projectId });
+      set((s) => ({ chat: { ...s.chat, sessionId: res.sessionId, status: "running" } }));
+      // 首条用户消息落盘后列表会出现这条会话；刷新一次让侧栏不用等下一轮。
+      void get().loadChatSessions();
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `发送失败：${(e as Error).message}` } }));
+    }
+  },
+
+  abortChat: async () => {
+    await api().abortChat();
+    set((s) => ({ chat: { ...s.chat, status: "aborted", pendingApproval: undefined } }));
+  },
+
+  newChat: async () => {
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set((s) => ({ chat: { ...s.chat, notice: "先在「项目库」里打开一个项目" } }));
+      return;
+    }
+    try {
+      const res = await api().newChat({ projectId });
+      set((s) => ({
+        chat: {
+          ...s.chat,
+          sessionId: res.sessionId,
+          entries: [],
+          status: "idle",
+          turns: 0,
+          usageTokens: 0,
+          pendingApproval: undefined,
+          notice: "",
+        },
+      }));
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `开新会话失败：${(e as Error).message}` } }));
+    }
+  },
+
+  loadChatTranscript: async () => {
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set((s) => ({ chat: { ...s.chat, entries: [], sessions: [] } }));
+      return;
+    }
+    try {
+      // 有活会话就返回它；否则主进程恢复该项目最近一条。这样重启应用后
+      // 页面不会只剩一个空输入框，最后一轮对话能直接接上。
+      const t = await api().chatLatest({ projectId });
+      if (t) {
+        set((s) => ({
+          chat: {
+            ...s.chat,
+            sessionId: t.meta.sessionId,
+            entries: t.entries,
+            status: t.meta.status,
+            turns: t.meta.turns,
+            usageTokens: t.meta.usageTokens,
+            mode: t.meta.mode,
+            approvalPolicy: t.meta.approvalPolicy,
+            pendingApproval: undefined,
+          },
+        }));
+      } else {
+        // 没有记录时不清空内存里的条目：页面刚挂载时状态本来就是空的，
+        // 而删除当前会话那条路径会显式先清空再调这里。
+        set((s) => ({
+          chat: { ...s.chat, sessionId: undefined, status: "idle", pendingApproval: undefined },
+        }));
+      }
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `读取会话失败：${(e as Error).message}` } }));
+    }
+    await get().loadChatSessions();
+  },
+
+  loadChatSessions: async () => {
+    const projectId = get().activeProjectId;
+    if (!projectId) return;
+    try {
+      const sessions = await api().listChatSessions({ projectId });
+      set((s) => ({ chat: { ...s.chat, sessions } }));
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `读取会话列表失败：${(e as Error).message}` } }));
+    }
+  },
+
+  resumeChat: async (sessionId) => {
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set((s) => ({ chat: { ...s.chat, notice: "先在「项目库」里打开一个项目" } }));
+      return;
+    }
+    try {
+      const t = await api().resumeChat({ projectId, sessionId });
+      set((s) => ({
+        chat: {
+          ...s.chat,
+          sessionId: t.meta.sessionId,
+          entries: t.entries,
+          status: t.meta.status,
+          turns: t.meta.turns,
+          usageTokens: t.meta.usageTokens,
+          mode: t.meta.mode,
+          approvalPolicy: t.meta.approvalPolicy,
+          pendingApproval: undefined,
+          notice: "",
+        },
+      }));
+      await get().loadChatSessions();
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `恢复会话失败：${(e as Error).message}` } }));
+    }
+  },
+
+  forkChat: async (sessionId) => {
+    const projectId = get().activeProjectId;
+    if (!projectId) {
+      set((s) => ({ chat: { ...s.chat, notice: "先在「项目库」里打开一个项目" } }));
+      return;
+    }
+    try {
+      const t = await api().forkChat({ projectId, sessionId });
+      set((s) => ({
+        chat: {
+          ...s.chat,
+          sessionId: t.meta.sessionId,
+          entries: t.entries,
+          status: t.meta.status,
+          turns: t.meta.turns,
+          usageTokens: t.meta.usageTokens,
+          mode: t.meta.mode,
+          approvalPolicy: t.meta.approvalPolicy,
+          pendingApproval: undefined,
+          notice: "",
+        },
+      }));
+      await get().loadChatSessions();
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `分叉失败：${(e as Error).message}` } }));
+    }
+  },
+
+  deleteChat: async (sessionId) => {
+    try {
+      await api().deleteChat({ sessionId });
+      if (get().chat.sessionId === sessionId) {
+        set((s) => ({
+          chat: { ...s.chat, sessionId: undefined, entries: [], status: "idle", pendingApproval: undefined },
+        }));
+        await get().loadChatTranscript();
+      } else {
+        await get().loadChatSessions();
+      }
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `删除会话失败：${(e as Error).message}` } }));
+    }
+  },
+
+  revertChat: async (turn, path) => {
+    const projectId = get().activeProjectId;
+    const sessionId = get().chat.sessionId;
+    if (!projectId || !sessionId) {
+      set((s) => ({ chat: { ...s.chat, notice: "没有可撤销的会话" } }));
+      return;
+    }
+    try {
+      const result = await api().revertChat({ projectId, sessionId, turn, ...(path ? { path } : {}) });
+      const head =
+        result.reverted.length > 0 ? `已撤销：${result.reverted.join("、")}` : "没有文件被撤销";
+      const tail =
+        result.skipped.length > 0
+          ? `；跳过 ${result.skipped.length} 处：${result.skipped
+              .map((s) => `${s.path}（${s.reason}）`)
+              .join("；")}`
+          : "";
+      set((s) => ({ chat: { ...s.chat, notice: `${head}${tail}` } }));
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `撤销失败：${(e as Error).message}` } }));
+    }
+  },
+
+  resolveChatApproval: async (granted, scope, reason) => {
+    const req = get().chat.pendingApproval;
+    if (!req) return;
+    // 允许一次 / 本会话不再问这两条路径不带理由：`reason` 是可选的，
+    // 不能对可能为 undefined 的值直接 `.trim()`（那会让批准按钮抛异常）。
+    const trimmed = (reason ?? "").trim();
+    await api().resolveChatApproval(req.requestId, {
+      granted,
+      scope: scope ?? "once",
+      ...(trimmed !== "" ? { reason: trimmed } : {}),
+    });
+    set((s) => ({ chat: { ...s.chat, pendingApproval: undefined } }));
+  },
 
   refreshProjects: async () => {
     // Guarded: this runs on mount, so a rejected IPC call (unreadable projects
@@ -128,6 +348,22 @@ export const useApp = create<AppState>((set, get) => ({
         logs: [...s.logs, `[错误] 从 issue 创建项目失败: ${message}`],
       }));
     }
+  },
+
+  /**
+   * 从项目库点开已有项目（2026-10-19）。
+   *
+   * 与 `beginProject` 的差别是**刻意的**：这里不重跑规划 —— PRD 与批次已经
+   * 在盘上，看板挂载时会自己 `loadRecovery` 从审计事实恢复进度。此前"点项目
+   * 行"只切了页面没设 `activeProjectId`，看板于是继续显示上一个项目，看上去
+   * 像点了没反应。
+   */
+  openProject: (projectId: string) => {
+    set({
+      activeProjectId: projectId,
+      page: "board",
+      projectsError: undefined,
+    });
   },
 
   /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
@@ -443,6 +679,35 @@ export const useApp = create<AppState>((set, get) => ({
             { taskId, summary, resolved: false },
           ],
           logs: [...s.logs, `── ⚠️ 任务 ${taskId} 需要决策（见右侧面板）──`],
+        }));
+        break;
+      }
+      case "chat:entry": {
+        const entry = (p as { entry: ChatEntry }).entry;
+        set((s) => ({ chat: { ...s.chat, entries: [...s.chat.entries, entry] } }));
+        break;
+      }
+      case "chat:status": {
+        const { status, turns } = p as { status: ChatStatus; turns: number };
+        set((s) => ({ chat: { ...s.chat, status, turns } }));
+        break;
+      }
+      case "chat:approval-request": {
+        // 单条而非数组：会话严格串行，同一时刻最多一个动作在等人。
+        const request = (p as { request: ChatApprovalRequest }).request;
+        set((s) => ({ chat: { ...s.chat, pendingApproval: request, status: "awaiting-approval" } }));
+        break;
+      }
+      case "chat:done": {
+        const { turns, usageTokens } = p as { turns: number; usageTokens: number };
+        set((s) => ({ chat: { ...s.chat, status: "done", turns, usageTokens, pendingApproval: undefined } }));
+        break;
+      }
+      case "chat:error": {
+        const message = String(p.message ?? "");
+        set((s) => ({
+          chat: { ...s.chat, status: "error", pendingApproval: undefined },
+          logs: [...s.logs.slice(-500), `── 会话出错：${message} ──`],
         }));
         break;
       }

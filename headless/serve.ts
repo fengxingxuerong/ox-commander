@@ -1,5 +1,6 @@
 import * as http from "node:http";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { DeliveryGuide } from "../shared/delivery-guide";
 import type { HeadlessEvent } from "./protocol";
 
 /**
@@ -66,6 +67,8 @@ export interface ServeState {
   exitCode?: number;
   /** 最近一份交付凭据。 */
   receipt?: DeliveryReceipt;
+  /** 最近一次运行的产物清单与验收命令（`acceptance` 事件）。 */
+  acceptance?: DeliveryGuide;
   /** 最近一次状态变化的时间（ISO）。 */
   updatedAt?: string;
   /**
@@ -144,6 +147,7 @@ export function serveEmit(state: ServeState, evt: HeadlessEvent, now?: () => str
   else if (evt.type === "done") state.status = evt.passed ? "delivered" : "failed";
   else if (evt.type === "error") state.status = "failed";
   else if (evt.type === "receipt") state.receipt = evt.receipt;
+  else if (evt.type === "acceptance") state.acceptance = evt.guide;
   else if (evt.type === "approval-request") {
     state.pendingApprovals = [
       ...(state.pendingApprovals ?? []),
@@ -258,6 +262,38 @@ const STATUS_LABEL = {
 } as const;
 
 /**
+ * 交付成果面的 HTML（本次产物 + 怎么验收）。
+ *
+ * 与桌面看板同源：`state.acceptance` 来自 `acceptance` 事件，内容是
+ * `shared/delivery-guide` 推导的同一份结构。这里只做渲染，不重新计算。
+ */
+function acceptanceHtml(guide: DeliveryGuide, esc: (s: string) => string): string {
+  const fileRows = (files: DeliveryGuide["artifacts"][number]["files"]): string =>
+    files
+      .map(
+        (f) =>
+          `<li><code>${esc(f.path)}</code> · ${esc(f.op)}${f.bytes !== undefined ? ` · ${f.bytes} B` : ""}</li>`,
+      )
+      .join("");
+  const groups = guide.artifacts
+    .map((g) => `<h3>${esc(g.title)} · ${esc(g.zone)}</h3><ul>${fileRows(g.files)}</ul>`)
+    .join("");
+  const unassigned = guide.unassigned
+    ? `<h3>未归属任务</h3><ul>${fileRows(guide.unassigned)}</ul>`
+    : "";
+  const empty = guide.totalFiles === 0 ? "<p class=muted>本次没有文件改动。</p>" : "";
+  const commands = guide.commands
+    .map((c) => `<li><b>${esc(c.label)}</b> <code>${esc([c.command, ...c.args].join(" "))}</code></li>`)
+    .join("");
+  const commandBlock =
+    guide.commands.length > 0
+      ? `<ul class=commands>${commands}</ul>`
+      : "<p class=muted>本次没有记录可复跑的命令。</p>";
+  return `<h2>本次产物（${guide.totalFiles} 个文件）</h2>${empty}${groups}${unassigned}
+<h2>怎么验收</h2><p class=muted>在工作区根目录执行。</p>${commandBlock}`;
+}
+
+/**
  * 一页自包含 HTML（无外链、无构建）：状态 + 凭据 + 尾部事件。
  *
  * 它替代的不是桌面看板，是"去倒杯咖啡回来还能看一眼"那件事 —— 所以刻意
@@ -303,6 +339,7 @@ export function serveIndexHtml(state: ServeState): string {
     ? `<h2>交付凭据</h2><p>${esc(state.receipt.headline)}</p>
        <pre>${esc(JSON.stringify(state.receipt, null, 2))}</pre>`
     : "<p class=muted>还没有凭据（只在交付成功 / 重修耗尽两条出口上产生）。</p>";
+  const acceptance = state.acceptance ? acceptanceHtml(state.acceptance, esc) : "";
   return `<!doctype html>
 <meta charset="utf-8">
 <title>OxCommander · 运行状态</title>
@@ -319,6 +356,7 @@ ${approvals}
 <p class=muted>状态 ${esc(state.status)}${
     state.exitCode !== undefined ? ` · 退出码 ${state.exitCode}` : ""
   }${state.updatedAt ? ` · ${esc(state.updatedAt)}` : ""} · 共 ${state.events.length} 条事件</p>
+${acceptance}
 ${receipt}
 <h2>最近事件</h2>
 <ul class=events>${rows}</ul>

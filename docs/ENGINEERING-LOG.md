@@ -19,6 +19,141 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（交互式编码会话 P0 · 2026-10-20）
+
+**动机**：Codex 类产品的核心不是"一次吐整份文件"，而是"模型自己多轮取信息、改一处、
+跑一遍验证"。本项目此前内置执行器是一问一答（平台塞 32k 快照 → 模型吐整份文件），
+`docs/2026-10-06-real-decomposition-e2e.md` 的失败链正卡在"读不到就说没这个文件"。
+本轮把会话循环、工具执行、审批、沙箱、会话记录、CLI 形态一次接通。
+
+**实现要点**：
+
+- `electron/chat/session.ts`：工具循环（轮次上限、可中断、过程可回放）；轮次是**会话累计**
+  的 LLM 回合，另设 `userTurn` 作为用户回合号，供撤销分组。`onPersist` 在用户消息、
+  工具批次与终态边界落快照，半更新状态不落盘。
+- `electron/chat/tool-runner.ts`：六个工具全部落在既有沙箱内；读路径 realpath + 禁读
+  密钥文件；命令走 `CommandPolicy` + `planSpawn` + `killTree` + `scopedEnv`；`apply_patch`
+  改原子写，并把每文件 before/after 记入 `changes`。目录遍历固定排序，避免 readdir
+  顺序漂移。
+- `electron/chat/session-store.ts`：原子索引 + 每会话 JSON；坏文件跳过、索引坏了按文件
+  重建；fork 新 id、delete 先看存在性；恢复时 status 重置 idle。
+- `electron/chat/runtime.ts`：把项目 `AGENTS.md`/`OX.md` + 全局约定 + `.ox/config.json`
+  + 全局/项目 `policy.d` 合成一次运行时边界与签名；签名变化触发会话重建。
+- `electron/ipc/chat.ts`：首条消息建会话、设置/项目/中止后重建（同项目保留历史）、
+  list/latest/load/resume/fork/delete/revert。`chat:revert` 只在当前内容仍等于补丁后
+  内容时恢复；补丁后被改过的一律跳过。
+- `headless/chat-main.ts`：CLI 三形态（REPL / exec / resume），与桌面共用会话记录与
+  沙箱；非交互无审批通道 = fail-closed；`--base-url`/`--model` 支持本地端点与测试。
+
+**安全修复（同批）**：`run_command` 之前继承 `process.env`（桌面主进程已把 keychain
+播种进去），模型跑一个脚本就能打印 provider key；现在默认 `scopedEnv()`。读路径之前只做
+字面 resolve，项目内链接可读到项目外；现在 realpath + 禁读 `.env*`/`.git/**` 等。
+桌面/headless 生产装配此前都没传 `policyDir`，`policy.d` 只在测试里生效；现在桌面传
+`<userData>/policy.d` + 项目 `.ox/policy.d`，headless 传项目 `.ox/policy.d`。
+
+**测试与变异账**：
+
+- 新增 `src/chat-{session,tools,store,security,runtime,ui,tool-runner}.test.ts(x)`、
+  `src/policy-file.test.ts` 的 forbidRead/多目录、`src/http-clients.test.ts` 的原生工具
+  映射、`scripts/chat-cli-it.mjs`（真子进程）。定向 site 审计（17 个漂移文件）逐点修到
+  100%：project-config 16/16、policy-dir 5/5、chat-events 15/15、runtime 12/12、
+  session 24/24、session-store 38/38、ipc/chat 77/77、tool-runner 59/59、patch 49/49、
+  path-policy 48/48、store 43/43、http-clients 96/96、context 27/27、platform 38/38、
+  spec 27/27、protocol 13/13、policy 20/20。过程中暴露并修掉：`delete` 对不存在会话
+  返回 true、`apply_patch` 纯新增多插空行、`ChatSession` 恢复 seq 撞号/把 assistant 当
+  user、store 空输入/删除分支缺测试、原生工具映射测试漏挂 http-clients 目标。
+- 基线 1989 → **2396**（95 目标）；用例 2351 → **2530**（+8 跳过，82 个有可执行用例的
+  文件）；`verify` 33 → **35 段**（新增 `smoke:chat-agent` / `smoke:chat-cli`）。
+
+**明确未做（P1）**：流式 token、上下文压缩、多会话并行、MCP client、审批持久规则、
+模型/推理档切换、`@` 文件补全、网络隔离；`danger-full-access` 仍受代码地板约束。
+
+### 新增（运行预览：dev server 保活 · 2026-10-20）
+
+**动机**：交付成果面补到"文件能看"之后，前端任务的最后一步仍是"自己开目录、自己起
+server"。dev-server 冒烟此前只证明端口活着，随后就把进程杀了（验证道具）。本轮把它
+在**验证通过后**交给桌面宿主保活，看板给一个预览入口。
+
+**实现**：
+
+- `DevServerKeepInfo`（`engine/dev-server.ts`）：验证器把 child 所有权交出去时的事实
+  （title/url/command/args/cwd/已收集日志）。`runSmokeChecks` 只有在
+  `verdict.ok && page.ok` 时才调用接管器；返回 `true` 才不 kill，否则按老路径杀掉。
+  接管失败/抛错只写进 digest，**不改冒烟结论**。
+- **打通 devServer 的来源**（此前是断链）：`parseDecompose` 现在解析 smoke 的可选
+  `devServer`（url 必须是回环 http(s)、timeoutMs 必须是正数，且与 stdin/expectContains
+  互斥），规划提示词也教了这条；验证器在 spawn/fetch 前**再挡一次**回环 —— 桌面端从
+  `smokeJson` 直接 JSON.parse，绕过了 schema，这一层是 SSRF 的真正执行面。探活与页面
+  冒烟的 fetch 都设 `redirect: "manual"` —— 跟随重定向会把请求带出回环。
+- `PreviewManager`（`electron/preview-manager.ts`）：单实例（新预览先停旧的）、日志尾部
+  16KiB、close/error 保留退出码现场、30 分钟 TTL（旧定时器用 entry 身份判定，防止误停
+  后来者）、stop 杀进程树。桌面宿主通过 `setDevServerKeeper` 安装；headless 不安装，
+  行为不变。
+- IPC：`preview:status/open/stop`。`open` **不接收 URL 入参**，只打开管理器里那条已探活
+  的服务，且仅限本机 `http(s)`；`app.before-quit` 清进程；`buildEngine` 在新一轮规划/
+  执行前先停旧预览。
+- 看板 `PreviewPanel`：URL/命令/pid/到期时间/日志尾部 + 打开/停止；进程退出后打开按钮
+  禁用、保留退出码现场；刷新跟随 receipt 事件与项目切换。
+
+**测试**：`src/preview-manager.test.ts` 9 条（接管/替换/TTL 不误停/退出/停止/日志截断）；
+`src/dev-server.test.ts` 新增 4 条（接管不杀、拒绝/抛错仍杀、页面红不许接管）；
+IPC 5 条（状态/URL 白名单/已退出/打开失败/stop 与 before-quit）；UI 4 条。
+
+**变异账**：首轮 site 暴露 preview-manager 2 处（`state()` 的 exitCode/killed 组合、
+exitCode 回填条件）、delivery IPC 5 处（URL 协议/hostname 白名单的 `||` 与
+`return false`）；补"exitCode 已变但 close 未到""被信号杀 exitCode 为 null""https
+loopback / localhost / [::1] / file: / 非法 URL"等断言后：preview-manager 12/12、
+delivery IPC 27/27、verifier 31/31、orchestration IPC 10/10（100%）。同时校回了
+orchestration.ts approval-decide 的等价位点行号（232 → 267）：旧行号已漂到
+`enginesOf().values()` 那行，fail-safe 在本次 site 审计里按预期暴露。
+位点 1948 → **1989**（83 目标，`site-baseline --write`）；用例 2319 → **2351**
+（75 个有可执行用例的文件），README / gates.md 同步，`check:doc-claims` PASS。
+
+**明确未做**：内嵌 webview/iframe（用系统浏览器，避免把任意页面塞进渲染进程）；
+页面不轮询（预览卡在 receipt/切项目时刷新）；headless/serve 无保活；kill 是尽力而为，
+极端残留靠 TTL / 下次替换收口。
+
+### 新增（交付成果面：本次产物 + 怎么验收 · 2026-10-19）
+
+**动机**：竞品缺口盘点 B1 的最后一米——能证明"跑过了"、能看"改了哪些文件"，
+但"成果长什么样"仍要用户自己打开工作目录。Codex 类产品把 changed files / diff /
+preview 放进同一个面；本轮先补可交付的最近一格：**产物清单 + 只读全文 + 验收命令**。
+
+**实现分层**：
+
+- `shared/delivery-guide.ts`：纯函数。运行边界 = 最后一条 `stage=PRD`；若最后
+  一份凭据之后还有派发/批次改动（无 PRD 的续跑），以凭据为界只取之后的事实。
+  批次改动按 `isPathInZone` 归到凭据任务；同一路径跨批只留最后一次 op/bytes；
+  对不上任何任务 zone 的进 `unassigned`。命令 = 凭据里带 `command` 的检查
+  （去重）+ `package.json` 的 `dev/start/preview/serve`（去重；坏 JSON 不抛）。
+- `electron/ipc/delivery.ts`：`delivery:guide`（审计 + workspace/package.json 的 IO）
+  与 `delivery:read`。只读读取两道 containment：字面 `path.relative` + `realpath`，
+  防符号链接逃逸；512KiB 上限、二进制探测、删除/目录/越界都以数据返回，
+  不抛异常（"本批删除"是正常形态）。
+- 看板 `DeliveryPanel`：按任务分组、点开只读全文、命令一键复制；刷新信号是
+  `receipt`（主进程先落审计再推事件）。空交付（有凭据、零改动）也出卡并说破。
+- headless：`onVerdict` 累积 `scope.changes`，凭据存在时在 `done/error` 前发
+  `acceptance`；serve 存进 `state.acceptance`，状态页与 `/state` 直接渲染。
+  取消/崩溃不发（半截现场不冒充成果）。
+
+**测试**：`src/delivery-guide.test.ts` 24 条（边界/过滤/归组/去重/命令/坏 JSON）；
+IPC 8 条（含跨项目过滤、二进制、截断、越界、符号链接 POSIX）；UI 3 条；
+serve 5 条；headless 端到端 1 条（`receipt → acceptance → done` 顺序）。
+
+**变异账**：首轮 site 暴露 delivery-guide 2 处存活（非 PRD stage 的 `&&`、
+bytes 存在性的 `!==`）与 delivery IPC 4 处（非字符串 projectId、realpath 的
+`||`、两个三元）；分别用"非 PRD stage / Object.keys 断言 / 42 入参 /
+跨项目审计记录 / 拆分 containment 判定"杀掉。复跑：delivery-guide 31/31、
+delivery IPC 15/15、run-spec 33/33（新位点 3）、serve 73/73（新位点 5）、
+protocol 120/120。位点 1894 → **1948**（82 目标，`site-baseline --write`）；
+用例 2275 → **2319**（74 个有可执行用例的文件），README / gates.md 同步，
+`check:doc-claims` PASS。
+
+**明确未做（下一轮已补保活 + 系统浏览器入口）**：dev server 保活/内嵌预览（当时探活后
+进程照旧被杀）；内嵌 webview 仍未做。产物读的是
+工作区现状而非批次存档，因此本批删除的文件只标「已删除」；跨任务共享文件的
+归组按任务顺序先到先得（zone 互斥下不会出现双归属）。
+
 ### 新增（变体竞争 + 门禁裁决（B4） · 2026-10-19）
 
 竞品缺口 B4（`docs/2026-10-17-competitor-gap.md`）：cezar「同一任务 ×2/×3 比 diff」、

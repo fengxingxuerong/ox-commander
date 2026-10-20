@@ -10,8 +10,77 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（交互式编码会话 P0）
+
+- **桌面会话页 + 工具循环**（2026-10-20）。`ChatPage` / `ChatSession` / `ToolRunner` 把
+  "人说一句 → 模型自己 `read_file` / `grep_files` / `apply_patch` / `run_command` → 人看着
+  过程"接成真实闭环；工具结果逐条回灌给下一轮，不是"模型假装读过"。审批支持
+  `untrusted` / `on-request` / `never`，一次/本会话/拒绝并附理由，拒绝理由回灌给模型。
+  **边界**：没有流式 token、上下文压缩与多会话并行（P1）；`danger-full-access` 仍受
+  代码里的路径/命令地板约束，不提供真正的"无沙箱"。
+- **会话记录与恢复**（同日）。每条会话落在 `<userData>/chat/`（原子索引 + 每会话 JSON），
+  桌面页可列出、恢复、分叉、删除；模型消息原样保存，恢复后的下一轮不会改变协议形状。
+  重启应用后打开会话页会自动接回最近一条；`/sessions` 式列表在 CLI 为 `ox chat list`。
+- **改动审阅与撤销**（同日）。`apply_patch` 的每个文件改动带 before/after 全文快照，桌面
+  可展开逐行 diff、撤销单个文件或整轮；撤销只在"当前内容仍等于补丁后内容"时执行，补丁
+  之后被改过的文件一律跳过。补丁写盘改成同目录临时文件 + rename 的原子写；超过记录上限
+  的文件仍落盘但标"不可撤销"。**边界**：`run_command` 产生的改动不在撤销范围，界面明说。
+- **项目指令与项目级配置**（同日）。会话 system prompt 注入 `~/.ox/AGENTS.md` 与项目根的
+  `AGENTS.md` / `OX.md`；项目 `.ox/config.json` 可覆盖 `sandboxMode` / `approvalPolicy` /
+  `approvalCommands` / `maxTurns`。全局与项目 `.ox/policy.d` 取并集（只能加严）。
+  **同时修掉**桌面与 headless 生产装配从未传 `policyDir` 的死线：策略文件现在真的参与
+  命令拒绝、写入禁区、审批名单与预算。
+- **CLI 会话形态**（同日）。`ox chat`（REPL，支持 `/new` `/resume` `/sessions` `/help`
+  `/exit`）、`ox chat exec "<prompt>" --json`（单发 JSONL 事件）、`ox chat resume [id]`。
+  与桌面共用同一套会话记录与沙箱；非交互没有审批通道时按 fail-closed 拒绝，`--approval
+  never` 才显式放开。新增 `--base-url` / `--model` 以支持本地端点和测试。
+- **会话安全边界**（同日）。`run_command` 子进程改走 `scopedEnv()`，默认看不到宿主
+  provider key；读路径加 realpath 与 `DEFAULT_FORBIDDEN_READ`（`.env*`、`.git/**` 等，
+  `.env.example` 例外）；停止会话会真的杀命令进程树；跨协议恢复会剥离对文本端点无效的
+  `toolCalls`/`tool` 消息。
+
+### 修复（交互式会话）
+
+- 新装应用首条消息不再空指针（`live` 为 null 时先建会话）；审批"允许一次/本会话不再问"
+  不再因可选理由抛异常；会话 id 改用 UUID（去掉 `Math.random`）；`truncateToolOutput`
+  改成保留尾部；`apply_patch` 不再把 `*** End Patch` 前的分隔换行当成空上下文行，纯新增
+  不再多插一个空行；`ChatSessionStore.delete` 对不存在的会话不再报"删除成功"。
+
+### 门禁与维护（交互式会话）
+
+- `verify` 增加 `smoke:chat-agent` 与 `smoke:chat-cli` 两条真进程 IT（**35 段**；假 HTTP
+  端点、随机端口、零配额）；CLI 分发包入口从四个变五个。全量 site 审计新增 12 个目标，
+  漂移清单 17 个文件逐点审到 100% 后基线更新为 **95 个目标 / 2396 处位点**；用例数
+  **2530 通过 + 8 跳过**（82 个有可执行用例的文件）。
+
 ### 新增（调度与交付）
 
+- **运行预览：dev server 保活 + 看板入口**（2026-10-20）。前端任务的可选 dev server 冒烟
+  在**探活与页面冒烟都通过**后，桌面端把它从"验证道具"接管为预览：主进程单实例持有
+  （新预览替换旧的，避免抢端口），继续收集 stdout/stderr 尾部 16KiB，默认 **30 分钟**
+  自动停止；应用退出时清理，新一次规划/执行前也会先停掉上一轮预览。看板出现「运行预览」
+  卡：URL、命令、pid、到期时间、日志尾部，可**在系统浏览器打开**、手动停止；进程自己退出
+  时保留退出码现场。`preview:open` **不接收渲染层传的 URL**，只打开管理器里那条已经
+  探活的服务，且必须是本机 `http(s)`（`127.0.0.1` / `localhost` / `::1`）——
+  防 `file:` 与任意远端地址。同批**打通 devServer 来源**：此前 `parseDecompose` 与
+  规划提示词都没有这个字段（配了也到不了验证器）；现在 smoke 可带
+  `devServer: {url, timeoutMs?}`，schema 只收回环 `http(s)`、正超时，且与
+  `stdin`/`expectContains` 互斥；验证器在 fetch/spawn 前再挡一次回环 —— 桌面端从
+  `smokeJson` 直接反序列化会绕过 schema，这一层是 SSRF 的执行面；探活与页面冒烟的
+  fetch 都**不跟随重定向**，防 dev server 把请求带出回环。**边界**：系统浏览器而不是内嵌 webview；页面不在前台时
+  不轮询，预览卡在收到凭据事件/切项目时刷新；headless/serve 不装接管器，仍按"跑完即杀"；
+  kill 是尽力而为，极端情况下残留进程仍靠 TTL 或下次替换收口。
+- **本次产物 + 怎么验收（交付成果面）**（2026-10-19）。看板在 run 收束后固定出「本次产物」：
+  按任务 zone 归组本次运行的改动路径，点「查看」直接读**只读全文**，不用打开工作目录；
+  同卡列出「怎么验收」—— 凭据里实际跑过的复跑命令 + `package.json` 的
+  `dev/start/preview/serve` 启动命令，可一键复制。推导住在 `shared/delivery-guide`
+  （运行边界、跨批去重、按 zone 归组、命令去重），桌面 IPC 与 headless 的
+  `acceptance` 事件共用同一份结构，serve 状态页与 `/state` 因此和看板同源。
+  **边界**：读取的是工作区**现状**而不是批次存档（本批删除的文件只标「已删除」）；
+  单文件上限 512KiB、二进制不渲染、截断会说破；路径先按字面再按 realpath 判两次，
+  符号链接逃出工作区一律拒绝。`acceptance` 只在凭据存在时发（取消/崩溃不发），
+  顺序为 `receipt → acceptance → done/error`。**仍未做**：把 dev server 保活成可交互
+  预览（探活后进程照旧被杀），那是下一步。
 - **变体竞争 + 门禁裁决（B4）**（2026-10-19）。`variantCount`（默认 `1` = 关闭；
   settings 文件与 headless spec 同名字段）`> 1` 时，每个任务**顺序**派 N 个执行器
   （同一 zone 就地起跑，各开一个快照窗口），全部落定后**批末统一回放裁决**：逐变体

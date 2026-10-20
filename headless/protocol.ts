@@ -20,6 +20,7 @@ import { parseAgentManifestList } from "../electron/agents/manifest-schema";
 import { REPO_RE } from "../electron/context/github-readonly";
 import type { AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { DeliveryGuide } from "../shared/delivery-guide";
 import {
   ARBITRATION_MODES,
   DEFAULT_SETTINGS,
@@ -234,6 +235,14 @@ export type HeadlessEvent =
    * `usage` 事件仍然是逐字段的明细，这条是**结论层**，两者不重复。
    */
   | { type: "receipt"; receipt: DeliveryReceipt }
+  /**
+   * 交付成果面：本次产物（按任务分组的路径）+ 怎么验收（可复制命令）。
+   *
+   * 只在凭据存在时发（取消/崩溃不让半截现场看起来像成果），放在 `receipt`
+   * 之后、`done`/`error` 之前。桌面看板与 serve 状态页用同一个共享构建器，
+   * 所以两边读到的产物清单不会各说各的。
+   */
+  | { type: "acceptance"; guide: DeliveryGuide }
   | { type: "done"; passed: boolean; report: unknown }
   /** `exhausted: true` means the repair budget ran out (exit code 2), not a crash (1). */
   | { type: "error"; message: string; exhausted?: boolean };

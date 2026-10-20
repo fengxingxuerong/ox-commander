@@ -153,12 +153,13 @@ export function PrdReviewPage() {
     <div className="page">
       <header className="page-header">
         <button onClick={backToProjects}>← 返回项目列表</button>
-        <h1>PRD 确认</h1>
-        {!editing && (
-          <button className="ghost" onClick={startEdit}>
-            ✏️ 编辑 PRD
-          </button>
-        )}
+          <h1>PRD 确认</h1>
+          <p>先看机器理解得对不对：改完点「批准开工」，它会按下面的批次并行开发。</p>
+          {!editing && (
+            <button className="ghost" onClick={startEdit}>
+              ✏️ 编辑 PRD
+            </button>
+          )}
       </header>
 
       {editing && draft ? (
@@ -238,6 +239,7 @@ export function PrdReviewPage() {
             <h2>
               📦 批次规划（{totalTasks} 个任务 · {batches?.length ?? 0} 个批次）
             </h2>
+            <p className="card-sub">同批次内的任务并行开发，批次之间串行；有依赖的任务自动排到后面的批次。</p>
             {!batches && <p className="muted">批次尚未生成…</p>}
             {batches?.map((batch: Task[], bi: number) => (
               <div key={bi} className="batch-block">

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createLlmClient, AnthropicClient, OpenAiCompatibleClient, HttpLlmError } from "../shared/http-clients";
 import { getProvider, PROVIDER_CATALOG } from "../shared/providers";
 import type { ChatRequest } from "../shared/llm-client";
+import { TOOL_SPECS } from "../shared/tools/spec";
 
 const req: ChatRequest = {
   messages: [
@@ -28,6 +29,22 @@ describe("OpenAiCompatibleClient", () => {
     expect(capturedUrl).toBe("https://api.deepseek.com/v1/chat/completions");
     expect(res.content).toBe("hello");
     expect(res.usageTokens).toBe(42);
+    // 没有 tool_calls 时不能长出 `toolCalls: []`：会把"一问一答"伪装成工具回合。
+    expect("toolCalls" in res).toBe(false);
+  });
+
+  it("只有 tools=native 才发 tools 字段", async () => {
+    let body: Record<string, unknown> = {};
+    const fake = (async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+    }) as never;
+    const native = new OpenAiCompatibleClient({ ...getProvider("deepseek"), tools: "native" }, "k", fake);
+    await native.chat({ ...req, tools: [TOOL_SPECS[0]] });
+    expect(body.tools).toBeDefined();
+    const text = new OpenAiCompatibleClient({ ...getProvider("deepseek"), tools: "text" }, "k", fake);
+    await text.chat({ ...req, tools: [TOOL_SPECS[0]] });
+    expect(body.tools).toBeUndefined();
   });
 
   it("enables json mode when requested", async () => {
@@ -184,6 +201,21 @@ describe("AnthropicClient", () => {
     expect(body.messages).toEqual([{ role: "user", content: "hi" }]);
     expect(res.content).toBe("hi there");
     expect(res.usageTokens).toBe(12);
+    expect("toolCalls" in res).toBe(false);
+  });
+
+  it("只有 tools=native 才发 tools 字段（Anthropic 侧）", async () => {
+    let body: Record<string, unknown> = {};
+    const fake = (async (_u: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return { ok: true, status: 200, text: async () => JSON.stringify({ content: [{ type: "text", text: "ok" }] }) } as never;
+    }) as never;
+    const native = new AnthropicClient({ ...getProvider("anthropic"), tools: "native" }, "k", fake);
+    await native.chat({ ...req, tools: [TOOL_SPECS[0]] });
+    expect(body.tools).toBeDefined();
+    const text = new AnthropicClient({ ...getProvider("anthropic"), tools: "text" }, "k", fake);
+    await text.chat({ ...req, tools: [TOOL_SPECS[0]] });
+    expect(body.tools).toBeUndefined();
   });
 });
 

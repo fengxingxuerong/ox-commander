@@ -25,6 +25,15 @@ export function optionalHostHooks(io: {
   };
 }
 
+/** package.json 只用于"怎么启动"这一格；读不到就是没有，不影响交付。 */
+function readPackageJson(root: string): string | undefined {
+  try {
+    return fs.readFileSync(path.join(root, "package.json"), "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Runs one `ParsedSpec` to completion and reports the exit code.
  *
@@ -43,7 +52,8 @@ import { getProvider, providerKeyEnvVars } from "../shared/providers";
 import { renderIssueRequirement, viewGithubIssue } from "../electron/context/github-readonly";
 import type { LlmClient } from "../shared/llm-client";
 import type { SmokeCheck, Task, EscalationAction, VerificationReport } from "../shared/types";
-import { pairConflict } from "../shared/delivery-receipt";
+import { pairConflict, type DeliveryReceipt } from "../shared/delivery-receipt";
+import { deriveDeliveryGuide, type DeliveryArtifactFile } from "../shared/delivery-guide";
 import type { HeadlessEvent, ParsedSpec } from "./protocol";
 
 /**
@@ -242,6 +252,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     });
   }
   const redispatched = new Set<string>();
+  /** 交付成果面的事实：批次改动累积 + 最近一份凭据（只在凭据存在时发 acceptance）。 */
+  let receiptForAcceptance: DeliveryReceipt | undefined;
+  const runFiles: DeliveryArtifactFile[] = [];
   const callbacks: OrchestratorCallbacks = {
     onStage: (stage) => io.emit({ type: "stage", stage }),
     onLog: (text) => io.emit({ type: "log", text }),
@@ -252,7 +265,10 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     onUsage: (snapshot) => io.emit({ type: "usage", ...snapshot }),
     // 凭据走独立事件而不是塞进 `done`：宿主可能要把它原样落进自己的工单系统，
     // 而 `done` 的 `report` 字段是 unknown 形状（历史契约），塞进去就得再解析一次。
-    onReceipt: (receipt) => io.emit({ type: "receipt", receipt }),
+    onReceipt: (receipt) => {
+      receiptForAcceptance = receipt;
+      io.emit({ type: "receipt", receipt });
+    },
     onVerification: (report) =>
         io.emit({
           type: "verification",
@@ -319,6 +335,8 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     snapshotRoot: spec.snapshotRoot,
     manifests: spec.agents,
     manifestDir: spec.manifestDir,
+    // headless 没有 userData：项目级 `.ox/policy.d` 是它的策略入口。
+    policyDirs: [path.join(spec.projectRoot, ".ox", "policy.d")],
     llmPool: spec.llmPool,
     maxParallelRuns: spec.maxParallelRuns,
     journal,
@@ -347,7 +365,9 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
           ...(outcome.durationMs !== undefined ? { durationMs: outcome.durationMs } : {}),
           ...(outcome.errorClass ? { errorClass: outcome.errorClass } : {}),
         }),
-      onVerdict: (verdict) => {
+      onVerdict: (verdict, scope) => {
+        // 交付成果面的事实来源与桌面审计同源：每批 settle 后的完整改动清单。
+        runFiles.push(...(scope?.changes ?? []));
         for (const c of verdict.conflicts) {
           // 同 context.ts：配对规则只有 `pairConflict` 一份实现。
           const paired = pairConflict(c, verdict.remedies);
@@ -382,6 +402,25 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
   const engine = platform.engine;
   io.onEngine?.(engine);
 
+  /**
+   * 发交付成果面。只在凭据存在时发：取消/崩溃的现场不完整，不能让半截
+   * 改动看起来像"本次成果"。放在终态之前，顺序与 receipt 一致。
+   */
+  const emitAcceptance = (): void => {
+    if (receiptForAcceptance === undefined) return;
+    const packageJson = readPackageJson(spec.projectRoot);
+    io.emit({
+      type: "acceptance",
+      guide: deriveDeliveryGuide(
+        [
+          { phase: "batch-changes", files: runFiles },
+          { phase: "receipt", receipt: receiptForAcceptance },
+        ],
+        { ...(packageJson !== undefined ? { packageJson } : {}) },
+      ),
+    });
+  };
+
   try {
     let batches: Task[][];
     let smoke: SmokeCheck[] = [];
@@ -405,12 +444,15 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
       resume,
       smoke,
     });
+    emitAcceptance();
     io.emit({ type: "done", passed: report.passed, report });
     return report.passed ? 0 : 2;
   } catch (err) {
     // "Spent the repair budget" is a different outcome from "something broke":
     // hosts script against the difference, so the exit codes differ too.
-    if (err instanceof VerificationExhaustedError) {
+    const exhausted = err instanceof VerificationExhaustedError;
+    emitAcceptance();
+    if (exhausted) {
       io.emit({ type: "error", message: err.message, exhausted: true });
       return 2;
     }

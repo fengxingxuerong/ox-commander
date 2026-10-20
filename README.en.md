@@ -23,6 +23,8 @@ npx oxcommander --help
 echo '{"requirement":"...","projectRoot":"."}' | npx oxcommander        # one delivery, JSONL events on stdout
 npx oxcommander serve --port=8787                                       # status page + SSE + POST /run
 npx oxcommander mcp                                                     # MCP stdio server for agent hosts
+npx oxcommander chat                                                    # interactive coding agent (REPL)
+npx oxcommander chat exec "fix the failing test" --json                 # one-shot, JSONL events
 npx oxcommander receipt receipt.json --replay                           # re-verify a delivery independently
 ```
 
@@ -58,8 +60,13 @@ Two honest gaps: there is **no macOS desktop build** (no signing certificate; un
 blocked by Gatekeeper, so we ship nothing rather than something broken) — but the `npx oxcommander`
 CLI **does** run on macOS (pure Node package, no native deps; a dedicated `cli (macOS)` CI job
 builds and smokes it on every push), and the desktop app is **not a terminal
-IDE** — no embedded terminal, no per-file diff viewer yet. The CLI/headless surface is where
-programmatic control lives (JSONL protocol + MCP server).
+IDE** — no embedded terminal and no in-app preview pane yet. What the board does show is the last
+mile of delivery: per-batch changed files with line-level diffs and one-file rollback, a per-task
+artifact list with read-only full-file viewing and copyable acceptance/start commands, and a
+**live preview entry** — a dev server that passed probing/page smoke is kept alive by the desktop
+process (30-minute TTL, one at a time) and can be opened in your system browser, with its log tail
+and a stop button in the board. The CLI/headless surface is where programmatic control lives
+(JSONL protocol + MCP server).
 
 ## What you get at the end
 
@@ -73,7 +80,9 @@ npx oxcommander receipt receipt.json --replay   # actually re-runs the checks: 0
 ```
 
 Other tools say "it passed the gate" and you have to take their word for it. Here the receipt carries
-its own evidence.
+its own evidence. Alongside it, an `acceptance` event lists **what this run produced** (changed
+files grouped by task) and **how to accept it** (the verification commands plus `dev/start/preview/
+serve` from `package.json`); the desktop board and the `serve` status page render the same structure.
 
 ## Surfaces
 
@@ -102,7 +111,7 @@ SSH tunnel. Set `OX_SERVE_TOKEN` to opt into Bearer checking.
 
 ## Quality gate
 
-`npm run verify` is the single acceptance entry — a chain of static checks, ~2.1k tests, a mutation
+`npm run verify` is the single acceptance entry — a chain of static checks, ~2.5k tests, a mutation
 round, two builds, and a set of integration smokes including an offline end-to-end that spends no quota.
 The strongest claim is the site-granularity mutation audit (run in CI on every push): **every** decision
 site is mutated individually and must be killed. Aggregate mutation scores ("100% killed") are weaker

@@ -120,6 +120,99 @@ describe("parseDecompose（任务 + 独立冒烟清单）", () => {
     expect(plan.smoke[0].command).toBe("node");
     expect(plan.smoke[0].stdin).toBe("样例数据");
     expect(plan.smoke[0].expectContains).toEqual(["col0", "type="]);
+    expect("devServer" in plan.smoke[0]).toBe(false);
+  });
+
+  it("解析 devServer：只接受回环 URL 与正整数超时", () => {
+    const withTimeout = parseDecompose({
+      ...valid,
+      smoke: [
+        {
+          title: "web 起得来",
+          command: "node",
+          args: ["src/server.js"],
+          devServer: { url: "http://127.0.0.1:3000/", timeoutMs: 5000 },
+        },
+      ],
+    });
+    expect(withTimeout.smoke[0].devServer).toStrictEqual({
+      url: "http://127.0.0.1:3000/",
+      timeoutMs: 5000,
+    });
+
+    const withoutTimeout = parseDecompose({
+      ...valid,
+      smoke: [
+        {
+          title: "web 起得来",
+          command: "node",
+          args: ["src/server.js"],
+          devServer: { url: "http://localhost:3000/" },
+        },
+      ],
+    });
+    expect(withoutTimeout.smoke[0].devServer).toStrictEqual({ url: "http://localhost:3000/" });
+  });
+
+  it("拒绝非回环 / 非 HTTP(S) 的 devServer URL", () => {
+    for (const url of [
+      "https://example.com/",
+      "http://192.168.1.10:5173/",
+      "file:///etc/passwd",
+      "not-a-url",
+    ]) {
+      expect(
+        () =>
+          parseDecompose({
+            ...valid,
+            smoke: [{ title: "web", command: "node", args: ["x.js"], devServer: { url } }],
+          }),
+        url,
+      ).toThrow(/loopback http\(s\)/);
+    }
+  });
+
+  it("拒绝非法 devServer.timeoutMs 与非对象 devServer", () => {
+    for (const timeoutMs of [0, -1, "5000", Infinity]) {
+      expect(
+        () =>
+          parseDecompose({
+            ...valid,
+            smoke: [
+              {
+                title: "web",
+                command: "node",
+                args: ["x.js"],
+                devServer: { url: "http://127.0.0.1:3000/", timeoutMs },
+              },
+            ],
+          }),
+        String(timeoutMs),
+      ).toThrow(/positive number/);
+    }
+    for (const bad of ["http://127.0.0.1:3000/", []]) {
+      expect(() =>
+        parseDecompose({
+          ...valid,
+          smoke: [{ title: "web", command: "node", args: ["x.js"], devServer: bad }],
+        }),
+      ).toThrow(/devServer must be an object/);
+    }
+  });
+
+  it("devServer 与 stdin/expectContains 互斥", () => {
+    const base = {
+      title: "web",
+      command: "node",
+      args: ["x.js"],
+      devServer: { url: "http://127.0.0.1:3000/" },
+    };
+    expect(() =>
+      parseDecompose({ ...valid, smoke: [{ ...base, stdin: "x" }] }),
+    ).toThrow(/mutually exclusive/);
+    expect(() =>
+      parseDecompose({ ...valid, smoke: [{ ...base, expectContains: ["ok"] }] }),
+    ).toThrow(/mutually exclusive/);
   });
 
   it("拒绝超过 5 条的 smoke（防滥用）", () => {

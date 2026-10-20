@@ -12,6 +12,7 @@ import {
 } from "../headless/serve";
 import { parseSpec } from "../headless/protocol";
 import { buildReceipt } from "../shared/delivery-receipt";
+import type { DeliveryGuide } from "../shared/delivery-guide";
 
 /**
  * serve 形态的测试：路由与状态派生走纯函数，**HTTP 那一层走真实请求**
@@ -55,6 +56,30 @@ function receipt() {
     tasks: [],
     conflicts: [],
   });
+}
+
+function guide(over: Partial<DeliveryGuide> = {}): DeliveryGuide {
+  return {
+    artifacts: [
+      {
+        taskId: "t1",
+        title: "接口",
+        zone: "src",
+        files: [
+          { path: "src/a.js", op: "modify", bytes: 12 },
+          { path: "src/gone.js", op: "delete" },
+        ],
+      },
+    ],
+    unassigned: [{ path: "outside.js", op: "create" }],
+    commands: [
+      { kind: "verify", label: "复跑 test", command: "npm", args: ["run", "test"] },
+      { kind: "start", label: "启动 · dev", command: "npm", args: ["run", "dev"] },
+    ],
+    totalFiles: 3,
+    hasReceipt: true,
+    ...over,
+  };
 }
 
 describe("serve · 状态派生", () => {
@@ -170,6 +195,16 @@ describe("serve · 状态派生", () => {
     serveFinish(s, 2, now);
     expect(s.exitCode).toBe(2);
   });
+
+  it("stores the acceptance guide from the acceptance event", () => {
+    const s = createServeState();
+    const value = guide();
+    serveEmit(s, { type: "acceptance", guide: value }, now);
+    expect(s.acceptance).toEqual(value);
+    // /state 是宿主的机器接口：产物清单也必须从那里读得到。
+    const state = JSON.parse(routeRequest(s, "GET", "/state").body) as { acceptance?: DeliveryGuide };
+    expect(state.acceptance).toEqual(value);
+  });
 });
 
 describe("serve · SSE 帧", () => {
@@ -235,6 +270,52 @@ describe("serve · 首页", () => {
   it("says there is no receipt yet rather than rendering an empty block", () => {
     const html = serveIndexHtml(createServeState());
     expect(html).toContain("还没有凭据");
+  });
+
+  it("renders the acceptance guide: grouped artifacts, commands, unassigned, escaping", () => {
+    const s = createServeState();
+    serveEmit(s, {
+      type: "acceptance",
+      guide: guide({
+        artifacts: [
+          {
+            taskId: "t1",
+            title: "<b>接口</b>",
+            zone: "src",
+            files: [
+              { path: "src/<script>.js", op: "modify", bytes: 12 },
+              { path: "src/gone.js", op: "delete" },
+            ],
+          },
+        ],
+        commands: [{ kind: "verify", label: "复跑 test", command: "npm", args: ["run", "<test>"] }],
+      }),
+    });
+    const html = serveIndexHtml(s);
+    expect(html).toContain("本次产物（3 个文件）");
+    expect(html).toContain("<h3>&lt;b&gt;接口&lt;/b&gt; · src</h3>");
+    expect(html).toContain("src/&lt;script&gt;.js");
+    expect(html).toContain("· 12 B");
+    expect(html).toContain("src/gone.js</code> · delete");
+    expect(html).toContain("未归属任务");
+    expect(html).toContain("npm run &lt;test&gt;");
+    expect(html).not.toContain("src/<script>.js");
+  });
+
+  it("says an empty delivery has no artifacts and no commands", () => {
+    const s = createServeState();
+    serveEmit(s, {
+      type: "acceptance",
+      guide: guide({ artifacts: [], unassigned: undefined, commands: [], totalFiles: 0 }),
+    });
+    const html = serveIndexHtml(s);
+    expect(html).toContain("本次没有文件改动。");
+    expect(html).toContain("本次没有记录可复跑的命令。");
+    expect(html).not.toContain("未归属任务");
+  });
+
+  it("does not render an acceptance section before the event arrives", () => {
+    expect(serveIndexHtml(createServeState())).not.toContain("本次产物");
   });
 
   it("renders a receipt row as its headline, not as raw JSON", () => {

@@ -88,6 +88,17 @@ describe("pollDevServer：纯轮询（假 fetch + 注入时钟）", () => {
     const r = await pollDevServer("http://x/", { fetchImpl, sleep: noopSleep, now: () => t, timeoutMs: 120, intervalMs: 50 });
     expect(r.ok).toBe(false);
   });
+
+  it("探活不跟随重定向（dev server 不能把 fetch 带出回环）", async () => {
+    let init: RequestInit | undefined;
+    const fetchImpl = (async (_url: string, opts?: RequestInit) => {
+      init = opts;
+      return { status: 204 } as Response;
+    }) as unknown as typeof fetch;
+    const r = await pollDevServer("http://127.0.0.1:1/", { fetchImpl, timeoutMs: 1_000, intervalMs: 1 });
+    expect(r.ok).toBe(true);
+    expect(init?.redirect).toBe("manual");
+  });
 });
 
 describe("pollDevServerProcess：真子进程的退出守卫", () => {
@@ -132,6 +143,12 @@ describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () 
   const okScript = path.join(tmp, "ok.js");
   fs.writeFileSync(okScript, "process.exit(0);\n", "utf8");
 
+  /** close 可能已经发生（kill 是 fire-and-forget）—— 先看退出码，别死等一个不会重来的事件。 */
+  function waitClose(child: ReturnType<typeof spawn>): Promise<void> {
+    if (child.exitCode !== null) return Promise.resolve();
+    return new Promise((resolve) => child.once("close", () => resolve()));
+  }
+
   it("通过路径：探活 200 → ok，digest 带探活事实与『进程已按约终止』", async () => {
     const url = await startEndpoint((_q, res) => res.end("ok"));
     const results = await runSmokeChecks(
@@ -144,6 +161,83 @@ describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () 
     expect(results[0]!.logDigest).toContain("[dev-server]");
     expect(results[0]!.logDigest).toContain("HTTP 200");
     expect(results[0]!.logDigest).toContain("进程已按约终止");
+  });
+
+  it("keepDevServer 返回 true：接管为预览，验证器不杀进程", async () => {
+    const url = await startEndpoint((_q, res) => res.end("ok"));
+    let kept: { child: ReturnType<typeof spawn>; url: string; cwd: string; title: string } | undefined;
+    try {
+      const results = await runSmokeChecks(
+        [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+        {
+          cwd: tmp,
+          keepDevServer: (info) => {
+            kept = info;
+            return true;
+          },
+        },
+      );
+      expect(results[0]!.ok).toBe(true);
+      expect(results[0]!.logDigest).toContain("进程保留为预览");
+      expect(kept).toBeDefined();
+      expect(kept!.url).toBe(url);
+      expect(kept!.cwd).toBe(tmp);
+      expect(kept!.title).toBe("dev server 起得来");
+      expect(kept!.child.exitCode).toBeNull();
+    } finally {
+      if (kept) {
+        killDevServer(kept.child);
+        await waitClose(kept.child);
+      }
+    }
+  });
+
+  it("keepDevServer 返回 false / 抛错：验证照常通过，进程仍被终止", async () => {
+    const url = await startEndpoint((_q, res) => res.end("ok"));
+    let refused: { child: ReturnType<typeof spawn> } | undefined;
+    const refusedResults = await runSmokeChecks(
+      [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+      {
+        cwd: tmp,
+        keepDevServer: (info) => {
+          refused = info;
+          return false;
+        },
+      },
+    );
+    expect(refusedResults[0]!.ok).toBe(true);
+    expect(refusedResults[0]!.logDigest).toContain("进程已按约终止");
+    await waitClose(refused!.child);
+
+    let thrown: { child: ReturnType<typeof spawn> } | undefined;
+    const thrownResults = await runSmokeChecks(
+      [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+      {
+        cwd: tmp,
+        keepDevServer: (info) => {
+          thrown = info;
+          throw new Error("keeper boom");
+        },
+      },
+    );
+    expect(thrownResults[0]!.ok).toBe(true);
+    expect(thrownResults[0]!.logDigest).toContain("预览接管失败：keeper boom");
+    await waitClose(thrown!.child);
+  });
+
+  it("页面冒烟失败时不允许接管（预览不能把红页留下来）", async () => {
+    const url = await startEndpoint((_q, res) => {
+      res.writeHead(200, { "content-type": "text/html" });
+      res.end("Failed to compile.\n./src/App.js  Module not found");
+    });
+    let called = false;
+    const results = await runSmokeChecks(
+      [{ title: "dev server 起得来", command: process.execPath, args: [sleepScript], devServer: { url, timeoutMs: 3_000 } }],
+      { cwd: tmp, keepDevServer: () => { called = true; return true; } },
+    );
+    expect(results[0]!.ok).toBe(false);
+    expect(called).toBe(false);
+    expect(results[0]!.logDigest).toContain("进程已终止");
   });
 
   /**
@@ -189,6 +283,24 @@ describe("runSmokeChecks 的 devServer 分支（真子进程 + 真 HTTP）", () 
     expect(results[0]!.logDigest).toContain("code=3");
     // 尾部输出为空时的占位文案：没有它排障时分不清"没输出"和"没收集"
     expect(results[0]!.logDigest).toContain("尾部输出：（空）");
+  });
+
+  it("拒绝非本机回环的 devServer URL，且不 spawn（SSRF 面）", async () => {
+    let spawned = false;
+    const results = await runSmokeChecks(
+      [
+        {
+          title: "远端地址",
+          command: process.execPath,
+          args: [sleepScript],
+          devServer: { url: "http://example.com/", timeoutMs: 3_000 },
+        },
+      ],
+      { cwd: tmp, spawnImpl: (() => { spawned = true; throw new Error("must not spawn"); }) as never },
+    );
+    expect(results[0]!.ok).toBe(false);
+    expect(results[0]!.logDigest).toContain("回环");
+    expect(spawned).toBe(false);
   });
 
   it("沙箱门在 devServer 分支同样生效：node -e 内联求值被拒，且没有 spawn", async () => {

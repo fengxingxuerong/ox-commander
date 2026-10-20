@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { dialog } from "electron";
@@ -202,8 +203,13 @@ h.builtAdapter = {
 };
 
 import type { FakeIpcMain } from "./__fakes__/electron";
+import { fireAppEvent } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
+import { registerChatHandlers } from "../electron/ipc/chat";
+import { ChatSessionStore } from "../electron/chat/session-store";
+import type { ChatSessionSnapshot } from "../shared/chat-events";
+import type { ChatFileChange } from "../shared/tools/spec";
 import type { ReceiptVerifyResult } from "../shared/delivery-receipt";
 import {
   abortAllApprovals,
@@ -225,6 +231,8 @@ import {
 import { exampleManifest } from "../electron/agents/manifest-schema";
 import { SnapshotStore } from "../electron/sandbox/snapshot-store";
 import { HttpLlmError } from "../shared/http-clients";
+import { getPreview, keepDevServer, stopPreview } from "../electron/preview-manager";
+import { runSmokeChecks } from "../electron/engine/verifier";
 import type { AgentCapabilities, AgentDescriptor } from "../shared/agent-contract";
 import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
 
@@ -325,6 +333,18 @@ beforeEach(() => {
     (keys.status as Mock).mockReset().mockReturnValue([]);
     (keys.isEncryptedAtRest as Mock).mockReset().mockReturnValue(true);
     (keys.plaintextCount as Mock).mockReset().mockReturnValue(0);
+  }
+  // SettingsStore 实例跨用例共享；不复位 load 的话，上一个用例设置的
+  // `approvalPolicy: "untrusted"` 会漏进下一个会话用例，让补丁一直等人审批。
+  for (const settings of h.settingsInstances) {
+    (settings.load as Mock).mockReset().mockReturnValue({
+      llmProvider: "sensenova",
+      llmPool: [],
+      agentRouter: true,
+      arbitration: "revert-batch",
+      maxParallelRuns: 1,
+      verificationCommands: ["node ox-scripts/test.js"],
+    });
   }
   h.generatePrd.mockReset();
   h.decompose.mockReset();
@@ -2064,6 +2084,320 @@ describe("changes handlers（diff 面板供数，竞品缺口 B1）", () => {
 });
 
 /**
+ * 交付成果面（本次产物 + 怎么验收）：
+ * `delivery:guide` 只做审计/package.json 的 IO，推导在 shared（双宿主同源）；
+ * `delivery:read` 是只读预览，必须挡住越界路径与符号链接逃逸。
+ */
+describe("delivery handlers（本次产物 + 只读预览）", () => {
+  function stubAudit(records: unknown[]) {
+    ensureAudit();
+    const audit = inst(h.auditInstances);
+    (audit.read as Mock).mockReturnValue(records);
+    return audit;
+  }
+
+  function seedWorkspace(projectId: string): string {
+    const root = path.join(tmp, "workspaces", projectId);
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    return root;
+  }
+
+  it("delivery:guide 从审计推导按任务分组的产物，并补上 package.json 的启动脚本", () => {
+    const root = seedWorkspace("p-delivery");
+    fs.writeFileSync(
+      path.join(root, "package.json"),
+      JSON.stringify({ scripts: { dev: "vite", test: "vitest" } }),
+      "utf8",
+    );
+    const receipt = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [{ kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "", command: "npm", args: ["run", "test"] }],
+      tasks: [{ id: "t1", title: "接口", zone: "src", status: "done", attempts: 1 }],
+      conflicts: [],
+    });
+    stubAudit([
+      { phase: "stage", stage: "PRD", projectId: "p-delivery" },
+      { phase: "run-start", taskId: "t1", title: "接口", zone: "src", projectId: "p-delivery" },
+      { phase: "batch-changes", projectId: "p-delivery", files: [{ path: "src/a.js", op: "modify", bytes: 3 }] },
+      { phase: "batch-changes", projectId: "p-delivery", files: [{ path: "outside.js", op: "create" }] },
+      { phase: "batch-changes", projectId: "p-other", files: [{ path: "other.js", op: "create" }] },
+      { phase: "receipt", projectId: "p-delivery", receipt },
+    ]);
+
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:guide", "p-delivery") as {
+      artifacts: Array<{ taskId: string; files: Array<{ path: string }> }>;
+      unassigned?: Array<{ path: string }>;
+      commands: Array<{ kind: string; label: string; command: string; args: string[] }>;
+      totalFiles: number;
+    };
+    expect(out.artifacts).toEqual([{ taskId: "t1", title: "接口", zone: "src", files: [{ path: "src/a.js", op: "modify", bytes: 3 }] }]);
+    expect(out.unassigned?.map((f) => f.path)).toEqual(["outside.js"]);
+    expect(out.totalFiles).toBe(2);
+    expect(out.commands).toEqual([
+      { kind: "verify", label: "复跑 test", command: "npm", args: ["run", "test"] },
+      { kind: "start", label: "启动 · dev", command: "npm", args: ["run", "dev"] },
+    ]);
+  });
+
+  it("delivery:guide 无 projectId 时不做工作区读取（package.json 缺席）", () => {
+    stubAudit([{ phase: "batch-changes", files: [{ path: "src/a.js", op: "create" }] }]);
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:guide") as {
+      commands: unknown[];
+      unassigned?: Array<{ path: string }>;
+    };
+    expect(out.commands).toEqual([]);
+    expect(out.unassigned?.map((f) => f.path)).toEqual(["src/a.js"]);
+  });
+
+  it("delivery:guide 对非字符串 projectId 当作未指定（不拼工作区路径）", () => {
+    stubAudit([{ phase: "batch-changes", files: [{ path: "src/a.js", op: "create" }] }]);
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:guide", 42) as {
+      commands: unknown[];
+      unassigned?: Array<{ path: string }>;
+    };
+    expect(out.commands).toEqual([]);
+    expect(out.unassigned?.map((f) => f.path)).toEqual(["src/a.js"]);
+  });
+
+  it("delivery:read 返回工作区内文本文件的完整内容", () => {
+    const root = seedWorkspace("p-read");
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src/a.js"), "hello\nworld\n", "utf8");
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:read", "p-read", "src/a.js") as {
+      ok: boolean;
+      content: string;
+      bytes: number;
+      truncated: boolean;
+      binary: boolean;
+    };
+    expect(out).toEqual({ ok: true, content: "hello\nworld\n", bytes: 12, truncated: false, binary: false });
+  });
+
+  it("delivery:read 对二进制文件不返回内容，只说体积", () => {
+    const root = seedWorkspace("p-read-bin");
+    fs.writeFileSync(path.join(root, "blob.bin"), Buffer.from([0x41, 0x00, 0x42]));
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:read", "p-read-bin", "blob.bin") as {
+      ok: boolean;
+      content: string;
+      bytes: number;
+      binary: boolean;
+    };
+    expect(out).toEqual({ ok: true, content: "", bytes: 3, truncated: false, binary: true });
+  });
+
+  it("delivery:read 超过 512KiB 时截断并标记", () => {
+    const root = seedWorkspace("p-read-big");
+    const text = "x".repeat(512 * 1024 + 17);
+    fs.writeFileSync(path.join(root, "big.txt"), text, "utf8");
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:read", "p-read-big", "big.txt") as {
+      ok: boolean;
+      content: string;
+      bytes: number;
+      truncated: boolean;
+    };
+    expect(out.ok).toBe(true);
+    expect(out.bytes).toBe(Buffer.byteLength(text, "utf8"));
+    expect(out.truncated).toBe(true);
+    expect(out.content).toHaveLength(512 * 1024);
+  });
+
+  it("delivery:read 对已删除文件、目录、绝对路径与穿越路径都返回原因", () => {
+    const root = seedWorkspace("p-read-bad");
+    fs.mkdirSync(path.join(root, "dir"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "escape.txt"), "secret", "utf8");
+    const invoke = (rel: string) =>
+      (h.ipcMain as FakeIpcMain).invoke("delivery:read", "p-read-bad", rel) as { ok: boolean; reason?: string };
+    expect(invoke("missing.txt").ok).toBe(false);
+    expect(invoke("missing.txt").reason).toContain("不在工作区");
+    expect(invoke("dir").reason).toContain("不是普通文件");
+    expect(invoke(path.join(tmp, "escape.txt")).reason).toContain("相对路径");
+    expect(invoke("../escape.txt").reason).toContain("越出工作区");
+    expect(invoke("src/../../escape.txt").reason).toContain("越出工作区");
+  });
+
+  it("delivery:read 拒绝非法的 projectId / path 入参", () => {
+    const invoke = (...args: unknown[]) =>
+      (h.ipcMain as FakeIpcMain).invoke("delivery:read", ...args) as { ok: boolean; reason?: string };
+    expect(invoke("", "a.js").reason).toContain("projectId");
+    expect(invoke("p", "").reason).toContain("path");
+    expect(invoke("p", 3).reason).toContain("path");
+  });
+
+  it("delivery:read 拒绝经符号链接逃出工作区的路径（POSIX）", () => {
+    if (process.platform === "win32") return;
+    const root = seedWorkspace("p-read-link");
+    const outside = path.join(tmp, "outside-secret.txt");
+    fs.writeFileSync(outside, "secret", "utf8");
+    fs.symlinkSync(outside, path.join(root, "link.txt"));
+    const out = (h.ipcMain as FakeIpcMain).invoke("delivery:read", "p-read-link", "link.txt") as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("符号链接");
+  });
+});
+
+/**
+ * 保活预览（item 2）：PreviewManager 是真实单例，这里用假 child 接管；
+ * `pid` 故意留空，stop 时 killTree 会在 pid 缺失处直接返回（不碰真实进程）。
+ */
+describe("preview handlers（保活 dev server）", () => {
+  interface FakeChild extends EventEmitter {
+    stdout: EventEmitter;
+    stderr: EventEmitter;
+    pid: undefined;
+    exitCode: number | null;
+    killed: boolean;
+  }
+
+  function fakeChild(): FakeChild {
+    const child = new EventEmitter() as FakeChild;
+    child.stdout = new EventEmitter();
+    child.stderr = new EventEmitter();
+    child.pid = undefined;
+    child.exitCode = null;
+    child.killed = false;
+    return child;
+  }
+
+  function keep(url = "http://127.0.0.1:5173/", child = fakeChild()): FakeChild {
+    keepDevServer({
+      title: "dev server 起得来",
+      url,
+      command: "node",
+      args: ["server.js"],
+      cwd: tmp,
+      child: child as never,
+      log: "boot\n",
+    });
+    return child;
+  }
+
+  afterEach(() => {
+    stopPreview();
+  });
+
+  it("preview:status 没有预览时返回 null，有预览时返回完整事实", () => {
+    expect((h.ipcMain as FakeIpcMain).invoke("preview:status")).toBeNull();
+    keep();
+    const state = (h.ipcMain as FakeIpcMain).invoke("preview:status") as {
+      url: string;
+      running: boolean;
+      command: string;
+      log: string;
+    };
+    expect(state).toMatchObject({
+      url: "http://127.0.0.1:5173/",
+      running: true,
+      command: "node",
+      log: "boot\n",
+    });
+  });
+
+  it("preview:open 只打开管理器里的本机 HTTP(S) 地址", async () => {
+    const openExternal = shell.openExternal as unknown as Mock;
+    openExternal.mockClear();
+    const invoke = () => (h.ipcMain as FakeIpcMain).invoke("preview:open") as Promise<
+      { ok: true } | { ok: false; reason: string }
+    >;
+
+    expect((await invoke()).ok).toBe(false);
+    expect(openExternal).not.toHaveBeenCalled();
+
+    keep();
+    expect(await invoke()).toEqual({ ok: true });
+    expect(openExternal).toHaveBeenCalledWith("http://127.0.0.1:5173/");
+
+    for (const allowed of [
+      "http://localhost:5173/",
+      "https://localhost:5173/",
+      "http://[::1]:5173/",
+    ]) {
+      openExternal.mockClear();
+      stopPreview();
+      keep(allowed);
+      expect(await invoke(), allowed).toEqual({ ok: true });
+      expect(openExternal).toHaveBeenCalledWith(allowed);
+    }
+
+    for (const blockedUrl of ["https://example.com/", "file:///etc/passwd", "not-a-url"]) {
+      openExternal.mockClear();
+      stopPreview();
+      keep(blockedUrl);
+      const blocked = await invoke();
+      expect(blocked.ok, blockedUrl).toBe(false);
+      if (!blocked.ok) expect(blocked.reason).toContain("本机 HTTP");
+      expect(openExternal, blockedUrl).not.toHaveBeenCalled();
+    }
+  });
+
+  it("preview:open 对已退出进程返回原因，不打开", async () => {
+    const child = keep();
+    child.exitCode = 1;
+    child.emit("close", 1);
+    expect(getPreview()!.running).toBe(false);
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("preview:open")) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("已退出");
+    expect(shell.openExternal).not.toHaveBeenCalled();
+  });
+
+  it("preview:open 把 shell.openExternal 的失败折成 reason", async () => {
+    keep();
+    (shell.openExternal as unknown as Mock).mockRejectedValueOnce(new Error("no browser"));
+    const out = (await (h.ipcMain as FakeIpcMain).invoke("preview:open")) as {
+      ok: boolean;
+      reason?: string;
+    };
+    expect(out.ok).toBe(false);
+    expect(out.reason).toContain("no browser");
+  });
+
+  it("preview:stop 停止并清除；应用退出时也会清掉", () => {
+    keep();
+    expect((h.ipcMain as FakeIpcMain).invoke("preview:stop")).toBe(true);
+    expect(getPreview()).toBeNull();
+    expect((h.ipcMain as FakeIpcMain).invoke("preview:stop")).toBe(false);
+
+    keep();
+    fireAppEvent("before-quit");
+    expect(getPreview()).toBeNull();
+  });
+
+  it("接线：验证器把通过冒烟的进程交给预览管理器；新引擎构建前先停旧预览", async () => {
+    // 不真 spawn：假 child + 假 fetch 足够走完"探活 → 页面冒烟 → 接管"。
+    const child = fakeChild();
+    const spawnImpl = vi.fn(() => child) as unknown as typeof import("node:child_process").spawn;
+    const fetchImpl = (async () =>
+      new Response("ok", { status: 200, headers: { "content-type": "text/html" } })) as typeof fetch;
+    const results = await runSmokeChecks(
+      [
+        {
+          title: "dev server 起得来",
+          command: "node",
+          args: ["server.js"],
+          devServer: { url: "http://127.0.0.1:5173/", timeoutMs: 500 },
+        },
+      ],
+      { cwd: tmp, spawnImpl, devServerFetch: fetchImpl },
+    );
+    expect(results[0]!.ok).toBe(true);
+    expect(results[0]!.logDigest).toContain("进程保留为预览");
+    expect(getPreview()!.url).toBe("http://127.0.0.1:5173/");
+
+    // 下一轮规划/执行开始：旧预览必须先停，避免占着端口。
+    buildEngine("p-preview-stop");
+    expect(getPreview()).toBeNull();
+  });
+});
+
+/**
  * B1 第二半：changes:file（逐行 diff）与 changes:revert（单文件回滚）。
  *
  * 这里用**真的 SnapshotStore**（临时目录）而不是替身 —— 这两个 handler 的
@@ -2312,6 +2646,592 @@ describe("changes:file / changes:revert（B1 第二半：diff 与单文件回滚
     expect(out.ok).toBe(false);
     expect(out.reason).toContain("不存在");
     expect(fs.readFileSync(path.join(root, "src/a.js"), "utf8")).toBe("line1\nnew\nline3\n"); // 没被碰
+  });
+});
+
+describe("chat handlers（交互式编码会话）", () => {
+  function seedChatWorkspace(projectId = "p-chat"): string {
+    const root = path.join(tmp, "workspaces", projectId);
+    fs.mkdirSync(root, { recursive: true });
+    return root;
+  }
+
+  function events(): Array<Record<string, any>> {
+    return win.webContents.send.mock.calls.map(([, payload]) => payload as Record<string, any>);
+  }
+
+  function settingsMock(): { load: Mock } {
+    return inst(h.settingsInstances) as { load: Mock };
+  }
+
+  async function waitForEvent(type: string, count = 1): Promise<void> {
+    await vi.waitFor(() => {
+      expect(events().filter((p) => p.type === type)).toHaveLength(count);
+    });
+  }
+
+  /** 直接写一条带任意 changes 的会话记录（不经过模型/工具），专测撤销分支。 */
+  function saveStoredSession(
+    changes: ChatFileChange[],
+    opts: { id?: string; projectId?: string; rootAbs?: string } = {},
+  ): string {
+    const projectId = opts.projectId ?? "p-chat";
+    const rootAbs = opts.rootAbs ?? seedChatWorkspace(projectId);
+    const id = opts.id ?? "chat-stored";
+    const snapshot: ChatSessionSnapshot = {
+      meta: {
+        sessionId: id,
+        rootAbs,
+        startedAt: 1,
+        updatedAt: 2,
+        turns: 1,
+        status: "done",
+        mode: "workspace-write",
+        approvalPolicy: "on-request",
+        usageTokens: 0,
+      },
+      entries: [
+        {
+          id: "e-1",
+          ts: 1,
+          kind: "tool_result",
+          text: "补丁",
+          result: { id: "t-1", name: "apply_patch", ok: true, output: "", changes },
+        },
+      ],
+      messages: [],
+      toolProtocol: "text",
+    };
+    new ChatSessionStore(path.join(tmp, "chat")).save(projectId, rootAbs, "sensenova", snapshot);
+    return id;
+  }
+
+  function storedEnvelopePath(id: string): string {
+    return path.join(tmp, "chat", "sessions", `${id}.json`);
+  }
+
+  it("首条消息：没有 chat:new 也会建会话，并真的把答复推进转录", async () => {
+    seedChatWorkspace();
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "收到", provider: "fake", model: "fake", usageTokens: 7 });
+
+    const res = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "你好", projectId: "p-chat" }) as {
+      sessionId: string;
+      accepted: boolean;
+    };
+    // 旧实现在 live === null 时直接 `live!.session` —— 这条用例在修前会抛
+    // "Cannot read properties of null"。它必须从空会话开始，不能先 chat:new。
+    expect(res.accepted).toBe(true);
+    expect(res.sessionId).toMatch(/^chat-/);
+    await waitForEvent("chat:done");
+
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.entries.map((e) => e.kind)).toEqual(["user", "assistant"]);
+    expect(transcript.entries[1].text).toBe("收到");
+  });
+
+  it("沙箱/审批设置变化后重建会话（工具边界更新，但对话历史保留）", async () => {
+    seedChatWorkspace();
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "第一轮", provider: "fake", model: "fake", usageTokens: 1 });
+    const first = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "a", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    await waitForEvent("chat:done");
+
+    const store = settingsMock();
+    const base = store.load.mock.results[0]?.value ?? store.load();
+    store.load.mockReturnValue({ ...base, approvalPolicy: "untrusted" });
+
+    const second = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "b", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    // 设置变化只换执行边界，不换会话身份；否则用户每改一次档位就"开新聊天"，
+    // 前文全丢（而那正是恢复功能要避免的）。
+    expect(second.sessionId).toBe(first.sessionId);
+    await waitForEvent("chat:done", 2);
+
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: { approvalPolicy: string };
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.meta.approvalPolicy).toBe("untrusted");
+    expect(transcript.entries.some((e) => e.kind === "user" && e.text === "a")).toBe(true);
+    expect(transcript.entries.some((e) => e.kind === "user" && e.text === "b")).toBe(true);
+  });
+
+  it("审批真的拦在写盘前：批准一次后才落盘，拒绝理由不落盘", async () => {
+    const root = seedChatWorkspace();
+    const store = settingsMock();
+    const base = store.load.mock.results[0]?.value ?? store.load();
+    store.load.mockReturnValue({ ...base, approvalPolicy: "untrusted" });
+
+    const patch = ["*** Begin Patch", "*** Add File: guarded.txt", "+hello", "*** End Patch"].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "先写\n```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "写好了", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "新建 guarded.txt", projectId: "p-chat" });
+    await waitForEvent("chat:approval-request");
+    const req = events().find((p) => p.type === "chat:approval-request")!.request as { requestId: string };
+    expect(fs.existsSync(path.join(root, "guarded.txt"))).toBe(false);
+
+    expect(
+      (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", req.requestId, { granted: true, scope: "once" }),
+    ).toBe(true);
+    await waitForEvent("chat:done");
+    expect(fs.readFileSync(path.join(root, "guarded.txt"), "utf8")).toBe("hello");
+  });
+
+  it("项目约定进 system prompt，项目 policy.d 的 denyCommands 真的拦住命令", async () => {
+    const root = seedChatWorkspace();
+    fs.writeFileSync(path.join(root, "AGENTS.md"), "项目约定：只改 src\n", "utf8");
+    fs.mkdirSync(path.join(root, ".ox", "policy.d"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".ox", "policy.d", "deny.json"),
+      JSON.stringify({ version: 1, denyCommands: ["node"] }),
+      "utf8",
+    );
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content:
+          "```tool\n" +
+          JSON.stringify({ tool: "run_command", arguments: { command: "node", args: ["-v"] } }) +
+          "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "收到", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "看看 node 版本", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    const system = String(h.llmChat.mock.calls[0]?.[0]?.messages?.[0]?.content ?? "");
+    expect(system).toContain("项目约定：只改 src");
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.entries.some((e) => e.kind === "tool_result" && e.text.includes("命令被沙箱禁止：node"))).toBe(
+      true,
+    );
+  });
+
+  it("项目 .ox/config.json 的 read-only 档位真的拦住补丁写盘", async () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, ".ox"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".ox", "config.json"),
+      JSON.stringify({ version: 1, sandboxMode: "read-only" }),
+      "utf8",
+    );
+    const patch = ["*** Begin Patch", "*** Add File: blocked.txt", "+x", "*** End Patch"].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "没法写", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "写个文件", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    expect(fs.existsSync(path.join(root, "blocked.txt"))).toBe(false);
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.entries.some((e) => e.kind === "tool_result" && e.text.includes("read-only"))).toBe(true);
+  });
+
+  it("撤销第 N 轮补丁：内容仍等于补丁后版本才恢复；之后被改过则跳过", async () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "const a = 1;\nconst b = 2;\n", "utf8");
+    const patch = [
+      "*** Begin Patch",
+      "*** Update File: src/a.ts",
+      "@@ ",
+      " const a = 1;",
+      "-const b = 2;",
+      "+const b = 3;",
+      "*** End Patch",
+    ].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "改好了", provider: "fake", model: "fake", usageTokens: 1 });
+
+    const sent = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "改 a.ts", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    await waitForEvent("chat:done");
+    expect(fs.readFileSync(path.join(root, "src", "a.ts"), "utf8")).toBe("const a = 1;\nconst b = 3;\n");
+
+    const reverted = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: sent.sessionId,
+      turn: 1,
+    }) as { reverted: string[]; skipped: Array<{ path: string; reason: string }> };
+    expect(reverted.reverted).toEqual(["src/a.ts"]);
+    expect(fs.readFileSync(path.join(root, "src", "a.ts"), "utf8")).toBe("const a = 1;\nconst b = 2;\n");
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(
+      transcript.entries.some(
+        (e) => e.kind === "system" && e.text.includes("已撤销第 1 轮") && e.text.includes("src/a.ts"),
+      ),
+    ).toBe(true);
+
+    // 文件在补丁之后又被改过：撤销必须拒绝覆盖，而不是把新内容写回旧的 before。
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "// 用户后来改的\n", "utf8");
+    const skipped = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: sent.sessionId,
+      turn: 1,
+    }) as { reverted: string[]; skipped: Array<{ path: string; reason: string }> };
+    expect(skipped.reverted).toEqual([]);
+    expect(skipped.skipped[0]?.path).toBe("src/a.ts");
+    expect(skipped.skipped[0]?.reason).toMatch(/又被改过/);
+    expect(fs.readFileSync(path.join(root, "src", "a.ts"), "utf8")).toBe("// 用户后来改的\n");
+
+    // 第二轮新建的文件：撤销依据 created 证据删除；turn 必须是累计的 2，
+    // 不能与第一轮撞号（否则"撤第 2 轮"会找不到或误撤第一轮）。
+    const addPatch = ["*** Begin Patch", "*** Add File: b.txt", "+new", "*** End Patch"].join("\n");
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch: addPatch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "建好了", provider: "fake", model: "fake", usageTokens: 1 });
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "新建 b.txt", projectId: "p-chat" });
+    await waitForEvent("chat:done", 2);
+    expect(fs.readFileSync(path.join(root, "b.txt"), "utf8")).toBe("new");
+    const undoAdd = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: sent.sessionId,
+      turn: 2,
+    }) as { reverted: string[] };
+    expect(undoAdd.reverted).toEqual(["b.txt"]);
+    expect(fs.existsSync(path.join(root, "b.txt"))).toBe(false);
+  });
+
+  it("abort 无会话返回 false、有会话返回 true；未知审批请求返回 false", () => {
+    seedChatWorkspace();
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort")).toBe(false);
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" });
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort")).toBe(true);
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", "no-such-request", { granted: true })).toBe(false);
+  });
+
+  it("项目 .ox/config.json 的 maxTurns 真的决定工具循环上限", async () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, ".ox"), { recursive: true });
+    fs.writeFileSync(path.join(root, ".ox", "config.json"), JSON.stringify({ version: 1, maxTurns: 1 }), "utf8");
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({
+      content: "```tool\n" + JSON.stringify({ tool: "list_dir", arguments: {} }) + "\n```",
+      provider: "fake",
+      model: "fake",
+      usageTokens: 1,
+    });
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "一直列目录", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    expect(h.llmChat).toHaveBeenCalledTimes(1);
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.entries.some((e) => e.text.includes("达到轮次上限（1 轮）"))).toBe(true);
+  });
+
+  it("chat:latest 不把别的项目的活会话当成当前项目的；中止后能重建并返回转录", async () => {
+    seedChatWorkspace("p-chat");
+    seedChatWorkspace("p-other");
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-other" });
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" })).toBeNull();
+
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "好了", provider: "fake", model: "fake", usageTokens: 1 });
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "你好", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    (h.ipcMain as FakeIpcMain).invoke("chat:abort");
+    const latest = (h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" }) as {
+      meta: { sessionId: string };
+      entries: Array<{ text: string }>;
+    } | null;
+    expect(latest).not.toBeNull();
+    expect(latest?.entries.some((e) => e.text === "好了")).toBe(true);
+  });
+
+  it("删除非当前会话不会中止当前 live；删除当前才中止", async () => {
+    seedChatWorkspace();
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "好了", provider: "fake", model: "fake", usageTokens: 1 });
+    const sent = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "你好", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    await waitForEvent("chat:done");
+    const other = saveStoredSession([], { id: "chat-other-live" });
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:delete", { sessionId: other })).toBe(true);
+    const still = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as { meta: { sessionId: string } } | null;
+    expect(still?.meta.sessionId).toBe(sent.sessionId);
+
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:delete", { sessionId: sent.sessionId })).toBe(true);
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:transcript")).toBeNull();
+  });
+
+  it("resume 的根路径比较按平台归一：win32 不区分大小写，POSIX 区分", async () => {
+    const root = seedChatWorkspace();
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "好了", provider: "fake", model: "fake", usageTokens: 1 });
+    const sent = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "你好", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    await waitForEvent("chat:done");
+    const file = storedEnvelopePath(sent.sessionId);
+    const env = JSON.parse(fs.readFileSync(file, "utf8")) as { rootAbs: string };
+    env.rootAbs = root.toUpperCase();
+    fs.writeFileSync(file, JSON.stringify(env), "utf8");
+    if (process.platform === "win32") {
+      const t = (h.ipcMain as FakeIpcMain).invoke("chat:resume", {
+        projectId: "p-chat",
+        sessionId: sent.sessionId,
+      }) as { meta: { sessionId: string } };
+      expect(t.meta.sessionId).toBe(sent.sessionId);
+    } else {
+      expect(() =>
+        (h.ipcMain as FakeIpcMain).invoke("chat:resume", { projectId: "p-chat", sessionId: sent.sessionId }),
+      ).toThrow(/工作区已变化/);
+    }
+  });
+
+  it("chat:revert 拒绝坏 turn / 坏 path / 别的项目的会话", () => {
+    seedChatWorkspace();
+    const id = saveStoredSession([], { id: "chat-val" });
+    const bad = (extra: Record<string, unknown>) => () =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:revert", { projectId: "p-chat", sessionId: id, ...extra });
+    expect(bad({ turn: -1 })).toThrow(/非负整数/);
+    expect(bad({ turn: 1.5 })).toThrow(/非负整数/);
+    expect(bad({ turn: "1" })).toThrow(/非负整数/);
+    expect(bad({ turn: 1, path: 42 })).toThrow(/path 必须是字符串/);
+    const other = saveStoredSession([], { id: "chat-other-proj", projectId: "p-other" });
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:revert", { projectId: "p-chat", sessionId: other, turn: 1 }),
+    ).toThrow(/不属于当前项目/);
+  });
+
+  it("chat:revert 的 path 只撤指定文件（同一补丁多文件不串）", () => {
+    const root = seedChatWorkspace();
+    const id = saveStoredSession([
+      { path: "a.txt", before: null, after: "a", created: true, turn: 1, revertable: true },
+      { path: "b.txt", before: null, after: "b", created: true, turn: 1, revertable: true },
+    ]);
+    fs.writeFileSync(path.join(root, "a.txt"), "a");
+    fs.writeFileSync(path.join(root, "b.txt"), "b");
+    const res = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: id,
+      turn: 1,
+      path: "b.txt",
+    }) as { reverted: string[] };
+    expect(res.reverted).toEqual(["b.txt"]);
+    expect(fs.existsSync(path.join(root, "a.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "b.txt"))).toBe(false);
+  });
+
+  it("撤销遇到跳过项后继续处理后面的可撤销项", () => {
+    const root = seedChatWorkspace();
+    const changes: ChatFileChange[] = [
+      { path: "ok.txt", before: "old", after: "new", created: false, turn: 1, revertable: true },
+      { path: "too-large-recorded.txt", before: null, after: null, created: false, turn: 1, revertable: false },
+      { path: "node_modules/x.txt", before: "oldA", after: "newA", created: false, turn: 1, revertable: true },
+      { path: "mismatch.txt", before: "oldB", after: "newB", created: false, turn: 1, revertable: true },
+      { path: "big.txt", before: "oldC", after: "newC", created: false, turn: 1, revertable: true },
+      { path: "dir", before: "oldD", after: "newD", created: false, turn: 1, revertable: true },
+      { path: "not-created.txt", before: null, after: "whatever", created: false, turn: 1, revertable: true },
+      // 放在原数组末尾 ⇒ reverse 后第一个走"删除新建"分支；若在该分支后 break，
+      // 后面的 ok.txt 就永远轮不到。
+      { path: "created-last.txt", before: null, after: "c", created: true, turn: 1, revertable: true },
+    ];
+    const id = saveStoredSession(changes);
+    fs.writeFileSync(path.join(root, "ok.txt"), "new");
+    fs.writeFileSync(path.join(root, "mismatch.txt"), "user");
+    fs.writeFileSync(path.join(root, "big.txt"), "x".repeat(4 * 1024 * 1024 + 1));
+    fs.mkdirSync(path.join(root, "dir"));
+    fs.writeFileSync(path.join(root, "not-created.txt"), "whatever");
+    fs.writeFileSync(path.join(root, "created-last.txt"), "c");
+
+    const res = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: id,
+      turn: 1,
+    }) as { reverted: string[]; skipped: Array<{ path: string; reason: string }> };
+    expect(res.reverted).toEqual(["created-last.txt", "ok.txt"]);
+    expect(fs.existsSync(path.join(root, "created-last.txt"))).toBe(false);
+    expect(fs.readFileSync(path.join(root, "ok.txt"), "utf8")).toBe("old");
+    expect(res.skipped.map((s) => s.path).sort()).toEqual(
+      ["big.txt", "dir", "mismatch.txt", "node_modules/x.txt", "not-created.txt", "too-large-recorded.txt"].sort(),
+    );
+  });
+
+  it("chat:revert 只撤指定 turn 的改动（同一结果条目里混着两轮也不串）", () => {
+    const root = seedChatWorkspace();
+    const id = saveStoredSession([
+      { path: "a.txt", before: null, after: "a", created: true, turn: 1, revertable: true },
+      { path: "b.txt", before: null, after: "b", created: true, turn: 2, revertable: true },
+    ]);
+    fs.writeFileSync(path.join(root, "a.txt"), "a");
+    fs.writeFileSync(path.join(root, "b.txt"), "b");
+    const res = (h.ipcMain as FakeIpcMain).invoke("chat:revert", {
+      projectId: "p-chat",
+      sessionId: id,
+      turn: 2,
+    }) as { reverted: string[] };
+    expect(res.reverted).toEqual(["b.txt"]);
+    expect(fs.existsSync(path.join(root, "a.txt"))).toBe(true);
+    expect(fs.existsSync(path.join(root, "b.txt"))).toBe(false);
+  });
+
+  it("审批答『本会话都不再问』经 IPC 保留：第二个同类动作不再问人", async () => {
+    seedChatWorkspace();
+    const store = settingsMock();
+    const base = store.load.mock.results[0]?.value ?? store.load();
+    store.load.mockReturnValue({ ...base, approvalPolicy: "untrusted" });
+    const patch = (name: string) =>
+      "```tool\n" +
+      JSON.stringify({
+        tool: "apply_patch",
+        arguments: { patch: `*** Begin Patch\n*** Add File: ${name}\n+x\n*** End Patch` },
+      }) +
+      "\n```";
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({ content: patch("a.txt"), provider: "fake", model: "fake", usageTokens: 1 })
+      .mockResolvedValueOnce({ content: "a 好了", provider: "fake", model: "fake", usageTokens: 1 })
+      .mockResolvedValueOnce({ content: patch("b.txt"), provider: "fake", model: "fake", usageTokens: 1 })
+      .mockResolvedValueOnce({ content: "b 好了", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "写 a", projectId: "p-chat" });
+    await waitForEvent("chat:approval-request");
+    const req = events().find((p) => p.type === "chat:approval-request")!.request as { requestId: string };
+    (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", req.requestId, { granted: true, scope: "session" });
+    await waitForEvent("chat:done");
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "写 b", projectId: "p-chat" });
+    await waitForEvent("chat:done", 2);
+    expect(events().filter((p) => p.type === "chat:approval-request")).toHaveLength(1);
+  });
+
+  it("会话落盘：list / load / 重启后 latest / 继续 / fork / delete", async () => {
+    seedChatWorkspace();
+    h.llmChat.mockReset();
+    h.llmChat.mockResolvedValue({ content: "第一轮答复", provider: "fake", model: "fake", usageTokens: 5 });
+
+    const first = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "第一轮问题", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    await waitForEvent("chat:done");
+
+    const list = (h.ipcMain as FakeIpcMain).invoke("chat:list", { projectId: "p-chat" }) as Array<{
+      sessionId: string;
+      title: string;
+      turns: number;
+    }>;
+    expect(list).toHaveLength(1);
+    expect(list[0].sessionId).toBe(first.sessionId);
+    expect(list[0].title).toBe("第一轮问题");
+    expect(list[0].turns).toBe(1);
+
+    const loaded = (h.ipcMain as FakeIpcMain).invoke("chat:load", { sessionId: first.sessionId }) as {
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(loaded.entries.some((e) => e.kind === "assistant" && e.text === "第一轮答复")).toBe(true);
+
+    // 模拟应用重启：清掉已注册通道后重新装配会话 IPC（fake 与 Electron 一样
+    // 拒绝同一通道注册两次），live / store 缓存随之清空；随后 chat:latest
+    // 必须从磁盘把最近一条接回来。
+    (h.ipcMain as FakeIpcMain).handlers.clear();
+    registerChatHandlers();
+    const latest = (h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" }) as {
+      meta: { sessionId: string; status: string };
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(latest.meta.sessionId).toBe(first.sessionId);
+    expect(latest.meta.status).toBe("idle");
+    expect(latest.entries.some((e) => e.text === "第一轮答复")).toBe(true);
+
+    h.llmChat.mockResolvedValueOnce({ content: "第二轮答复", provider: "fake", model: "fake", usageTokens: 5 });
+    const second = (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "继续", projectId: "p-chat" }) as {
+      sessionId: string;
+    };
+    expect(second.sessionId).toBe(first.sessionId);
+    await waitForEvent("chat:done", 2);
+    // 恢复后第一轮请求里必须带着上一轮的模型消息，而不是只把 UI 转录贴回去。
+    const request = h.llmChat.mock.calls.at(-1)?.[0] as { messages: Array<{ role: string; content: string }> };
+    expect(request.messages.some((m) => m.content.includes("第一轮答复"))).toBe(true);
+    expect(request.messages.some((m) => m.content.includes("继续"))).toBe(true);
+
+    const forked = (h.ipcMain as FakeIpcMain).invoke("chat:fork", {
+      projectId: "p-chat",
+      sessionId: first.sessionId,
+    }) as { meta: { sessionId: string }; entries: Array<{ text: string }> };
+    expect(forked.meta.sessionId).not.toBe(first.sessionId);
+    expect(forked.entries.some((e) => e.text === "第一轮答复")).toBe(true);
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:list", { projectId: "p-chat" })).toHaveLength(2);
+
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:delete", { sessionId: first.sessionId })).toBe(true);
+    const after = (h.ipcMain as FakeIpcMain).invoke("chat:list", { projectId: "p-chat" }) as Array<{
+      sessionId: string;
+    }>;
+    expect(after.map((s) => s.sessionId)).toEqual([forked.meta.sessionId]);
+  });
+
+  it("拒绝审批：文件不落盘，拒绝理由作为工具结果回灌给模型", async () => {
+    const root = seedChatWorkspace();
+    const store = settingsMock();
+    const base = store.load.mock.results[0]?.value ?? store.load();
+    store.load.mockReturnValue({ ...base, approvalPolicy: "untrusted" });
+
+    const patch = ["*** Begin Patch", "*** Add File: denied.txt", "+nope", "*** End Patch"].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "收到拒绝", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "新建 denied.txt", projectId: "p-chat" });
+    await waitForEvent("chat:approval-request");
+    const req = events().find((p) => p.type === "chat:approval-request")!.request as { requestId: string };
+    (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", req.requestId, {
+      granted: false,
+      scope: "once",
+      reason: "别建这个文件",
+    });
+    await waitForEvent("chat:done");
+    expect(fs.existsSync(path.join(root, "denied.txt"))).toBe(false);
+    const secondRequest = String(h.llmChat.mock.calls[1]?.[0]?.messages?.map((m: any) => m.content).join("\n"));
+    expect(secondRequest).toContain("别建这个文件");
   });
 });
 

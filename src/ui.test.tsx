@@ -158,6 +158,22 @@ function makeBridge(): Bridge {
       },
     })),
     revertFile: vi.fn(async () => ({ ok: true as const, action: "restored" as const })),
+    deliveryGuide: vi.fn(async () => ({
+      artifacts: [],
+      commands: [],
+      totalFiles: 0,
+      hasReceipt: false,
+    })),
+    readDeliveryFile: vi.fn(async () => ({
+      ok: true as const,
+      content: "",
+      bytes: 0,
+      truncated: false,
+      binary: false,
+    })),
+    previewStatus: vi.fn(async () => null),
+    previewOpen: vi.fn(async () => ({ ok: true as const })),
+    previewStop: vi.fn(async () => true),
     setTaskNote: vi.fn(async () => true),
     auditFiles: vi.fn(async () => []),
     exportAudit: vi.fn(async () => ({ ok: true as const, path: "/x/out.jsonl" })),
@@ -179,6 +195,20 @@ function makeBridge(): Bridge {
     taskTrail: vi.fn(async () => ({ taskId: "t1", runs: [] })),
     // 2026-10-14 摄入半边：issue 选择器的供数替身（不真跑 gh）。
     listGithubIssues: vi.fn(async () => ({ ok: true as const, issues: [] })),
+    // 交互式会话（对标 Codex TUI 那一层）：send 立刻返回 sessionId，
+    // 过程由 onEvent 推 —— 所以测试里也是"推事件"而不是"等返回"。
+    sendChat: vi.fn(async () => ({ sessionId: "chat-1", accepted: true as const })),
+    abortChat: vi.fn(async () => true),
+    newChat: vi.fn(async () => ({ sessionId: "chat-2" })),
+    chatTranscript: vi.fn(async () => null),
+    chatLatest: vi.fn(async () => null),
+    listChatSessions: vi.fn(async () => []),
+    loadChatSession: vi.fn(async () => null),
+    resumeChat: vi.fn(async () => null as never),
+    forkChat: vi.fn(async () => null as never),
+    deleteChat: vi.fn(async () => true),
+    revertChat: vi.fn(async () => ({ reverted: [], skipped: [] })),
+    resolveChatApproval: vi.fn(async () => true),
   };
 }
 
@@ -491,6 +521,160 @@ describe("BoardPage", () => {
       expect(screen.queryByTitle("从本批存档恢复这个文件（需二次确认）")).toBeNull();
       // 边界写在卡片上，不是藏进文档
       expect(screen.getByText(/没有存档的批次/)).toBeTruthy();
+    });
+  });
+
+  /**
+   * 交付成果面：run 收束后按任务列产物、点开只读全文、命令可复制。
+   * 这里同时钉住"空交付也出卡"（hasReceipt）与"删除文件不放开必然失败的查看按钮"。
+   */
+  describe("本次产物 + 怎么验收（delivery:guide / delivery:read）", () => {
+    const guide = {
+      artifacts: [
+        {
+          taskId: "t1",
+          title: "接口",
+          zone: "src",
+          files: [
+            { path: "src/a.js", op: "modify", bytes: 12 },
+            { path: "src/gone.js", op: "delete" },
+          ],
+        },
+      ],
+      unassigned: [{ path: "outside.js", op: "create" }],
+      commands: [
+        { kind: "verify" as const, label: "复跑 test", command: "npm", args: ["run", "test"] },
+        { kind: "start" as const, label: "启动 · dev", command: "npm", args: ["run", "dev"] },
+      ],
+      totalFiles: 3,
+      hasReceipt: true,
+    };
+
+    it("按任务分组陈列产物；点查看读到只读全文；命令原样可复制", async () => {
+      (window.oxCommander.deliveryGuide as ReturnType<typeof vi.fn>).mockResolvedValue(guide);
+      (window.oxCommander.readDeliveryFile as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ok: true,
+        content: "export const a = 1;\n",
+        bytes: 20,
+        truncated: false,
+        binary: false,
+      });
+      seedBoard();
+      render(<BoardPage />);
+
+      expect(await screen.findByText("本次产物", { exact: false })).toBeTruthy();
+      expect(window.oxCommander.deliveryGuide).toHaveBeenCalledWith("p-1");
+      expect(screen.getByText("接口 · src · 2 个文件")).toBeTruthy();
+      expect(screen.getByText("未归属任务 · 1 个文件")).toBeTruthy();
+      expect(screen.getByText("src/a.js")).toBeTruthy();
+      // 删除的文件明确标注，且不出现必然失败的「查看」；另两个文件各有入口
+      expect(screen.getByText("（已删除）")).toBeTruthy();
+      expect(screen.getAllByTitle("只读查看这个文件（读取工作区当前内容）")).toHaveLength(2);
+      // 验收命令原样摆出（可选中复制），并有复制按钮
+      expect(screen.getByText("npm run test")).toBeTruthy();
+      expect(screen.getByText("npm run dev")).toBeTruthy();
+      expect(screen.getAllByTitle("复制命令")).toHaveLength(2);
+
+      fireEvent.click(screen.getAllByTitle("只读查看这个文件（读取工作区当前内容）")[0]);
+      await waitFor(() =>
+        expect(window.oxCommander.readDeliveryFile).toHaveBeenCalledWith("p-1", "src/a.js"),
+      );
+      expect(await screen.findByText(/export const a = 1/)).toBeTruthy();
+    });
+
+    it("凭据已收束但本次没有改动时也出卡，并说清没有产物", async () => {
+      (window.oxCommander.deliveryGuide as ReturnType<typeof vi.fn>).mockResolvedValue({
+        artifacts: [],
+        commands: [
+          { kind: "verify" as const, label: "复跑 build", command: "npm", args: ["run", "build"] },
+        ],
+        totalFiles: 0,
+        hasReceipt: true,
+      });
+      seedBoard();
+      render(<BoardPage />);
+
+      expect(await screen.findByText("本次没有文件改动。")).toBeTruthy();
+      expect(screen.getByText("npm run build")).toBeTruthy();
+    });
+
+    it("没有凭据也没有产物时不占位", async () => {
+      seedBoard();
+      render(<BoardPage />);
+      await waitFor(() => expect(window.oxCommander.deliveryGuide).toHaveBeenCalled());
+      expect(screen.queryByText("本次产物", { exact: false })).toBeNull();
+    });
+  });
+
+  /**
+   * 保活预览：进程事实来自主进程；这里钉"有预览才出场、打开/停止走桥、
+   * 已退出的进程不给必然失败的打开按钮"。
+   */
+  describe("运行预览（preview:status/open/stop）", () => {
+    const preview = {
+      title: "dev server 起得来",
+      url: "http://127.0.0.1:5173/",
+      command: "node",
+      args: ["server.js"],
+      cwd: "/ws",
+      pid: 123,
+      startedAt: "2026-10-19T10:00:00.000Z",
+      expiresAt: "2026-10-19T10:30:00.000Z",
+      running: true,
+      log: "VITE ready in 120ms\n",
+    } as const;
+
+    it("有预览时显示 URL/命令/日志；打开与停止都走桥", async () => {
+      (window.oxCommander.previewStatus as ReturnType<typeof vi.fn>).mockResolvedValue(preview);
+      seedBoard();
+      render(<BoardPage />);
+
+      expect(await screen.findByText("运行预览")).toBeTruthy();
+      expect(screen.getByText("http://127.0.0.1:5173/")).toBeTruthy();
+      expect(screen.getByText(/node server\.js/)).toBeTruthy();
+      expect(screen.getByText(/VITE ready in 120ms/)).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "打开预览" }));
+      await waitFor(() => expect(window.oxCommander.previewOpen).toHaveBeenCalled());
+
+      fireEvent.click(screen.getByRole("button", { name: "停止预览" }));
+      await waitFor(() => expect(window.oxCommander.previewStop).toHaveBeenCalled());
+      await waitFor(() => expect(screen.queryByRole("button", { name: "打开预览" })).toBeNull());
+      expect(screen.getByText("已停止预览。")).toBeTruthy();
+    });
+
+    it("已退出的预览标注退出码，且打开按钮不可用", async () => {
+      (window.oxCommander.previewStatus as ReturnType<typeof vi.fn>).mockResolvedValue({
+        ...preview,
+        running: false,
+        exitCode: 1,
+      });
+      seedBoard();
+      render(<BoardPage />);
+
+      expect(await screen.findByText("已退出")).toBeTruthy();
+      expect(screen.getByText(/退出码 1/)).toBeTruthy();
+      expect(screen.getByRole("button", { name: "打开预览" })).toHaveProperty("disabled", true);
+    });
+
+    it("没有预览时不占位", async () => {
+      seedBoard();
+      render(<BoardPage />);
+      await waitFor(() => expect(window.oxCommander.previewStatus).toHaveBeenCalled());
+      expect(screen.queryByText("运行预览")).toBeNull();
+    });
+
+    it("读取失败时说出来（刷新按钮可重试）", async () => {
+      (window.oxCommander.previewStatus as ReturnType<typeof vi.fn>).mockResolvedValue(preview);
+      seedBoard();
+      render(<BoardPage />);
+      expect(await screen.findByText("运行预览")).toBeTruthy();
+
+      (window.oxCommander.previewStatus as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+        new Error("ipc down"),
+      );
+      fireEvent.click(screen.getByTitle("重新读取预览状态"));
+      expect(await screen.findByText(/读不到预览状态：ipc down/)).toBeTruthy();
     });
   });
 

@@ -1,10 +1,20 @@
 import type { EscalationAction, FailureClass, PrdDocument, ProjectSettings, Stage, Task, TaskStatus, VerificationReport } from "../shared/types";
 import type { ReceiptVerifyResult } from "../shared/delivery-receipt";
 import type { AgentCapabilities, AgentLimits, AgentManifest } from "../shared/agent-contract";
-import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import { type DeliveryReceipt } from "../shared/delivery-receipt";
+import type { DeliveryFileRead, DeliveryGuide, PreviewState } from "../shared/delivery-guide";
 import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
 import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
+import type {
+  ChatApprovalRequest,
+  ChatEntry,
+  ChatRevertResult,
+  ChatSessionSummary,
+  ChatStatus,
+  ChatTranscript,
+} from "../shared/chat-events";
+import type { ApprovalPolicy, SandboxMode } from "../shared/tools/policy";
 import type { GithubIssue, GithubIssueListResult } from "../electron/context/github-readonly";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
@@ -159,10 +169,38 @@ export interface ConflictView {
   ts: string;
 }
 
-export type Page = "projects" | "board" | "prd-review" | "settings";
+/**
+ * 五格导航。第 5 格 `chat` 是**交互式会话**（对标 Codex 的 TUI 那一层）：
+ * 与看板那条"需求 → PRD → 批次 → 门禁"流水线并行，不共用审批队列。
+ */
+export type Page = "projects" | "board" | "prd-review" | "chat" | "settings";
+
+/**
+ * 会话页在渲染层持有的全部状态。
+ *
+ * `pendingApproval` 用**单条**而不是数组：会话是严格串行的（一次 send 就是一次
+ * "说到做完"），同一时刻最多有一个动作在等人；用数组会让界面出现"两个都答"
+ * 这种实际不会发生的状态。
+ */
+export interface ChatView {
+  sessionId?: string;
+  entries: ChatEntry[];
+  /** 当前项目的历史会话（最近在前）；只含元数据，正文按需 resume/load。 */
+  sessions: ChatSessionSummary[];
+  status: ChatStatus;
+  turns: number;
+  usageTokens: number;
+  mode: SandboxMode;
+  approvalPolicy: ApprovalPolicy;
+  pendingApproval?: ChatApprovalRequest;
+  /** 需要人看着时给的一句话（如"没有选项目"）——空串表示没有。 */
+  notice: string;
+}
 
 export interface AppState {
   page: Page;
+  chat: ChatView;
+  chatInput: string;
   projects: Array<{ id: string; name: string; stage: string; requirement: string }>;
   activeProjectId?: string;
   stage: Stage;
@@ -222,6 +260,29 @@ export interface AppState {
   newRequirement: string;
 
   setPage(page: Page): void;
+  setChatInput(text: string): void;
+  /**
+   * 发一句话给会话。立刻返回（会话在后台跑，过程由 `ox:event` 逐条推），
+   * 所以这里必须把"已发出"与"已完成"分开：界面上的"停止"按钮依据的是 status。
+   */
+  sendChat(): Promise<void>;
+  /** 中止当前这一轮（轮次之间生效，不是杀进程）。 */
+  abortChat(): Promise<void>;
+  /** 开一个新会话（清掉旧转录）。 */
+  newChat(): Promise<void>;
+  /** 加载当前会话（无活会话时自动恢复最近一条）；随后刷新会话列表。 */
+  loadChatTranscript(): Promise<void>;
+  loadChatSessions(): Promise<void>;
+  resumeChat(sessionId: string): Promise<void>;
+  forkChat(sessionId: string): Promise<void>;
+  deleteChat(sessionId: string): Promise<void>;
+  /** 撤销某轮（可只撤一个文件）的 apply_patch 改动。 */
+  revertChat(turn: number, path?: string): Promise<void>;
+  /**
+   * 答复一次审批。三选一对齐 Codex：允许一次 / 本次会话不再问 / 拒绝并说明理由。
+   * 拒绝理由会回灌给模型 —— 不给理由，它只会原样重试同一个动作。
+   */
+  resolveChatApproval(granted: boolean, scope?: "once" | "session", reason?: string): Promise<void>;
   setNewProjectName(name: string): void;
   setNewRequirement(text: string): void;
   refreshProjects(): Promise<void>;
@@ -233,6 +294,12 @@ export interface AppState {
    * 走同一条 beginProject → runPlanning 链路。
    */
   createFromIssue(issue: GithubIssue): Promise<void>;
+  /**
+   * 从项目库点开一个已有项目：只切当前项目 + 进看板，**不**重新规划。
+   * （2026-10-19：此前点行只切页面、不动 activeProjectId，于是看板显示的
+   *   还是上一个项目 —— 点了没反应，这是"看不出点在起作用"的典型。）
+   */
+  openProject(projectId: string): void;
   /** 创建成功后的共同搬家：进 PRD 复核页并立即开始规划。 */
   beginProject(projectId: string): void;
   runPlanning(): Promise<void>;
@@ -343,6 +410,23 @@ declare global {
        * ⇒ 功能静默不可用（不报错、不留日志，只是"这个能力没人用得上"）。
        */
       taskTrail(taskId: string): Promise<TaskTrail>;
+      /**
+       * 本次运行的成果面：按任务分组的产物路径 + 可复制验收命令。
+       * 推导在 `shared/delivery-guide`（serve 状态页用同一份），主进程只补
+       * 审计事实与 workspace/package.json。
+       */
+      deliveryGuide(projectId?: string): Promise<DeliveryGuide>;
+      /** 只读预览一个产物文件；越出工作区/已删除/二进制都以数据形式说明。 */
+      readDeliveryFile(projectId: string, path: string): Promise<DeliveryFileRead>;
+      /**
+       * 当前保活的 dev server（探活 + 页面冒烟通过后由主进程持有）。
+       * 没有预览时返回 null；进程退出后仍保留现场直到用户停止/下次接管。
+       */
+      previewStatus(): Promise<PreviewState | null>;
+      /** 在系统浏览器打开当前预览；只允许管理器里的本机 HTTP(S) 地址。 */
+      previewOpen(): Promise<{ ok: true } | { ok: false; reason: string }>;
+      /** 停止并清除当前预览；没有预览时返回 false。 */
+      previewStop(): Promise<boolean>;
       auditFiles(): Promise<string[]>;
       exportAudit(): Promise<AuditExportResult>;
       /**
@@ -353,6 +437,26 @@ declare global {
       listGithubIssues(input: { repo?: string; search?: string; limit?: number }): Promise<GithubIssueListResult>;
       /** Board view derived from the audit trail (durable facts). */
       boardRecovery(): Promise<BoardRecoveryView>;
+      /**
+       * 发一句话进交互式会话；立刻返回 sessionId（过程走 onEvent 推）。
+       * 需要 projectId：会话的工具边界就是那个项目的工作区。
+       */
+      sendChat(input: { text: string; projectId: string }): Promise<{ sessionId: string; accepted: true }>;
+      abortChat(): Promise<boolean>;
+      newChat(input: { projectId: string }): Promise<{ sessionId: string }>;
+      chatTranscript(): Promise<ChatTranscript | null>;
+      /** 有活会话返回它，否则恢复当前项目最近一条；没有记录返回 null。 */
+      chatLatest(input: { projectId: string }): Promise<ChatTranscript | null>;
+      listChatSessions(input: { projectId: string }): Promise<ChatSessionSummary[]>;
+      loadChatSession(input: { sessionId: string }): Promise<ChatTranscript | null>;
+      resumeChat(input: { projectId: string; sessionId: string }): Promise<ChatTranscript>;
+      forkChat(input: { projectId: string; sessionId: string }): Promise<ChatTranscript>;
+      deleteChat(input: { sessionId: string }): Promise<boolean>;
+      revertChat(input: { projectId: string; sessionId: string; turn: number; path?: string }): Promise<ChatRevertResult>;
+      resolveChatApproval(
+        requestId: string,
+        answer: { granted: boolean; scope?: "once" | "session"; reason?: string },
+      ): Promise<boolean>;
       onEvent(handler: (payload: unknown) => void): () => void;
     };
   }

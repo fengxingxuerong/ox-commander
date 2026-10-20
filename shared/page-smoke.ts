@@ -18,6 +18,29 @@
  * 宁可放过，不误报 —— 一条误报的门禁会把好交付挡在门外，那比漏判更糟。
  */
 
+/**
+ * 只接受本机回环的 HTTP(S) URL。
+ *
+ * 用途不止预览：dev-server 冒烟会把规划器生成的 URL 交给 fetch（SSRF 面），
+ * schema 在这一层就拒绝非回环地址；桌面预览入口复用同一判据，避免两处各写
+ * 一份 whitelist 而漂移。
+ */
+export function isLoopbackHttpUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
+  return (
+    url.hostname === "127.0.0.1" ||
+    url.hostname === "localhost" ||
+    url.hostname === "::1" ||
+    url.hostname === "[::1]"
+  );
+}
+
 /** 页面冒烟的五种判定。 */
 export type PageSmokeVerdict =
   /** HTTP 状态码就不在 2xx/3xx —— 探活层也会判死，这里给出同一事实。 */

@@ -38,7 +38,7 @@ export interface PolicyFile {
    */
   approvalCommands?: string[];
   /**
-   * 追加到内置**禁止写入**清单（路径面，P2-2）。glob 口径，与内置同一套匹配。
+   * 追加到内置**禁止写入**清单（路径面）。glob 口径，与内置同一套匹配。
    *
    * ⚠️ 语义是**扩展**不是替换：内置的 `package.json` / `.env` / `.git/**` 等
    * 始终生效，这里只能往上叠。`SandboxConfig.forbiddenWrite` 本身是**替换**语义
@@ -46,6 +46,12 @@ export interface PolicyFile {
    * 那是放宽，违反本模块"只加严不放宽"的纪律（见 `pathPolicyOverrides`）。
    */
   forbidWrite?: string[];
+  /**
+   * 追加到内置**禁止读取**清单（路径面）。glob 口径，语义与 `forbidWrite`
+   * 相同：只能扩展内置地板，不能替换。用于把项目里额外的密钥/凭据文件
+   * 也挡在 `read_file` / `grep_files` 之外。
+   */
+  forbidRead?: string[];
   /** token 软上限；与 `ProjectSettings.maxTokensPerRun` 冲突时取**更小**的那个。 */
   maxTokensPerRun?: number;
 }
@@ -106,11 +112,13 @@ export function normalizePolicyFile(raw: unknown): NormalizedPolicy {
   const denyNpmSubcommands = cleanStrings(obj.denyNpmSubcommands, "denyNpmSubcommands", issues);
   const approvalCommands = cleanStrings(obj.approvalCommands, "approvalCommands", issues);
   const forbidWrite = cleanStrings(obj.forbidWrite, "forbidWrite", issues);
+  const forbidRead = cleanStrings(obj.forbidRead, "forbidRead", issues);
   if (denyCommands) policy.denyCommands = denyCommands;
   if (denyGitSubcommands) policy.denyGitSubcommands = denyGitSubcommands;
   if (denyNpmSubcommands) policy.denyNpmSubcommands = denyNpmSubcommands;
   if (approvalCommands) policy.approvalCommands = approvalCommands;
   if (forbidWrite) policy.forbidWrite = forbidWrite;
+  if (forbidRead) policy.forbidRead = forbidRead;
 
   const budget = obj.maxTokensPerRun;
   if (budget !== undefined) {
@@ -133,6 +141,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   const denyNpm = new Set<string>();
   const approval = new Set<string>();
   const forbid = new Set<string>();
+  const forbidRead = new Set<string>();
   let budget: number | undefined;
   for (const f of files) {
     for (const c of f.denyCommands ?? []) deny.add(c);
@@ -142,6 +151,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
     for (const c of f.approvalCommands ?? []) approval.add(c);
     // 禁止写入同理取并集 —— 保护清单只会越叠越多，不会被另一份"没说"抹掉。
     for (const c of f.forbidWrite ?? []) forbid.add(c);
+    for (const c of f.forbidRead ?? []) forbidRead.add(c);
     if (f.maxTokensPerRun !== undefined) {
       budget = budget === undefined ? f.maxTokensPerRun : Math.min(budget, f.maxTokensPerRun);
     }
@@ -151,6 +161,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   if (denyNpm.size > 0) out.denyNpmSubcommands = [...denyNpm].sort();
   if (approval.size > 0) out.approvalCommands = [...approval].sort();
   if (forbid.size > 0) out.forbidWrite = [...forbid].sort();
+  if (forbidRead.size > 0) out.forbidRead = [...forbidRead].sort();
   if (budget !== undefined) out.maxTokensPerRun = budget;
   return out;
 }
@@ -213,6 +224,22 @@ export function pathPolicyOverrides(
 }
 
 /**
+ * 策略 → 路径沙箱的 `forbiddenRead`（读面）。
+ *
+ * 与 `pathPolicyOverrides` 同一条理由：`SandboxConfig.forbiddenRead` 是替换
+ * 语义，策略层必须自己算并集，否则一份 JSON 就能把 `.env` / `.git` 的读
+ * 地板整块换掉。返回 undefined = 策略没碰读面，调用方保持 PathPolicy 默认。
+ */
+export function forbiddenReadOverrides(
+  policy: PolicyFile,
+  defaults: readonly string[],
+): { forbiddenRead: string[] } | undefined {
+  if (!policy.forbidRead?.length) return undefined;
+  const merged = [...new Set([...defaults, ...policy.forbidRead])].sort();
+  return { forbiddenRead: merged };
+}
+
+/**
  * 策略 → 预算上限（P2-2 预算面）。
  *
  * 取**更小**的那个：策略与设置都是"上限"，两个上限并存时以严的为准 ——
@@ -240,6 +267,7 @@ export function describePolicy(policy: PolicyFile): string {
   if (policy.denyNpmSubcommands?.length) parts.push(`禁用 npm 子命令 ${policy.denyNpmSubcommands.join("、")}`);
   if (policy.approvalCommands?.length) parts.push(`需人工确认 ${policy.approvalCommands.join("、")}`);
   if (policy.forbidWrite?.length) parts.push(`禁止写入 ${policy.forbidWrite.join("、")}`);
+  if (policy.forbidRead?.length) parts.push(`禁止读取 ${policy.forbidRead.join("、")}`);
   if (policy.maxTokensPerRun !== undefined) parts.push(`token 上限 ${policy.maxTokensPerRun}`);
   return parts.length > 0 ? parts.join("；") : "（空策略：规则一条不改）";
 }

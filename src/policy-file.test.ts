@@ -17,6 +17,7 @@ import {
   commandPolicyOverrides,
   describePolicy,
   effectiveTokenBudget,
+  forbiddenReadOverrides,
   mergePolicies,
   normalizePolicyFile,
   pathPolicyOverrides,
@@ -213,6 +214,29 @@ describe("approvalGateOf · 空清单不建门", () => {
   });
 });
 
+describe("forbiddenReadOverrides · 读面也只能加严", () => {
+  it("没配 forbidRead ⇒ undefined（保持 PathPolicy 默认）", () => {
+    expect(forbiddenReadOverrides({ version: 1 }, DEFAULTS)).toBeUndefined();
+    expect(forbiddenReadOverrides({ version: 1, forbidRead: [] }, DEFAULTS)).toBeUndefined();
+  });
+
+  it("配了 ⇒ 内置读地板 + 策略项取并集并排序", () => {
+    const r = forbiddenReadOverrides({ version: 1, forbidRead: ["secrets/**", ".env"] }, DEFAULTS);
+    for (const d of DEFAULTS) expect(r!.forbiddenRead).toContain(d);
+    expect(r!.forbiddenRead).toContain("secrets/**");
+    expect(r!.forbiddenRead).toEqual([...r!.forbiddenRead].sort());
+    expect(r!.forbiddenRead.filter((x) => x === ".env")).toHaveLength(1);
+  });
+
+  it("多份策略合并时 forbidRead 取并集", () => {
+    const merged = mergePolicies([
+      { version: 1, forbidRead: ["a/**"] },
+      { version: 1, forbidRead: ["b/**"] },
+    ]);
+    expect(merged.forbidRead).toEqual(["a/**", "b/**"]);
+  });
+});
+
 describe("pathPolicyOverrides · 路径面取并集（绝不能替换地板）", () => {
   it("没配 forbidWrite ⇒ undefined（调用方不传，保持 PathPolicy 默认）", () => {
     expect(pathPolicyOverrides({ version: 1 }, DEFAULTS)).toBeUndefined();
@@ -270,7 +294,7 @@ describe("describePolicy · 各分支都要念出来", () => {
     expect(describePolicy({ version: 1 })).toContain("空策略");
   });
 
-  it("四类规则各自成句", () => {
+  it("每类规则各自成句", () => {
     const s = describePolicy({
       version: 1,
       denyCommands: ["node"],
@@ -278,6 +302,7 @@ describe("describePolicy · 各分支都要念出来", () => {
       denyNpmSubcommands: ["publish"],
       approvalCommands: ["deploy"],
       forbidWrite: ["secrets/**"],
+      forbidRead: ["keys/**"],
       maxTokensPerRun: 100,
     });
     expect(s).toContain("禁用命令 node");
@@ -285,6 +310,7 @@ describe("describePolicy · 各分支都要念出来", () => {
     expect(s).toContain("禁用 npm 子命令 publish");
     expect(s).toContain("需人工确认 deploy");
     expect(s).toContain("禁止写入 secrets/**");
+    expect(s).toContain("禁止读取 keys/**");
     expect(s).toContain("token 上限 100");
   });
 

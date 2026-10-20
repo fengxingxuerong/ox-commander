@@ -2,6 +2,8 @@ import { memo, useEffect, useRef, useState } from "react";
 import type { CSSProperties } from "react";
 import { useApp, REMEDY_VERB } from "../store";
 import { AuditPanel } from "../components/AuditPanel";
+import { DeliveryPanel } from "../components/DeliveryPanel";
+import { PreviewPanel } from "../components/PreviewPanel";
 import { STAGE_ORDER, type FailureClass, type Stage } from "../../shared/types";
 import type { ReceiptTaskStatus, ReceiptVerdict } from "../../shared/delivery-receipt";
 import { usageFact } from "../../shared/usage-meter";
@@ -599,9 +601,14 @@ export function BoardPage() {
         </div>
       )}
 
+      {!activeProjectId && (
+        <p className="empty-hint">还没有选中项目 —— 先回「项目库」点一个项目名，或在那里新建。</p>
+      )}
+
       <div className="board-columns">
         {/* 左栏：阶段进度 + 任务列表（DAG 分组） */}
         <aside className="col col-left">
+          <p className="col-label">① 进度 · 这一步跑到哪了</p>
           <section className="card">
             <h3>
               流水线阶段
@@ -620,6 +627,9 @@ export function BoardPage() {
 
           <section className="card">
             <h3>任务</h3>
+            <p className="card-sub">
+              左侧圆点是状态：青=在跑 · 绿=完成 · 红=失败 · 灰=已取消。每条任务可展开看运行履历、挂纠偏附言。
+            </p>
             {taskList.length === 0 && <p className="muted">尚未分解</p>}
             {taskList.map((t) => (
               <div key={t.taskId} className={`task-row status-${t.status}`}>
@@ -671,34 +681,44 @@ export function BoardPage() {
             审计日志回答的是"上一次到底发生过什么"（run 起止、批次守卫裁决）且重启不丢。
             两份事实放同一栏：操作者盯着的正是这里，不用换页去设置里翻 JSONL。 */}
         <main className="col col-center">
+          <p className="col-label">② 实况 · 机器正在说什么</p>
           <section className="card log-card">
             <h3>执行日志</h3>
             <LogView />
           </section>
+          <DeliveryPanel />
+          <PreviewPanel />
           <ChangesPanel />
           <AuditPanel />
         </main>
 
         {/* 右栏：验证结果 / 升级提示 / 控制 */}
         <aside className="col col-right">
+          <p className="col-label">③ 干预 · 你在这里拍板</p>
           <section className="card">
-            <h3>控制</h3>
+            <h3>
+              控制
+              <span className={`stage-chip${runActive ? " chip-ok" : ""}`}>{runActive ? "运行中" : "空闲"}</span>
+            </h3>
+            <p className="card-sub">
+              开始 = 按已批准的 PRD 跑一轮；暂停只是挂起当前批次；取消会停掉整个 run。
+            </p>
             <div className="btn-row">
               <button
                 className="primary"
                 onClick={() => void start()}
                 disabled={runActive}
-                title={runActive ? "已有 run 在跑；要重来先取消" : undefined}
+                title={runActive ? "已有 run 在跑；要重来先取消" : "按已批准的 PRD 开始一轮执行"}
               >
                 开始
               </button>
-              <button onClick={pause} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
+              <button onClick={pause} disabled={!runActive} title={runActive ? "挂起当前批次" : "没有在跑的 run"}>
                 暂停
               </button>
-              <button onClick={resume} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
+              <button onClick={resume} disabled={!runActive} title={runActive ? "从暂停处继续" : "没有在跑的 run"}>
                 继续
               </button>
-              <button className="danger" onClick={cancel} disabled={!runActive} title={runActive ? undefined : "没有在跑的 run"}>
+              <button className="danger" onClick={cancel} disabled={!runActive} title={runActive ? "终止整个 run" : "没有在跑的 run"}>
                 取消
               </button>
             </div>
@@ -709,6 +729,7 @@ export function BoardPage() {
           {fact && (
             <section className="card">
               <h3>本次运行用量</h3>
+              <p className="card-sub">本次 run 真实烧掉的 token；「未上报」是端点没回用量的次数，那部分不可考。</p>
               <p className="task-meta">{fact.summary}</p>
               {fact.limit !== undefined && <p className="task-meta">预算上限 {fact.limit} tokens</p>}
               {fact.blindNote ? <p className="muted">{fact.blindNote}</p> : null}
@@ -720,6 +741,7 @@ export function BoardPage() {
           {lines && lines.length > 0 && (
             <section className="card">
               <h3>线路健康</h3>
+              <p className="card-sub">冷却中的线路会自动跳过、请求落到下一条；连续失败越多，说明这条线在拖后腿。</p>
               <ul>
                 {lines.map((l) => (
                   <li key={l.key} className="task-meta">
@@ -842,6 +864,7 @@ export function BoardPage() {
           {escalations.length > 0 && (
             <section className="card escalation">
               <h3>⚠️ 需要你决策</h3>
+              <p className="card-sub">这些任务重修轮数用完仍未通过，停在这里等你处置：放弃它 / 再给一轮 / 终止整个项目。</p>
               {escalations.map((e) => (
                 <div key={e.taskId} className="escalation-item">
                   <pre className="escalation-summary">{e.summary}</pre>
@@ -876,6 +899,7 @@ export function BoardPage() {
           {approvals.length > 0 && (
             <section className="card escalation">
               <h3>🛂 命令需要审批</h3>
+              <p className="card-sub">沙箱拦下了这条命令（不在白名单里）。批准只在本批次内有效；拒绝会记成一次验证失败。</p>
               {approvals.map((a) => (
                 <div key={a.requestId} className="escalation-item">
                   <pre className="escalation-summary">

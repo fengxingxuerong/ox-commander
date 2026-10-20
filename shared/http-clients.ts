@@ -1,5 +1,6 @@
 import { getProvider, resolveTemperature, type ChatMessage, type ProviderConfig } from "./providers";
 import type { ChatRequest, ChatResponse, LlmClient } from "./llm-client";
+import type { ToolCall, ToolSpec } from "./tools/spec";
 
 interface FetchLikeResponse {
   ok: boolean;
@@ -199,11 +200,80 @@ abstract class BaseHttpLlmClient implements LlmClient {  constructor(
   }
 }
 
+/**
+ * 原生 function calling 的两个映射（OpenAI 兼容侧）。
+ *
+ * 抽成导出的纯函数是为了让它**可测**：端点形状错一点（少 `type: "function"`、
+ * 少 `tool_calls` 里的 `id`）就会整条工具链失效，而失效表现为"模型忽然不再
+ * 调用工具"——看不出是端点、平台还是模型的问题。
+ */
+export function toOpenAiTools(specs: readonly ToolSpec[]): Array<Record<string, unknown>> {
+  return specs.map((s) => ({
+    type: "function",
+    function: { name: s.name, description: s.description, parameters: s.parameters },
+  }));
+}
+
+/**
+ * 消息映射：`assistant` 带 `toolCalls` 时回灌成 `tool_calls`，`tool` 消息带上
+ * `tool_call_id`。
+ *
+ * **必须回灌**的理由（不只是"信息更全"）：OpenAI 兼容端点要求 assistant 发了
+ * `tool_calls` 之后紧跟对应的 `tool` 消息，缺了直接 400 —— 而那个 400 发生在
+ * 平台之外，日志里只会看到一次普通请求失败。
+ */
+export function toOpenAiMessages(messages: readonly ChatMessage[]): Array<Record<string, unknown>> {
+  return messages.map((m) => {
+    if (m.role === "tool") {
+      return {
+        role: "tool",
+        content: m.content,
+        ...(m.toolCallId ? { tool_call_id: m.toolCallId } : {}),
+      };
+    }
+    if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+      return {
+        role: "assistant",
+        content: m.content,
+        tool_calls: m.toolCalls.map((c) => ({
+          id: c.id,
+          type: "function",
+          function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
+        })),
+      };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
+/** 解析 OpenAI 兼容响应里的 tool_calls。参数不是合法 JSON 时抛畸形响应错。 */
+export function parseOpenAiToolCalls(raw: unknown): ToolCall[] {
+  const list = (raw as { tool_calls?: unknown } | undefined)?.tool_calls;
+  if (!Array.isArray(list) || list.length === 0) return [];
+  const out: ToolCall[] = [];
+  for (const item of list) {
+    const call = item as { id?: string; function?: { name?: string; arguments?: string } };
+    const id = typeof call.id === "string" ? call.id : `t-${out.length + 1}`;
+    const name = call.function?.name;
+    if (typeof name !== "string") continue;
+    const rawArgs = call.function?.arguments ?? "{}";
+    let args: Record<string, unknown> = {};
+    try {
+      const parsed = JSON.parse(rawArgs);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed as Record<string, unknown>;
+    } catch {
+      throw new MalformedResponseError(`工具调用 ${name} 的 arguments 不是合法 JSON：${rawArgs.slice(0, 80)}`);
+    }
+    out.push({ id, name: name as ToolCall["name"], args });
+  }
+  return out;
+}
+
 export class OpenAiCompatibleClient extends BaseHttpLlmClient {
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const body: Record<string, unknown> = {
       model: this.config.defaultModel,
-      messages: req.messages,
+      messages: toOpenAiMessages(req.messages),
       temperature: resolveTemperature(this.config.defaultModel, req.temperature),
       /*
        * 必须显式带上 max_tokens，而且要给到端点允许的最大值。不带时商汤用默认
@@ -221,6 +291,10 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       enable_thinking: false,
     };
     if (req.jsonMode) body.response_format = { type: "json_object" };
+    // 只有端点声明原生支持时才发 tools 字段（理由见 `ProviderConfig.tools`）。
+    if (this.config.tools === "native" && req.tools && req.tools.length > 0) {
+      body.tools = toOpenAiTools(req.tools);
+    }
     const data = await this.postJson(
       `${this.config.baseUrl}/chat/completions`,
       this.authHeaders(),
@@ -228,13 +302,14 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       req.signal,
     );
     const choices = data.choices as
-      | Array<{ message?: { content?: string; reasoning_content?: string }; finish_reason?: string }>
+      | Array<{ message?: { content?: string; reasoning_content?: string } & Record<string, unknown>; finish_reason?: string }>
       | undefined;
     const choice = choices?.[0];
     const raw = choice?.message ?? {};
     if (choice?.finish_reason === "length") {
       throw new MalformedResponseError(`输出因长度限制被截断（finish_reason=length）：${(raw.content ?? "").slice(0, 80)}`);
     }
+    const toolCalls = parseOpenAiToolCalls(raw);
     // Some reasoning models put the answer in reasoning_content and leave content empty.
     const content = (raw.content ?? "").trim() !== "" ? (raw.content ?? "") : (raw.reasoning_content ?? "");
     const usage = data.usage as { total_tokens?: number } | undefined;
@@ -243,6 +318,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       provider: this.config.id,
       model: String(data.model ?? this.config.defaultModel),
       usageTokens: usage?.total_tokens,
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }
 
@@ -251,22 +327,86 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
   }
 }
 
-export class AnthropicClient extends BaseHttpLlmClient {
-  private toAnthropicMessages(messages: ChatMessage[]): Array<{ role: string; content: string }> {
-    return messages
-      .filter((m) => m.role !== "system")
-      .map((m) => ({ role: m.role, content: m.content }));
-  }
+/** Anthropic 侧的工具声明：`parameters` 改名叫 `input_schema`，其余同名。 */
+export function toAnthropicTools(specs: readonly ToolSpec[]): Array<Record<string, unknown>> {
+  return specs.map((s) => ({
+    name: s.name,
+    description: s.description,
+    input_schema: {
+      type: s.parameters.type,
+      properties: s.parameters.properties,
+      required: s.parameters.required,
+    },
+  }));
+}
 
+/**
+ * Anthropic 的消息映射。
+ *
+ * 与 OpenAI 侧的差异是**结构性的**：这里没有 `role: "tool"`，工具结果要作为
+ * `user` 消息里的 `tool_result` 块回灌。所以两份映射不能合并成一份"通用"映射
+ * —— 合成一份的结果一定是某一侧静默错形。
+ */
+export function toAnthropicMessages(
+  messages: readonly ChatMessage[],
+): Array<{ role: string; content: string | Array<Record<string, unknown>> }> {
+  return messages
+    .filter((m) => m.role !== "system")
+    .map((m) => {
+      if (m.role === "tool") {
+        return {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: m.toolCallId ?? "",
+              content: m.content,
+            },
+          ],
+        };
+      }
+      if (m.role === "assistant" && m.toolCalls && m.toolCalls.length > 0) {
+        const blocks: Array<Record<string, unknown>> = [];
+        if (m.content.trim() !== "") blocks.push({ type: "text", text: m.content });
+        for (const c of m.toolCalls) {
+          blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.args ?? {} });
+        }
+        return { role: "assistant", content: blocks };
+      }
+      return { role: m.role, content: m.content };
+    });
+}
+
+/** 解析 Anthropic 响应里的 `tool_use` 块（`input` 已经是对象，不需要再 parse）。 */
+export function parseAnthropicToolCalls(blocks: unknown): ToolCall[] {
+  if (!Array.isArray(blocks)) return [];
+  const out: ToolCall[] = [];
+  for (const block of blocks) {
+    const b = block as { type?: string; id?: string; name?: string; input?: unknown };
+    if (b.type !== "tool_use") continue;
+    const name = b.name;
+    if (typeof name !== "string") continue;
+    const input = b.input && typeof b.input === "object" && !Array.isArray(b.input)
+      ? (b.input as Record<string, unknown>)
+      : {};
+    out.push({ id: b.id ?? `t-${out.length + 1}`, name: name as ToolCall["name"], args: input });
+  }
+  return out;
+}
+
+export class AnthropicClient extends BaseHttpLlmClient {
   async chat(req: ChatRequest): Promise<ChatResponse> {
     const system = req.messages.find((m) => m.role === "system")?.content;
     const body: Record<string, unknown> = {
       model: this.config.defaultModel,
       max_tokens: 8192,
       temperature: req.temperature ?? 0.2,
-      messages: this.toAnthropicMessages(req.messages),
+      messages: toAnthropicMessages(req.messages),
     };
     if (system) body.system = system;
+    if (this.config.tools === "native" && req.tools && req.tools.length > 0) {
+      body.tools = toAnthropicTools(req.tools);
+    }
     const data = await this.postJson(
       `${this.config.baseUrl}/messages`,
       this.authHeaders(),
@@ -275,12 +415,14 @@ export class AnthropicClient extends BaseHttpLlmClient {
     );
     const blocks = data.content as Array<{ type: string; text?: string }> | undefined;
     const content = (blocks ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+    const toolCalls = parseAnthropicToolCalls(blocks);
     const usage = data.usage as { input_tokens?: number; output_tokens?: number } | undefined;
     return {
       content,
       provider: this.config.id,
       model: String(data.model ?? this.config.defaultModel),
       usageTokens: (usage?.input_tokens ?? 0) + (usage?.output_tokens ?? 0),
+      ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }
 

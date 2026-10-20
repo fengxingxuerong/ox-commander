@@ -207,10 +207,12 @@ export function SettingsPage() {
       <header className="page-header">
         <button onClick={() => setPage("projects")}>← 返回</button>
         <h1>设置</h1>
+        <p>接好模型密钥 → 定好验证命令 → 再调执行策略；改完点最底部的「保存设置」。</p>
       </header>
 
       <section className="card">
         <h2>LLM 提供商</h2>
+        <p className="card-sub">选一个默认大脑；先点「测试连接」确认这条线真能通。</p>
         <div className="form-row">
           <label htmlFor="llm-provider">提供商</label>
           <select
@@ -348,6 +350,7 @@ export function SettingsPage() {
 
       <section className="card">
         <h2>执行策略</h2>
+        <p className="card-sub">并行度、重修轮数、预算与超时。默认值够用 —— 一般只在被打到限流或跑太久时才动。</p>
         <div className="form-row">
           <label htmlFor="max-repair">最大重修轮数</label>
           <input
@@ -536,6 +539,53 @@ export function SettingsPage() {
         <p className="muted">
           重修轮数用完仍有任务失败时怎么办。默认停下来等人决定；挂后台跑长单（无人值守）时可选自动处置
           —— 与 headless 协议的 escalationPolicy 同义。「重派一次」按任务记账，同一任务第二次升级会自动终止。
+        </p>
+        <div className="form-row">
+          <label htmlFor="sandbox-mode">会话沙箱档位</label>
+          <select
+            id="sandbox-mode"
+            value={draft.sandboxMode ?? "workspace-write"}
+            onChange={(e) => patch({ sandboxMode: e.target.value as ProjectSettings["sandboxMode"] })}
+          >
+            <option value="read-only">read-only：只看不改（不写文件、不跑命令）</option>
+            <option value="workspace-write">workspace-write：可改项目内文件、可跑命令（默认）</option>
+            <option value="danger-full-access">danger-full-access：不做分档拦截</option>
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="approval-policy">会话审批策略</label>
+          <select
+            id="approval-policy"
+            value={draft.approvalPolicy ?? "on-request"}
+            onChange={(e) => patch({ approvalPolicy: e.target.value as ProjectSettings["approvalPolicy"] })}
+          >
+            <option value="untrusted">untrusted：写文件与跑命令都先问人</option>
+            <option value="on-request">on-request：只问下面点名的命令（默认）</option>
+            <option value="never">never：从不询问</option>
+          </select>
+        </div>
+        <div className="form-row">
+          <label htmlFor="approval-commands">审批命令名单</label>
+          <input
+            id="approval-commands"
+            value={(draft.approvalCommands ?? []).join(", ")}
+            placeholder="留空 = 不额外点名，如：git, npm"
+            onChange={(e) =>
+              patch({
+                approvalCommands: e.target.value
+                  .split(",")
+                  .map((x) => x.trim())
+                  .filter((x) => x !== ""),
+              })
+            }
+          />
+        </div>
+        <p className="muted">
+          这两项是「两个轴」：沙箱档位管"能不能做"，审批策略管"做之前问不问"。
+          所以 <code>never</code> 只有在档位本身兜得住时才安全 —— 别把
+          <code>never</code> 和 <code>danger-full-access</code> 一起读成"有防护"。
+          另外，沙箱**不管网络**：三档都只判路径与命令，出网目标不受它约束。
+          命令名单按 basename 比对（写 <code>git</code> 即可覆盖 <code>git.exe</code>）。
         </p>
         <div className="form-row">
           <label htmlFor="snapshot-root">快照备份根目录</label>

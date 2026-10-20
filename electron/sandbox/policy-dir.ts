@@ -59,3 +59,25 @@ export function loadPolicyDir(dir: string | undefined): LoadedPolicies {
   }
   return { policy: mergePolicies(policies), errors, files: policies.length };
 }
+
+/**
+ * 多目录策略合并：全局 `<userData>/policy.d` + 项目 `.ox/policy.d`。
+ *
+ * 两个目录是**并集**关系，且都只能加严：命令拒绝清单合并、审批清单合并、
+ * 禁读写清单合并、预算取最小。目录去重，避免调用方把同一个路径传两次
+ * 导致同一份规则被叠加出重复错误。
+ */
+export function loadPolicyDirs(dirs: readonly (string | undefined)[]): LoadedPolicies {
+  // 空串由 `loadPolicyDir` 的 `!dir` 早退处理，这里只收窄类型。
+  const unique = [...new Set(dirs.filter((d): d is string => typeof d === "string"))];
+  const policies: PolicyFile[] = [];
+  const errors: PolicyLoadError[] = [];
+  let files = 0;
+  for (const dir of unique) {
+    const loaded = loadPolicyDir(dir);
+    if (loaded.files > 0) policies.push(loaded.policy);
+    errors.push(...loaded.errors);
+    files += loaded.files;
+  }
+  return { policy: mergePolicies(policies), errors, files };
+}
