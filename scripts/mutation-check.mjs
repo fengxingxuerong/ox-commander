@@ -586,6 +586,14 @@ const TARGETS = [
     tests: ["src/llm-pool.test.ts", "src/http-clients.test.ts"],
     tier: 2,
   },
+  // chat-conflict.ts（M4c）：并行写冲突判据。它决定"要不要拦一下人"，判错方向
+  // 全是静默的：只认别人的写（自己接着打补丁不能被自己拦）、窗外的不算并发、
+  // 同一路径只报最近那一条、时钟倒挂按"刚刚"处理（宁可多问一次）。tier 1。
+  {
+    file: "shared/chat-conflict.ts",
+    tests: ["src/chat-conflict.test.ts"],
+    tier: 1,
+  },
   // chat-thread-status.ts（M4b）：左栏状态位。错法全是**静默**的 —— 后台跑完
   // 不标完成、等审批不变橙、正在看的那条给自己涨未读。它决定"谁在等我"，
   // 判错之后人只是在错误的时间切到错误的线程。
@@ -593,6 +601,15 @@ const TARGETS = [
   {
     file: "shared/chat-thread-status.ts",
     tests: ["src/chat-thread-status.test.ts"],
+    tier: 1,
+  },
+  // write-ledger.ts（M4c）：活跃线程的写台账。错法是"该拦的不拦 / 不该拦的乱拦"
+  // —— 两种都不抛异常，前者是一次莫名其妙的覆盖，后者会训练人对着弹窗盲点，
+  // 闸门也就废了。台账上限丢**最旧的**（丢最新等于把最该拦的先扔掉），
+  // 线程退场要连记录一起清（否则已不存在的线程继续拦人）。tier 1。
+  {
+    file: "electron/chat/write-ledger.ts",
+    tests: ["src/chat-conflict.test.ts"],
     tier: 1,
   },
   // thread-registry.ts（M4a）：活线程登记表替掉了 `let live` 单例。这里的错法

@@ -285,3 +285,106 @@ describe("ToolRunner · 命令与审批", () => {
     expect(requests[1]?.paths).toBeUndefined();
   });
 });
+
+/**
+ * 并行写冲突（M4c · P1）。
+ *
+ * 不走 worktree，所以"两条线程撞同一个文件"只能靠**提示 + 人拍板**。这里守的是
+ * 那个闸门本身：撞上了要问、问的时候要带"谁刚动过"的事实、拒绝就不许写、
+ * 没有审批通道时按拒绝（fail-closed），以及**自己的写不算冲突** ——
+ * 最后一条漏了的话，"补丁打一半接着补"会被自己拦住。
+ */
+describe("ToolRunner · 并行写冲突（M4c）", () => {
+  const patch = (rel: string, text: string): string =>
+    ["*** Begin Patch", `*** Add File: ${rel}`, `+${text}`, "*** End Patch"].join("\n");
+
+  it("撞上别的线程刚改的文件：先问一句，理由里带线程与多久之前", async () => {
+    const root = project();
+    const requests: ChatApprovalRequest[] = [];
+    const r = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [{ sessionId: "chat-other", path: "a.txt", ts: Date.now() - 30_000 }],
+      requestApproval: async (req) => {
+        requests.push(req);
+        return { granted: true };
+      },
+    });
+    const res = await r.run(call("apply_patch", { patch: patch("a.txt", "y") }));
+    expect(res.ok).toBe(true);
+    expect(requests[0]?.requestId).toBe("conflict-t-1");
+    expect(requests[0]?.reason).toContain("a.txt");
+    expect(requests[0]?.reason).toContain("30 秒前");
+    expect(requests[0]?.paths).toEqual(["a.txt"]);
+  });
+
+  it("人拒绝 = 不写（盘上还是原内容）", async () => {
+    const root = project();
+    write(root, "a.txt", "原内容");
+    const r = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [{ sessionId: "chat-other", path: "a.txt", ts: Date.now() - 1_000 }],
+      requestApproval: async () => ({ granted: false, reason: "等它跑完" }),
+    });
+    const res = await r.run(call("apply_patch", { patch: patch("a.txt", "新内容") }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("等它跑完");
+    expect(fs.readFileSync(path.join(root, "a.txt"), "utf8")).toBe("原内容");
+  });
+
+  it("没有审批通道时按拒绝（保护不能因为没有通道就消失）", async () => {
+    const root = project();
+    const r = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [{ sessionId: "chat-other", path: "a.txt", ts: Date.now() - 1_000 }],
+    });
+    const res = await r.run(call("apply_patch", { patch: patch("a.txt", "x") }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("没有审批通道");
+    expect(fs.existsSync(path.join(root, "a.txt"))).toBe(false);
+  });
+
+  it("自己刚改过的不算冲突（补丁接着打是最常见的正常动作）", async () => {
+    const root = project();
+    let asked = 0;
+    const r = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [{ sessionId: "chat-mine", path: "a.txt", ts: Date.now() - 1_000 }],
+      requestApproval: async () => {
+        asked += 1;
+        return { granted: true };
+      },
+    });
+    const res = await r.run(call("apply_patch", { patch: patch("a.txt", "x") }));
+    expect(res.ok).toBe(true);
+    expect(asked).toBe(0);
+  });
+
+  it("窗口外的写不算冲突；没注入 sessionId 时压根不检测", async () => {
+    const root = project();
+    const stale = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [{ sessionId: "chat-other", path: "a.txt", ts: Date.now() - 10 * 60_000 - 5_000 }],
+      requestApproval: async () => ({ granted: false }),
+    });
+    expect((await stale.run(call("apply_patch", { patch: patch("a.txt", "x") }))).ok).toBe(true);
+
+    // 单线程/CLI 形态：不注入 sessionId —— 把自己的历史当冲突去拦自己是错的。
+    const single = runner(root, {
+      conflictWrites: () => [{ sessionId: "chat-other", path: "b.txt", ts: Date.now() }],
+      requestApproval: async () => ({ granted: false }),
+    });
+    expect((await single.run(call("apply_patch", { patch: patch("b.txt", "x") }))).ok).toBe(true);
+  });
+
+  it("写成功后回灌台账（别的线程下一步才看得见）", async () => {
+    const root = project();
+    const recorded: string[] = [];
+    const r = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: () => [],
+      onWrite: (paths) => recorded.push(...paths),
+    });
+    await r.run(call("apply_patch", { patch: patch("a.txt", "x") }));
+    expect(recorded).toEqual(["a.txt"]);
+  });
+});

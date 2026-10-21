@@ -28,6 +28,7 @@ import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
 import { ThreadRegistry, type LiveThread } from "../chat/thread-registry";
 import { focusChatSession } from "../chat/focus";
+import { clearThreadWrites, recordThreadWrites, resetThreadWrites, threadWrites } from "../chat/write-ledger";
 import { writeFileAtomic } from "../atomic-file";
 import {
   getProvider,
@@ -186,6 +187,11 @@ function buildSession(
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     approvalCommands: runtime.approvalCommands,
+    // M4c：冲突检测的两个注入点都在这里接 —— 本线程 id 与"别人的写台账"。
+    // CLI / headless 单线程形态走同一个 ToolRunner，只是不注入，于是天然不检测。
+    sessionId,
+    conflictWrites: () => threadWrites(),
+    onWrite: (paths: readonly string[]) => recordThreadWrites(sessionId, paths),
     requestApproval: async (req: ChatApprovalRequest) =>
       await new Promise<ChatApprovalAnswer>((resolve) => {
         // 审批 id 只在**会话内**唯一（文本协议是 `t-1`/`t-2`，原生协议是模型给的
@@ -510,6 +516,7 @@ export function registerChatHandlers(): void {
   abortAllChatSessions();
   sessionStore = null;
   pendingApprovals.clear();
+  resetThreadWrites();
 
   ipcMain.handle("chat:send", (_e, input: unknown) => {
     const payload = (input ?? {}) as { text?: unknown; projectId?: unknown; sessionId?: unknown };
@@ -634,6 +641,8 @@ export function registerChatHandlers(): void {
     if (liveThreads.get(sessionId) !== undefined) {
       abortChatSession(sessionId);
       liveThreads.remove(sessionId);
+      // 它已经不在登记表里了：写台账里不能继续留着它的名字去拦后来的写。
+      clearThreadWrites(sessionId);
     }
     return chatStore().delete(sessionId);
   });

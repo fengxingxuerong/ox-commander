@@ -39,6 +39,8 @@ export function compareEntryNames(a: { name: string }, b: { name: string }): num
  * 理解，而它的理解来自上一轮工具输出 —— 一次读错了，下一次写就照着错的写。
  * 沙箱在这里的价值不是防恶意，是防**漂移**。
  */
+import { conflictFacts, describeConflictFacts, type ConflictFact, type ThreadWrite } from "../../shared/chat-conflict";
+
 export interface ToolRunnerOptions {
   /** 项目根：一切路径判定的边界。 */
   rootAbs: string;
@@ -62,6 +64,20 @@ export interface ToolRunnerOptions {
   maxSearchFiles?: number;
   /** 读文件正文的注入点（默认 fs.readFileSync）；测试用来构造读失败分支。 */
   readTextFile?: (abs: string) => string;
+  /**
+   * 本线程 id（M4c）。缺席 = 不做并行冲突检测（CLI / headless 单线程形态）。
+   */
+  sessionId?: string;
+  /**
+   * 别的活跃线程的写记录（M4c）。缺席 = 不做冲突检测。
+   *
+   * 用**函数**而不是数组：台账在主进程里随时在长，注入点要读的是"此刻"。
+   */
+  conflictWrites?: () => readonly ThreadWrite[];
+  /** 冲突窗口（毫秒）；默认见 `DEFAULT_CONFLICT_WINDOW_MS`。 */
+  conflictWindowMs?: number;
+  /** 写成功后回灌台账（M4c）：让别的线程知道"这个文件刚被改过"。 */
+  onWrite?: (paths: readonly string[]) => void;
 }
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -83,6 +99,10 @@ export class ToolRunner {
   private readonly maxFileBytes: number;
   private readonly maxSearchFiles: number;
   private readonly readTextFile: (abs: string) => string;
+  private readonly sessionId?: string;
+  private readonly conflictWrites?: () => readonly ThreadWrite[];
+  private readonly conflictWindowMs?: number;
+  private readonly onWrite?: (paths: readonly string[]) => void;
   /** 本次会话里人答过"不用再问"的动作（key 由 policy 层定义）。 */
   private readonly sessionApproved = new Set<string>();
 
@@ -99,6 +119,10 @@ export class ToolRunner {
     this.maxFileBytes = opts.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxSearchFiles = opts.maxSearchFiles ?? DEFAULT_MAX_SEARCH_FILES;
     this.readTextFile = opts.readTextFile ?? ((abs) => fs.readFileSync(abs, "utf8"));
+    this.sessionId = opts.sessionId;
+    this.conflictWrites = opts.conflictWrites;
+    this.conflictWindowMs = opts.conflictWindowMs;
+    this.onWrite = opts.onWrite;
   }
 
   /**
@@ -201,6 +225,60 @@ export class ToolRunner {
       const key =
         call.name === "run_command" ? `cmd:${baseNameOf(extra.command ?? "")}` : `tool:${call.name}`;
       this.sessionApproved.add(key);
+    }
+    return { ok: true };
+  }
+
+  /**
+   * 查并行冲突（M4c · P1）。
+   *
+   * 两个注入点都给了才检测：`sessionId` 缺席（CLI / headless 单线程）时没有
+   * "别人"这回事，跑了只会把自己的历史当冲突拦自己一次。
+   */
+  private detectConflicts(paths: readonly string[]): ConflictFact[] {
+    if (this.sessionId === undefined || this.conflictWrites === undefined) return [];
+    return conflictFacts(paths, this.conflictWrites(), {
+      sessionId: this.sessionId,
+      now: Date.now(),
+      ...(this.conflictWindowMs !== undefined ? { windowMs: this.conflictWindowMs } : {}),
+    });
+  }
+
+  /**
+   * 冲突的那一问。
+   *
+   * 与 `guard` 的三点不同，都是刻意的：
+   * 1. **不接"本次会话不再问"**。一次冲突是一次具体的事实（"谁刚改过"），
+   *    记住它等于把闸门永久关上 —— P1 的价值全在"每次都让人看一眼"。
+   * 2. **没有审批通道就按拒绝**（fail-closed，与 `guard` 同纪律）：没有通道
+   *    时放行，等于这个保护根本不存在。
+   * 3. 请求 id 带 `conflict-` 前缀：它和同一次调用的 `guard` 审批是两个不同的
+   *    问题，共用一个 id 会让第二次提问被第一个答复吃掉。
+   */
+  private async confirmConflict(
+    call: ToolCall,
+    facts: readonly ConflictFact[],
+  ): Promise<{ ok: true } | { ok: false; reason: string }> {
+    const reason = describeConflictFacts(facts);
+    if (!this.requestApproval) {
+      return { ok: false, reason: `${reason} 当前没有审批通道，按拒绝处理` };
+    }
+    let answer: ChatApprovalAnswer;
+    try {
+      answer = await this.requestApproval({
+        requestId: `conflict-${call.id}`,
+        tool: "apply_patch",
+        reason,
+        paths: facts.map((f) => f.path),
+      });
+    } catch (e) {
+      return { ok: false, reason: `审批通道出错，按拒绝处理：${(e as Error).message}` };
+    }
+    if (!answer.granted) {
+      return {
+        ok: false,
+        reason: answer.reason ? `人工拒绝：${answer.reason}` : "人工拒绝了这次冲突写入（未说明理由）",
+      };
     }
     return { ok: true };
   }
@@ -352,6 +430,14 @@ export class ToolRunner {
       return { id: call.id, name: call.name, ok: false, output: "", reason: `补丁无法解析：${parsed.error}` };
     }
     const paths = parsed.ops.map((op) => op.path);
+    // 并行冲突（M4c · P1）：写之前先问一句"有没有别的线程刚改过这些文件"。
+    // 放在 `guard` **之前**：人要先知道"这是别人的地盘"，再决定要不要批这次写 ——
+    // 顺序反过来会让审批理由里少掉最关键的那个事实。
+    const conflicts = this.detectConflicts(paths);
+    if (conflicts.length > 0) {
+      const verdict = await this.confirmConflict(call, conflicts);
+      if (!verdict.ok) return { id: call.id, name: call.name, ok: false, output: "", reason: verdict.reason };
+    }
     const guard = await this.guard(call, { paths });
     if (!guard.ok) return { id: call.id, name: call.name, ok: false, output: "", reason: guard.reason };
 
@@ -398,6 +484,8 @@ export class ToolRunner {
       done.push(`${op.kind === "add" ? "新建" : "修改"} ${op.path}${outcome.notes.length > 0 ? `（${outcome.notes.join("；")}）` : ""}`);
     }
     this.onEvent?.(`[chat:patch] ${describePatchOps(parsed.ops)}：${paths.join("、")}`);
+    // 记进台账：别的线程下一步撞上同一个文件时，人能看到"谁刚动过"。
+    this.onWrite?.(paths);
     const result = this.ok(call, `补丁已应用：${done.join("；")}`);
     return changes.length > 0 ? { ...result, changes } : result;
   }
