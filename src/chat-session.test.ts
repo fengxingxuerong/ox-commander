@@ -80,6 +80,20 @@ describe("会话循环（session）", () => {
     expect(session.transcript().meta.model).toBe("deepseek-chat");
   });
 
+  it("线路只给一半时不写 meta（缺的字段不能以 undefined 落盘）", () => {
+    for (const opts of [{ providerId: "deepseek" }, { model: "deepseek-chat" }]) {
+      const session = new ChatSession({
+        client: new ScriptedClient([]),
+        runner: new ScriptedRunner([]) as unknown as ToolRunner,
+        rootAbs: tmpRoot,
+        sessionId: "s-partial",
+        ...opts,
+      });
+      expect("providerId" in session.transcript().meta).toBe(false);
+      expect("model" in session.transcript().meta).toBe(false);
+    }
+  });
+
   it("不要工具时直接答复，转录里有 user 与 assistant 两条", async () => {
     const client = new ScriptedClient([assistant("改好了")]);
     const runner = new ScriptedRunner([]);

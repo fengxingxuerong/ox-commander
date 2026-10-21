@@ -1574,12 +1574,12 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
 
   it("caches the agent layer per settings signature", () => {
     const settings = inst(h.settingsInstances);
-    (settings.load as Mock).mockReturnValue({
+    const base = {
       llmProvider: "sensenova",
       llmPool: [],
-      agentRouter: false,
       arbitration: "skip",
-    });
+    };
+    (settings.load as Mock).mockReturnValue({ ...base, agentRouter: false });
     const before = h.createAgentLayerFn.mock.calls.length;
     (h.ipcMain as FakeIpcMain).invoke("agents:list");
     (h.ipcMain as FakeIpcMain).invoke("agents:list");
@@ -1587,6 +1587,15 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
     // what lets runtime-registered agents survive engine rebuilds.
     expect(h.createAgentLayerFn.mock.calls.length - before).toBe(1);
     expect(h.createAgentLayerFn).toHaveBeenLastCalledWith(expect.objectContaining({ enableRouter: false }));
+
+    // 旧 settings 没有 agentRouter 时 enableRouter 仍是 true，与显式 true 同义；
+    // signature 必须把它们归一成同一个值，否则升级后会白重建一次 layer。
+    (settings.load as Mock).mockReturnValue({ ...base, agentRouter: true });
+    (h.ipcMain as FakeIpcMain).invoke("agents:list");
+    const afterTrue = h.createAgentLayerFn.mock.calls.length;
+    (settings.load as Mock).mockReturnValue({ ...base, agentRouter: undefined });
+    (h.ipcMain as FakeIpcMain).invoke("agents:list");
+    expect(h.createAgentLayerFn.mock.calls.length).toBe(afterTrue);
   });
 
   it("执行器超时进了 layer 的缓存 signature —— 改了会重建，不改则复用", () => {
@@ -2948,9 +2957,59 @@ describe("chat handlers（交互式编码会话）", () => {
       (h.ipcMain as FakeIpcMain).invoke("chat:send", {
         text: "hi",
         projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", providerId: null },
+      }),
+    ).toThrow(/profile\.providerId/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
         profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "deepseek", model: "bad model" },
       }),
     ).toThrow(/profile\.model/);
+  });
+
+  it("chat:new 的线程线路：只给 provider 用默认模型，只给 model 用全局 provider", () => {
+    seedChatWorkspace();
+    const base = { mode: "read-only" as const, approvalPolicy: "on-request" as const };
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: { ...base, providerId: "deepseek" },
+    });
+    let transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: { providerId?: string; model?: string };
+    };
+    expect(transcript.meta.providerId).toBe("deepseek");
+    expect(transcript.meta.model).toBe("deepseek-chat");
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: { ...base, model: "deepseek-v4-flash" },
+    });
+    transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: { providerId?: string; model?: string };
+    };
+    expect(transcript.meta.providerId).toBe("sensenova");
+    expect(transcript.meta.model).toBe("deepseek-v4-flash");
+  });
+
+  it("chat:latest 中止后按 meta 的 provider/model 重建线路", () => {
+    seedChatWorkspace();
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: {
+        mode: "read-only",
+        approvalPolicy: "on-request",
+        providerId: "deepseek",
+        model: "deepseek-reasoner",
+      },
+    });
+    (h.ipcMain as FakeIpcMain).invoke("chat:abort");
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" }) as {
+      meta: { providerId?: string; model?: string };
+    };
+    expect(transcript.meta.providerId).toBe("deepseek");
+    expect(transcript.meta.model).toBe("deepseek-reasoner");
   });
 
   it("撤销第 N 轮补丁：内容仍等于补丁后版本才恢复；之后被改过则跳过", async () => {

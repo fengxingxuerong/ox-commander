@@ -844,6 +844,36 @@ describe("sendChat · 行级评论附录", () => {
     expect(seen[0]).toContain("a.ts 第 1 轮改动 · 改后第 3 行：加个判空");
   });
 
+  it("线程线路只在 provider/model 成对时发送（半截状态不送 undefined）", async () => {
+    const profiles: Array<Record<string, unknown> | undefined> = [];
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      sendChat: async (input: { text: string; projectId: string; profile?: Record<string, unknown> }) => {
+        profiles.push(input.profile);
+        return { sessionId: "chat-1", accepted: true as const };
+      },
+      listChatSessions: async () => [],
+    };
+    const chat = useApp.getState().chat;
+    useApp.setState({
+      activeProjectId: "p-1",
+      chatInput: "x",
+      chat: { ...chat, providerId: "deepseek", model: undefined },
+    });
+    await useApp.getState().sendChat();
+    useApp.setState({
+      chatInput: "x",
+      chat: { ...useApp.getState().chat, providerId: undefined, model: "deepseek-chat" },
+    });
+    await useApp.getState().sendChat();
+    expect(profiles).toHaveLength(2);
+    for (const profile of profiles) {
+      expect(profile).not.toHaveProperty("providerId");
+      expect(profile).not.toHaveProperty("model");
+    }
+  });
+
   it("发送失败把评论还回去（不静默丢掉用户写的东西）", async () => {
     const g = globalThis as { window?: unknown; oxCommander?: unknown };
     g.oxCommander = {

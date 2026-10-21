@@ -8,6 +8,7 @@ import {
   SENSENOVA_MODELS_EXTRA,
   baseUrlEnvVar,
   getProvider,
+  isModelId,
   providerKeyEnvVars,
   resolveTemperature,
 } from "../shared/providers";
@@ -109,6 +110,15 @@ describe("provider catalog", () => {
   it("reports the extra key vars of a multi-key provider", () => {
     expect(providerKeyEnvVars("sensenova")).toEqual([...SENSENOVA_KEY_VARS]);
     expect(providerKeyEnvVars("amd-radeon")).toEqual([]);
+  });
+
+  it("isModelId 只放行非空模型 token，不放行非字符串", () => {
+    expect(isModelId("deepseek-v4-flash")).toBe(true);
+    expect(isModelId("qwen2.5:14b")).toBe(true);
+    expect(isModelId("z-ai/glm-5.3-flash")).toBe(true);
+    expect(isModelId("bad model")).toBe(false);
+    expect(isModelId("")).toBe(false);
+    expect(isModelId(123)).toBe(false);
   });
 });
 

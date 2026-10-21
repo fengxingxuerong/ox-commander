@@ -142,8 +142,14 @@ provider × model，但**不碰推理强度**：各端点的 reasoning 字段不
 - 线程头新增模型下拉（已登记线路，不支持任意输入）；切线路进 runtime signature，
   下一条消息重建会话并保留历史。
 
-**门禁现状**：用例 2659 → **2663 通过 + 8 跳过**（86 个有可执行用例的文件）。
-site 审计待跑（先提交再审计），基线暂留 2534。
+**门禁现状**：用例 2659 → **2668 通过 + 8 跳过**（86 个有可执行用例的文件）。M3c-2 触及的
+8 个目标逐点审计全杀：runtime **12/12**、session **34/34**、chat **98/98**、context **27/27**、
+build-llm **12/12**、chat-events **15/15**、providers **5/5**、store **59/59**；基线
+2534 → **2554 / 98 目标**，README/gates 已同步。补的 5 条用例专钉半截线路（只给 provider 或
+只给 model）、非字符串 provider、`isModelId` 的非字符串输入，以及中止后按 meta 重建线路。
+两处等价变异入白名单：`profileOfMeta` 的早退条件（下游 `getProvider` + `isModelId` 兜底，
+半截 meta 的返回值不变）与 `ensureAgentLayer` signature 里的布尔取反（只参与字符串相等比较，
+取反保持相等类）。
 
 ### 新增（线程级运行档 M3c-1 · 2026-10-21）
 

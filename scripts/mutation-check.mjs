@@ -837,7 +837,7 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/chat/runtime.ts": 12,
   "electron/chat/session-store.ts": 38,
-  "electron/chat/session.ts": 32,
+  "electron/chat/session.ts": 34,
   "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -851,7 +851,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 85,
+  "electron/ipc/chat.ts": 99,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -905,7 +905,7 @@ const SITE_BASELINE = {
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,
   "shared/prompts.ts": 6,
-  "shared/providers.ts": 3,
+  "shared/providers.ts": 5,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 77,
@@ -918,7 +918,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 57,
+  "src/store.ts": 59,
 };
 
 /**
@@ -1279,6 +1279,36 @@ const EQUIVALENT_SITES = [
    * 两条断言钉住，不入表。
    */
   { file: "shared/tools/spec.ts", op: "!== → ===", line: 204 },
+  /**
+   * `electron/ipc/context.ts` 的 `ensureAgentLayer` 缓存 signature 里
+   * `settingsValue.agentRouter !== false` → `=== false` —— **可证明等价**。
+   *
+   * 这个布尔只作为 signature 字符串的一个片段，而 signature 的唯一用途是与
+   * 上一次的 `layerSignature` 做**字符串相等**比较；它从不被解析、不对外暴露。
+   * 对任意输入 v，`v === false` 恒等于 `!(v !== false)`，即变异只是把该片段
+   * 整体取反。取反是单射：`f(a) === f(b)` 当且仅当 `g(a) === g(b)`，所以
+   * 任意两次设置的「命中/未命中」关系完全不变 —— 变异只改缓存键的字面值，
+   * 不改任何可观测行为。
+   *
+   * ⚠️ 行号是锚点：signature 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认它仍只参与相等比较。
+   */
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 222 },
+  /**
+   * `electron/ipc/chat.ts` `profileOfMeta` 的早退条件
+   * `if (!meta.providerId || !meta.model) return base;` —— **可证明等价**。
+   *
+   * 改成 `&&` 后只有「两个字段都缺」才会提前返回；半截 meta 会多走一次
+   * `getProvider` / `isModelId`，但两条路的返回值与副作用都相同：
+   * • provider 有、model 缺：getProvider 成功，`isModelId(undefined)` 为假 → base；
+   * • provider 缺、model 有：getProvider(undefined) 抛错，被 catch → base。
+   * `getProvider` 是纯查表，没有可观测副作用；因此变异只影响执行路径，不影响
+   * 任何返回结果。真正的完整性判断由后面的 getProvider + isModelId 兜底。
+   *
+   * ⚠️ 行号是锚点：`profileOfMeta` 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认下游两条校验仍在。
+   */
+  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 318 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */
