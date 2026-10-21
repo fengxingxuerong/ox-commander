@@ -69,11 +69,11 @@ const api = {
     ipcRenderer.invoke("receipt:verify", projectId, replay ? { replay: true } : undefined),
   // ── 交互式会话（对标 Codex TUI 那一层）──
   // 会话在后台跑、过程由 ox:event 逐条推，所以 send 立刻返回 sessionId。
-  sendChat: (input: { text: string; projectId: string }) =>
+  sendChat: (input: { text: string; projectId: string; sessionId?: string }) =>
     ipcRenderer.invoke("chat:send", input),
-  abortChat: () => ipcRenderer.invoke("chat:abort"),
+  abortChat: (input?: { sessionId?: string }) => ipcRenderer.invoke("chat:abort", input),
   newChat: (input: { projectId: string }) => ipcRenderer.invoke("chat:new", input),
-  chatTranscript: () => ipcRenderer.invoke("chat:transcript"),
+  chatTranscript: (input?: { sessionId?: string }) => ipcRenderer.invoke("chat:transcript", input),
   /** 有活会话就返回，否则恢复该项目最近一条记录；没有记录返回 null。 */
   chatLatest: (input: { projectId: string }) => ipcRenderer.invoke("chat:latest", input),
   listChatSessions: (input: { projectId: string }) => ipcRenderer.invoke("chat:list", input),

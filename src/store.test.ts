@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_ESCALATION_POLICY, DEFAULT_SETTINGS } from "../shared/types";
 import { isFailureClass } from "../shared/types";
 import { DEFAULT_LLM_POOL } from "../shared/providers";
-import { useApp } from "./store";
+import { isEventForChat, useApp } from "./store";
 import { buildReceipt } from "../shared/delivery-receipt";
 
 /**
@@ -964,6 +964,15 @@ describe("sendChat · 行级评论附录", () => {
       model: "glm-5.2",
       reasoningEffort: "high",
     });
+
+    // 半截线路（只有 provider 或只有 model）不是线路：宿主那边会把缺的一半当成
+    // "没指定"，于是新线程悄悄回到全局池。两样要么一起带，要么都不带。
+    useApp.setState({
+      chat: { ...useApp.getState().chat, providerId: "sensenova", model: undefined, reasoningEffort: undefined },
+    });
+    await useApp.getState().newChat();
+    expect("providerId" in (calls[1] ?? {})).toBe(false);
+    expect("model" in (calls[1] ?? {})).toBe(false);
   });
 
   it("发送失败把评论还回去（不静默丢掉用户写的东西）", async () => {
@@ -981,5 +990,42 @@ describe("sendChat · 行级评论附录", () => {
     expect(useApp.getState().chat.notice).toContain("网络断了");
     // 正文也要还原：发送失败不该把输入框吃掉。
     expect(useApp.getState().chatInput).toBe("原文");
+  });
+});
+
+
+/**
+ * 事件归属（M4a）。
+ *
+ * 宿主已能同时跑多条线程，`chat:*` 事件里带 sessionId。渲染层的旧假设是
+ * "事件 = 我盯着的这条" —— 在两条线程并跑时，那个假设不会报错，只会让两条
+ * 线程的正文拼进同一个转录（串台比丢事件难查十倍）。
+ *
+ * 三条规则各有对应的真实到达顺序，逐条钉：
+ *   ① 无 sessionId（旧版本/测试事件）→ 收下，否则升级后视图一片空白；
+ *   ② 当前还没有 id（刚点发送、返回值晚于第一个事件）→ 收下，否则首条消息的
+ *      全部事件被自己丢掉；
+ *   ③ 两边都有且不同 → 丢弃。
+ */
+describe("isEventForChat", () => {
+  it("无归属 / 还没有当前 id / 同一条：都收下", () => {
+    expect(isEventForChat("chat-1", { type: "chat:entry" })).toBe(true);
+    expect(isEventForChat("chat-1", { type: "chat:entry", sessionId: "" })).toBe(true);
+    expect(isEventForChat(undefined, { type: "chat:entry", sessionId: "chat-9" })).toBe(true);
+    expect(isEventForChat("chat-1", { type: "chat:entry", sessionId: "chat-1" })).toBe(true);
+  });
+
+  it("别的线程的事件不收（包含 null / 非对象输入不炸）", () => {
+    expect(isEventForChat("chat-1", { type: "chat:delta", sessionId: "chat-2" })).toBe(false);
+    expect(isEventForChat("chat-1", null)).toBe(true);
+    expect(isEventForChat("chat-1", 42)).toBe(true);
+  });
+
+  it("handleEvent 收到别的线程的条目时不污染当前转录", () => {
+    useApp.setState({ chat: { ...useApp.getState().chat, sessionId: "chat-1", entries: [] } });
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-2", entry: { kind: "assistant", text: "别人的输出" } });
+    expect(useApp.getState().chat.entries).toEqual([]);
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-1", entry: { kind: "assistant", text: "我的输出" } });
+    expect(useApp.getState().chat.entries.map((e) => e.text)).toEqual(["我的输出"]);
   });
 });

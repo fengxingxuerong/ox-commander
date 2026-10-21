@@ -586,6 +586,16 @@ const TARGETS = [
     tests: ["src/llm-pool.test.ts", "src/http-clients.test.ts"],
     tier: 2,
   },
+  // thread-registry.ts（M4a）：活线程登记表替掉了 `let live` 单例。这里的错法
+  // 全是**静默**的 —— 同 id 覆盖写成并存（get 返回旧会话）、删活跃项后指针
+  // 指向已删除对象（chat:latest 返回不存在的线程）、latestOf 跨项目回退
+  // （拿别人的线程冒充本项目的）。三种都不抛异常，只让中止/读转录打错人。
+  // tier 1：纯内存结构，一个测试文件就能逐点杀。
+  {
+    file: "electron/chat/thread-registry.ts",
+    tests: ["src/thread-registry.test.ts"],
+    tier: 1,
+  },
   // build-llm.ts 是 Electron 与 headless **共用**的大脑层构造点（工厂唯一），
   // `provider.id === "sensenova"` 决定走多 key×多模型 failover 还是普通单客户端。
   // 反过来 = sensenova 退化成单线路（failover 白设计）、别的 provider 却走
@@ -837,7 +847,7 @@ const SITE_BASELINE = {
   "electron/board-derive.ts": 40,
   "electron/chat/runtime.ts": 12,
   "electron/chat/session-store.ts": 38,
-  "electron/chat/session.ts": 34,
+  "electron/chat/session.ts": 44,
   "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -851,7 +861,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 99,
+  "electron/ipc/chat.ts": 107,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -897,7 +907,7 @@ const SITE_BASELINE = {
   "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,
-  "shared/http-clients.ts": 129,
+  "shared/http-clients.ts": 137,
   "shared/llm-client.ts": 15,
   "shared/page-smoke.ts": 17,
   "shared/policy-file.ts": 33,
@@ -905,7 +915,7 @@ const SITE_BASELINE = {
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,
   "shared/prompts.ts": 6,
-  "shared/providers.ts": 5,
+  "shared/providers.ts": 7,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schema.ts": 77,
@@ -918,7 +928,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 59,
+  "src/store.ts": 68,
 };
 
 /**
@@ -1312,6 +1322,28 @@ const EQUIVALENT_SITES = [
    * 318 → 345。论证不变：`getProvider` / `isModelId` 仍是同一对兜底。
    */
   { file: "electron/ipc/chat.ts", op: "|| → &&", line: 345 },
+  /**
+   * `electron/ipc/chat.ts` `buildSession` 里 `...(pinned && profile?.reasoningEffort ? … : {})`
+   * 的 `&& → ||` —— **可证明等价**（下游二次守卫）。
+   *
+   * 变异体在「线路已钉死、但没选推理档」时不再短路，而是展开
+   * `{ reasoningEffort: undefined }` 进 `ChatSessionOptions`。但 `ChatSession`
+   * 构造函数自己又守了一次：
+   * `...(opts.reasoningEffort && opts.providerId && opts.model ? { reasoningEffort } : {})`
+   * —— `undefined` 在那里就被丢掉，**meta 里不会出现该键**（本轮的用例
+   * 「chat:new 的推理强度……」直接断言 `"reasoningEffort" in meta === false`）。
+   *
+   * 另半边「pinned 真而 profile 假」不可达：`pinnedLineOf(profile, …)` 只有在
+   * profile 给出完整 providerId + model 时才返回非空，`pinned` 真 ⟹ profile 非空，
+   * 所以 `profile.reasoningEffort` 不会抛 TypeError。
+   *
+   * **刻意保留**：两层守卫各管一段职责 —— buildSession 不往选项里塞 undefined，
+   * ChatSession 不信任调用方。任一层将来放宽，这个等价就不再成立。
+   *
+   * ⚠️ 行号是锚点：buildSession 结构变化使该行漂移时，变异会重新出现 ——
+   * 届时按新行号校回，并重新确认 ChatSession 侧的二次守卫仍在。
+   */
+  { file: "electron/ipc/chat.ts", op: "&& → ||", line: 172 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

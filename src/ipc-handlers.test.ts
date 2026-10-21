@@ -3208,6 +3208,92 @@ describe("chat handlers（交互式编码会话）", () => {
     expect((h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", "no-such-request", { granted: true })).toBe(false);
   });
 
+  /**
+   * M4a：宿主从"一条 live 单例"变成登记表。
+   *
+   * 这一层最容易出的错**都不抛异常**：建第二条线程时把第一条顶掉、`chat:abort`
+   * 没有参数于是中止了"最近活跃的那条"（用户想停的是屏幕上这条）、
+   * `chat:transcript` 不带 id 就读回别人的转录。三条断言各钉一个。
+   */
+  it("两条线程同时活着：按 id 寻址，中止一条不影响另一条", () => {
+    seedChatWorkspace();
+    const first = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    const second = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    expect(second.sessionId).not.toBe(first.sessionId);
+
+    // 两条都在（建第二条没有顶掉第一条）
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: first.sessionId })).toBe(true);
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: second.sessionId })).toBe(true);
+    // 中止过的线程仍在登记表里（可再发消息 = 重建），所以重复中止不是错误；
+    // 但**不存在的 id** 必须明确是 false，否则界面永远不知道"停的是哪条"。
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: "chat-unknown" })).toBe(false);
+  });
+
+  it("按 id 取转录：两条线程各读各的，不串台", () => {
+    seedChatWorkspace();
+    const first = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    const second = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    const a = (h.ipcMain as FakeIpcMain).invoke("chat:transcript", { sessionId: first.sessionId }) as {
+      meta: { sessionId: string };
+    };
+    const b = (h.ipcMain as FakeIpcMain).invoke("chat:transcript", { sessionId: second.sessionId }) as {
+      meta: { sessionId: string };
+    };
+    expect(a.meta.sessionId).toBe(first.sessionId);
+    expect(b.meta.sessionId).toBe(second.sessionId);
+    // 不存在的 id 不给"最近活跃那条"顶包 —— 那会让界面以为切到了新线程。
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:transcript", { sessionId: "chat-missing" })).toBeNull();
+  });
+
+  it("中止一条线程只关它自己的审批：另一条挂着的审批仍能答、仍能落盘", async () => {
+    const root = seedChatWorkspace();
+    const store = settingsMock();
+    const base = store.load.mock.results[0]?.value ?? store.load();
+    store.load.mockReturnValue({ ...base, approvalPolicy: "untrusted" });
+
+    const patchFor = (file: string): string =>
+      ["*** Begin Patch", `*** Add File: ${file}`, "+hi", "*** End Patch"].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat.mockImplementation(async (req: { messages: Array<{ role: string; content: string }> }) => {
+      const user = [...req.messages].reverse().find((m) => m.role === "user")?.content ?? "";
+      const file = user.includes("a.txt") ? "a.txt" : "b.txt";
+      return {
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch: patchFor(file) } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      };
+    });
+
+    const first = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    const second = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "写 a.txt", projectId: "p-chat", sessionId: first.sessionId });
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "写 b.txt", projectId: "p-chat", sessionId: second.sessionId });
+    await waitForEvent("chat:approval-request", 2);
+
+    const requests = events().filter((p) => p.type === "chat:approval-request");
+    const forFirst = requests.find((p) => p.sessionId === first.sessionId);
+    const forSecond = requests.find((p) => p.sessionId === second.sessionId);
+    expect(forFirst).toBeDefined();
+    expect(forSecond).toBeDefined();
+
+    // 中止第一条：它的审批按拒绝收尾（runner 不该永远挂着），第二条原封不动。
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: first.sessionId })).toBe(true);
+    const stillPending = (forSecond as { request: { requestId: string } }).request.requestId;
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", stillPending, { granted: true, scope: "once" })).toBe(
+      true,
+    );
+    await vi.waitFor(() => {
+      expect(fs.existsSync(path.join(root, "b.txt"))).toBe(true);
+    });
+    // 被中止那条的审批已经不在挂起表里：再答一次是 false。
+    expect(
+      (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", (forFirst as { request: { requestId: string } }).request.requestId, {
+        granted: true,
+      }),
+    ).toBe(false);
+  });
+
   it("项目 .ox/config.json 的 maxTurns 真的决定工具循环上限", async () => {
     const root = seedChatWorkspace();
     fs.mkdirSync(path.join(root, ".ox"), { recursive: true });

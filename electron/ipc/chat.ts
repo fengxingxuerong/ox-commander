@@ -26,6 +26,7 @@ import { ChatSession } from "../chat/session";
 import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
+import { ThreadRegistry, type LiveThread } from "../chat/thread-registry";
 import { writeFileAtomic } from "../atomic-file";
 import {
   getProvider,
@@ -50,11 +51,9 @@ import {
 import { isApprovalPolicy, isSandboxMode } from "../../shared/tools/policy";
 import type { ChatFileChange } from "../../shared/tools/spec";
 
-interface LiveSession {
+interface LiveSession extends LiveThread {
   session: ChatSession;
   controller: AbortController;
-  rootAbs: string;
-  projectId: string;
   providerId: string;
   /**
    * 会话构造时的运行时签名。工具边界（项目根、沙箱档位、审批策略、模型池）
@@ -64,10 +63,16 @@ interface LiveSession {
   signature: string;
 }
 
-let live: LiveSession | null = null;
+/**
+ * 活线程登记表（M4a）：此前是 `let live` 单例，多线程并行下它会静默串台 ——
+ * 第二线程一建，第一线程的 transcript 就指向新的，`chat:abort` 会中止别人。
+ * 寻址规则（同 id 覆盖、删活跃项退位、同项目"最近活跃"）都在
+ * `chat/thread-registry` 里单独测过，这里只做接线。
+ */
+const liveThreads = new ThreadRegistry<LiveSession>();
 let sessionStore: ChatSessionStore | null = null;
-/** 挂起等待人答复的审批：requestId -> resolver。 */
-const pendingApprovals = new Map<string, (answer: ChatApprovalAnswer) => void>();
+/** 挂起等待人答复的审批：requestId -> 所属线程 + resolver（中止只清自己那几个）。 */
+const pendingApprovals = new Map<string, { sessionId: string; resolve: (answer: ChatApprovalAnswer) => void }>();
 
 function chatStore(): ChatSessionStore {
   if (!sessionStore) sessionStore = new ChatSessionStore(path.join(app.getPath("userData"), "chat"));
@@ -93,19 +98,35 @@ export function toolProtocolOf(
   }
 }
 
-/** 会话被中止 / 应用退出：把挂着没答的审批按拒绝收尾。 */
-function rejectAllApprovals(reason: string): void {
-  for (const [id, resolve] of [...pendingApprovals]) {
+/**
+ * 只拒绝**目标线程**的审批。
+ *
+ * 旧实现一刀切地把所有挂起审批按拒绝收尾 —— 单线程下等价，多线程下等于
+ * "中止 A 把 B 的审批也关了"，而 B 还在跑：模型那边等的是一个永远不会来的
+ * 答复，runner 会一直挂着。`null` = 全部（仅用于应用退出 / 重装配）。
+ */
+function rejectApprovals(sessionId: string | null, reason: string): void {
+  for (const [id, pending] of [...pendingApprovals]) {
+    if (sessionId !== null && pending.sessionId !== sessionId) continue;
     pendingApprovals.delete(id);
-    resolve({ granted: false, reason });
+    pending.resolve({ granted: false, reason });
   }
 }
 
-export function abortChatSession(): boolean {
-  if (!live) return false;
-  live.controller.abort();
-  rejectAllApprovals("会话已中止");
+/** 中止一条活线程；`sessionId` 缺席 = 最近活跃的那条（兼容旧调用）。 */
+export function abortChatSession(sessionId?: string): boolean {
+  const target = sessionId === undefined ? liveThreads.active() : liveThreads.get(sessionId);
+  if (!target) return false;
+  target.controller.abort();
+  rejectApprovals(target.sessionId, "会话已中止");
   return true;
+}
+
+/** 应用退出 / 重装配 IPC：所有线程一起收尾（生产只在启动时走到一次）。 */
+function abortAllChatSessions(): void {
+  for (const entry of liveThreads.all()) entry.controller.abort();
+  rejectApprovals(null, "会话已中止");
+  liveThreads.clear();
 }
 
 function sameRoot(a: string, b: string): boolean {
@@ -153,8 +174,12 @@ function buildSession(
     approvalCommands: runtime.approvalCommands,
     requestApproval: async (req: ChatApprovalRequest) =>
       await new Promise<ChatApprovalAnswer>((resolve) => {
-        pendingApprovals.set(req.requestId, resolve);
-        send({ type: "chat:approval-request", sessionId, request: req });
+        // 审批 id 只在**会话内**唯一（文本协议是 `t-1`/`t-2`，原生协议是模型给的
+        // call id）—— 两条线程同时问第一件事时就是同一个键：答一条等于答两条，
+        // 或者一条被另一条顶掉、永远挂着。对外暴露的 id 因此带上会话前缀。
+        const approvalId = `${sessionId}#${req.requestId}`;
+        pendingApprovals.set(approvalId, { sessionId, resolve });
+        send({ type: "chat:approval-request", sessionId, request: { ...req, requestId: approvalId } });
       }),
     onEvent: (text) => send({ type: "log", text }),
   });
@@ -182,7 +207,15 @@ function buildSession(
       }
     },
   });
-  live = { session, controller, rootAbs, projectId, providerId, signature: runtime.signature };
+  liveThreads.add({
+    sessionId: session.sessionId,
+    session,
+    controller,
+    rootAbs,
+    projectId,
+    providerId,
+    signature: runtime.signature,
+  });
   return session;
 }
 
@@ -212,21 +245,27 @@ function ensureLiveSession(
   settings: ProjectSettings,
   projectId: string,
   profile?: ChatRuntimeProfile,
+  sessionId?: string,
 ): ChatSession {
   const runtime = runtimeOf(rootAbs, settings, profile);
+  // 带 id = 只认那一条；不带 id = 本项目最近活跃的那条（旧客户端的口径）。
+  const existing = sessionId === undefined ? liveThreads.latestOf(projectId) : liveThreads.get(sessionId);
   if (
-    live !== null &&
-    live.signature === runtime.signature &&
-    live.projectId === projectId &&
-    !live.controller.signal.aborted
+    existing !== undefined &&
+    existing.signature === runtime.signature &&
+    existing.projectId === projectId &&
+    !existing.controller.signal.aborted
   ) {
-    return live.session;
+    liveThreads.setActive(existing.sessionId);
+    return existing.session;
   }
+  // 重建只接**自己的**历史：设置变了不等于聊天记录消失，但另一条线程的转录
+  // 与本条无关 —— 顺手接过来就是把两条线搅在一起（多线程下最隐蔽的串台）。
   let history: ChatHistory | undefined;
-  if (live !== null && sameRoot(live.rootAbs, rootAbs)) {
-    const snap = live.session.snapshot();
+  if (existing !== undefined && sameRoot(existing.rootAbs, rootAbs)) {
+    const snap = existing.session.snapshot();
     history = {
-      sessionId: live.session.sessionId,
+      sessionId: existing.session.sessionId,
       entries: snap.entries,
       messages: messagesForProtocol(
         snap.messages,
@@ -234,8 +273,8 @@ function ensureLiveSession(
       ),
       meta: snap.meta,
     };
+    liveThreads.remove(existing.sessionId);
   }
-  abortChatSession();
   return buildSession(rootAbs, settings, runtime, projectId, history, profile);
 }
 
@@ -255,8 +294,13 @@ function resumeIntoLive(projectId: string, sessionId: string, settings: ProjectS
   if (!sameRoot(env.rootAbs, rootAbs)) {
     throw new Error(`会话绑定的工作区已变化：${env.rootAbs}（当前 ${rootAbs}）`);
   }
-  abortChatSession();
-  live = null;
+  // 已经在跑的那条直接切过去（它的内存态比盘上更新，重建会丢本轮增量）。
+  const already = liveThreads.get(sessionId);
+  if (already !== undefined && !already.controller.signal.aborted) {
+    liveThreads.setActive(sessionId);
+    return already.session;
+  }
+  if (already !== undefined) liveThreads.remove(sessionId);
   const profile = profileOfMeta(env.snapshot.meta);
   const history: ChatHistory = {
     sessionId: env.snapshot.meta.sessionId,
@@ -275,6 +319,18 @@ function projectIdOf(input: unknown, channel: string): string {
   const projectId = typeof payload.projectId === "string" ? payload.projectId : "";
   if (projectId === "") throw new Error(`${channel} 需要 projectId`);
   return projectId;
+}
+
+/**
+ * 视图查询的目标线程：给了 id 就按 id 找，否则最近活跃的那条。
+ *
+ * 找不到返回 undefined（而不是报错）：`chat:transcript` 在页面挂载时会被无条件
+ * 调用一次，"还没有任何活线程"是正常状态，不是错误。
+ */
+function liveTargetOf(input: unknown): LiveSession | undefined {
+  const payload = (input ?? {}) as { sessionId?: unknown };
+  if (typeof payload.sessionId !== "string" || payload.sessionId === "") return liveThreads.active();
+  return liveThreads.get(payload.sessionId);
 }
 
 function sessionIdOf(input: unknown, channel: string): string {
@@ -435,13 +491,12 @@ function collectProjectFiles(rootAbs: string, runtime: ChatRuntime): ChatFileInd
 export function registerChatHandlers(): void {
   // 重新装配 IPC（测试里每个用例都会走一次）不能把上一个会话的控制器与
   // 挂起的审批带进来；生产只在启动时调用一次，这里等于空操作。
-  abortChatSession();
-  live = null;
+  abortAllChatSessions();
   sessionStore = null;
   pendingApprovals.clear();
 
   ipcMain.handle("chat:send", (_e, input: unknown) => {
-    const payload = (input ?? {}) as { text?: unknown; projectId?: unknown };
+    const payload = (input ?? {}) as { text?: unknown; projectId?: unknown; sessionId?: unknown };
     const text = typeof payload.text === "string" ? payload.text.trim() : "";
     if (text === "") throw new Error("chat:send 需要非空的 text");
     const projectId = typeof payload.projectId === "string" ? payload.projectId : "";
@@ -452,16 +507,30 @@ export function registerChatHandlers(): void {
     // 换项目/换设置/上一个会话已被中止都在这一处收口。首条消息也必须从这里
     // 拿会话 —— 旧实现只在“已有会话且项目变化”时重建，新装应用第一次发送
     // 会直接对 null 取 `.session`。
-    const session = ensureLiveSession(rootAbs, settings, projectId, profile);
+    const target = typeof payload.sessionId === "string" && payload.sessionId !== "" ? payload.sessionId : undefined;
+    // 指定了一条没在跑的线程（重启后、或从另一台设备恢复的 id）：先按记录恢复它，
+    // 而不是拿一条全新的会话顶替 —— 那会让"回这条线程继续"变成"又开了一条线"。
+    const session =
+      target !== undefined && liveThreads.get(target) === undefined
+        ? resumeIntoLive(projectId, target, settings)
+        : ensureLiveSession(rootAbs, settings, projectId, profile, target);
     void session.send(text).catch((e) => {
       send({ type: "chat:error", sessionId: session.sessionId, message: (e as Error).message });
     });
     return { sessionId: session.sessionId, accepted: true as const };
   });
 
-  ipcMain.handle("chat:abort", () => abortChatSession());
+  ipcMain.handle("chat:abort", (_e, input: unknown) => {
+    const payload = (input ?? {}) as { sessionId?: unknown };
+    return typeof payload.sessionId === "string" && payload.sessionId !== ""
+      ? abortChatSession(payload.sessionId)
+      : abortChatSession();
+  });
 
-  ipcMain.handle("chat:transcript", () => (live ? live.session.transcript() : null));
+  ipcMain.handle("chat:transcript", (_e, input: unknown) => {
+    const target = liveTargetOf(input);
+    return target ? target.session.transcript() : null;
+  });
 
   /**
    * 页面挂载时调用：有活会话就返回它，否则恢复该项目最近的一条记录。
@@ -469,17 +538,20 @@ export function registerChatHandlers(): void {
    */
   ipcMain.handle("chat:latest", (_e, input: unknown) => {
     const projectId = projectIdOf(input, "chat:latest");
-    if (live && live.projectId === projectId) {
-      if (live.controller.signal.aborted) {
-        const aborted = live;
+    const projectLive = liveThreads.latestOf(projectId);
+    if (projectLive !== undefined) {
+      if (projectLive.controller.signal.aborted) {
         ensureLiveSession(
-          aborted.rootAbs,
+          projectLive.rootAbs,
           settingsStore().load(),
           projectId,
-          profileOfMeta(aborted.session.transcript().meta),
+          profileOfMeta(projectLive.session.transcript().meta),
+          projectLive.sessionId,
         );
+        return liveThreads.get(projectLive.sessionId)?.session.transcript() ?? null;
       }
-      return live ? live.session.transcript() : null;
+      liveThreads.setActive(projectLive.sessionId);
+      return projectLive.session.transcript();
     }
     const latest = chatStore().latest(projectId);
     if (!latest) return null;
@@ -519,8 +591,7 @@ export function registerChatHandlers(): void {
     const forked = chatStore().fork(sessionId);
     if (!forked) throw new Error(`分叉失败：${sessionId}`);
     const rootAbs = requireProjectRoot(projectId, "分叉会话");
-    abortChatSession();
-    live = null;
+    // 分叉出一条**新**线程：原来那条继续跑（并行下"复制一份再改"是常见动作）。
     const settings = settingsStore().load();
     const profile = profileOfMeta(forked.snapshot.meta);
     const history: ChatHistory = {
@@ -544,9 +615,9 @@ export function registerChatHandlers(): void {
 
   ipcMain.handle("chat:delete", (_e, input: unknown) => {
     const sessionId = sessionIdOf(input, "chat:delete");
-    if (live?.session.sessionId === sessionId) {
-      abortChatSession();
-      live = null;
+    if (liveThreads.get(sessionId) !== undefined) {
+      abortChatSession(sessionId);
+      liveThreads.remove(sessionId);
     }
     return chatStore().delete(sessionId);
   });
@@ -571,10 +642,10 @@ export function registerChatHandlers(): void {
     const runtime = runtimeOf(rootAbs, settings);
 
     let entries: ChatHistory["entries"];
-    const liveSession = live?.session.sessionId === sessionId ? live.session : null;
-    if (liveSession) {
-      if (live?.projectId !== projectId) throw new Error("该会话不属于当前项目");
-      entries = liveSession.transcript().entries;
+    const liveEntry = liveThreads.get(sessionId);
+    if (liveEntry) {
+      if (liveEntry.projectId !== projectId) throw new Error("该会话不属于当前项目");
+      entries = liveEntry.session.transcript().entries;
     } else {
       const env = chatStore().load(sessionId);
       if (!env) throw new Error(`会话不存在或已损坏：${sessionId}`);
@@ -637,18 +708,16 @@ export function registerChatHandlers(): void {
     }
 
     const result: ChatRevertResult = { reverted, skipped };
-    if (liveSession) {
+    if (liveEntry) {
       const parts = [`已撤销第 ${turn} 轮改动：${reverted.length > 0 ? reverted.join("、") : "无"}`];
       if (skipped.length > 0) parts.push(`未撤销 ${skipped.length} 处（${skipped.map((s) => `${s.path}：${s.reason}`).join("；")}）`);
-      liveSession.note(parts.join("；"));
+      liveEntry.session.note(parts.join("；"));
     }
     return result;
   });
 
   ipcMain.handle("chat:new", (_e, input: unknown) => {
     const projectId = projectIdOf(input, "chat:new");
-    abortChatSession();
-    live = null;
     const rootAbs = requireProjectRoot(projectId, "新建会话");
     const settings = settingsStore().load();
     const profile = chatProfileOf(input);
@@ -664,11 +733,11 @@ export function registerChatHandlers(): void {
   });
 
   ipcMain.handle("chat:approval-decide", (_e, requestId: string, answer: unknown) => {
-    const resolve = pendingApprovals.get(requestId);
-    if (!resolve) return false;
+    const pending = pendingApprovals.get(requestId);
+    if (!pending) return false;
     pendingApprovals.delete(requestId);
     const a = (answer ?? {}) as ChatApprovalAnswer;
-    resolve({
+    pending.resolve({
       granted: a.granted === true,
       scope: a.scope === "session" ? "session" : "once",
       ...(typeof a.reason === "string" && a.reason.trim() !== "" ? { reason: a.reason.trim() } : {}),

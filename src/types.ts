@@ -514,6 +514,8 @@ declare global {
       sendChat(input: {
         text: string;
         projectId: string;
+        /** 目标线程；省略 = 本项目最近活跃的那条（M4a 之后多线程可并行）。 */
+        sessionId?: string;
         /** 线程自己的沙箱/审批/模型；省略 = 主进程按设置与项目配置合并。 */
         profile?: {
           mode: SandboxMode;
@@ -523,7 +525,8 @@ declare global {
           reasoningEffort?: ReasoningEffort;
         };
       }): Promise<{ sessionId: string; accepted: true }>;
-      abortChat(): Promise<boolean>;
+      /** 中止哪条线程；省略 = 最近活跃的那条。 */
+      abortChat(input?: { sessionId?: string }): Promise<boolean>;
       newChat(input: {
         projectId: string;
         /** 新线程沿用当前档位；省略 = 主进程按设置与项目配置合并。 */
@@ -535,7 +538,7 @@ declare global {
           reasoningEffort?: ReasoningEffort;
         };
       }): Promise<{ sessionId: string }>;
-      chatTranscript(): Promise<ChatTranscript | null>;
+      chatTranscript(input?: { sessionId?: string }): Promise<ChatTranscript | null>;
       /** 有活会话返回它，否则恢复当前项目最近一条；没有记录返回 null。 */
       chatLatest(input: { projectId: string }): Promise<ChatTranscript | null>;
       listChatSessions(input: { projectId: string }): Promise<ChatSessionSummary[]>;

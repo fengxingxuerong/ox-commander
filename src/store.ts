@@ -10,6 +10,23 @@ import { reasoningEffortsOf, type ReasoningEffort } from "../shared/providers";
 const api = () => window.oxCommander;
 
 /**
+ * 事件归属判定（M4a）。
+ *
+ * 三条规则，每条都对应一种真实的到达顺序：
+ * 1. 事件没有 `sessionId`（旧版本/测试构造）→ 当作当前线程的，否则升级后整个
+ *    视图一片空白；
+ * 2. 当前还没有 id（刚点发送、返回值未到）→ 接受，否则第一条消息的全部事件
+ *    会被自己丢掉；
+ * 3. 两边都有且不同 → **不是**本线程，丢弃。
+ */
+export function isEventForChat(currentSessionId: string | undefined, event: unknown): boolean {
+  const sessionId = (event as { sessionId?: unknown } | null | undefined)?.sessionId;
+  if (typeof sessionId !== "string" || sessionId === "") return true;
+  if (!currentSessionId) return true;
+  return sessionId === currentSessionId;
+}
+
+/**
  * Monotonic token for the in-flight planning request.
  *
  * `createAndOpen` and `retryPlanning` can both fire `runPlanning`, and a slow
@@ -138,6 +155,9 @@ export const useApp = create<AppState>((set, get) => ({
       const res = await api().sendChat({
         text: outgoing,
         projectId,
+        // 指定线程：M4a 之后宿主可同时跑多条，不指明就等于"最近活跃的那条"，
+        // 而在两条线程间来回切时"最近活跃"随时会变 —— 那会把话发进别人的线程。
+        ...(get().chat.sessionId ? { sessionId: get().chat.sessionId } : {}),
         profile: {
           mode: get().chat.mode,
           approvalPolicy: get().chat.approvalPolicy,
@@ -181,7 +201,9 @@ export const useApp = create<AppState>((set, get) => ({
   clearInlineComments: () => set((s) => ({ chat: { ...s.chat, comments: [] } })),
 
   abortChat: async () => {
-    await api().abortChat();
+    // 只中止当前这条：宿主已支持并行，"停止"波及别的线程是越权。
+    const sessionId = get().chat.sessionId;
+    await api().abortChat(sessionId ? { sessionId } : undefined);
     // 打字预览一并收掉：停止是用户当场看到的动作，不该等收尾事件回来才消失。
     set((s) => ({ chat: { ...s.chat, status: "aborted", pendingApproval: undefined, streaming: "" } }));
   },
@@ -740,6 +762,12 @@ export const useApp = create<AppState>((set, get) => ({
 
   handleEvent: (payload) => {
     const p = payload as Record<string, unknown>;
+    // 宿主已经能同时跑多条线程（M4a），事件里带 sessionId。别的线程的事件**不进
+    // 本视图** —— 串台的表现是"两条线程的正文拼进同一个转录"，比丢事件难查得多。
+    // 当前还没拿到 id 时（首条消息的返回值可能晚于第一个事件）按本线程处理。
+    if (typeof p.type === "string" && p.type.startsWith("chat:") && !isEventForChat(get().chat.sessionId, p)) {
+      return;
+    }
     switch (p.type) {
       case "stage":
         set((s) => ({ stage: p.stage as Stage, logs: [...s.logs, `── 阶段：${String(p.stage)} ──`] }));

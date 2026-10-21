@@ -133,6 +133,9 @@ describe("会话页（ChatPage）", () => {
     expect(bridge.sendChat.mock.calls[0][0]).toEqual({
       text: "把 a 改成 b",
       projectId: "p-1",
+      // M4a：宿主可同时跑多条线程，发送必须指明目标 —— 不指明就是"最近活跃的
+      // 那条"，在两条线程间来回切时那随时会变成别人的线程。
+      sessionId: "chat-1",
       profile: { mode: "workspace-write", approvalPolicy: "on-request" },
     });
   });
