@@ -851,7 +851,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 83,
+  "electron/ipc/chat.ts": 85,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
