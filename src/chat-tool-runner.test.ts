@@ -376,6 +376,26 @@ describe("ToolRunner · 并行写冲突（M4c）", () => {
     expect((await single.run(call("apply_patch", { patch: patch("b.txt", "x") }))).ok).toBe(true);
   });
 
+  it("自定义窗口生效：宿主给的窗口比默认短时，稍旧的写就不算并发", async () => {
+    const root = project();
+    // 5 秒前的写：默认窗口（10 分钟）算冲突，1 秒窗口不算。
+    const writes = () => [{ sessionId: "chat-other", path: "a.txt", ts: Date.now() - 5_000 }];
+    const wide = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: writes,
+      requestApproval: async () => ({ granted: false }),
+    });
+    expect((await wide.run(call("apply_patch", { patch: patch("a.txt", "x") }))).ok).toBe(false);
+
+    const narrow = runner(root, {
+      sessionId: "chat-mine",
+      conflictWrites: writes,
+      conflictWindowMs: 1_000,
+      requestApproval: async () => ({ granted: false }),
+    });
+    expect((await narrow.run(call("apply_patch", { patch: patch("a.txt", "y") }))).ok).toBe(true);
+  });
+
   it("写成功后回灌台账（别的线程下一步才看得见）", async () => {
     const root = project();
     const recorded: string[] = [];

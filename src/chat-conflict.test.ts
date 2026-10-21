@@ -7,6 +7,7 @@ import {
   threadWrites,
 } from "../electron/chat/write-ledger";
 import {
+  compareConflictPaths,
   DEFAULT_CONFLICT_WINDOW_MS,
   conflictFacts,
   describeAgo,
@@ -55,6 +56,36 @@ describe("conflictFacts", () => {
       { sessionId: "chat-self", now: NOW },
     );
     expect(facts).toEqual([{ path: "src/a.ts", otherSessionId: "chat-new", agoMs: 2_000 }]);
+  });
+
+  it("自己的写在前面也不该挡住后面别人的写（continue 不是 break）", () => {
+    const facts = conflictFacts(
+      ["src/a.ts"],
+      [
+        w("chat-self", "src/a.ts", NOW - 1_000),
+        w("chat-other", "src/a.ts", NOW - 2_000),
+      ],
+      { sessionId: "chat-self", now: NOW },
+    );
+    expect(facts).toEqual([{ path: "src/a.ts", otherSessionId: "chat-other", agoMs: 2_000 }]);
+  });
+
+  it("过期的写在前面也不该收摊：后面还有新的并发写", () => {
+    const facts = conflictFacts(
+      ["src/a.ts"],
+      [
+        w("chat-old", "src/a.ts", NOW - DEFAULT_CONFLICT_WINDOW_MS - 1_000),
+        w("chat-new", "src/a.ts", NOW - 3_000),
+      ],
+      { sessionId: "chat-self", now: NOW },
+    );
+    expect(facts).toEqual([{ path: "src/a.ts", otherSessionId: "chat-new", agoMs: 3_000 }]);
+  });
+
+  it("比较器的三档都成立（相等那档单独测，否则永远不可达）", () => {
+    expect(compareConflictPaths("a", "b")).toBe(-1);
+    expect(compareConflictPaths("b", "a")).toBe(1);
+    expect(compareConflictPaths("a", "a")).toBe(0);
   });
 
   it("多条路径按字典序返回；没冲突的路径不出现", () => {

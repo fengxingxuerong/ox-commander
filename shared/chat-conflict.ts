@@ -41,6 +41,18 @@ export interface ConflictFact {
 export const DEFAULT_CONFLICT_WINDOW_MS = 10 * 60_000;
 
 /**
+ * 路径排序比较器。
+ *
+ * 单独导出是为了让"相等"这一档**可达**：`conflictFacts` 里每条路径最多出一条
+ * 事实，相等分支在日常输入下永远走不到（一次补丁里同一路径重复出现才会走到），
+ * 于是坏比较器在那里全绿。这与 `chat-changes` 里那条教训是同一条：**比较器必须
+ * 单独可测，否则"相等"这一档永远测不到，而它恰是坏比较器最先烂掉的地方。**
+ */
+export function compareConflictPaths(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
  * 判断一组待写路径里有哪些被**别的线程**刚改过。
  *
  * 返回按路径字典序排序的事实列表（稳定，方便测试与界面展示）；没有冲突时
@@ -66,7 +78,7 @@ export function conflictFacts(
     }
     if (best !== undefined) out.push({ path: p, otherSessionId: best.sessionId, agoMs: Math.max(0, opts.now - best.ts) });
   }
-  out.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
+  out.sort((a, b) => compareConflictPaths(a.path, b.path));
   return out;
 }
 
