@@ -17,6 +17,7 @@ import {
 import { PROJECT_CONFIG_VERSION, normalizeProjectConfig, type ProjectChatConfig } from "../../shared/project-config";
 import type { ProjectSettings } from "../../shared/types";
 import type { ApprovalPolicy, SandboxMode } from "../../shared/tools/policy";
+import type { ReasoningEffort } from "../../shared/providers";
 
 /**
  * 一次会话的**运行时边界**：沙箱档位、审批策略、路径/命令地板、项目约定
@@ -42,7 +43,13 @@ export interface ChatRuntimeOptions {
    * 线程级覆盖（M3c）：显式选择的档位/审批策略要压过项目配置与全局设置。
    * 省略 = 逐字沿用原来的合并顺序。
    */
-  profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy; providerId?: string; model?: string };
+  profile?: {
+    mode: SandboxMode;
+    approvalPolicy: ApprovalPolicy;
+    providerId?: string;
+    model?: string;
+    reasoningEffort?: ReasoningEffort;
+  };
 }
 
 export interface ChatRuntime {
@@ -163,6 +170,7 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
         pool: settings.llmPool ?? [],
         threadProvider: opts.profile?.providerId ?? null,
         threadModel: opts.profile?.model ?? null,
+        threadReasoning: opts.profile?.reasoningEffort ?? null,
         disabledKeys: settings.disabledKeyVars ?? [],
         policy: policy ? describePolicy(policy) : "",
         policyFiles: policyFingerprint(policyDirs),

@@ -16,6 +16,7 @@ import type {
   ChatTranscript,
 } from "../shared/chat-events";
 import type { ApprovalPolicy, SandboxMode } from "../shared/tools/policy";
+import type { ReasoningEffort } from "../shared/providers";
 import type { GithubIssue, GithubIssueListResult } from "../electron/context/github-readonly";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
@@ -196,6 +197,8 @@ export interface ChatView {
   /** 线程钉死的线路（M3c-2）；两者同时缺席 = 跟随全局 provider/pool。 */
   providerId?: string;
   model?: string;
+  /** 线程级推理强度（M3c-3）；省略 = 不主动开思考。 */
+  reasoningEffort?: ReasoningEffort;
   pendingApproval?: ChatApprovalRequest;
   /** 需要人看着时给的一句话（如"没有选项目"）——空串表示没有。 */
   notice: string;
@@ -306,6 +309,8 @@ export interface AppState {
   setChatApproval(policy: ApprovalPolicy): void;
   /** `null` = 这条线程恢复跟随全局 provider/pool。 */
   setChatModel(line: { providerId: string; model: string } | null): void;
+  /** 线程级推理强度（M3c-3）；`undefined` = 回到默认（不主动开思考）。 */
+  setChatReasoning(effort: ReasoningEffort | undefined): void;
   /** 展开 / 收起右栏改动审查（M2）。显式给值，不做无参翻转 —— 翻转在多处触发时会分不清谁翻的。 */
   setReviewOpen(open: boolean): void;
   /**
@@ -515,6 +520,7 @@ declare global {
           approvalPolicy: ApprovalPolicy;
           providerId?: string;
           model?: string;
+          reasoningEffort?: ReasoningEffort;
         };
       }): Promise<{ sessionId: string; accepted: true }>;
       abortChat(): Promise<boolean>;
@@ -526,6 +532,7 @@ declare global {
           approvalPolicy: ApprovalPolicy;
           providerId?: string;
           model?: string;
+          reasoningEffort?: ReasoningEffort;
         };
       }): Promise<{ sessionId: string }>;
       chatTranscript(): Promise<ChatTranscript | null>;

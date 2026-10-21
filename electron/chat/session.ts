@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import type { LlmClient } from "../../shared/llm-client";
-import type { ChatMessage } from "../../shared/providers";
+import type { ChatMessage, ReasoningEffort } from "../../shared/providers";
 import type { ToolName } from "../../shared/tools/spec";
 import { TOOL_NAMES, TOOL_SPECS } from "../../shared/tools/spec";
 import { parseToolTurn, toolCatalogBlock, toolResultBlock } from "../../shared/tools/protocol";
@@ -68,6 +68,8 @@ export interface ChatSessionOptions {
   /** 线程钉死的线路（M3c-2）；省略 = 跟随全局 provider/pool。 */
   providerId?: string;
   model?: string;
+  /** 线程级推理强度（M3c-3）；只在线路支持时由宿主传入。 */
+  reasoningEffort?: ReasoningEffort;
   /**
    * 要不要把正文增量（`chat:delta`）发出去。默认开。
    *
@@ -132,6 +134,7 @@ export class ChatSession {
   private readonly signal?: AbortSignal;
   private readonly now: () => number;
   private readonly stream: boolean;
+  private readonly reasoningEffort?: ReasoningEffort;
   private readonly compact: CompactOptions | false;
   private readonly summarize?: (source: string, signal?: AbortSignal) => Promise<string>;
   private readonly messages: ChatMessage[] = [];
@@ -160,6 +163,7 @@ export class ChatSession {
     this.signal = opts.signal;
     this.now = opts.now ?? Date.now;
     this.stream = opts.stream ?? true;
+    this.reasoningEffort = opts.reasoningEffort;
     this.compact = opts.compact === undefined ? {} : opts.compact;
     this.summarize = opts.summarize;
     // 会话 id 会进文件名与恢复索引：`Math.random` 既不满足仓库"零随机"
@@ -180,6 +184,9 @@ export class ChatSession {
       mode: opts.mode ?? "workspace-write",
       approvalPolicy: opts.approvalPolicy ?? "on-request",
       ...(opts.providerId && opts.model ? { providerId: opts.providerId, model: opts.model } : {}),
+      ...(opts.reasoningEffort && opts.providerId && opts.model
+        ? { reasoningEffort: opts.reasoningEffort }
+        : {}),
       usageTokens: history?.meta?.usageTokens ?? 0,
     };
     if (history) {
@@ -368,6 +375,7 @@ export class ChatSession {
     if (this.summarize) return this.summarize(source, this.signal);
     // 缺省实现：**不带工具**地问一次 —— 压缩请求绝不能再触发工具循环，
     // 否则"整理上下文"会变成"又去读了一遍文件"。
+    // 压缩是维护动作，故意不带线程推理强度：整理历史不需要再深思一次。
     const res = await this.client.chat({
       messages: [
         { role: "system", content: COMPACTION_INSTRUCTION },
@@ -398,6 +406,7 @@ export class ChatSession {
         ...(this.toolProtocol === "native"
           ? { tools: TOOL_SPECS.filter((s) => this.tools.includes(s.name)) }
           : {}),
+        ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
         ...(this.signal ? { signal: this.signal } : {}),
         // 给了回调 = 想要增量：客户端先试 SSE，**零增量**就整段退回普通请求，
         // 所以这里不需要判断"端点支不支持流"。
@@ -424,7 +433,11 @@ export class ChatSession {
           // 表现为"模型假装读过"（protocol.ts 里同一条理由）。
           const parts = [finalText, ...parsed.problems.map((p) => `（解析问题）${p}`)];
           this.push({ kind: "assistant", text: parts.join("\n").trim() });
-          this.messages.push({ role: "assistant", content: finalText });
+          this.messages.push({
+            role: "assistant",
+            content: finalText,
+            ...(this.toolProtocol === "native" && res.reasoning ? { reasoning: res.reasoning } : {}),
+          });
         }
         this.setStatus("done");
         this.persist();
@@ -445,6 +458,7 @@ export class ChatSession {
         role: "assistant",
         content: parsed.text.trim(),
         ...(this.toolProtocol === "native" ? { toolCalls: parsed.calls } : {}),
+        ...(this.toolProtocol === "native" && res.reasoning ? { reasoning: res.reasoning } : {}),
       });
 
       const results = [];

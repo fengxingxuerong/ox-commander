@@ -10,7 +10,7 @@
  */
 import type { ToolCall, ToolResult } from "./tools/spec";
 import type { SandboxMode, ApprovalPolicy } from "./tools/policy";
-import type { ChatMessage } from "./providers";
+import type { ChatMessage, ReasoningEffort } from "./providers";
 
 export type ChatEntryKind = "user" | "assistant" | "tool_call" | "tool_result" | "approval" | "error" | "system";
 
@@ -51,6 +51,11 @@ export interface ChatRuntimeProfile {
    */
   providerId?: string;
   model?: string;
+  /**
+   * 线程级推理强度（M3c-3）。只在固定线路且该线路已登记档位时出现；
+   * 省略 = 保持平台默认（不主动开思考）。
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 export interface ChatSessionMeta {
@@ -66,6 +71,8 @@ export interface ChatSessionMeta {
   /** 固定线路时才有；缺席 = 这条线程跟随全局 provider/pool。 */
   providerId?: string;
   model?: string;
+  /** 固定线路且该线路支持时才出现；缺席 = 不主动开思考。 */
+  reasoningEffort?: ReasoningEffort;
   usageTokens: number;
 }
 

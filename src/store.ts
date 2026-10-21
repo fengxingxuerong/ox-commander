@@ -5,6 +5,7 @@ import { isFailureClass } from "../shared/types";
 import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
 import { renderIssueRequirement, type GithubIssue } from "../shared/github-issue";
 import type { ChatApprovalRequest, ChatEntry, ChatStatus } from "../shared/chat-events";
+import { reasoningEffortsOf, type ReasoningEffort } from "../shared/providers";
 
 const api = () => window.oxCommander;
 
@@ -97,9 +98,23 @@ export const useApp = create<AppState>((set, get) => ({
   setChatMode: (mode) => set((s) => ({ chat: { ...s.chat, mode } })),
   setChatApproval: (approvalPolicy) => set((s) => ({ chat: { ...s.chat, approvalPolicy } })),
   setChatModel: (line) =>
-    set((s) => ({
-      chat: { ...s.chat, providerId: line?.providerId, model: line?.model },
-    })),
+    set((s) => {
+      // 换到未登记推理档的线路时清掉旧档位，避免把上一个模型的能力带过去。
+      const keepReasoning =
+        line !== null &&
+        s.chat.reasoningEffort !== undefined &&
+        reasoningEffortsOf(line.providerId, line.model).includes(s.chat.reasoningEffort);
+      return {
+        chat: {
+          ...s.chat,
+          providerId: line?.providerId,
+          model: line?.model,
+          reasoningEffort: keepReasoning ? s.chat.reasoningEffort : undefined,
+        },
+      };
+    }),
+  setChatReasoning: (reasoningEffort: ReasoningEffort | undefined) =>
+    set((s) => ({ chat: { ...s.chat, reasoningEffort } })),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
 
   sendChat: async () => {
@@ -127,7 +142,11 @@ export const useApp = create<AppState>((set, get) => ({
           mode: get().chat.mode,
           approvalPolicy: get().chat.approvalPolicy,
           ...(get().chat.providerId && get().chat.model
-            ? { providerId: get().chat.providerId, model: get().chat.model }
+            ? {
+                providerId: get().chat.providerId,
+                model: get().chat.model,
+                ...(get().chat.reasoningEffort ? { reasoningEffort: get().chat.reasoningEffort } : {}),
+              }
             : {}),
         },
       });
@@ -174,7 +193,20 @@ export const useApp = create<AppState>((set, get) => ({
       return;
     }
     try {
-      const res = await api().newChat({ projectId });
+      const res = await api().newChat({
+        projectId,
+        profile: {
+          mode: get().chat.mode,
+          approvalPolicy: get().chat.approvalPolicy,
+          ...(get().chat.providerId && get().chat.model
+            ? {
+                providerId: get().chat.providerId,
+                model: get().chat.model,
+                ...(get().chat.reasoningEffort ? { reasoningEffort: get().chat.reasoningEffort } : {}),
+              }
+            : {}),
+        },
+      });
       set((s) => ({
         chat: {
           ...s.chat,
@@ -216,6 +248,7 @@ export const useApp = create<AppState>((set, get) => ({
             approvalPolicy: t.meta.approvalPolicy,
             providerId: t.meta.providerId,
             model: t.meta.model,
+            reasoningEffort: t.meta.reasoningEffort,
             pendingApproval: undefined,
             streaming: "",
           },
@@ -270,6 +303,7 @@ export const useApp = create<AppState>((set, get) => ({
           approvalPolicy: t.meta.approvalPolicy,
           providerId: t.meta.providerId,
           model: t.meta.model,
+          reasoningEffort: t.meta.reasoningEffort,
           pendingApproval: undefined,
           notice: "",
           streaming: "",
@@ -301,6 +335,7 @@ export const useApp = create<AppState>((set, get) => ({
           approvalPolicy: t.meta.approvalPolicy,
           providerId: t.meta.providerId,
           model: t.meta.model,
+          reasoningEffort: t.meta.reasoningEffort,
           pendingApproval: undefined,
           notice: "",
           streaming: "",

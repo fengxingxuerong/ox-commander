@@ -1307,8 +1307,11 @@ const EQUIVALENT_SITES = [
    *
    * ⚠️ 行号是锚点：`profileOfMeta` 结构变化使该行漂移时，变异会重新出现 ——
    * 届时按新行号校回，并重新确认下游两条校验仍在。
+   *
+   * 2026-10-21：M3c-3 在 `chatProfileOf` 里插入推理强度校验（+27 行），锚点
+   * 318 → 345。论证不变：`getProvider` / `isModelId` 仍是同一对兜底。
    */
-  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 318 },
+  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 345 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

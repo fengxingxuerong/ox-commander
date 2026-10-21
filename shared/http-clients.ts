@@ -1,4 +1,4 @@
-import { getProvider, resolveTemperature, type ChatMessage, type ProviderConfig } from "./providers";
+import { getProvider, reasoningEffortsOf, resolveTemperature, type ChatMessage, type ProviderConfig } from "./providers";
 import type { ChatRequest, ChatResponse, LlmClient } from "./llm-client";
 import {
   createAnthropicStreamReader,
@@ -319,11 +319,19 @@ export function toOpenAiMessages(messages: readonly ChatMessage[]): Array<Record
       return {
         role: "assistant",
         content: m.content,
+        ...(m.reasoning ? { reasoning_content: m.reasoning } : {}),
         tool_calls: m.toolCalls.map((c) => ({
           id: c.id,
           type: "function",
           function: { name: c.name, arguments: JSON.stringify(c.args ?? {}) },
         })),
+      };
+    }
+    if (m.role === "assistant") {
+      return {
+        role: "assistant",
+        content: m.content,
+        ...(m.reasoning ? { reasoning_content: m.reasoning } : {}),
       };
     }
     return { role: m.role, content: m.content };
@@ -374,14 +382,24 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
        * 在两个不同模型上，2026-09-20 真实案例）。用端点声明的
        * max_output_length（65536）作为上限，reasoning 再长也不会吃掉正文。
        *
-       * 同时关闭思考模式：sensenova 的推理模型思考一次要拖慢生成 15–20 倍
+       * 默认关闭思考模式：sensenova 的推理模型思考一次要拖慢生成 15–20 倍
        * （实测同一请求 42–60s → 3.1s），是 PLANNING 超时的另一半根因。
-       * OpenAI 兼容层对未知 body 字段普遍忽略；若未来某家报 400，
-       * 再做成 per-provider 开关。
+       * 线程显式选了推理强度时才改发 `reasoning_effort` 并去掉这个关闭开关
+       * —— 两者同时发虽然实测仍会推理，但语义冲突，不能靠端点"碰巧忽略"。
        */
       max_tokens: 65536,
-      enable_thinking: false,
     };
+    if (req.reasoningEffort !== undefined) {
+      const allowed = reasoningEffortsOf(this.config.id, this.config.defaultModel);
+      if (!allowed.includes(req.reasoningEffort)) {
+        throw new Error(
+          `模型 ${this.config.defaultModel} 未登记推理强度 ${req.reasoningEffort}（provider=${this.config.id}）`,
+        );
+      }
+      body.reasoning_effort = req.reasoningEffort;
+    } else {
+      body.enable_thinking = false;
+    }
     if (req.jsonMode) body.response_format = { type: "json_object" };
     // 只有端点声明原生支持时才发 tools 字段（理由见 `ProviderConfig.tools`）。
     if (this.config.tools === "native" && req.tools && req.tools.length > 0) {
@@ -414,6 +432,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
     }
     const toolCalls = parseOpenAiToolCalls(raw);
     // Some reasoning models put the answer in reasoning_content and leave content empty.
+    const reasoning = (raw.reasoning_content ?? "").trim();
     const content = (raw.content ?? "").trim() !== "" ? (raw.content ?? "") : (raw.reasoning_content ?? "");
     const usage = data.usage as { total_tokens?: number } | undefined;
     return {
@@ -421,6 +440,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       provider: this.config.id,
       model: String(data.model ?? this.config.defaultModel),
       usageTokens: usage?.total_tokens,
+      ...(reasoning !== "" ? { reasoning } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }
@@ -470,6 +490,7 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
       provider: this.config.id,
       model: this.config.defaultModel,
       ...(out.usageTokens !== undefined ? { usageTokens: out.usageTokens } : {}),
+      ...(out.reasoning !== "" ? { reasoning: out.reasoning } : {}),
       ...(toolCalls.length > 0 ? { toolCalls } : {}),
     };
   }

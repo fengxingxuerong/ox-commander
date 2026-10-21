@@ -1,5 +1,19 @@
 import type { ToolCall, ToolSpec } from "./tools/spec";
 
+/**
+ * 线程级推理强度（M3c-3）。
+ *
+ * 只提供**已实测接受 `reasoning_effort`** 的线路与档位；不是所有 OpenAI 兼容
+ * 端点都认这个字段，也不是同一档位在所有模型上都等价。能力表放在
+ * `reasoningEffortsOf`，UI 与请求体共用同一份判定。
+ */
+export const REASONING_EFFORTS = ["low", "medium", "high"] as const;
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number];
+
+export function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && (REASONING_EFFORTS as readonly string[]).includes(value);
+}
+
 export interface ChatMessage {
   role: "system" | "user" | "assistant" | "tool";
   content: string;
@@ -13,12 +27,25 @@ export interface ChatMessage {
   toolCalls?: ToolCall[];
   /** 原生路径下 **tool** 消息对应的调用 id。 */
   toolCallId?: string;
+  /**
+   * 思考内容（OpenAI 兼容端的 `reasoning_content`）。
+   *
+   * 只在原生工具循环里回灌：DeepSeek 系文档要求带 `tools` 的请求把历史
+   * `reasoning_content` 原样带回，否则下一轮可能丢掉推理上下文。没有原生
+   * 工具时端点会忽略它，所以不存进消息以控制会话体积。
+   */
+  reasoning?: string;
 }
 
 export interface ChatRequest {
   messages: ChatMessage[];
   temperature?: number;
   jsonMode?: boolean;
+  /**
+   * 线程级推理强度。省略 = 保持平台原有行为（默认关闭思考，省时省费）；
+   * 只有 `reasoningEffortsOf(provider, model)` 声明过的线路才接受它。
+   */
+  reasoningEffort?: ReasoningEffort;
   /**
    * 本轮开放给模型的工具表。`undefined` 或空数组 = 不开放（行为与以前一致）。
    *
@@ -60,6 +87,11 @@ export interface ChatResponse {
   provider: string;
   model: string;
   usageTokens?: number;
+  /**
+   * 本轮思考内容（OpenAI 兼容端的 `reasoning_content`）。流式与整段两条路径
+   * 都聚合到同一个字段，宿主据此决定是否在原生工具循环里回灌。
+   */
+  reasoning?: string;
   /**
    * 模型要求调用的工具（原生路径下由端点结构化返回；文本路径下平台从正文里
    * 解析后再填进这里）。两种来源对下游是**同一个结构** —— 这是工具循环只写
@@ -196,6 +228,33 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
     apiKeyEnvVar: "NVIDIA_API_KEY",
   },
 ];
+
+/**
+ * 已实测接受 `reasoning_effort` 的**线路级**能力表。
+ *
+ * 为什么按 provider + model 而不是按 provider：同一家端点会同时卖推理型与
+ * 非推理型模型（SenseNova 的 `deepseek-v4-flash` 与 `sensenova-6.8-flash-lite`），
+ * 按 provider 一刀切会把不认识的字段发给非推理模型。
+ *
+ * 当前只登记两条实测线路：
+ * - `sensenova/deepseek-v4-flash`：low / medium / high 均 200 且返回
+ *   `reasoning_content`（2026-10-21 真请求验证；`none` 关闭思考，但平台默认
+ *   就是关闭，不需要单独暴露）。
+ * - `sensenova/glm-5.2`：只登记 high；端点接受 low/medium 但文档映射到 high，
+ *   把它显示成三档会变成"选了低/中，实际仍是高"的假开关。
+ *
+ * 未登记 = 不发 `reasoning_effort`。新增线路前先用真实请求确认档位与返回字段，
+ * 再改这张表。
+ */
+const REASONING_EFFORTS_BY_LINE: Readonly<Record<string, readonly ReasoningEffort[]>> = {
+  "sensenova/deepseek-v4-flash": REASONING_EFFORTS,
+  "sensenova/glm-5.2": ["high"],
+};
+
+/** 某条线路允许的推理档位；空数组 = 未登记，调用方不得发 `reasoning_effort`。 */
+export function reasoningEffortsOf(providerId: string, model: string): readonly ReasoningEffort[] {
+  return REASONING_EFFORTS_BY_LINE[`${providerId}/${model}`] ?? [];
+}
 
 /**
  * 某个 provider 端点的**覆盖变量名**：`OX_LLM_BASE_URL_<ID>`（大写、连字符换下划线）。

@@ -122,6 +122,52 @@
 流式改动被整份抹掉，且 `git status` 看不出来（等于静默回退到 HEAD）。教训：
 **跑变异/审计类脚本前先提交**（或至少留一个可恢复的快照）；过期台账目录已清理。
 
+### 新增（线程级推理强度 M3c-3 · 2026-10-21）
+
+**动机**：M3c-2 收尾时明确写了「不碰推理强度」——各端点 reasoning 字段不统一，先不做
+没有真实效果的开关。这一轮把「不统一」这件事本身做成数据：**能力表按 provider×model
+登记，未登记就不发字段**。同一家端点既卖推理型也卖非推理型模型（`deepseek-v4-flash`
+vs `sensenova-6.8-flash-lite`），按 provider 一刀切会把不认识的字段发给普通模型 ——
+所以判据必须细到线路。
+
+**实测先于代码**（2026-10-21 真请求）：
+
+| 线路 | low | medium | high | 返回 `reasoning_content` |
+| --- | --- | --- | --- | --- |
+| `sensenova/deepseek-v4-flash` | 200 | 200 | 200 | 是 |
+| `sensenova/glm-5.2` | 200（文档映射到 high） | 同左 | 200 | 是 |
+| `sensenova/kimi-k3` | 探测 429、文档仅 `max` | — | — | 未验证 |
+
+glm-5.2 只登记 `high`：把 low/medium 显示成三档 = 「选了低档实际跑高档」的假开关，
+比不显示更坏。Kimi 与 Anthropic 本轮不开（后者需要保留带签名的 thinking blocks，
+当前工具循环只存纯文本 reasoning，回灌会 400）。
+
+**实现要点**：
+
+- `REASONING_EFFORTS` / `isReasoningEffort` / `reasoningEffortsOf` 放在
+  `shared/providers.ts`：UI 下拉与请求体共用**同一份**判定，不各写一套。
+- `ChatRequest.reasoningEffort` 与 `enable_thinking: false` 互斥：显式选了强度就发
+  `reasoning_effort` 并撤掉关闭开关；两者同时发实测仍会推理，但语义冲突不能靠端点
+  「碰巧忽略」。未登记线路收到强度时**抛错**，不静默降级 —— 静默降级会让操作者以为
+  自己在用高档。
+- `ChatResponse.reasoning` 在整段与 SSE 两条路径都聚合（有的模型把答案写进
+  `reasoning_content` 而 `content` 为空，这条此前已有兜底）；原生协议把上一轮
+  reasoning 随 assistant 消息回灌，文本协议不存（避免会话体积翻倍）。
+- 线程档位进 `ChatSessionMeta`：恢复、分叉、开新会话都从 meta 沿用；换线路时
+  store 会**清掉**旧档位（`setChatModel` 里查能力表），否则会给新模型带上它不认识的档。
+- 压缩摘要故意不带强度：维护动作不该变成第二次深思。
+
+**审计抓到的三处「假绿」**（都不是编译错，是"没测到"）：
+
+1. `isReasoningEffort` 两个位点存活（`&& → ||`、`=== → !==`）：原用例只经 IPC 走
+   非法值，`typeof` 与 `includes` 两条腿从未被分开验证。补的直接单测里，`"max"`
+   （字符串但不在表内）钉 `includes` 腿，`"high"` 被接受钉 `typeof` 腿。
+2. `toOpenAiMessages` 的**无 tool_calls 助手分支**三元互换存活：既有用例只覆盖
+   「带 tool_calls 的助手消息回灌 reasoning」，而工具循环**收尾那条**（正文已出、
+   没有 tool_calls）是另一条 return。它丢字段不报错，只让下一轮追问丢掉推理上下文。
+3. 这两处都属于同一类：**新加的分支要先问"哪条 assertion 只能由它满足"**，
+   否则测的是邻居。
+
 ### 新增（线程级模型 M3c-2 · 2026-10-21）
 
 **动机**：Codex 的模型选择在会话头，不在全局设置里 —— 一条线程用快模型摸现状、另一条

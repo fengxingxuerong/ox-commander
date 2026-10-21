@@ -2967,6 +2967,27 @@ describe("chat handlers（交互式编码会话）", () => {
         profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "deepseek", model: "bad model" },
       }),
     ).toThrow(/profile\.model/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "sensenova", model: "deepseek-v4-flash", reasoningEffort: "max" },
+      }),
+    ).toThrow(/reasoningEffort 不合法/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", reasoningEffort: "high" },
+      }),
+    ).toThrow(/需要固定 provider 与 model/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "sensenova", model: "kimi-k3", reasoningEffort: "high" },
+      }),
+    ).toThrow(/不被当前线路支持/);
   });
 
   it("chat:new 的线程线路：只给 provider 用默认模型，只给 model 用全局 provider", () => {
@@ -2993,6 +3014,57 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(transcript.meta.model).toBe("deepseek-v4-flash");
   });
 
+  it("chat:new 的推理强度：合法线路写入 meta，缺线路/不支持时拒绝", () => {
+    seedChatWorkspace();
+    const base = { mode: "read-only" as const, approvalPolicy: "on-request" as const };
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: { ...base, providerId: "sensenova", model: "deepseek-v4-flash", reasoningEffort: "medium" },
+    });
+    let transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: { reasoningEffort?: string };
+    };
+    expect(transcript.meta.reasoningEffort).toBe("medium");
+
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+        projectId: "p-chat",
+        profile: { ...base, reasoningEffort: "high" },
+      }),
+    ).toThrow(/需要固定 provider 与 model/);
+    // 半截组合同样要拒：给了 model 没给 providerId 时，线路仍未固定。
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+        projectId: "p-chat",
+        profile: { ...base, model: "deepseek-v4-flash", reasoningEffort: "high" },
+      }),
+    ).toThrow(/需要固定 provider 与 model/);
+    // 反过来：只有 provider 没有 model —— 同样不是一条确定的线路。
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+        projectId: "p-chat",
+        profile: { ...base, providerId: "sensenova", reasoningEffort: "high" },
+      }),
+    ).toThrow(/需要固定 provider 与 model/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+        projectId: "p-chat",
+        profile: { ...base, providerId: "sensenova", model: "kimi-k3", reasoningEffort: "high" },
+      }),
+    ).toThrow(/不被当前线路支持/);
+
+    // 钉了线路、没选强度：meta 里**不能有这个键**（`reasoningEffort: undefined`
+    // 落盘后在 JSON 里变成缺键，但内存断言与分叉合并会把它当"已选"）。
+    (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: { ...base, providerId: "sensenova", model: "deepseek-v4-flash" },
+    });
+    const plain = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: Record<string, unknown>;
+    };
+    expect("reasoningEffort" in plain.meta).toBe(false);
+  });
+
   it("chat:latest 中止后按 meta 的 provider/model 重建线路", () => {
     seedChatWorkspace();
     (h.ipcMain as FakeIpcMain).invoke("chat:new", {
@@ -3010,6 +3082,42 @@ describe("chat handlers（交互式编码会话）", () => {
     };
     expect(transcript.meta.providerId).toBe("deepseek");
     expect(transcript.meta.model).toBe("deepseek-reasoner");
+  });
+
+  it("chat:latest 保留合法推理档，并丢弃旧快照里已不支持的档", () => {
+    seedChatWorkspace();
+    const created = (h.ipcMain as FakeIpcMain).invoke("chat:new", {
+      projectId: "p-chat",
+      profile: {
+        mode: "read-only",
+        approvalPolicy: "on-request",
+        providerId: "sensenova",
+        model: "deepseek-v4-flash",
+        reasoningEffort: "high",
+      },
+    }) as { sessionId: string };
+    (h.ipcMain as FakeIpcMain).invoke("chat:abort");
+    let transcript = (h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" }) as {
+      meta: { reasoningEffort?: string };
+    };
+    expect(transcript.meta.reasoningEffort).toBe("high");
+    (h.ipcMain as FakeIpcMain).invoke("chat:delete", { sessionId: created.sessionId });
+
+    const id = saveStoredSession([]);
+    const file = storedEnvelopePath(id);
+    const env = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      snapshot: { meta: Record<string, unknown> };
+    };
+    env.snapshot.meta.providerId = "sensenova";
+    env.snapshot.meta.model = "kimi-k3";
+    env.snapshot.meta.reasoningEffort = "high";
+    env.snapshot.meta.updatedAt = Date.now() + 10_000;
+    fs.writeFileSync(file, JSON.stringify(env), "utf8");
+    fs.rmSync(path.join(tmp, "chat", "index.json"), { force: true });
+    transcript = (h.ipcMain as FakeIpcMain).invoke("chat:latest", { projectId: "p-chat" }) as {
+      meta: { reasoningEffort?: string };
+    };
+    expect(transcript.meta.reasoningEffort).toBeUndefined();
   });
 
   it("撤销第 N 轮补丁：内容仍等于补丁后版本才恢复；之后被改过则跳过", async () => {

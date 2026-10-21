@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { createLlmClient, AnthropicClient, OpenAiCompatibleClient, HttpLlmError } from "../shared/http-clients";
+import { createLlmClient, AnthropicClient, OpenAiCompatibleClient, HttpLlmError, toOpenAiMessages } from "../shared/http-clients";
 import { getProvider, PROVIDER_CATALOG } from "../shared/providers";
 import type { ChatRequest } from "../shared/llm-client";
 import { TOOL_SPECS } from "../shared/tools/spec";
@@ -85,6 +85,107 @@ describe("OpenAiCompatibleClient", () => {
     );
     await client.chat({ ...req, temperature: 0.5 });
     expect(body.temperature).toBe(0.5);
+  });
+
+  it("线程推理强度只发给已登记线路，并取代默认的关闭思考", async () => {
+    let body: Record<string, unknown> = {};
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), defaultModel: "deepseek-v4-flash" },
+      "k",
+      (async (_url: string, init: RequestInit) => {
+        body = JSON.parse(String(init.body));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+      }) as never,
+    );
+    await client.chat({ ...req, reasoningEffort: "medium" });
+    expect(body.reasoning_effort).toBe("medium");
+    // 不能同时发 `enable_thinking: false`：语义冲突，不能靠端点碰巧忽略。
+    expect("enable_thinking" in body).toBe(false);
+  });
+
+  it("未登记线路收到推理强度时原地报错，不把字段硬发给端点", async () => {
+    let called = false;
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), defaultModel: "kimi-k3" },
+      "k",
+      (async () => {
+        called = true;
+        return { ok: true, status: 200, text: async () => "{}" } as never;
+      }) as never,
+    );
+    await expect(client.chat({ ...req, reasoningEffort: "high" })).rejects.toThrow(/未登记推理强度/);
+    expect(called).toBe(false);
+  });
+
+  it("默认仍显式关闭思考（保持原有延迟/费用）", async () => {
+    let body: Record<string, unknown> = {};
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), defaultModel: "deepseek-v4-flash" },
+      "k",
+      (async (_url: string, init: RequestInit) => {
+        body = JSON.parse(String(init.body));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+      }) as never,
+    );
+    await client.chat(req);
+    expect(body.enable_thinking).toBe(false);
+    expect(body.reasoning_effort).toBeUndefined();
+  });
+
+  it("把 reasoning_content 交给调用方，供原生工具循环回灌", async () => {
+    const client = new OpenAiCompatibleClient(
+      getProvider("sensenova"),
+      "k",
+      (async () => ({
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          choices: [{ message: { content: "答案", reasoning_content: "先想一下" } }],
+        }),
+      })) as never,
+    );
+    const res = await client.chat(req);
+    expect(res.reasoning).toBe("先想一下");
+  });
+
+  it("原生工具消息回灌 reasoning_content（DeepSeek 带 tools 的硬要求）", async () => {
+    let body: Record<string, unknown> = {};
+    const client = new OpenAiCompatibleClient(
+      { ...getProvider("sensenova"), tools: "native" },
+      "k",
+      (async (_url: string, init: RequestInit) => {
+        body = JSON.parse(String(init.body));
+        return { ok: true, status: 200, text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }] }) } as never;
+      }) as never,
+    );
+    await client.chat({
+      messages: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "", reasoning: "想过了", toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.ts" } }] },
+        { role: "tool", content: "x", toolCallId: "c1" },
+      ],
+    });
+    const messages = body.messages as Array<Record<string, unknown>>;
+    const assistant = messages.find((m) => m.role === "assistant");
+    expect(assistant?.reasoning_content).toBe("想过了");
+    expect(assistant?.tool_calls).toBeDefined();
+  });
+
+  /**
+   * 上一条只钉住「带 tool_calls 的助手消息」。工具循环**收尾那一条**（正文已产出、
+   * 没有 tool_calls）是另一条分支：它若丢掉 reasoning_content，DeepSeek 系要求
+   * 「带 tools 的请求把历史 reasoning 原样带回」的约束就在最后一轮破了 ——
+   * 下一轮追问时模型看不到自己上一轮怎么想的，而请求本身完全合法、不报错。
+   */
+  it("无工具调用的助手消息也回灌 reasoning_content；没有思考就不带这个键", () => {
+    const messages = toOpenAiMessages([
+      { role: "user", content: "hi" },
+      { role: "assistant", content: "结论", reasoning: "想过了" },
+      { role: "assistant", content: "没思考的答复" },
+    ]);
+    expect(messages[1].reasoning_content).toBe("想过了");
+    // 必须是**缺席**而不是 undefined：有的端点会把显式 null/undefined 当字段校验。
+    expect("reasoning_content" in messages[2]).toBe(false);
   });
 
   it("throws HttpLlmError on non-2xx", async () => {
@@ -473,6 +574,15 @@ describe("OpenAiCompatibleClient · 流式", () => {
     expect(res.content).toBe("答案");
     // reasoning 是**思考**，不是正文增量：不能替模型"边想边说"。
     expect(res.content).not.toBe("");
+  });
+
+  it("流里的 reasoning_content 也聚合，并随整段结果返回", async () => {
+    const reasoningChunk = (text: string): string => sse({ choices: [{ delta: { reasoning_content: text } }] });
+    const { fetchImpl } = recorder([() => sseResponse([reasoningChunk("先想"), reasoningChunk("一下"), textChunk("答"), DONE])]);
+    const client = new OpenAiCompatibleClient(getProvider("deepseek"), "k", fetchImpl);
+    const res = await client.chat({ ...req, onDelta: () => undefined });
+    expect(res.reasoning).toBe("先想一下");
+    expect(res.content).toBe("答");
   });
 
   it("流里的 usage 只在端点给了才带（缺席 ≠ 0，不给假数字）", async () => {

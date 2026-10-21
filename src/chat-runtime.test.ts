@@ -132,6 +132,22 @@ describe("resolveChatRuntime（项目指令 + 配置 + 策略）", () => {
     ).toBe(base.signature);
   });
 
+  it("线程推理强度进入签名：换档会重建会话，未给时签名不变", () => {
+    const proj = project("reasoning");
+    const settings = { ...DEFAULT_SETTINGS };
+    const profile = {
+      mode: "workspace-write" as const,
+      approvalPolicy: "on-request" as const,
+      providerId: "sensenova",
+      model: "deepseek-v4-flash",
+    };
+    const base = resolveChatRuntime({ rootAbs: proj, settings, profile });
+    const medium = resolveChatRuntime({ rootAbs: proj, settings, profile: { ...profile, reasoningEffort: "medium" } });
+    const high = resolveChatRuntime({ rootAbs: proj, settings, profile: { ...profile, reasoningEffort: "high" } });
+    expect(medium.signature).not.toBe(base.signature);
+    expect(high.signature).not.toBe(medium.signature);
+  });
+
   it("策略/约定变化会让签名变化（宿主据此重建会话）", () => {
     const proj = project("signature");
     write("signature/.ox/policy.d/a.json", JSON.stringify({ version: 1, denyCommands: ["node"] }));

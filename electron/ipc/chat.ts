@@ -27,7 +27,13 @@ import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
 import { writeFileAtomic } from "../atomic-file";
-import { getProvider, isModelId } from "../../shared/providers";
+import {
+  getProvider,
+  isModelId,
+  isReasoningEffort,
+  reasoningEffortsOf,
+  type ReasoningEffort,
+} from "../../shared/providers";
 import type { ProjectSettings } from "../../shared/types";
 import {
   messagesForProtocol,
@@ -163,6 +169,7 @@ function buildSession(
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     ...(pinned ? { providerId: pinned.providerId, model: pinned.model } : {}),
+    ...(pinned && profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
     ...(runtime.maxTurns !== undefined ? { maxTurns: runtime.maxTurns } : {}),
     signal: controller.signal,
     onEvent: (event) => send({ ...event } as unknown as Record<string, unknown>),
@@ -277,11 +284,17 @@ function sessionIdOf(input: unknown, channel: string): string {
   return sessionId;
 }
 
-/** 线程级运行档（M3c）：只接受两档已知值，拼错时原地报错而不是静默回退。 */
+/** 线程级运行档（M3c）：只接受已知档位/已登记线路，拼错时原地报错而不是静默回退。 */
 function chatProfileOf(input: unknown): ChatRuntimeProfile | undefined {
   const raw = (input as { profile?: unknown } | null | undefined)?.profile;
   if (raw === undefined) return undefined;
-  const profile = (raw ?? {}) as { mode?: unknown; approvalPolicy?: unknown; providerId?: unknown; model?: unknown };
+  const profile = (raw ?? {}) as {
+    mode?: unknown;
+    approvalPolicy?: unknown;
+    providerId?: unknown;
+    model?: unknown;
+    reasoningEffort?: unknown;
+  };
   if (!isSandboxMode(profile.mode)) throw new Error("chat:send 的 profile.mode 不合法");
   if (!isApprovalPolicy(profile.approvalPolicy)) {
     throw new Error("chat:send 的 profile.approvalPolicy 不合法");
@@ -301,11 +314,25 @@ function chatProfileOf(input: unknown): ChatRuntimeProfile | undefined {
   if (profile.model !== undefined && !isModelId(profile.model)) {
     throw new Error("chat:send 的 profile.model 不合法");
   }
+  let reasoningEffort: ReasoningEffort | undefined;
+  if (profile.reasoningEffort !== undefined) {
+    if (!isReasoningEffort(profile.reasoningEffort)) {
+      throw new Error("chat:send 的 profile.reasoningEffort 不合法");
+    }
+    if (!providerId || profile.model === undefined) {
+      throw new Error("chat:send 的 profile.reasoningEffort 需要固定 provider 与 model");
+    }
+    if (!reasoningEffortsOf(providerId, profile.model).includes(profile.reasoningEffort)) {
+      throw new Error("chat:send 的 profile.reasoningEffort 不被当前线路支持");
+    }
+    reasoningEffort = profile.reasoningEffort;
+  }
   return {
     mode: profile.mode,
     approvalPolicy: profile.approvalPolicy,
     ...(providerId ? { providerId } : {}),
     ...(profile.model !== undefined ? { model: profile.model } : {}),
+    ...(reasoningEffort ? { reasoningEffort } : {}),
   };
 }
 
@@ -321,7 +348,16 @@ function profileOfMeta(meta: ChatSessionMeta): ChatRuntimeProfile {
   } catch {
     return base;
   }
-  return isModelId(meta.model) ? { ...base, providerId: meta.providerId, model: meta.model } : base;
+  if (!isModelId(meta.model)) return base;
+  const line: ChatRuntimeProfile = { ...base, providerId: meta.providerId, model: meta.model };
+  if (
+    meta.reasoningEffort !== undefined &&
+    isReasoningEffort(meta.reasoningEffort) &&
+    reasoningEffortsOf(meta.providerId, meta.model).includes(meta.reasoningEffort)
+  ) {
+    return { ...line, reasoningEffort: meta.reasoningEffort };
+  }
+  return line;
 }
 
 const MENTION_IGNORED_DIRS = new Set([

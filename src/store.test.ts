@@ -874,6 +874,98 @@ describe("sendChat · 行级评论附录", () => {
     }
   });
 
+  it("推理档只随固定线路发送；切到未登记线路时清空（不把旧模型能力带过去）", async () => {
+    const profiles: Array<Record<string, unknown> | undefined> = [];
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      sendChat: async (input: { profile?: Record<string, unknown> }) => {
+        profiles.push(input.profile);
+        return { sessionId: "chat-1", accepted: true as const };
+      },
+      listChatSessions: async () => [],
+    };
+    useApp.setState({
+      activeProjectId: "p-1",
+      chatInput: "x",
+      chat: {
+        ...useApp.getState().chat,
+        providerId: "sensenova",
+        model: "deepseek-v4-flash",
+        reasoningEffort: undefined,
+      },
+    });
+    useApp.getState().setChatReasoning("high");
+    await useApp.getState().sendChat();
+    expect(profiles[0]).toMatchObject({
+      providerId: "sensenova",
+      model: "deepseek-v4-flash",
+      reasoningEffort: "high",
+    });
+
+    useApp.getState().setChatModel({ providerId: "sensenova", model: "kimi-k3" });
+    expect(useApp.getState().chat.reasoningEffort).toBeUndefined();
+    useApp.setState({ chatInput: "x" });
+    await useApp.getState().sendChat();
+    expect(profiles[1]).not.toHaveProperty("reasoningEffort");
+  });
+
+  /**
+   * 清档规则的两侧都要钉：**该留的留、该清的清**。
+   *
+   * 只测"切到不支持档的线路会清"只覆盖了一半 —— 判据写宽一点（比如拿
+   * `line === null` 当"要清"）会连**同档合法线路**一起清掉，用户看到的是
+   * "切个模型档位就自己没了"；而取消线路（`null`）时若先去读 `line.providerId`，
+   * 直接抛 TypeError 把整个切页动作打断。
+   */
+  it("切到同样支持该档的线路时保留；取消线路时清空且不抛", () => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        providerId: "sensenova",
+        model: "deepseek-v4-flash",
+        reasoningEffort: "high",
+      },
+    });
+    useApp.getState().setChatModel({ providerId: "sensenova", model: "glm-5.2" });
+    expect(useApp.getState().chat.reasoningEffort).toBe("high");
+
+    useApp.getState().setChatModel(null);
+    expect(useApp.getState().chat.providerId).toBeUndefined();
+    expect(useApp.getState().chat.reasoningEffort).toBeUndefined();
+  });
+
+  it("新会话沿用当前线程线路与推理档（不是悄悄回到全局池）", async () => {
+    const calls: Array<Record<string, unknown> | undefined> = [];
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      newChat: async (input: { profile?: Record<string, unknown> }) => {
+        calls.push(input.profile);
+        return { sessionId: "chat-new" };
+      },
+    };
+    useApp.setState({
+      activeProjectId: "p-1",
+      chat: {
+        ...useApp.getState().chat,
+        mode: "read-only",
+        approvalPolicy: "never",
+        providerId: "sensenova",
+        model: "glm-5.2",
+        reasoningEffort: "high",
+      },
+    });
+    await useApp.getState().newChat();
+    expect(calls[0]).toEqual({
+      mode: "read-only",
+      approvalPolicy: "never",
+      providerId: "sensenova",
+      model: "glm-5.2",
+      reasoningEffort: "high",
+    });
+  });
+
   it("发送失败把评论还回去（不静默丢掉用户写的东西）", async () => {
     const g = globalThis as { window?: unknown; oxCommander?: unknown };
     g.oxCommander = {

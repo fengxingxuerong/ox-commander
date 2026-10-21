@@ -26,13 +26,23 @@ const bridge = {
       approvalPolicy: "untrusted" | "on-request" | "never";
       providerId?: string;
       model?: string;
+      reasoningEffort?: "low" | "medium" | "high";
     };
   }) => ({
     sessionId: "chat-1",
     accepted: true as const,
   })),
   abortChat: vi.fn(async () => true),
-  newChat: vi.fn(async (_input: { projectId: string }) => ({ sessionId: "chat-2" })),
+  newChat: vi.fn(async (_input: {
+    projectId: string;
+    profile?: {
+      mode: "read-only" | "workspace-write" | "danger-full-access";
+      approvalPolicy: "untrusted" | "on-request" | "never";
+      providerId?: string;
+      model?: string;
+      reasoningEffort?: "low" | "medium" | "high";
+    };
+  }) => ({ sessionId: "chat-2" })),
   chatTranscript: vi.fn(async () => null),
   chatLatest: vi.fn(
     async (_input: { projectId: string }): Promise<import("../shared/chat-events").ChatTranscript | null> => null,
@@ -162,6 +172,32 @@ describe("会话页（ChatPage）", () => {
     fireEvent.change(screen.getByLabelText("会话模型"), { target: { value: "" } });
     expect(useApp.getState().chat.providerId).toBeUndefined();
     expect(useApp.getState().chat.model).toBeUndefined();
+  });
+
+  it("线程头推理档：只对登记线路启用，随消息带出；换到未登记线路即清空", async () => {
+    render(<ChatPage />);
+    const reasoning = screen.getByLabelText("会话推理强度") as HTMLSelectElement;
+    expect(reasoning.disabled).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("会话模型"), { target: { value: "sensenova	deepseek-v4-flash" } });
+    expect(reasoning.disabled).toBe(false);
+    fireEvent.change(reasoning, { target: { value: "medium" } });
+    expect(useApp.getState().chat.reasoningEffort).toBe("medium");
+
+    fireEvent.change(screen.getByLabelText("会话输入"), { target: { value: "想清楚再答" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await vi.waitFor(() => expect(bridge.sendChat).toHaveBeenCalled());
+    expect(bridge.sendChat.mock.calls[0][0].profile).toMatchObject({
+      providerId: "sensenova",
+      model: "deepseek-v4-flash",
+      reasoningEffort: "medium",
+    });
+
+    fireEvent.change(reasoning, { target: { value: "" } });
+    expect(useApp.getState().chat.reasoningEffort).toBeUndefined();
+    fireEvent.change(screen.getByLabelText("会话模型"), { target: { value: "sensenova	kimi-k3" } });
+    expect(useApp.getState().chat.reasoningEffort).toBeUndefined();
+    expect((screen.getByLabelText("会话推理强度") as HTMLSelectElement).disabled).toBe(true);
   });
 
   it("Enter 发送、Shift+Enter 不发送", () => {

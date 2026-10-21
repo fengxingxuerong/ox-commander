@@ -10,6 +10,20 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（线程级推理强度 M3c-3 · 2026-10-21）
+
+- **会话头选推理强度**。线程头新增推理下拉，选项来自**真实实测**的线路能力表：
+  `sensenova/deepseek-v4-flash` 开放 low / medium / high，`sensenova/glm-5.2` 只开放 high
+  （端点接受 low/medium 但文档映射到 high，显示三档会变成假开关）。选中后随下一条消息
+  发 `reasoning_effort`，并去掉默认的 `enable_thinking: false`；恢复、分叉、开新会话都
+  从 `meta` 沿用。未登记线路禁用下拉，默认仍不主动开思考。
+  **边界**：只对固定 `provider × model` 且已登记的线路开放；Kimi-k3（探测 429、文档仅
+  max）与 Anthropic（需要保留带签名的 thinking blocks，当前工具循环不支持）本轮不开放。
+- **原生工具循环保留思考内容**。OpenAI 兼容端的 `reasoning_content` 在整段与 SSE 两条
+  路径都聚合到 `ChatResponse.reasoning`；原生工具消息把上一轮 reasoning 回灌，满足
+  DeepSeek 系“带 tools 时必须原样带回”的要求。文本协议不保存 reasoning，压缩摘要也
+  故意不带推理强度，避免维护动作变成第二次深思。
+
 ### 新增（线程级模型 M3c-2 · 2026-10-21）
 
 - **会话头选模型**。线程头新增模型下拉，选项来自 provider 目录的默认模型与 SenseNova

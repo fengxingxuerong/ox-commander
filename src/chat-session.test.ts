@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { ChatSession, DEFAULT_MAX_TURNS } from "../electron/chat/session";
+import { ChatSession, DEFAULT_MAX_TURNS, type ChatSessionOptions } from "../electron/chat/session";
 import { ToolRunner } from "../electron/chat/tool-runner";
 import type { LlmClient } from "../shared/llm-client";
 import type { ChatRequest, ChatResponse } from "../shared/providers";
@@ -80,6 +80,107 @@ describe("会话循环（session）", () => {
     expect(session.transcript().meta.model).toBe("deepseek-chat");
   });
 
+  it("线程推理强度进 meta，并随每轮请求下发；省略时请求不带该字段", async () => {
+    const withReasoning = new ScriptedClient([assistant("一"), assistant("二")]);
+    const session = new ChatSession({
+      client: withReasoning,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      sessionId: "s-reasoning",
+      providerId: "sensenova",
+      model: "deepseek-v4-flash",
+      reasoningEffort: "medium",
+    });
+    expect(session.transcript().meta.reasoningEffort).toBe("medium");
+    await session.send("第一句");
+    await session.send("第二句");
+    expect(withReasoning.requests.map((r) => r.reasoningEffort)).toEqual(["medium", "medium"]);
+
+    const plain = new ScriptedClient([assistant("ok")]);
+    const plainSession = new ChatSession({
+      client: plain,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      sessionId: "s-no-reasoning",
+    });
+    await plainSession.send("hi");
+    expect(plain.requests[0].reasoningEffort).toBeUndefined();
+    expect("reasoningEffort" in plainSession.transcript().meta).toBe(false);
+  });
+
+  it("原生工具循环把 reasoning 留在 assistant 消息里（下一轮必须回灌）", async () => {
+    const client = new ScriptedClient([
+      {
+        content: "先读",
+        reasoning: "我需要先看文件",
+        provider: "fake",
+        model: "fake-1",
+        toolCalls: [{ id: "call-1", name: "read_file", args: { path: "a.ts" } }],
+      },
+      assistant("好了"),
+    ]);
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([{ id: "call-1", name: "read_file", ok: true, output: "1: x" }]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      toolProtocol: "native",
+    });
+    await session.send("改 a.ts");
+    const withCalls = client.requests[1].messages.find((m) => m.toolCalls && m.toolCalls.length > 0);
+    expect(withCalls?.reasoning).toBe("我需要先看文件");
+  });
+
+  /**
+   * 工具循环**收尾**那条 assistant 消息（正文已产出、没有 tool_calls）走的是另一个
+   * push 分支。两条错法都不抛异常：
+   * ① 原生协议、模型没思考时仍写入 `reasoning: undefined` —— 恢复后序列化成脏键，
+   *    端点拿到显式 null/undefined 会挑剔；
+   * ② 文本协议、模型有思考时把纯文本推理灌回历史 —— 文本协议的推理与工具调用混在
+   *    正文里，回灌等于让模型读到自己上一轮的散文式草稿。
+   */
+  it("最终答复的 reasoning 只在原生协议且确实有思考时留下", async () => {
+    const nativeClient = new ScriptedClient([assistant("一"), assistant("二")]);
+    const nativeSession = new ChatSession({
+      client: nativeClient,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      toolProtocol: "native",
+    });
+    await nativeSession.send("第一句");
+    await nativeSession.send("第二句");
+    const nativeFinal = nativeClient.requests[1].messages.find((m) => m.role === "assistant");
+    expect("reasoning" in (nativeFinal ?? {})).toBe(false);
+
+    const textClient = new ScriptedClient([
+      { content: "结论", reasoning: "内部推理", provider: "fake", model: "fake-1" },
+      assistant("再说一句"),
+    ]);
+    const textSession = new ChatSession({
+      client: textClient,
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      toolProtocol: "text",
+    });
+    await textSession.send("第一句");
+    await textSession.send("第二句");
+    expect(textClient.requests[1].messages.some((m) => m.reasoning !== undefined)).toBe(false);
+  });
+
+  it("文本协议不保存 reasoning（避免无用的会话体积）", async () => {
+    const client = new ScriptedClient([
+      { content: "先读\n```tool\n{\"tool\":\"read_file\",\"arguments\":{\"path\":\"a.ts\"}}\n```", reasoning: "内部推理", provider: "fake", model: "fake-1" },
+      assistant("好了"),
+    ]);
+    const session = new ChatSession({
+      client,
+      runner: new ScriptedRunner([{ id: "t-1", name: "read_file", ok: true, output: "1: x" }]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      toolProtocol: "text",
+    });
+    await session.send("改 a.ts");
+    expect(client.requests[1].messages.some((m) => m.reasoning !== undefined)).toBe(false);
+  });
+
   it("线路只给一半时不写 meta（缺的字段不能以 undefined 落盘）", () => {
     for (const opts of [{ providerId: "deepseek" }, { model: "deepseek-chat" }]) {
       const session = new ChatSession({
@@ -91,6 +192,30 @@ describe("会话循环（session）", () => {
       });
       expect("providerId" in session.transcript().meta).toBe(false);
       expect("model" in session.transcript().meta).toBe(false);
+    }
+  });
+
+  /**
+   * 推理强度与线路是**三个条件同存同缺**的关系。原用例只覆盖"三样全给"与
+   * "三样全无"，中间三种半截组合没测 —— 而把 `&&` 写错恰好只在半截时露头：
+   * `undefined || providerId` 会把「没选强度」当成「选了 undefined」写进 meta。
+   */
+  it("推理强度缺线路时同样不落 meta（半截组合逐个走一遍）", () => {
+    const combos: Array<Partial<ChatSessionOptions>> = [
+      { providerId: "sensenova", model: "deepseek-v4-flash" },
+      { reasoningEffort: "medium", model: "deepseek-v4-flash" },
+      { reasoningEffort: "medium", providerId: "sensenova" },
+    ];
+    for (const combo of combos) {
+      const session = new ChatSession({
+        client: new ScriptedClient([]),
+        runner: new ScriptedRunner([]) as unknown as ToolRunner,
+        rootAbs: tmpRoot,
+        sessionId: "s-half",
+        ...combo,
+      });
+      const meta = session.transcript().meta as unknown as Record<string, unknown>;
+      expect("reasoningEffort" in meta, JSON.stringify(combo)).toBe(false);
     }
   });
 

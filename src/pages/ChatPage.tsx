@@ -13,7 +13,7 @@ import {
   type ApprovalPolicy,
   type SandboxMode,
 } from "../../shared/tools/policy";
-import { PROVIDER_CATALOG, SENSENOVA_MODELS } from "../../shared/providers";
+import { PROVIDER_CATALOG, SENSENOVA_MODELS, reasoningEffortsOf, type ReasoningEffort } from "../../shared/providers";
 import { diffText } from "../../shared/text-diff";
 import { insertMention, mentionCandidates, mentionTokenAt, type MentionToken } from "../chat-mention";
 
@@ -104,6 +104,12 @@ const APPROVAL_TEXT: Record<ApprovalPolicy, string> = {
   untrusted: "写/执行都问",
   "on-request": "按策略问",
   never: "从不问",
+};
+
+const REASONING_TEXT: Record<ReasoningEffort, string> = {
+  low: "低",
+  medium: "中",
+  high: "高",
 };
 
 /** 一个 apply_patch 结果里的逐文件 diff；只读内容来自工具结果本身。 */
@@ -214,6 +220,7 @@ export function ChatPage() {
   const setChatMode = useApp((s) => s.setChatMode);
   const setChatApproval = useApp((s) => s.setChatApproval);
   const setChatModel = useApp((s) => s.setChatModel);
+  const setChatReasoning = useApp((s) => s.setChatReasoning);
   const sendChat = useApp((s) => s.sendChat);
   const abortChat = useApp((s) => s.abortChat);
   const newChat = useApp((s) => s.newChat);
@@ -250,6 +257,8 @@ export function ChatPage() {
   }, [chat.entries.length, chat.streaming]);
 
   const busy = chat.status === "running" || chat.status === "awaiting-approval";
+  const reasoningEfforts =
+    chat.providerId && chat.model ? reasoningEffortsOf(chat.providerId, chat.model) : [];
 
   const loadFiles = (projectId: string) => {
     if (fileIndex?.projectId === projectId || loadingFileProject.current === projectId) return;
@@ -339,6 +348,32 @@ export function ChatPage() {
               {THREAD_MODEL_CHOICES.map((choice) => (
                 <option key={`${choice.providerId}\t${choice.model}`} value={`${choice.providerId}\t${choice.model}`}>
                   {choice.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chat-runtime-field">
+            <span className="hud-stat-label">推理</span>
+            <select
+              aria-label="会话推理强度"
+              value={chat.reasoningEffort ?? ""}
+              disabled={busy || reasoningEfforts.length === 0}
+              onChange={(e) => {
+                const effort = e.target.value;
+                setChatReasoning(effort === "" ? undefined : (effort as ReasoningEffort));
+              }}
+              title={
+                reasoningEfforts.length === 0
+                  ? "先固定到已登记推理档的线路（当前：SenseNova deepseek-v4-flash / glm-5.2）"
+                  : "只影响这条线程；默认不主动开思考"
+              }
+            >
+              <option value="">
+                {reasoningEfforts.length === 0 ? "该线路未登记" : "关闭（默认）"}
+              </option>
+              {reasoningEfforts.map((effort) => (
+                <option key={effort} value={effort}>
+                  {REASONING_TEXT[effort]}
                 </option>
               ))}
             </select>

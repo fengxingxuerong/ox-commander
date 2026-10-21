@@ -9,7 +9,9 @@ import {
   baseUrlEnvVar,
   getProvider,
   isModelId,
+  isReasoningEffort,
   providerKeyEnvVars,
+  reasoningEffortsOf,
   resolveTemperature,
 } from "../shared/providers";
 import {
@@ -119,6 +121,36 @@ describe("provider catalog", () => {
     expect(isModelId("bad model")).toBe(false);
     expect(isModelId("")).toBe(false);
     expect(isModelId(123)).toBe(false);
+  });
+
+  it("推理强度只对实测支持的线路开放（未登记 = 空数组，不猜）", () => {
+    expect(reasoningEffortsOf("sensenova", "deepseek-v4-flash")).toEqual(["low", "medium", "high"]);
+    // 端点接受 low/medium，但文档映射到 high；登记低/中档等于给假开关。
+    expect(reasoningEffortsOf("sensenova", "glm-5.2")).toEqual(["high"]);
+    expect(reasoningEffortsOf("sensenova", "kimi-k3")).toEqual([]);
+    expect(reasoningEffortsOf("sensenova", "sensenova-6.8-flash-lite")).toEqual([]);
+    expect(reasoningEffortsOf("deepseek", "deepseek-chat")).toEqual([]);
+    expect(reasoningEffortsOf("unknown", "deepseek-v4-flash")).toEqual([]);
+  });
+
+  /**
+   * 守卫本身也要逐点验：它是 IPC 边界唯一的形状闸门，判错方向是**静默**的 ——
+   * 放过一个 `"max"` 会让请求带着端点不认识的 `reasoning_effort` 出去（有的端点
+   * 400、有的当没看见，两种都不在现场报错），把 `"high"` 误判成非法则会让合法
+   * 请求被自家闸门拦死。三条断言分别钉住 `typeof` 与 `includes` 两侧：只测
+   * 合法值会漏掉前者（`&&` 换成 `||` 仍全绿），只测非法值会漏掉后者。
+   */
+  it("isReasoningEffort 挡形状也挡取值（两条腿都要能单独判错）", () => {
+    expect(isReasoningEffort("high")).toBe(true);
+    expect(isReasoningEffort("low")).toBe(true);
+    // 字符串但不在档位表里：只靠 `typeof` 判断会放它过去。
+    expect(isReasoningEffort("max")).toBe(false);
+    expect(isReasoningEffort("")).toBe(false);
+    // 非字符串：`typeof` 恒假，取值比较也不该把它们当成档位。
+    expect(isReasoningEffort(1)).toBe(false);
+    expect(isReasoningEffort(null)).toBe(false);
+    expect(isReasoningEffort(undefined)).toBe(false);
+    expect(isReasoningEffort(["high"])).toBe(false);
   });
 });
 
