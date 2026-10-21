@@ -168,6 +168,68 @@ describe("git-export · 参数与解析（注入 runner）", () => {
     expect(calls.filter((c) => c.args.includes("commit"))).toHaveLength(1);
   });
 
+  it("[3c] 显式 paths：不扫 git status，只 add 给定路径；非法路径跳过", async () => {
+    const ok = fakeRunner([
+      { code: 0, stdout: "true\n" },
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      { code: 0, stdout: "abc1234\n" },
+    ]);
+    const r = await exportDeliveryBranch(
+      base({ run: ok.run, paths: ["src/new/a.ts", "src/new/a.ts", "../escape.txt", "D:/abs.txt"] }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.filesCommitted).toBe(1);
+    expect(ok.calls.some((c) => c.args[0] === "status")).toBe(false);
+    expect(ok.calls.find((c) => c.args[0] === "add")?.args).toEqual(["add", "--", "src/new/a.ts"]);
+    expect(r.skippedPaths?.join()).toContain("非法路径");
+
+    const none = fakeRunner([{ code: 0, stdout: "true\n" }]);
+    const skipped = await exportDeliveryBranch(base({ run: none.run, paths: ["../escape.txt"] }));
+    expect(skipped.skipped).toBe("no-zone-files");
+    // 全被跳过时也必须把原因带回来；三元写反会把 skippedPaths 整块吞掉。
+    expect(skipped.skippedPaths?.join()).toContain("非法路径");
+    expect(none.calls.some((c) => c.args[0] === "checkout")).toBe(false);
+  });
+
+  it("[3d] 显式 paths 的非法/被策略拒的条目在**前面**时，后面的合法路径仍要导出", async () => {
+    const { run, calls } = fakeRunner([
+      { code: 0, stdout: "true\n" },
+      { code: 0 },
+      { code: 0 },
+      { code: 0 },
+      { code: 0, stdout: "abc1234\n" },
+    ]);
+    const r = await exportDeliveryBranch(
+      base({
+        run,
+        paths: ["", "/abs.txt", "D:/abs.txt", "../escape.txt", "src/a;b.ts", "src/ok.ts"],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.filesCommitted).toBe(1);
+    expect(r.skippedPaths).toHaveLength(5);
+    expect(r.skippedPaths?.join()).toContain("非法路径");
+    expect(calls.find((c) => c.args[0] === "add")?.args).toEqual(["add", "--", "src/ok.ts"]);
+  });
+
+  it("[3e] zones 缺席时是 no-zone-files，不能去读 undefined.length", async () => {
+    const none = fakeRunner([
+      { code: 0, stdout: "true\n" },
+      { code: 0, stdout: "M  a.ts\0" },
+    ]);
+    const r = await exportDeliveryBranch(base({ run: none.run, zones: undefined }));
+    expect(r).toMatchObject({ ok: true, skipped: "no-zone-files" });
+    expect(none.calls.some((c) => c.args[0] === "checkout")).toBe(false);
+  });
+
+  it("[3f] paths 是空数组 ⇒ no-changes（不是失败）", async () => {
+    const empty = fakeRunner([{ code: 0, stdout: "true\n" }]);
+    const r = await exportDeliveryBranch(base({ run: empty.run, paths: [] }));
+    expect(r).toMatchObject({ ok: true, skipped: "no-changes" });
+  });
+
   it("[9] checkout / add / commit 失败都折进结果对象（ok:false + 原因），永不 throw", async () => {
     const checkoutFail = fakeRunner([
       { code: 0, stdout: "true\n" },
@@ -236,6 +298,28 @@ describe("git-export · 真 git 仓库", () => {
     const committed = g(["show", "--name-only", "--format="]).trim().split("\n");
     expect(committed).toEqual(["src/a.ts"]);
     // zone 外的改动原样留在工作树，绝没有被卷进 commit
+    expect(g(["status", "--porcelain"]).trim()).toBe("?? other.txt");
+  });
+
+  it("[11b] 显式 paths 能导出新建目录里的新文件（zone 过滤会漏掉的那类）", async () => {
+    const root = makeRepo();
+    fs.mkdirSync(path.join(root, "src", "newdir"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "newdir", "a.ts"), "export {};\n");
+    fs.writeFileSync(path.join(root, "other.txt"), "operator's own dirt\n");
+
+    const r = await exportDeliveryBranch(
+      base({
+        projectRoot: root,
+        paths: ["src/newdir/a.ts"],
+        branch: "oxcommander/thread-test",
+        run: undefined,
+      }),
+    );
+    expect(r.ok).toBe(true);
+    expect(r.filesCommitted).toBe(1);
+    const g = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString();
+    const committed = g(["show", "--name-only", "--format="]).trim().split("\n");
+    expect(committed).toEqual(["src/newdir/a.ts"]);
     expect(g(["status", "--porcelain"]).trim()).toBe("?? other.txt");
   });
 

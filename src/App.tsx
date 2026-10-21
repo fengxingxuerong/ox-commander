@@ -4,6 +4,9 @@ import { ErrorBoundary } from "./components/ErrorBoundary";
 import { HudNav } from "./components/HudNav";
 import { ThreadRail } from "./components/ThreadRail";
 import { ReviewRail } from "./components/ReviewRail";
+import { OrchestrationSteps } from "./components/OrchestrationSteps";
+import { AutomationsPage } from "./pages/AutomationsPage";
+import { SkillsPage } from "./pages/SkillsPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -35,6 +38,9 @@ export function App() {
       <div className="app-body">
         {page === "chat" ? <ThreadRail /> : null}
         <main className="app-main">
+          {/* 编排两步（IA-2）：需求确认与执行看板在导航上合并成一格，两步的顺序
+              靠页内这条步骤条回答 —— 它比顶栏更靠近"我正在做的事"。 */}
+          {page === "prd-review" || page === "board" ? <OrchestrationSteps /> : null}
           <ErrorBoundary>
             <CurrentPage page={page} />
           </ErrorBoundary>
@@ -56,6 +62,10 @@ function CurrentPage({ page }: { page: ReturnType<typeof useApp.getState>["page"
       return <ChatPage />;
     case "settings":
       return <SettingsPage />;
+    case "automations":
+      return <AutomationsPage />;
+    case "skills":
+      return <SkillsPage />;
     case "projects":
       // projects 是**默认页**，所以以前只写在 default 里。写出来不为改行为，
       // 是为了让 `scripts/check-exhaustive-maps.mjs` 能判"每一档都登记过"：

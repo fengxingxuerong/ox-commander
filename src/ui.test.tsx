@@ -8,13 +8,17 @@
  * mapping that store.test.ts covers only up to the store boundary.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { AgentsPanel } from "./components/AgentsPanel";
 import { AuditPanel } from "./components/AuditPanel";
 import { ThreadRail } from "./components/ThreadRail";
+import { HudNav } from "./components/HudNav";
+import { OrchestrationSteps } from "./components/OrchestrationSteps";
+import { AutomationsPage } from "./pages/AutomationsPage";
+import { SkillsPage } from "./pages/SkillsPage";
 import { ProjectsPage } from "./pages/ProjectsPage";
 import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
@@ -210,13 +214,22 @@ function makeBridge(): Bridge {
     forkChat: vi.fn(async () => null as never),
     deleteChat: vi.fn(async () => true),
     revertChat: vi.fn(async () => ({ reverted: [], skipped: [] })),
+    exportChat: vi.fn(async () => ({
+      ok: true,
+      branch: "oxcommander/thread-x",
+      commit: "abc1234",
+      filesCommitted: 1,
+      unrevertable: [],
+    })),
     resolveChatApproval: vi.fn(async () => true),
   };
 }
 
 function resetStore() {
   useApp.setState({
-    page: "projects",
+    // IA-2 的默认页是会话；夹具必须与产品默认一致，否则"默认页"用例永远
+    // 测的是旧行为（曾经因此让两条断言在默认页切换后同时变红）。
+    page: "chat",
     projects: [],
     activeProjectId: undefined,
     stage: "PRD",
@@ -250,9 +263,11 @@ afterEach(() => {
 });
 
 describe("App", () => {
-  it("mounts on the projects page, subscribes to events and refreshes projects", async () => {
+  it("mounts on the **chat** page (IA-2), subscribes to events and refreshes projects", async () => {
     render(<App />);
-    expect(screen.getByText("新建项目")).toBeTruthy();
+    // 默认页从项目登记表换成会话：指挥中心的家是线程工作区。
+    expect(await screen.findByLabelText("项目与线程")).toBeTruthy();
+    expect(screen.queryByText("新建项目")).toBeNull();
     await waitFor(() => {
       expect(window.oxCommander.listProjects).toHaveBeenCalled();
       expect(window.oxCommander.onEvent).toHaveBeenCalled();
@@ -273,8 +288,7 @@ describe("App", () => {
   // 看板与设置页的正文宽度就是它们的内容宽度，硬套三栏只会多两条空边。
   it("shows the thread rail only on the chat page", async () => {
     render(<App />);
-    expect(screen.queryByLabelText("项目与线程")).toBeNull();
-    useApp.setState({ page: "chat" });
+    // 默认页就是会话，所以一上来就**有**左栏；这里钉的是"离开会话页就收起"。
     expect(await screen.findByLabelText("项目与线程")).toBeTruthy();
     useApp.setState({ page: "board" });
     // 用 waitFor 而不是同步断言：zustand 的 setState 在 act 之外时要等一拍才
@@ -291,6 +305,60 @@ describe("App", () => {
  * 2. 同项目重复点击不重取（那会打断正在读的转录）；
  * 3. 运行 / 等审批时禁用一切切换 —— 换线程会让在途的工具结果串到另一条线上。
  */
+describe("IA-2 导航与占位页", () => {
+  it("主导航四格：会话是家，编排包两步；项目库与设置退到常驻入口", () => {
+    render(<HudNav />);
+    const main = screen.getByRole("navigation", { name: "主导航" });
+    for (const label of ["会话", "编排", "自动化", "技能"]) {
+      expect(within(main).getByRole("button", { name: new RegExp(label) })).toBeTruthy();
+    }
+    const utility = screen.getByRole("navigation", { name: "常驻入口" });
+    expect(within(utility).getByRole("button", { name: /项目库/ })).toBeTruthy();
+    expect(within(utility).getByRole("button", { name: /设置/ })).toBeTruthy();
+    // 项目库/设置不再占主导航格：产品形状是 Codex 式的四格。
+    expect(within(main).queryByRole("button", { name: /项目库/ })).toBeNull();
+    expect(within(main).queryByRole("button", { name: /^设置/ })).toBeNull();
+  });
+
+  it("执行看板仍点亮「编排」；点它回到第一步需求确认", () => {
+    useApp.setState({ page: "board" });
+    render(<HudNav />);
+    const orch = screen.getByRole("button", { name: /编排/ });
+    expect(orch.getAttribute("aria-current")).toBe("page");
+    fireEvent.click(orch);
+    expect(useApp.getState().page).toBe("prd-review");
+  });
+
+  it("页内步骤条标出当前步，只导航不发起执行", () => {
+    useApp.setState({ page: "prd-review", stage: "PRD" });
+    render(<OrchestrationSteps />);
+    const first = screen.getByRole("button", { name: /需求确认/ });
+    expect(first.getAttribute("aria-current")).toBe("step");
+    fireEvent.click(screen.getByRole("button", { name: /执行看板/ }));
+    expect(useApp.getState().page).toBe("board");
+    expect(useApp.getState().stage).toBe("PRD");
+  });
+
+  it("自动化占位页说清引擎已有一半、界面在建，并可回到会话", () => {
+    useApp.setState({ page: "automations" });
+    render(<AutomationsPage />);
+    expect(screen.getByText(/引擎就绪，桌面入口在建/)).toBeTruthy();
+    expect(screen.getByText(/schedule-core/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
+    expect(useApp.getState().page).toBe("chat");
+  });
+
+  it("技能占位页说清本地目录与 MCP client 的区别，并可回到会话", () => {
+    useApp.setState({ page: "skills" });
+    render(<SkillsPage />);
+    expect(screen.getByText(/界面在建/)).toBeTruthy();
+    // 标题与正文都提到 MCP client；这里要的是"页面说到了它"，不是唯一性。
+    expect(screen.getAllByText(/MCP client/).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
+    expect(useApp.getState().page).toBe("chat");
+  });
+});
+
 describe("左栏（ThreadRail）", () => {
   const project = (id: string, name: string) => ({ id, name, stage: "IDLE", requirement: `需求 ${name}` });
 
@@ -318,7 +386,10 @@ describe("左栏（ThreadRail）", () => {
   it("没有项目时说明白去哪新建，而不是摆一个空树", () => {
     useApp.setState({ projects: [], activeProjectId: undefined });
     render(<ThreadRail />);
-    expect(screen.getByText(/项目库/)).toBeTruthy();
+    // IA-2 之后顶栏也有一枚「项目库」入口，所以这里要按**这句提示的全文**取，
+    // 而不是按"页面上有项目库这四个字"取 —— 后者在两处同时出现时先假绿、
+    // 再在别人加了第三处时炸掉。
+    expect(screen.getByText(/去「项目库」新建一个/)).toBeTruthy();
     // 按钮在但禁用：没有项目时可点的"新线程"只会造出一条没有工作区的线。
     // 摆一个按不动的按钮，也比藏起来更让人觉得"这里能开线程"。
     const btn = screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement;
@@ -340,6 +411,43 @@ describe("左栏（ThreadRail）", () => {
     render(<ThreadRail />);
     expect((screen.getByRole("button", { name: "二" }) as HTMLButtonElement).disabled).toBe(false);
     expect((screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("线程搜索只按标题/id 过滤；无匹配时说清不搜正文", () => {
+    const summary = (sessionId: string, title: string) => ({
+      sessionId,
+      projectId: "p-1",
+      title,
+      startedAt: 1,
+      updatedAt: 2,
+      status: "done",
+      turns: 1,
+      usageTokens: 0,
+    });
+    useApp.setState({
+      projects: [project("p-1", "一")],
+      activeProjectId: "p-1",
+      chat: {
+        ...useApp.getState().chat,
+        sessions: [summary("chat-a", "修登录"), summary("chat-b", "重构结算")],
+      },
+    });
+    render(<ThreadRail />);
+    const search = screen.getByLabelText("搜索线程");
+    fireEvent.change(search, { target: { value: "结算" } });
+    expect(screen.getByText("重构结算")).toBeTruthy();
+    expect(screen.queryByText("修登录")).toBeNull();
+    fireEvent.change(search, { target: { value: "不存在" } });
+    expect(screen.getByText(/没有匹配/)).toBeTruthy();
+    expect(screen.getByText(/只搜标题与线程 id/)).toBeTruthy();
+  });
+
+  it("左栏底部常驻项目库/设置入口（IA-2 把主导航让给四格后仍一键可达）", () => {
+    render(<ThreadRail />);
+    fireEvent.click(screen.getByRole("button", { name: /项目库/ }));
+    expect(useApp.getState().page).toBe("projects");
+    fireEvent.click(screen.getByRole("button", { name: /设置/ }));
+    expect(useApp.getState().page).toBe("settings");
   });
 });
 
@@ -379,6 +487,7 @@ describe("ErrorBoundary", () => {
 
 describe("ProjectsPage", () => {
   it("shows the empty state and enables creation only with a requirement", async () => {
+    useApp.setState({ page: "projects" });
     render(<App />);
     expect(screen.getByText("暂无项目")).toBeTruthy();
     const create = screen.getByRole("button", { name: "创建并进入看板" }) as HTMLButtonElement;

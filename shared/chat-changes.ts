@@ -135,4 +135,40 @@ export function changeStat(change: FileChangeView): { added: number; deleted: nu
   };
 }
 
+/**
+ * 一条线程要导出成 git 分支的路径集合：去重 + 稳定排序。
+ *
+ * 只用 ReviewRail 看得到的 `apply_patch` 改动 —— 命令产生的改动没有 before/after，
+ * 不属于"这条线程可审阅的改动集"。路径本身仍是相对项目根的写法，真正的包含
+ * 判定在 git-export 的显式路径校验里再做一次。
+ */
+export function exportablePaths(groups: readonly ChangedFileGroup[]): string[] {
+  const seen = new Set<string>();
+  for (const group of groups) seen.add(group.path);
+  return [...seen].sort(comparePaths);
+}
+
+/**
+ * 线程导出的分支名。session id 是外部输入（可能来自恢复的旧记录），所以只保留
+ * git ref 安全字符并裁剪长度；stamp 由宿主生成（本地时间）。
+ *
+ * 前缀带 `thread-` 而不是复用 `delivery-`：两者在 `git branch` 里一眼可分，
+ * 排查"这个分支是谁写的"时不必先翻凭据。
+ */
+export function threadBranchName(sessionId: string, stamp: string): string {
+  const id =
+    sessionId
+      .replace(/[^A-Za-z0-9._-]+/g, "-")
+      .replace(/^[-._]+/, "")
+      .slice(0, 24) || "thread";
+  const safeStamp = stamp.replace(/[^A-Za-z0-9-]+/g, "").slice(0, 20) || "now";
+  return `oxcommander/thread-${id}-${safeStamp}`;
+}
+
+/** 线程导出的 commit message（单行、限长；git 走参数数组，不存在注入面）。 */
+export function threadExportMessage(title: string, fileCount: number): string {
+  const clean = title.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 60) || "会话改动";
+  return `oxcommander: ${clean}（${Math.max(0, fileCount)} 个文件）`;
+}
+
 export type { ChatFileChange };

@@ -94,7 +94,7 @@ aipedia.wiki 2026-04-16 稿注明 3 源交叉验证、developers.openai.com chan
 | F2 | Local/Worktree/Cloud | 只有 Local（共享工作区）。worktree = D 类决议不做；Cloud 的对应物是 `headless/serve.ts` 自托管（已有） | ⛔/🟡 | 对应物已在 |
 | F3 | 多智能体并行 | 会话侧单活跃线程：`electron/ipc/chat.ts` 模块级 `let live` 单例；编排侧有并行但那是 zone 批内执行器并行，不是线程并行 | 🔴 | **M4** |
 | F4 | inline diff + 评论 | 右栏逐行 diff（`ReviewRail.tsx`，M2）+ 行级评论四样定位（M3a） | ✅ | — |
-| F5 | App 内 commit/push | 编排侧有 `electron/engine/git-export.ts`（分支+commit，默认不 push，可开 PR）；**会话线程侧零通道** | 🟡 | **M5a** |
+| F5 | App 内 commit/push | 编排侧有 `electron/engine/git-export.ts`；会话线程侧 M5a 已接：右栏「导出分支」按 `chat-changes` 精确路径导出，默认不 push，勾选才走本机 git 凭据链（永不 force、不建 PR） | ✅ | **M5a 已落地** |
 | F6 | Skills | 无。README「尚未做 Skills」；会话注入面只有约定（`shared/project-conventions.ts`） | 🔴 | **M6** |
 | F7 | Automations | 时间触发引擎在 `headless/schedule-core.ts`（serve `--every`，忙时跳过、中断补跑至多一次）；桌面无 UI、无事件触发 | 🟡 | **M5b** |
 | F8 | MCP 接入 | 我们是 MCP **server**（`headless/mcp.ts`，被集成方向）；作为 client 集成外部工具 = 零 | 🔴 | **M7** |
@@ -216,7 +216,7 @@ IA-2 落地时必须同步登记，不吃 default。
 `store.ts`/`ChatPage.tsx`/`shared/chat-events.ts`，在别人的未提交改动上开工 =
 重演 2026-10-20 变异脚本抹掉未提交流式改动的事故。
 
-### M5a · 线程侧 commit/push（对齐 F5）
+### M5a · 线程侧 commit/push（对齐 F5）— ✅ 已落地 2026-10-21
 
 **目标**：会话线程的改动可以从右栏导出为 git 分支 + commit（默认不 push，与编排侧
 `git-export` 同哲学：永不 `--force`、不碰凭据）。
@@ -224,6 +224,10 @@ IA-2 落地时必须同步登记，不吃 default。
 **设计要点**：复用 `electron/engine/git-export.ts` 的 Runner/staging 件；差别在输入源 ——
 编排侧吃批次产物，线程侧吃 ReviewRail 的 (turn, path) 变更集（`shared/chat-changes.ts`
 已经把它算清楚了）。不可撤销/超上限的改动照实列出并拒绝静默混入（M2 既有纪律）。
+
+**落地**：`chat:export` + ReviewRail「导出分支 / 推送」；`git-export` 新增显式
+`paths` 入口（新建目录里的新文件不再漏）；无 remote 时 push 结果返回
+`skipped:no-remote`，界面不念成"已推送"；真 git 仓库用例覆盖新目录与 push 默认关闭。
 
 **验收**：真 git 仓库里两线程改动导出为两个分支；push 开关默认关；
 「create 证据才肯删」不变量在线程侧同样成立（复用 `snapshot-store` 判据）。

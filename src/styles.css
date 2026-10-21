@@ -173,6 +173,14 @@ body {
   gap: 8px;
 }
 
+.review-push {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
 .review-rail-headline {
   margin: 0;
   font-size: 12px;
@@ -434,6 +442,103 @@ body {
 .thread-rail-project.active {
   border-color: rgba(127, 119, 221, 0.55);
   background: rgba(127, 119, 221, 0.18);
+}
+
+/**
+ * 顶栏常驻入口（IA-2）：主导航收敛成四格之后，项目库与设置挪到右侧一组小按钮。
+ * 刻意**不做成第五格** —— 它们的形状比其它四格矮，摆在一起会让人以为
+ * "这五个是同一层的东西"。
+ */
+.hud-utility {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.hud-utility-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.hud-utility-btn.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+}
+
+/** 编排两步（IA-2）：页内步骤条，回答"我现在在第几步"。 */
+.orch-steps {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.orch-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.orch-step.active {
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.orch-step-index {
+  display: inline-grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--border);
+  font-size: 10px;
+}
+
+.orch-step-hint {
+  margin-left: auto;
+  font-size: 11px;
+}
+
+/** 左栏线程搜索（M1 已知缺口的补齐）。 */
+.thread-rail-search {
+  width: 100%;
+  margin: 6px 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel);
+  color: inherit;
+  font-size: 12px;
+}
+
+.thread-rail-footer {
+  margin-top: auto;
+  display: flex;
+  gap: 6px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
 }
 
 .thread-rail .chat-sessions {

@@ -10,6 +10,20 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（线程侧 commit/push M5a · 2026-10-21）
+
+- **右栏可以把一条线程的补丁改动导出成 git 分支 + commit**。只收右栏看得到的
+  `apply_patch` 路径；分支名 `oxcommander/thread-<session>-<时间戳>`，commit message
+  带线程首句与文件数。**默认不 push**：需要显式勾选「推送」才会走
+  `publishDeliveryRemote`（永不 `--force`、不碰凭据、不建 PR）。
+- 不可撤销的改动（超记录上限、没有 before/after）**仍会被提交**，但结果里逐条列出
+  「不可审阅」，不静默混入；没有补丁 / 非 git 仓库 / 路径不匹配分别返回
+  `no-changes` / `no-repo` / `no-zone-files`，不是失败。
+- `git-export` 新增显式 `paths` 入口：线程侧有精确文件集，能导出「新建目录里的新文件」
+  这一类 `git status` 只报父目录的改动；旧 `zones` 入口与语义保持不变。
+  **边界**：导出会 `checkout -B` 到新分支（当前工作树分支会变，与编排侧同语义）；
+  `run_command` 产生的改动不在 ReviewRail 里，也不进这次导出；push 走本机 git 凭据链。
+
 ### 新增（并行写冲突检测 M4c · P1 · 2026-10-21）
 
 - **两条线程撞同一个文件时会先问一句**。写文件前查活跃线程的写台账：命中就弹

@@ -4,6 +4,9 @@ import {
   changesHeadline,
   collectChangedFiles,
   comparePaths,
+  exportablePaths,
+  threadBranchName,
+  threadExportMessage,
   type FileChangeView,
 } from "../shared/chat-changes";
 import type { ChatEntry } from "../shared/chat-events";
@@ -142,6 +145,36 @@ describe("changesHeadline", () => {
   it("全部可撤销时不提那句（不制造不存在的警告）", () => {
     const groups = collectChangedFiles([entry([change({ path: "a.ts", turn: 1 })])]);
     expect(changesHeadline(groups)).toBe("1 个文件 · 1 处改动");
+  });
+});
+
+describe("线程导出（M5a）", () => {
+  it("exportablePaths 去重并按路径稳定排序", () => {
+    const groups = collectChangedFiles([
+      entry([change({ path: "src/b.ts", turn: 1 }), change({ path: "src/a.ts", turn: 1 })]),
+      entry([change({ path: "src/a.ts", turn: 2 })]),
+    ]);
+    expect(exportablePaths(groups)).toEqual(["src/a.ts", "src/b.ts"]);
+  });
+
+  it("分支名只保留 git ref 安全字符，空 id 有兜底，长度受控", () => {
+    expect(threadBranchName("chat-123", "20261021-120000")).toBe(
+      "oxcommander/thread-chat-123-20261021-120000",
+    );
+    expect(threadBranchName("weird id/with spaces", "20261021-120000")).toBe(
+      "oxcommander/thread-weird-id-with-spaces-20261021-120000",
+    );
+    expect(threadBranchName("", "stamp")).toBe("oxcommander/thread-thread-stamp");
+    const long = threadBranchName("x".repeat(100), "20261021-120000");
+    expect(long.length).toBeLessThanOrEqual(80);
+    expect(long).toMatch(/^oxcommander\/thread-/);
+    expect(long).not.toMatch(/[^A-Za-z0-9._/-]/);
+  });
+
+  it("commit message 单行、限长、空标题有兜底", () => {
+    expect(threadExportMessage("修登录\n  与结算", 3)).toBe("oxcommander: 修登录 与结算（3 个文件）");
+    expect(threadExportMessage("   ", 0)).toBe("oxcommander: 会话改动（0 个文件）");
+    expect(threadExportMessage("x".repeat(200), 1)).toContain("（1 个文件）");
   });
 });
 

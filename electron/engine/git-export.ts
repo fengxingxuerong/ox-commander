@@ -27,7 +27,15 @@ import { isPathInZone } from "../../shared/glob";
 export interface GitExportInput {
   projectRoot: string;
   /** 本次 run 的全部任务 zone（相对项目根）；空数组 = 没有可归属的改动。 */
-  zones: readonly string[];
+  zones?: readonly string[];
+  /**
+   * 显式文件路径（线程侧导出用）：跳过 `git status` 扫描，只 add 这些路径。
+   *
+   * 为什么需要第二入口：`zones` 过滤对"新建目录下的新文件"会漏 —— git 只报
+   * `?? newdir/`，而线程改动集里是 `newdir/a.ts`，按前缀匹配不上。线程侧本来
+   * 就有精确路径（`shared/chat-changes`），直接交给 git 比再猜一遍目录更诚实。
+   */
+  paths?: readonly string[];
   /** 目标分支名（已由调用方保证字符集，见 `BRANCH_RE`）。 */
   branch: string;
   /** commit 信息。 */
@@ -157,33 +165,63 @@ export async function exportDeliveryBranch(input: GitExportInput): Promise<GitEx
     return { ok: true, skipped: "no-repo" };
   }
 
-  // 2. 工作树改动清单（含未跟踪；-z 免转义）。
-  const status = await run("git", ["status", "--porcelain", "-z"]);
-  if (status.code !== 0) {
-    return { ok: false, reason: `git status 失败：${tail(status.stderr)}` };
-  }
-  const changed = parseStatusZ(status.stdout);
-  if (changed.length === 0) {
-    return { ok: true, skipped: "no-changes" };
-  }
-
-  // 3. 只收 zone 内的路径；元字符/策略拒绝的单条跳过（怪文件名不拖垮导出）。
   const skippedPaths: string[] = [];
-  const inZones = changed.filter((rel) => {
-    if (!input.zones.some((z) => isPathInZone(rel, z))) return false;
-    const gate = policy.check("git", ["add", "--", rel]);
-    if (!gate.ok) {
-      skippedPaths.push(`${rel}（${gate.reason}）`);
-      return false;
+  let inZones: string[];
+  if (input.paths !== undefined) {
+    // 2p. 显式路径：逐个自证（相对、无穿越、过命令策略），不扫全树。
+    const unique = new Set<string>();
+    for (const raw of input.paths) {
+      const rel = raw.replace(/\\/g, "/").replace(/^\.\/+/, "");
+      if (rel === "" || rel.startsWith("/") || /^[A-Za-z]:/.test(rel) || rel.split("/").includes("..")) {
+        skippedPaths.push(`${raw}（非法路径）`);
+        continue;
+      }
+      const gate = policy.check("git", ["add", "--", rel]);
+      if (!gate.ok) {
+        skippedPaths.push(`${rel}（${gate.reason}）`);
+        continue;
+      }
+      unique.add(rel);
     }
-    return true;
-  });
-  if (inZones.length === 0) {
-    return {
-      ok: true,
-      skipped: "no-zone-files",
-      ...(skippedPaths.length > 0 ? { skippedPaths } : {}),
-    };
+    inZones = [...unique].sort();
+    if (inZones.length === 0) {
+      return {
+        ok: true,
+        skipped: input.paths.length === 0 ? "no-changes" : "no-zone-files",
+        ...(skippedPaths.length > 0 ? { skippedPaths } : {}),
+      };
+    }
+  } else {
+    // 2. 工作树改动清单（含未跟踪；-z 免转义）。
+    const status = await run("git", ["status", "--porcelain", "-z"]);
+    if (status.code !== 0) {
+      return { ok: false, reason: `git status 失败：${tail(status.stderr)}` };
+    }
+    const changed = parseStatusZ(status.stdout);
+    if (changed.length === 0) {
+      return { ok: true, skipped: "no-changes" };
+    }
+    if (!input.zones || input.zones.length === 0) {
+      return { ok: true, skipped: "no-zone-files" };
+    }
+
+    // 3. 只收 zone 内的路径；元字符/策略拒绝的单条跳过（怪文件名不拖垮导出）。
+    inZones = changed.filter((rel) => {
+      if (!input.zones!.some((z) => isPathInZone(rel, z))) return false;
+      const gate = policy.check("git", ["add", "--", rel]);
+      if (!gate.ok) {
+        skippedPaths.push(`${rel}（${gate.reason}）`);
+        return false;
+      }
+      return true;
+    });
+    if (inZones.length === 0) {
+      return {
+        ok: true,
+        skipped: "no-zone-files",
+        ...(skippedPaths.length > 0 ? { skippedPaths } : {}),
+      };
+    }
   }
 
   // 4. 建分支（-B：同名已存在则重置到当前 HEAD——重复导出以最新交付为准）。

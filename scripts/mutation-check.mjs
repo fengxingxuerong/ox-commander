@@ -881,7 +881,7 @@ const SITE_BASELINE = {
   "electron/engine/batch-guard.ts": 19,
   "electron/engine/conventions.ts": 2,
   "electron/engine/dev-server.ts": 5,
-  "electron/engine/git-export.ts": 27,
+  "electron/engine/git-export.ts": 40,
   "electron/engine/git-remote.ts": 39,
   "electron/engine/orchestrator.ts": 83,
   "electron/engine/router.ts": 25,
@@ -889,7 +889,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 128,
+  "electron/ipc/chat.ts": 139,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -925,7 +925,7 @@ const SITE_BASELINE = {
   "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,
   "shared/build-llm.ts": 12,
-  "shared/chat-changes.ts": 10,
+  "shared/chat-changes.ts": 13,
   "shared/chat-compress.ts": 14,
   "shared/chat-conflict.ts": 12,
   "shared/chat-events.ts": 15,
@@ -958,7 +958,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 83,
+  "src/store.ts": 89,
 };
 
 /**

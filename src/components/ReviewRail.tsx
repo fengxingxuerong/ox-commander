@@ -161,7 +161,10 @@ export function ReviewRail({ onClose }: { onClose: () => void }) {
   const removeComment = useApp((s) => s.removeInlineComment);
   const clearComments = useApp((s) => s.clearInlineComments);
   const dropComments = useApp((s) => s.dropInlineCommentsFor);
+  const exportThread = useApp((s) => s.exportChat);
   const [selected, setSelected] = useState<string | null>(null);
+  const [push, setPush] = useState(false);
+  const [exporting, setExporting] = useState(false);
 
   const groups = useMemo(() => collectChangedFiles(entries), [entries]);
   const busy = status === "running" || status === "awaiting-approval";
@@ -180,6 +183,35 @@ export function ReviewRail({ onClose }: { onClose: () => void }) {
       <div className="review-rail-head">
         <span className="hud-stat-label">改动</span>
         <span className="btn-row">
+          {groups.length > 0 ? (
+            <>
+              <label className="muted review-push" title="默认只建本地分支；显式勾选才会 push">
+                <input
+                  type="checkbox"
+                  checked={push}
+                  onChange={(e) => setPush(e.target.checked)}
+                  disabled={busy || exporting}
+                />
+                推送
+              </label>
+              <button
+                type="button"
+                className="small"
+                disabled={busy || exporting}
+                title={
+                  push
+                    ? "导出为 git 分支并推送到设置的 remote"
+                    : "导出为 git 分支 + commit（不推送；当前工作树会切到该分支）"
+                }
+                onClick={() => {
+                  setExporting(true);
+                  void exportThread(push).finally(() => setExporting(false));
+                }}
+              >
+                {exporting ? "导出中…" : "导出分支"}
+              </button>
+            </>
+          ) : null}
           {comments.length > 0 ? (
             <button type="button" className="small" onClick={() => void clearComments()} title="丢掉全部待处理评论">
               评论 {comments.length}

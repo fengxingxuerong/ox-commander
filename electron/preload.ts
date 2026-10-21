@@ -84,6 +84,8 @@ const api = {
   deleteChat: (input: { sessionId: string }) => ipcRenderer.invoke("chat:delete", input),
   revertChat: (input: { projectId: string; sessionId: string; turn: number; path?: string }) =>
     ipcRenderer.invoke("chat:revert", input),
+  exportChat: (input: { projectId: string; sessionId: string; push?: boolean }) =>
+    ipcRenderer.invoke("chat:export", input),
   /**
    * 审批三选一：允许一次 / 本次会话不再问 / 拒绝并说明理由。
    * 理由会回灌给模型（不给理由它只会原样重试同一个动作）。

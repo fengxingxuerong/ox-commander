@@ -19,6 +19,37 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（线程侧 commit/push M5a · 2026-10-21）
+
+**动机**：Codex App 的右栏能直接 commit/push 线程改动；我们此前只有编排侧
+`exportDeliveryBranch`（批次 zone 输入），会话线程侧零通道。线程的改动集本来就在
+`shared/chat-changes` 里（右栏用它聚合、撤销也用 (turn, path)），复用它作为导出输入。
+
+**实现**：
+
+- `shared/chat-changes.ts`：`exportablePaths`（去重排序）、`threadBranchName`
+  （session id 只留 git ref 安全字符，空 id 有兜底）、`threadExportMessage`（单行限长）。
+- `electron/engine/git-export.ts`：新增可选 `paths` 入口。线程侧有精确文件集，直接
+  `git add -- <paths>`；不扫 `git status`，因此新建目录里的新文件不会因为 git 只报
+  `?? newdir/` 而漏掉。路径逐个自证（相对、无穿越、过 CommandPolicy），坏路径进
+  `skippedPaths`；`zones` 旧入口原样保留。
+- `electron/ipc/chat.ts` 的 `chat:export`：从 live 或落盘转录取 entries → 聚合
+  `ChangedFileGroup` → 导出分支/commit；`unrevertable` 逐条回传；`push:true` 才调用
+  `publishDeliveryRemote`（remote 取 settings.deliveryRemote.remote，默认 origin）。
+- `ReviewRail`：有改动时出现「导出分支」+「推送」复选框（默认关），导出中禁用；
+  结果进会话 notice，不在按钮上闪一下就算。
+- 校验：`shared/chat-changes` 纯函数用例、`git-export` 注入 runner + 真 git 仓库
+  （含显式 paths 导出新目录新文件）、IPC 真 git 仓库导出分支、ReviewRail 默认不推送
+  与勾选后 push 的桥接参数。
+
+**门禁**：全量测试 **2768 通过 + 8 跳过**（89 个有可执行用例的文件）；定向 site
+审计 `chat-changes` 13/13、`git-export` 40/40、`ipc/chat` 139/139（全程 100%）；
+基线 **102 个目标 / 2714 处位点**，`check:doc-claims` PASS。构建、`smoke:artifact`、
+`smoke:chat-agent`、`smoke:chat-cli` 同批复跑通过。
+
+**边界（写进界面/文档）**：导出会 `checkout -B` 到新分支；命令产生的改动不在
+ReviewRail，也不进导出；push 使用本机 git 凭据链，永不 force，不建 PR。
+
 ### 新增（交互式编码会话 P0 · 2026-10-20）
 
 **动机**：Codex 类产品的核心不是"一次吐整份文件"，而是"模型自己多轮取信息、改一处、

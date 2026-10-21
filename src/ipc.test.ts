@@ -152,6 +152,7 @@ describe("registerIpc · channel contract", () => {
     "chat:abort",
     "chat:approval-decide",
     "chat:delete",
+    "chat:export",
     "chat:files",
     "chat:fork",
     "chat:latest",

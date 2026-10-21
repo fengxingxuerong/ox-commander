@@ -32,13 +32,29 @@ interface NavItem {
   icon: string;
   label: string;
   sub: string;
+  /**
+   * 这一格点亮时还认哪些页（IA-2：编排一格包两步）。
+   * 没有它，"进了执行看板"会让顶栏看起来没有选中任何一格。
+   */
+  also?: readonly Page[];
 }
 
+/**
+ * 主导航四格（IA-2，方案 A）。
+ *
+ * 会话是**家**（默认页），编排是"会话之外的另一件事"（两步走），自动化与技能
+ * 是当前在建的两个一级公民 —— 先占位、明说在建，不留空也不摆假按钮。
+ */
 const NAV_ITEMS: NavItem[] = [
-  { page: "projects", icon: "◈", label: "项目库", sub: "新建 / 打开" },
-  { page: "prd-review", icon: "◇", label: "需求确认", sub: "看 PRD 再批准" },
-  { page: "board", icon: "▣", label: "执行看板", sub: "实时进度与干预" },
   { page: "chat", icon: "⌘", label: "会话", sub: "说一句，它自己动手" },
+  { page: "prd-review", icon: "▣", label: "编排", sub: "需求确认 → 执行看板", also: ["board"] },
+  { page: "automations", icon: "⟳", label: "自动化", sub: "定时触发（界面在建）" },
+  { page: "skills", icon: "✦", label: "技能", sub: "本地技能包（在建）" },
+];
+
+/** 常驻入口（右上角）：项目库与设置不再占主导航的格子，但仍要一键可达。 */
+const UTILITY_ITEMS: NavItem[] = [
+  { page: "projects", icon: "◈", label: "项目库", sub: "登记 / 换根 / 删除" },
   { page: "settings", icon: "⚙", label: "设置", sub: "密钥 / 策略 / 智能体" },
 ];
 
@@ -69,22 +85,41 @@ export function HudNav() {
       </div>
 
       <nav className="hud-nav" aria-label="主导航">
-        {NAV_ITEMS.map((item) => (
+        {NAV_ITEMS.map((item) => {
+          const active = page === item.page || (item.also ?? []).includes(page);
+          return (
+            <button
+              key={item.page}
+              type="button"
+              className={`hud-tab${active ? " active" : ""}`}
+              aria-current={active ? "page" : undefined}
+              title={`${item.label} — ${item.sub}`}
+              onClick={() => setPage(item.page)}
+            >
+              <span className="hud-tab-line">
+                <span className="hud-tab-icon" aria-hidden="true">
+                  {item.icon}
+                </span>
+                {item.label}
+              </span>
+              <span className="hud-tab-sub">{item.sub}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      <nav className="hud-utility" aria-label="常驻入口">
+        {UTILITY_ITEMS.map((item) => (
           <button
             key={item.page}
             type="button"
-            className={`hud-tab${page === item.page ? " active" : ""}`}
+            className={`hud-utility-btn${page === item.page ? " active" : ""}`}
             aria-current={page === item.page ? "page" : undefined}
             title={`${item.label} — ${item.sub}`}
             onClick={() => setPage(item.page)}
           >
-            <span className="hud-tab-line">
-              <span className="hud-tab-icon" aria-hidden="true">
-                {item.icon}
-              </span>
-              {item.label}
-            </span>
-            <span className="hud-tab-sub">{item.sub}</span>
+            <span aria-hidden="true">{item.icon}</span>
+            {item.label}
           </button>
         ))}
       </nav>

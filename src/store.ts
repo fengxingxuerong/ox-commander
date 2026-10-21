@@ -85,7 +85,9 @@ export function appendCommentAppendix(text: string, comments: readonly InlineCom
 }
 
 export const useApp = create<AppState>((set, get) => ({
-  page: "projects",
+  // IA-2：默认页是会话 —— 指挥中心的家是线程工作区，不是一张登记表。
+  // （`page` 不持久化，旧版本没有迁移问题。）
+  page: "chat",
   projects: [],
   stage: "PRD" as Stage,
   logs: [],
@@ -424,6 +426,44 @@ export const useApp = create<AppState>((set, get) => ({
       set((s) => ({ chat: { ...s.chat, notice: `${head}${tail}` } }));
     } catch (e) {
       set((s) => ({ chat: { ...s.chat, notice: `撤销失败：${(e as Error).message}` } }));
+    }
+  },
+
+  exportChat: async (push) => {
+    const projectId = get().activeProjectId;
+    const sessionId = get().chat.sessionId;
+    if (!projectId || !sessionId) {
+      set((s) => ({ chat: { ...s.chat, notice: "没有可导出的会话" } }));
+      return;
+    }
+    try {
+      const result = await api().exportChat({ projectId, sessionId, push });
+      const parts: string[] = [];
+      if (!result.ok) {
+        parts.push(`导出失败：${result.reason ?? "未知原因"}`);
+      } else if (result.skipped === "no-changes") {
+        parts.push("没有可导出的补丁改动");
+      } else if (result.skipped === "no-repo") {
+        parts.push("当前项目不是 git 仓库");
+      } else if (result.skipped === "no-zone-files") {
+        parts.push("没有匹配的改动路径");
+      } else if (result.branch) {
+        parts.push(
+          `已导出分支 ${result.branch}${result.commit ? `（${result.commit}）` : ""}` +
+            `${result.filesCommitted !== undefined ? ` · ${result.filesCommitted} 个文件` : ""}`,
+        );
+      }
+      if (result.unrevertable.length > 0) {
+        parts.push(`不可审阅：${result.unrevertable.join("、")}`);
+      }
+      if (result.push) {
+        if (result.push.skipped === "no-remote") parts.push("未推送：没有配置远端");
+        else if (result.push.ok) parts.push(`已推送${result.push.remote ? `到 ${result.push.remote}` : ""}`);
+        else parts.push(`推送失败：${result.push.reason ?? "未知原因"}`);
+      }
+      set((s) => ({ chat: { ...s.chat, notice: parts.join("；") } }));
+    } catch (e) {
+      set((s) => ({ chat: { ...s.chat, notice: `导出失败：${(e as Error).message}` } }));
     }
   },
 

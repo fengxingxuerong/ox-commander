@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useApp } from "../store";
 import { SessionList } from "./SessionList";
 
@@ -30,6 +30,8 @@ export function ThreadRail() {
   const deleteChat = useApp((s) => s.deleteChat);
   const newChat = useApp((s) => s.newChat);
   const loadChatSessions = useApp((s) => s.loadChatSessions);
+  const setPage = useApp((s) => s.setPage);
+  const [query, setQuery] = useState("");
 
   const activeProject = projects.find((p) => p.id === activeProjectId);
 
@@ -38,6 +40,14 @@ export function ThreadRail() {
   useEffect(() => {
     if (activeProjectId && sessions.length === 0) void loadChatSessions();
   }, [activeProjectId, sessions.length, loadChatSessions]);
+
+  // 线程搜索（M1 的已知缺口）：只在标题与线程 id 上匹配 —— 转录正文不在内存里
+  // （列表只存元数据），按正文搜要么假要么贵，都不诚实。
+  const needle = query.trim().toLowerCase();
+  const shown = useMemo(
+    () => (needle === "" ? sessions : sessions.filter((s) => `${s.title} ${s.sessionId}`.toLowerCase().includes(needle))),
+    [sessions, needle],
+  );
 
   return (
     <aside className="thread-rail" aria-label="项目与线程">
@@ -79,13 +89,27 @@ export function ThreadRail() {
         {activeProject ? (
           <p className="muted thread-rail-project-name">{activeProject.name}</p>
         ) : null}
+        {sessions.length > 0 ? (
+          <input
+            className="thread-rail-search"
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="搜索线程（标题 / id）"
+            aria-label="搜索线程"
+          />
+        ) : null}
         {sessions.length === 0 ? (
           <p className="muted thread-rail-empty">
             {activeProjectId ? "这个项目还没有线程。说一句要它做什么，第一条线程就出现在这里。" : "选一个项目才看得到它的线程。"}
           </p>
+        ) : shown.length === 0 ? (
+          <p className="muted thread-rail-empty">
+            没有匹配「{query.trim()}」的线程（只搜标题与线程 id：列表里没有正文）。
+          </p>
         ) : (
           <SessionList
-            sessions={sessions}
+            sessions={shown}
             activeSessionId={sessionId}
             threads={threads}
             onResume={(id) => void resumeChat(id)}
@@ -104,6 +128,17 @@ export function ThreadRail() {
           title="从会话记录重新读一次列表"
         >
           刷新线程列表
+        </button>
+      </div>
+
+      {/* IA-2：项目库与设置从主导航退到左下角（Codex 的设置位置），
+          但仍是常驻入口 —— 它们不该因为"不是主流程"就消失。 */}
+      <div className="thread-rail-block thread-rail-footer">
+        <button type="button" className="small" onClick={() => setPage("projects")} title="登记 / 换根 / 删除项目">
+          ◈ 项目库
+        </button>
+        <button type="button" className="small" onClick={() => setPage("settings")} title="密钥 / 策略 / 智能体">
+          ⚙ 设置
         </button>
       </div>
     </aside>

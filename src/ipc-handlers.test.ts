@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { dialog } from "electron";
 import { buildReceipt, sealReceipt } from "../shared/delivery-receipt";
@@ -208,7 +209,7 @@ import { app, shell } from "electron";
 import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
 import { registerChatHandlers } from "../electron/ipc/chat";
 import { ChatSessionStore } from "../electron/chat/session-store";
-import type { ChatSessionSnapshot } from "../shared/chat-events";
+import type { ChatSessionMeta, ChatSessionSnapshot } from "../shared/chat-events";
 import type { ChatFileChange } from "../shared/tools/spec";
 import type { ReceiptVerifyResult } from "../shared/delivery-receipt";
 import {
@@ -2682,7 +2683,14 @@ describe("chat handlers（交互式编码会话）", () => {
   /** 直接写一条带任意 changes 的会话记录（不经过模型/工具），专测撤销分支。 */
   function saveStoredSession(
     changes: ChatFileChange[],
-    opts: { id?: string; projectId?: string; rootAbs?: string } = {},
+    opts: {
+      id?: string;
+      projectId?: string;
+      rootAbs?: string;
+      userText?: string;
+      userAfterTool?: boolean;
+      meta?: Partial<ChatSessionMeta>;
+    } = {},
   ): string {
     const projectId = opts.projectId ?? "p-chat";
     const rootAbs = opts.rootAbs ?? seedChatWorkspace(projectId);
@@ -2698,8 +2706,12 @@ describe("chat handlers（交互式编码会话）", () => {
         mode: "workspace-write",
         approvalPolicy: "on-request",
         usageTokens: 0,
+        ...(opts.meta ?? {}),
       },
       entries: [
+        ...(opts.userText && !opts.userAfterTool
+          ? [{ id: "e-0", ts: 1, kind: "user" as const, text: opts.userText }]
+          : []),
         {
           id: "e-1",
           ts: 1,
@@ -2707,6 +2719,9 @@ describe("chat handlers（交互式编码会话）", () => {
           text: "补丁",
           result: { id: "t-1", name: "apply_patch", ok: true, output: "", changes },
         },
+        ...(opts.userText && opts.userAfterTool
+          ? [{ id: "e-2", ts: 2, kind: "user" as const, text: opts.userText }]
+          : []),
       ],
       messages: [],
       toolProtocol: "text",
@@ -3483,6 +3498,149 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(res.reverted).toEqual(["b.txt"]);
     expect(fs.existsSync(path.join(root, "a.txt"))).toBe(true);
     expect(fs.existsSync(path.join(root, "b.txt"))).toBe(false);
+  });
+
+  it("chat:export 在真 git 仓库导出线程分支与 commit；默认不推送", async () => {
+    const root = seedChatWorkspace();
+    fs.writeFileSync(path.join(root, "a.txt"), "old\n", "utf8");
+    const git = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+    git(["init", "-q"]);
+    git(["add", "."]);
+    git(["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "init"]);
+    fs.writeFileSync(path.join(root, "a.txt"), "new\n", "utf8");
+
+    const id = saveStoredSession(
+      [{ path: "a.txt", before: "old\n", after: "new\n", created: false, turn: 1, revertable: true }],
+      { id: "chat-export", rootAbs: root },
+    );
+    const result = (await (h.ipcMain as FakeIpcMain).invoke("chat:export", {
+      projectId: "p-chat",
+      sessionId: id,
+    })) as {
+      ok: boolean;
+      branch?: string;
+      commit?: string;
+      filesCommitted?: number;
+      skipped?: string;
+      push?: unknown;
+      unrevertable: string[];
+    };
+    expect(result.ok).toBe(true);
+    expect(result.branch).toMatch(/^oxcommander\/thread-/);
+    expect(result.commit).toMatch(/^[0-9a-f]+$/);
+    expect(result.filesCommitted).toBe(1);
+    expect(result.push).toBeUndefined();
+    expect(result.unrevertable).toEqual([]);
+
+    const branch = execFileSync("git", ["branch", "--show-current"], { cwd: root, stdio: "pipe" }).toString().trim();
+    expect(branch).toBe(result.branch);
+    const committed = execFileSync("git", ["show", "--name-only", "--format="], { cwd: root, stdio: "pipe" })
+      .toString()
+      .trim()
+      .split("\n");
+    expect(committed).toEqual(["a.txt"]);
+  });
+
+  it("chat:export 的 commit message 取线程首条非空 user 文本", async () => {
+    const root = seedChatWorkspace();
+    fs.writeFileSync(path.join(root, "a.txt"), "old\n", "utf8");
+    const git = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+    git(["init", "-q"]);
+    git(["add", "."]);
+    git(["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "init"]);
+    fs.writeFileSync(path.join(root, "a.txt"), "new\n", "utf8");
+    const id = saveStoredSession(
+      [{ path: "a.txt", before: "old\n", after: "new\n", created: false, turn: 1, revertable: true }],
+      { id: "chat-export-title", rootAbs: root, userText: "修登录流程", userAfterTool: true },
+    );
+    const result = (await (h.ipcMain as FakeIpcMain).invoke("chat:export", {
+      projectId: "p-chat",
+      sessionId: id,
+    })) as { ok: boolean };
+    expect(result.ok).toBe(true);
+    const subject = execFileSync("git", ["log", "-1", "--pretty=%s"], { cwd: root, stdio: "pipe" })
+      .toString()
+      .trim();
+    expect(subject).toContain("修登录流程");
+    expect(subject).toContain("1 个文件");
+  });
+
+  it("chat:export push=true 且无 remote：返回 push 事实，但不伪造 pushed/remote/reason", async () => {
+    const root = seedChatWorkspace();
+    fs.writeFileSync(path.join(root, "a.txt"), "old\n", "utf8");
+    const git = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" });
+    git(["init", "-q"]);
+    git(["add", "."]);
+    git(["-c", "user.name=t", "-c", "user.email=t@localhost", "commit", "-q", "-m", "init"]);
+    fs.writeFileSync(path.join(root, "a.txt"), "new\n", "utf8");
+    const id = saveStoredSession(
+      [{ path: "a.txt", before: "old\n", after: "new\n", created: false, turn: 1, revertable: true }],
+      { id: "chat-export-push", rootAbs: root },
+    );
+    const result = (await (h.ipcMain as FakeIpcMain).invoke("chat:export", {
+      projectId: "p-chat",
+      sessionId: id,
+      push: true,
+    })) as { ok: boolean; branch?: string; push?: Record<string, unknown> };
+    expect(result.ok).toBe(true);
+    expect(result.branch).toMatch(/^oxcommander\/thread-/);
+    // 没有 remote 时 publish 返回 skipped:no-remote；push 结果里不能出现
+    // `pushed: undefined` / `remote: undefined` 这类假字段，也不能把 skipped 吞掉
+    // 让界面念成"已推送"。
+    expect(result.push).toEqual({ ok: true, skipped: "no-remote" });
+    expect("pushed" in (result.push ?? {})).toBe(false);
+    expect("remote" in (result.push ?? {})).toBe(false);
+    expect("reason" in (result.push ?? {})).toBe(false);
+  });
+
+  it("chat:export 导出未成功时 push 分支说清「未推送」", async () => {
+    seedChatWorkspace();
+    const id = saveStoredSession(
+      [{ path: "../evil.txt", before: "a", after: "b", created: false, turn: 1, revertable: true }],
+      { id: "chat-export-fail" },
+    );
+    const result = (await (h.ipcMain as FakeIpcMain).invoke("chat:export", {
+      projectId: "p-chat",
+      sessionId: id,
+      push: true,
+    })) as { ok: boolean; skipped?: string; push?: { ok: boolean; reason?: string } };
+    // 工作区不是 git 仓库 ⇒ 导出本身是 skipped（不是失败），但 push 分支必须
+    // 明确说"没有分支可推"；不能因为 skipped 就假装推送成功。
+    expect(result).toMatchObject({ ok: true, skipped: "no-repo" });
+    expect(result.push).toMatchObject({ ok: false, reason: "导出未成功，未推送" });
+  });
+
+  it("chat:resume 对半截线路 meta（只有 provider 没有 model）回落到全局，不补默认模型", async () => {
+    seedChatWorkspace();
+    const id = saveStoredSession([], { id: "chat-half-line", meta: { providerId: "deepseek" } });
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:resume", {
+      projectId: "p-chat",
+      sessionId: id,
+    }) as { meta: Record<string, unknown> };
+    expect("providerId" in transcript.meta).toBe(false);
+    expect("model" in transcript.meta).toBe(false);
+  });
+
+  it("chat:export 拒绝导出属于别的项目的活线程", async () => {
+    seedChatWorkspace("p-chat");
+    seedChatWorkspace("p-other");
+    const other = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-other" }) as {
+      sessionId: string;
+    };
+    await expect(
+      (h.ipcMain as FakeIpcMain).invoke("chat:export", { projectId: "p-chat", sessionId: other.sessionId }),
+    ).rejects.toThrow(/不属于当前项目/);
+  });
+
+  it("chat:export 没有补丁改动时返回 no-changes（不建分支）", async () => {
+    seedChatWorkspace();
+    const id = saveStoredSession([], { id: "chat-export-none" });
+    const result = (await (h.ipcMain as FakeIpcMain).invoke("chat:export", {
+      projectId: "p-chat",
+      sessionId: id,
+    })) as { ok: boolean; skipped?: string; branch?: string };
+    expect(result).toMatchObject({ ok: true, skipped: "no-changes" });
+    expect(result.branch).toBeUndefined();
   });
 
   it("审批答『本会话都不再问』经 IPC 保留：第二个同类动作不再问人", async () => {

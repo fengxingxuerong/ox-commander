@@ -102,6 +102,33 @@ export interface ChatSessionSnapshot extends ChatTranscript {
   toolProtocol: "native" | "text";
 }
 
+/**
+ * 线程导出为 git 分支的结果（M5a）。
+ *
+ * `skipped` 与 `reason` 是两种结局：前者是"没有可做的事"（不是失败），后者是
+ * 命令真的失败了。`unrevertable` 不是导出失败 —— 它列出"这条线程动过、但没有
+ * before/after 快照"的文件，让操作者知道这份导出里包含不可审阅的改动。
+ */
+export interface ChatExportResult {
+  ok: boolean;
+  skipped?: "no-repo" | "no-changes" | "no-zone-files";
+  branch?: string;
+  commit?: string;
+  filesCommitted?: number;
+  reason?: string;
+  skippedPaths?: string[];
+  unrevertable: string[];
+  /** 显式勾选推送时才有；默认不 push。 */
+  push?: {
+    ok: boolean;
+    pushed?: boolean;
+    remote?: string;
+    reason?: string;
+    /** `publishDeliveryRemote` 的"没事可做"：例如没有配置远端。 */
+    skipped?: "no-remote" | "no-changes";
+  };
+}
+
 /** 撤销一轮/一个文件后的结果（部分撤销必须逐条说清为什么没撤）。 */
 export interface ChatRevertResult {
   reverted: string[];

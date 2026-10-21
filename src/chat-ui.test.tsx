@@ -62,6 +62,13 @@ const bridge = {
       skipped: [] as Array<{ path: string; reason: string }>,
     }),
   ),
+  exportChat: vi.fn(async (_input: { projectId: string; sessionId: string; push?: boolean }) => ({
+    ok: true,
+    branch: "oxcommander/thread-chat-1-20261021-120000",
+    commit: "abc1234",
+    filesCommitted: 1,
+    unrevertable: [] as string[],
+  })),
   resolveChatApproval: vi.fn(
     async (_requestId: string, _answer: { granted: boolean; scope?: "once" | "session"; reason?: string }) => true,
   ),
@@ -515,6 +522,33 @@ describe("右栏（ReviewRail）", () => {
     expect(screen.getAllByText(/不可撤销/).length).toBeGreaterThanOrEqual(2);
     fireEvent.click(screen.getByText("src/a.ts"));
     expect(screen.queryByRole("button", { name: "撤销此文件" })).toBeNull();
+  });
+
+  it("导出分支默认不推送；勾选「推送」后才显式 push", async () => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        sessionId: "chat-1",
+        entries: [patchEntry([change()])],
+      },
+    });
+    render(<ReviewRail onClose={() => undefined} />);
+    fireEvent.click(screen.getByRole("button", { name: "导出分支" }));
+    await vi.waitFor(() =>
+      expect(bridge.exportChat).toHaveBeenCalledWith({ projectId: "p-1", sessionId: "chat-1", push: false }),
+    );
+
+    // 第一次导出的 finally 可能在点击后才把按钮文案从「导出中…」还原；等它回来再点。
+    await vi.waitFor(() => expect(screen.getByRole("button", { name: "导出分支" })).toBeTruthy());
+    const pushBox = screen.getByRole("checkbox", { name: "推送" }) as HTMLInputElement;
+    expect(pushBox.checked).toBe(false);
+    fireEvent.click(pushBox);
+    fireEvent.click(screen.getByRole("button", { name: "导出分支" }));
+    await vi.waitFor(() =>
+      expect(bridge.exportChat).toHaveBeenLastCalledWith({ projectId: "p-1", sessionId: "chat-1", push: true }),
+    );
+    // 导出结果会进会话 notice，而不是只在按钮上闪一下。
+    expect(useApp.getState().chat.notice).toContain("已导出分支");
   });
 
   it("没有补丁时说清楚为什么空着", () => {

@@ -27,6 +27,9 @@ import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
 import { ThreadRegistry, type LiveThread } from "../chat/thread-registry";
+import { collectChangedFiles, exportablePaths, threadBranchName, threadExportMessage } from "../../shared/chat-changes";
+import { deliveryStamp, exportDeliveryBranch } from "../engine/git-export";
+import { publishDeliveryRemote } from "../engine/git-remote";
 import { focusChatSession } from "../chat/focus";
 import { clearThreadWrites, recordThreadWrites, resetThreadWrites, threadWrites } from "../chat/write-ledger";
 import { writeFileAtomic } from "../atomic-file";
@@ -42,6 +45,7 @@ import {
   messagesForProtocol,
   type ChatApprovalAnswer,
   type ChatApprovalRequest,
+  type ChatExportResult,
   type ChatFileIndex,
   type ChatHistory,
   type ChatRevertResult,
@@ -214,7 +218,9 @@ function buildSession(
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     ...(pinned ? { providerId: pinned.providerId, model: pinned.model } : {}),
-    ...(pinned && profile?.reasoningEffort ? { reasoningEffort: profile.reasoningEffort } : {}),
+    // ChatSession 自己会再判一次"线路与强度必须同时成立"；这里传 undefined
+    // 与整个键缺席在 meta 上等价，少一层永远等价的 && 位点。
+    reasoningEffort: profile?.reasoningEffort,
     ...(runtime.maxTurns !== undefined ? { maxTurns: runtime.maxTurns } : {}),
     signal: controller.signal,
     onEvent: (event) => send({ ...event } as unknown as Record<string, unknown>),
@@ -420,7 +426,9 @@ function chatProfileOf(input: unknown): ChatRuntimeProfile | undefined {
  */
 function profileOfMeta(meta: ChatSessionMeta): ChatRuntimeProfile {
   const base: ChatRuntimeProfile = { mode: meta.mode, approvalPolicy: meta.approvalPolicy };
-  if (!meta.providerId || !meta.model) return base;
+  // model 缺席交给下面的 `isModelId`（它本来就返回 false）；这里只挡 provider。
+  // 写成 `!provider || !model` 会多一个后半段永远被 isModelId 覆盖的位点。
+  if (!meta.providerId) return base;
   try {
     getProvider(meta.providerId);
   } catch {
@@ -737,6 +745,77 @@ export function registerChatHandlers(): void {
       const parts = [`已撤销第 ${turn} 轮改动：${reverted.length > 0 ? reverted.join("、") : "无"}`];
       if (skipped.length > 0) parts.push(`未撤销 ${skipped.length} 处（${skipped.map((s) => `${s.path}：${s.reason}`).join("；")}）`);
       liveEntry.session.note(parts.join("；"));
+    }
+    return result;
+  });
+
+  /**
+   * 把一条线程的 apply_patch 改动导出成 git 分支 + commit（M5a）。
+   *
+   * 默认不 push：本地分支是操作者可以自己 review / 推送的东西；勾选推送时走
+   * `publishDeliveryRemote`（永不 --force、不碰凭据）。导出失败不影响会话本身。
+   *
+   * 边界：`exportDeliveryBranch` 会 `checkout -B` 到新分支（与编排侧同一语义），
+   * 所以导出后当前工作树的分支会变；`unrevertable` 列出的文件没有 before/after，
+   * 仍会被提交，但界面必须把它们摆出来。
+   */
+  ipcMain.handle("chat:export", async (_e, input: unknown) => {
+    const payload = (input ?? {}) as { projectId?: unknown; sessionId?: unknown; push?: unknown };
+    const projectId = projectIdOf(payload, "chat:export");
+    const sessionId = sessionIdOf(payload, "chat:export");
+    const push = payload.push === true;
+    const rootAbs = requireProjectRoot(projectId, "导出线程");
+
+    let entries: ChatHistory["entries"];
+    const liveEntry = liveThreads.get(sessionId);
+    if (liveEntry) {
+      if (liveEntry.projectId !== projectId) throw new Error("该会话不属于当前项目");
+      entries = liveEntry.session.transcript().entries;
+    } else {
+      const env = chatStore().load(sessionId);
+      if (!env) throw new Error(`会话不存在或已损坏：${sessionId}`);
+      if (env.projectId !== projectId) throw new Error("该会话不属于当前项目");
+      entries = env.snapshot.entries;
+    }
+
+    const groups = collectChangedFiles(entries);
+    const paths = exportablePaths(groups);
+    const unrevertable = groups.filter((g) => !g.revertable).map((g) => g.path);
+    if (paths.length === 0) {
+      return { ok: true, skipped: "no-changes", unrevertable } satisfies ChatExportResult;
+    }
+
+    const title = entries.find((e) => e.kind === "user" && e.text.trim() !== "")?.text ?? "会话改动";
+    const branch = threadBranchName(sessionId, deliveryStamp());
+    const exported = await exportDeliveryBranch({
+      projectRoot: rootAbs,
+      paths,
+      branch,
+      message: threadExportMessage(title, paths.length),
+    });
+    const result: ChatExportResult = { ...exported, unrevertable };
+
+    if (push) {
+      if (!result.ok || !result.branch) {
+        result.push = { ok: false, reason: "导出未成功，未推送" };
+      } else {
+        const settings = settingsStore().load();
+        const pushed = await publishDeliveryRemote({
+          projectRoot: rootAbs,
+          branch: result.branch,
+          mode: "push",
+          // publish 自己的缺省也是 origin；显式给同一个值，避免一个永远等价的
+          // `remote !== undefined` 三元位点。
+          remote: settings.deliveryRemote?.remote ?? "origin",
+        });
+        result.push = {
+          ok: pushed.ok,
+          skipped: pushed.skipped,
+          ...(pushed.pushed !== undefined ? { pushed: pushed.pushed } : {}),
+          ...(pushed.remote !== undefined ? { remote: pushed.remote } : {}),
+          ...(pushed.reason !== undefined ? { reason: pushed.reason } : {}),
+        };
+      }
     }
     return result;
   });

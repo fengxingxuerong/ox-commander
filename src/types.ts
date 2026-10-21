@@ -9,6 +9,7 @@ import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 import type {
   ChatApprovalRequest,
   ChatEntry,
+  ChatExportResult,
   ChatFileIndex,
   ChatRevertResult,
   ChatSessionSummary,
@@ -176,7 +177,24 @@ export interface ConflictView {
  * 五格导航。第 5 格 `chat` 是**交互式会话**（对标 Codex 的 TUI 那一层）：
  * 与看板那条"需求 → PRD → 批次 → 门禁"流水线并行，不共用审批队列。
  */
-export type Page = "projects" | "board" | "prd-review" | "chat" | "settings";
+/**
+ * 一级页面（IA-2 之后）。
+ *
+ * 顶栏只有四格：会话（默认）/ 编排 / 自动化 / 技能；项目库与设置退到左下角与
+ * 右上角常驻入口。`automations` / `skills` 两格是**先占位后填充**（M5b / M6）——
+ * 导航决定产品形状，页面决定内容，所以格先到位、内容明说在建。
+ *
+ * 新增成员必须同时登记进 `App.tsx` 的 switch（`check-exhaustive-maps` 判的是
+ * "每一档都写过"，靠 default 兜会让新页静默渲染成项目页）。
+ */
+export type Page =
+  | "chat"
+  | "prd-review"
+  | "board"
+  | "automations"
+  | "skills"
+  | "projects"
+  | "settings";
 
 /**
  * 会话页在渲染层持有的全部状态。
@@ -339,6 +357,8 @@ export interface AppState {
   deleteChat(sessionId: string): Promise<void>;
   /** 撤销某轮（可只撤一个文件）的 apply_patch 改动。 */
   revertChat(turn: number, path?: string): Promise<void>;
+  /** 把当前线程的 apply_patch 改动导出为 git 分支；push 默认 false。 */
+  exportChat(push: boolean): Promise<void>;
   /**
    * 答复一次审批。三选一对齐 Codex：允许一次 / 本次会话不再问 / 拒绝并说明理由。
    * 拒绝理由会回灌给模型 —— 不给理由，它只会原样重试同一个动作。
@@ -557,6 +577,7 @@ declare global {
       forkChat(input: { projectId: string; sessionId: string }): Promise<ChatTranscript>;
       deleteChat(input: { sessionId: string }): Promise<boolean>;
       revertChat(input: { projectId: string; sessionId: string; turn: number; path?: string }): Promise<ChatRevertResult>;
+      exportChat(input: { projectId: string; sessionId: string; push?: boolean }): Promise<ChatExportResult>;
       resolveChatApproval(
         requestId: string,
         answer: { granted: boolean; scope?: "once" | "session"; reason?: string },
