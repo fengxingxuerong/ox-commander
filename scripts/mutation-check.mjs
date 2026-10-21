@@ -880,7 +880,7 @@ const SITE_BASELINE = {
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
-  "electron/notify-rules.ts": 8,
+  "electron/notify-rules.ts": 17,
   "electron/platform.ts": 38,
   "electron/preview-manager.ts": 12,
   "electron/sandbox/action-gate.ts": 13,
@@ -910,6 +910,7 @@ const SITE_BASELINE = {
   "shared/chat-changes.ts": 10,
   "shared/chat-compress.ts": 14,
   "shared/chat-events.ts": 15,
+  "shared/chat-thread-status.ts": 13,
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
   "shared/delivery-guide.ts": 31,
@@ -938,7 +939,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 79,
+  "src/store.ts": 83,
 };
 
 /**
