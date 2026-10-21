@@ -96,6 +96,10 @@ export const useApp = create<AppState>((set, get) => ({
   setChatInput: (chatInput) => set({ chatInput }),
   setChatMode: (mode) => set((s) => ({ chat: { ...s.chat, mode } })),
   setChatApproval: (approvalPolicy) => set((s) => ({ chat: { ...s.chat, approvalPolicy } })),
+  setChatModel: (line) =>
+    set((s) => ({
+      chat: { ...s.chat, providerId: line?.providerId, model: line?.model },
+    })),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
 
   sendChat: async () => {
@@ -119,7 +123,13 @@ export const useApp = create<AppState>((set, get) => ({
       const res = await api().sendChat({
         text: outgoing,
         projectId,
-        profile: { mode: get().chat.mode, approvalPolicy: get().chat.approvalPolicy },
+        profile: {
+          mode: get().chat.mode,
+          approvalPolicy: get().chat.approvalPolicy,
+          ...(get().chat.providerId && get().chat.model
+            ? { providerId: get().chat.providerId, model: get().chat.model }
+            : {}),
+        },
       });
       set((s) => ({ chat: { ...s.chat, sessionId: res.sessionId, status: "running" } }));
       // 首条用户消息落盘后列表会出现这条会话；刷新一次让侧栏不用等下一轮。
@@ -204,6 +214,8 @@ export const useApp = create<AppState>((set, get) => ({
             usageTokens: t.meta.usageTokens,
             mode: t.meta.mode,
             approvalPolicy: t.meta.approvalPolicy,
+            providerId: t.meta.providerId,
+            model: t.meta.model,
             pendingApproval: undefined,
             streaming: "",
           },
@@ -256,6 +268,8 @@ export const useApp = create<AppState>((set, get) => ({
           usageTokens: t.meta.usageTokens,
           mode: t.meta.mode,
           approvalPolicy: t.meta.approvalPolicy,
+          providerId: t.meta.providerId,
+          model: t.meta.model,
           pendingApproval: undefined,
           notice: "",
           streaming: "",
@@ -285,6 +299,8 @@ export const useApp = create<AppState>((set, get) => ({
           usageTokens: t.meta.usageTokens,
           mode: t.meta.mode,
           approvalPolicy: t.meta.approvalPolicy,
+          providerId: t.meta.providerId,
+          model: t.meta.model,
           pendingApproval: undefined,
           notice: "",
           streaming: "",

@@ -8,6 +8,12 @@ export interface BuildLlmOptions {
   env?: NodeJS.ProcessEnv;
   /** Per-request timeout; defaults to BRAIN_TIMEOUT_MS (brain-layer calls). */
   timeoutMs?: number;
+  /**
+   * Pin to one model instead of the provider default（M3c-2 线程级模型）.
+   * SenseNova still get every configured key, but only this model — a pinned
+   * thread must not silently rotate to a different model on a 429.
+   */
+  model?: string;
   /** Failover decision sink (rotation failures, cooldown skips); wired to the caller's log stream. */
   onEvent?: (text: string) => void;
   /**
@@ -36,9 +42,10 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
   const env = opts.env ?? process.env;
   const provider = getProvider(providerId, env);
   const timeoutMs = opts.timeoutMs ?? BRAIN_TIMEOUT_MS;
+  const model = opts.model ?? provider.defaultModel;
   if (provider.id === "sensenova") {
     return withMeter(
-      createFailoverClient(provider, SENSENOVA_KEY_VARS, SENSENOVA_MODELS, {
+      createFailoverClient(provider, SENSENOVA_KEY_VARS, [model], {
         env,
         timeoutMs,
         onEvent: opts.onEvent,
@@ -53,7 +60,7 @@ export function buildLlmClient(providerId: string, opts: BuildLlmOptions = {}): 
   // 而那个位点交换分支后是「有 envVar 却用空串」，语义变化真实但**无从构造输入
   // 去区分**（空串 envVar 在两条分支上结果一致）。判定简化掉，行为不变。
   const apiKey = env[provider.apiKeyEnvVar] ?? "";
-  return withMeter(createLlmClient(provider, apiKey, timeoutMs), opts.meter);
+  return withMeter(createLlmClient({ ...provider, defaultModel: model }, apiKey, timeoutMs), opts.meter);
 }
 
 export interface BuildPoolOptions extends BuildLlmOptions {

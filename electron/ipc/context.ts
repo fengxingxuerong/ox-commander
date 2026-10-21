@@ -13,12 +13,13 @@ import { OrchestratorEngine, type OrchestratorCallbacks, type RunSnapshot } from
 import { agentRoutingLogLine, createAgentLayer, type AgentLayer } from "../agents";
 import { AuditLog } from "../audit-log";
 import { taskTrail, trailBriefForRepair } from "../board-derive";
-import { createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
+import { brainTimeoutMsFor, createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
 import { desktopNotificationOf, type NotifyEventShape } from "../notify-rules";
 import { writeFileAtomic } from "../atomic-file";
 import { ProjectStore, SettingsStore } from "../store";
 import { KeysStore, createSafeStorageCrypto } from "../keys-store";
 import { getProvider, providerKeyEnvVars } from "../../shared/providers";
+import { buildLlmClient } from "../../shared/build-llm";
 import { redactSecrets } from "../../shared/redact";
 import type { AgentAdapter } from "../../shared/types";
 import type { AgentManifest } from "../../shared/agent-contract";
@@ -430,6 +431,19 @@ export function buildPlatformLayer(
 export function buildLlm(settingsValue: ProjectSettings): LlmClient {
   const platform = buildPlatformLayer(settingsValue, { log: logLine });
   return platform.buildLlm();
+}
+
+/**
+ * 线程钉死到一条 provider × model 的线路（M3c-2）。
+ *
+ * 为什么不复用 `buildLlm(settings)`：那条路会按 `settings.llmPool` 组一个故障转移
+ * 池，模型由池里的线路决定；线程选了模型之后必须**只有这一条模型**。这里先按
+ * 被选 provider 播种密钥（密钥仓只在 Electron 侧），再直接建单线路客户端，且
+ * 沿用同一个超时设置 —— 否则选模型会顺带把超时改回大脑层默认值。
+ */
+export function buildLlmPinned(settingsValue: ProjectSettings, providerId: string, model: string): LlmClient {
+  seedKeysFromStore({ ...settingsValue, llmPool: [providerId] }, new Set<string>());
+  return buildLlmClient(providerId, { model, timeoutMs: brainTimeoutMsFor(settingsValue), onEvent: logLine });
 }
 
 /** Writes a checkpoint journal for one project. Best-effort: never breaks a run. */

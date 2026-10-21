@@ -193,6 +193,9 @@ export interface ChatView {
   usageTokens: number;
   mode: SandboxMode;
   approvalPolicy: ApprovalPolicy;
+  /** 线程钉死的线路（M3c-2）；两者同时缺席 = 跟随全局 provider/pool。 */
+  providerId?: string;
+  model?: string;
   pendingApproval?: ChatApprovalRequest;
   /** 需要人看着时给的一句话（如"没有选项目"）——空串表示没有。 */
   notice: string;
@@ -301,6 +304,8 @@ export interface AppState {
   /** 线程级运行档（M3c）：只改当前这条线程，下一条消息随 payload 带给主进程。 */
   setChatMode(mode: SandboxMode): void;
   setChatApproval(policy: ApprovalPolicy): void;
+  /** `null` = 这条线程恢复跟随全局 provider/pool。 */
+  setChatModel(line: { providerId: string; model: string } | null): void;
   /** 展开 / 收起右栏改动审查（M2）。显式给值，不做无参翻转 —— 翻转在多处触发时会分不清谁翻的。 */
   setReviewOpen(open: boolean): void;
   /**
@@ -504,11 +509,25 @@ declare global {
       sendChat(input: {
         text: string;
         projectId: string;
-        /** 线程自己的沙箱/审批档；省略 = 主进程按设置与项目配置合并。 */
-        profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy };
+        /** 线程自己的沙箱/审批/模型；省略 = 主进程按设置与项目配置合并。 */
+        profile?: {
+          mode: SandboxMode;
+          approvalPolicy: ApprovalPolicy;
+          providerId?: string;
+          model?: string;
+        };
       }): Promise<{ sessionId: string; accepted: true }>;
       abortChat(): Promise<boolean>;
-      newChat(input: { projectId: string }): Promise<{ sessionId: string }>;
+      newChat(input: {
+        projectId: string;
+        /** 新线程沿用当前档位；省略 = 主进程按设置与项目配置合并。 */
+        profile?: {
+          mode: SandboxMode;
+          approvalPolicy: ApprovalPolicy;
+          providerId?: string;
+          model?: string;
+        };
+      }): Promise<{ sessionId: string }>;
       chatTranscript(): Promise<ChatTranscript | null>;
       /** 有活会话返回它，否则恢复当前项目最近一条；没有记录返回 null。 */
       chatLatest(input: { projectId: string }): Promise<ChatTranscript | null>;

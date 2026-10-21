@@ -2937,6 +2937,20 @@ describe("chat handlers（交互式编码会话）", () => {
         profile: { mode: "read-only", approvalPolicy: "sometimes" },
       }),
     ).toThrow(/profile\.approvalPolicy/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "not-a-provider" },
+      }),
+    ).toThrow(/profile\.providerId/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "on-request", providerId: "deepseek", model: "bad model" },
+      }),
+    ).toThrow(/profile\.model/);
   });
 
   it("撤销第 N 轮补丁：内容仍等于补丁后版本才恢复；之后被改过则跳过", async () => {

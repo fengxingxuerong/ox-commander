@@ -21,7 +21,12 @@ const bridge = {
   sendChat: vi.fn(async (_input: {
     text: string;
     projectId: string;
-    profile?: { mode: "read-only" | "workspace-write" | "danger-full-access"; approvalPolicy: "untrusted" | "on-request" | "never" };
+    profile?: {
+      mode: "read-only" | "workspace-write" | "danger-full-access";
+      approvalPolicy: "untrusted" | "on-request" | "never";
+      providerId?: string;
+      model?: string;
+    };
   }) => ({
     sessionId: "chat-1",
     accepted: true as const,
@@ -136,6 +141,27 @@ describe("会话页（ChatPage）", () => {
       mode: "read-only",
       approvalPolicy: "never",
     });
+  });
+
+  it("线程头选模型：只改本线程，并随下一条消息带出 provider/model", async () => {
+    render(<ChatPage />);
+    fireEvent.change(screen.getByLabelText("会话模型"), { target: { value: "sensenova\tglm-5.2" } });
+    expect(useApp.getState().chat.providerId).toBe("sensenova");
+    expect(useApp.getState().chat.model).toBe("glm-5.2");
+
+    fireEvent.change(screen.getByLabelText("会话输入"), { target: { value: "用这个模型" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await vi.waitFor(() => expect(bridge.sendChat).toHaveBeenCalled());
+    expect(bridge.sendChat.mock.calls[0][0].profile).toEqual({
+      mode: "workspace-write",
+      approvalPolicy: "on-request",
+      providerId: "sensenova",
+      model: "glm-5.2",
+    });
+
+    fireEvent.change(screen.getByLabelText("会话模型"), { target: { value: "" } });
+    expect(useApp.getState().chat.providerId).toBeUndefined();
+    expect(useApp.getState().chat.model).toBeUndefined();
   });
 
   it("Enter 发送、Shift+Enter 不发送", () => {

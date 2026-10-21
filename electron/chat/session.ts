@@ -65,6 +65,9 @@ export interface ChatSessionOptions {
   maxTurns?: number;
   mode?: SandboxMode;
   approvalPolicy?: ApprovalPolicy;
+  /** 线程钉死的线路（M3c-2）；省略 = 跟随全局 provider/pool。 */
+  providerId?: string;
+  model?: string;
   /**
    * 要不要把正文增量（`chat:delta`）发出去。默认开。
    *
@@ -176,6 +179,7 @@ export class ChatSession {
       status: "idle",
       mode: opts.mode ?? "workspace-write",
       approvalPolicy: opts.approvalPolicy ?? "on-request",
+      ...(opts.providerId && opts.model ? { providerId: opts.providerId, model: opts.model } : {}),
       usageTokens: history?.meta?.usageTokens ?? 0,
     };
     if (history) {

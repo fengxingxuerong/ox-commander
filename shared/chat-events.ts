@@ -42,6 +42,15 @@ export type ChatStatus = "idle" | "running" | "awaiting-approval" | "done" | "ab
 export interface ChatRuntimeProfile {
   mode: SandboxMode;
   approvalPolicy: ApprovalPolicy;
+  /**
+   * 线程级模型（M3c-2）：显式选 provider + model 时这条线程不再走全局线路池，
+   * 而是固定到这一条线路。省略 = 继续跟随设置页的 provider/pool。
+   *
+   * 只接受 provider 目录里的 id 与可打印模型名；两者一起写入 meta，恢复/分叉
+   * 时按原线路重建，避免"界面写着某模型、实际早换回全局池"。
+   */
+  providerId?: string;
+  model?: string;
 }
 
 export interface ChatSessionMeta {
@@ -54,6 +63,9 @@ export interface ChatSessionMeta {
   status: ChatStatus;
   mode: SandboxMode;
   approvalPolicy: ApprovalPolicy;
+  /** 固定线路时才有；缺席 = 这条线程跟随全局 provider/pool。 */
+  providerId?: string;
+  model?: string;
   usageTokens: number;
 }
 

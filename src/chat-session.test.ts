@@ -67,6 +67,19 @@ describe("会话循环（session）", () => {
     expect(session.transcript().meta.turns).toBe(2);
   });
 
+  it("线程固定线路时 meta 记下 provider/model（恢复/分叉据此重建）", () => {
+    const session = new ChatSession({
+      client: new ScriptedClient([]),
+      runner: new ScriptedRunner([]) as unknown as ToolRunner,
+      rootAbs: tmpRoot,
+      sessionId: "s-pinned",
+      providerId: "deepseek",
+      model: "deepseek-chat",
+    });
+    expect(session.transcript().meta.providerId).toBe("deepseek");
+    expect(session.transcript().meta.model).toBe("deepseek-chat");
+  });
+
   it("不要工具时直接答复，转录里有 user 与 assistant 两条", async () => {
     const client = new ScriptedClient([assistant("改好了")]);
     const runner = new ScriptedRunner([]);

@@ -42,7 +42,7 @@ export interface ChatRuntimeOptions {
    * 线程级覆盖（M3c）：显式选择的档位/审批策略要压过项目配置与全局设置。
    * 省略 = 逐字沿用原来的合并顺序。
    */
-  profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy };
+  profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy; providerId?: string; model?: string };
 }
 
 export interface ChatRuntime {
@@ -161,6 +161,8 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
         maxTurns: project.config.maxTurns ?? null,
         provider: settings.llmProvider ?? "sensenova",
         pool: settings.llmPool ?? [],
+        threadProvider: opts.profile?.providerId ?? null,
+        threadModel: opts.profile?.model ?? null,
         disabledKeys: settings.disabledKeyVars ?? [],
         policy: policy ? describePolicy(policy) : "",
         policyFiles: policyFingerprint(policyDirs),

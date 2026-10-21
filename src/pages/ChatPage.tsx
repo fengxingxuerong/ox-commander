@@ -13,6 +13,7 @@ import {
   type ApprovalPolicy,
   type SandboxMode,
 } from "../../shared/tools/policy";
+import { PROVIDER_CATALOG, SENSENOVA_MODELS } from "../../shared/providers";
 import { diffText } from "../../shared/text-diff";
 import { insertMention, mentionCandidates, mentionTokenAt, type MentionToken } from "../chat-mention";
 
@@ -65,6 +66,30 @@ function chatMeta(chat: { sessionId?: string; status: ChatStatus; turns: number;
     approvalPolicy: chat.approvalPolicy,
     usageTokens: chat.usageTokens,
   };
+}
+
+/**
+ * 线程头可选模型 = 目录里**已登记**的 provider 默认模型；SenseNova 额外带上
+ * 轮转表里的四款。这里不提供任意输入：模型名拼错在第一轮才会 404，而线程头
+ * 的职责是"选一条已知能走的路"，不是猜端点。
+ */
+const THREAD_MODEL_CHOICES = PROVIDER_CATALOG.flatMap((provider) =>
+  (provider.id === "sensenova" ? SENSENOVA_MODELS : [provider.defaultModel]).map((model) => ({
+    providerId: provider.id,
+    model,
+    label: `${provider.displayName} · ${model}`,
+  })),
+);
+
+function threadModelValue(chat: { providerId?: string; model?: string }): string {
+  return chat.providerId && chat.model ? `${chat.providerId}\t${chat.model}` : "";
+}
+
+function parseThreadModel(value: string): { providerId: string; model: string } | null {
+  const at = value.indexOf("\t");
+  return at <= 0 || at === value.length - 1
+    ? null
+    : { providerId: value.slice(0, at), model: value.slice(at + 1) };
 }
 
 const DIFF_MARK: Record<string, string> = { same: " ", add: "+", del: "-" };
@@ -188,6 +213,7 @@ export function ChatPage() {
   const setInput = useApp((s) => s.setChatInput);
   const setChatMode = useApp((s) => s.setChatMode);
   const setChatApproval = useApp((s) => s.setChatApproval);
+  const setChatModel = useApp((s) => s.setChatModel);
   const sendChat = useApp((s) => s.sendChat);
   const abortChat = useApp((s) => s.abortChat);
   const newChat = useApp((s) => s.newChat);
@@ -297,6 +323,22 @@ export function ChatPage() {
               {APPROVAL_POLICIES.map((policy) => (
                 <option key={policy} value={policy}>
                   {APPROVAL_TEXT[policy]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chat-runtime-field">
+            <span className="hud-stat-label">模型</span>
+            <select
+              aria-label="会话模型"
+              value={threadModelValue(chat)}
+              disabled={busy}
+              onChange={(e) => setChatModel(parseThreadModel(e.target.value))}
+            >
+              <option value="">跟随全局线路池</option>
+              {THREAD_MODEL_CHOICES.map((choice) => (
+                <option key={`${choice.providerId}\t${choice.model}`} value={`${choice.providerId}\t${choice.model}`}>
+                  {choice.label}
                 </option>
               ))}
             </select>

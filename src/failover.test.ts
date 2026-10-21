@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { buildLlmClient } from "../shared/build-llm";
 import {
   AllRoutesCoolingError,
@@ -513,6 +513,33 @@ describe("buildLlmClient", () => {
   it("returns an inert failover client when sensenova keys are missing", async () => {
     const client = buildLlmClient("sensenova", { env: {} });
     await expect(client.chat(REQ)).rejects.toThrow("no groups");
+  });
+});
+
+describe("buildLlmClient · 线程钉死模型（M3c-2）", () => {
+  it("单 provider 与 sensenova 都只把选中的模型发出去", async () => {
+    const bodies: Array<Record<string, unknown>> = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ choices: [{ message: { content: "ok" } }], usage: { total_tokens: 1 } }),
+      } as never;
+    });
+    try {
+      await buildLlmClient("deepseek", {
+        env: { DEEPSEEK_API_KEY: "k" },
+        model: "deepseek-reasoner",
+      }).chat(REQ);
+      await buildLlmClient("sensenova", {
+        env: { SENSENOVA_API_KEY: "k" },
+        model: "glm-5.2",
+      }).chat(REQ);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(bodies.map((b) => b.model)).toEqual(["deepseek-reasoner", "glm-5.2"]);
   });
 });
 

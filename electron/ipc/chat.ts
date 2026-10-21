@@ -21,13 +21,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { buildLlm, send, settingsStore, workspaceRoot } from "./context";
+import { buildLlm, buildLlmPinned, send, settingsStore, workspaceRoot } from "./context";
 import { ChatSession } from "../chat/session";
 import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
 import { writeFileAtomic } from "../atomic-file";
-import { getProvider } from "../../shared/providers";
+import { getProvider, isModelId } from "../../shared/providers";
 import type { ProjectSettings } from "../../shared/types";
 import {
   messagesForProtocol,
@@ -37,6 +37,7 @@ import {
   type ChatHistory,
   type ChatRevertResult,
   type ChatRuntimeProfile,
+  type ChatSessionMeta,
   type ChatSessionSnapshot,
   type ChatTranscript,
 } from "../../shared/chat-events";
@@ -74,8 +75,11 @@ function chatStore(): ChatSessionStore {
  * 调用在多条线路间轮换"，不可能为每条线路准备一份消息序列；未声明的端点一律
  * 走文本协议（理由见 `ProviderConfig.tools` 的注释）。
  */
-export function toolProtocolOf(settings: ProjectSettings): "native" | "text" {
-  const id = settings.llmProvider;
+export function toolProtocolOf(
+  settings: ProjectSettings,
+  providerId: string = settings.llmProvider,
+): "native" | "text" {
+  const id = providerId;
   try {
     return getProvider(id).tools === "native" ? "native" : "text";
   } catch {
@@ -103,14 +107,27 @@ function sameRoot(a: string, b: string): boolean {
   return normalize(a) === normalize(b);
 }
 
+/** 线程钉死的线路；省略/未选 = undefined（继续走全局池）。 */
+function pinnedLineOf(
+  profile: ChatRuntimeProfile | undefined,
+  settings: ProjectSettings,
+): { providerId: string; model: string } | undefined {
+  if (!profile?.providerId && !profile?.model) return undefined;
+  const providerId = profile.providerId ?? settings.llmProvider;
+  return { providerId, model: profile.model ?? getProvider(providerId).defaultModel };
+}
+
 function buildSession(
   rootAbs: string,
   settings: ProjectSettings,
   runtime: ChatRuntime,
   projectId: string,
   history?: ChatHistory,
+  profile?: ChatRuntimeProfile,
 ): ChatSession {
-  const providerId = settings.llmProvider;
+  const pinned = pinnedLineOf(profile, settings);
+  const providerId = pinned?.providerId ?? settings.llmProvider;
+  const toolProtocol = toolProtocolOf(settings, providerId);
   // Capture the store instance for this session's lifetime. `chatStore()` is a
   // mutable module singleton reset on re-registration (tests do this every case);
   // resolving it lazily would make an older session write into the newer test's
@@ -136,15 +153,16 @@ function buildSession(
     onEvent: (text) => send({ type: "log", text }),
   });
   const session = new ChatSession({
-    client: buildLlm(settings),
+    client: pinned ? buildLlmPinned(settings, pinned.providerId, pinned.model) : buildLlm(settings),
     runner,
     rootAbs,
     sessionId,
     ...(history ? { history } : {}),
     systemPrompt: runtime.systemPrompt,
-    toolProtocol: toolProtocolOf(settings),
+    toolProtocol,
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
+    ...(pinned ? { providerId: pinned.providerId, model: pinned.model } : {}),
     ...(runtime.maxTurns !== undefined ? { maxTurns: runtime.maxTurns } : {}),
     signal: controller.signal,
     onEvent: (event) => send({ ...event } as unknown as Record<string, unknown>),
@@ -203,12 +221,15 @@ function ensureLiveSession(
     history = {
       sessionId: live.session.sessionId,
       entries: snap.entries,
-      messages: messagesForProtocol(snap.messages, toolProtocolOf(settings)),
+      messages: messagesForProtocol(
+        snap.messages,
+        toolProtocolOf(settings, profile?.providerId ?? settings.llmProvider),
+      ),
       meta: snap.meta,
     };
   }
   abortChatSession();
-  return buildSession(rootAbs, settings, runtime, projectId, history);
+  return buildSession(rootAbs, settings, runtime, projectId, history, profile);
 }
 
 function requireProjectRoot(projectId: string, action: string): string {
@@ -229,13 +250,17 @@ function resumeIntoLive(projectId: string, sessionId: string, settings: ProjectS
   }
   abortChatSession();
   live = null;
+  const profile = profileOfMeta(env.snapshot.meta);
   const history: ChatHistory = {
     sessionId: env.snapshot.meta.sessionId,
     entries: env.snapshot.entries,
-    messages: messagesForProtocol(env.snapshot.messages, toolProtocolOf(settings)),
+    messages: messagesForProtocol(
+      env.snapshot.messages,
+      toolProtocolOf(settings, profile.providerId ?? settings.llmProvider),
+    ),
     meta: env.snapshot.meta,
   };
-  return buildSession(rootAbs, settings, runtimeOf(rootAbs, settings), projectId, history);
+  return buildSession(rootAbs, settings, runtimeOf(rootAbs, settings, profile), projectId, history, profile);
 }
 
 function projectIdOf(input: unknown, channel: string): string {
@@ -256,12 +281,47 @@ function sessionIdOf(input: unknown, channel: string): string {
 function chatProfileOf(input: unknown): ChatRuntimeProfile | undefined {
   const raw = (input as { profile?: unknown } | null | undefined)?.profile;
   if (raw === undefined) return undefined;
-  const profile = (raw ?? {}) as { mode?: unknown; approvalPolicy?: unknown };
+  const profile = (raw ?? {}) as { mode?: unknown; approvalPolicy?: unknown; providerId?: unknown; model?: unknown };
   if (!isSandboxMode(profile.mode)) throw new Error("chat:send 的 profile.mode 不合法");
   if (!isApprovalPolicy(profile.approvalPolicy)) {
     throw new Error("chat:send 的 profile.approvalPolicy 不合法");
   }
-  return { mode: profile.mode, approvalPolicy: profile.approvalPolicy };
+  let providerId: string | undefined;
+  if (profile.providerId !== undefined) {
+    if (typeof profile.providerId !== "string" || profile.providerId.trim() === "") {
+      throw new Error("chat:send 的 profile.providerId 不合法");
+    }
+    try {
+      getProvider(profile.providerId);
+    } catch {
+      throw new Error("chat:send 的 profile.providerId 不合法");
+    }
+    providerId = profile.providerId;
+  }
+  if (profile.model !== undefined && !isModelId(profile.model)) {
+    throw new Error("chat:send 的 profile.model 不合法");
+  }
+  return {
+    mode: profile.mode,
+    approvalPolicy: profile.approvalPolicy,
+    ...(providerId ? { providerId } : {}),
+    ...(profile.model !== undefined ? { model: profile.model } : {}),
+  };
+}
+
+/**
+ * 从落盘 meta 恢复线程档位。旧快照没有 provider/model（字段缺席），照旧跟随全局；
+ * 新快照里若线路字段被手工改坏，丢掉线路而不是让恢复整条会话失败。
+ */
+function profileOfMeta(meta: ChatSessionMeta): ChatRuntimeProfile {
+  const base: ChatRuntimeProfile = { mode: meta.mode, approvalPolicy: meta.approvalPolicy };
+  if (!meta.providerId || !meta.model) return base;
+  try {
+    getProvider(meta.providerId);
+  } catch {
+    return base;
+  }
+  return isModelId(meta.model) ? { ...base, providerId: meta.providerId, model: meta.model } : base;
 }
 
 const MENTION_IGNORED_DIRS = new Set([
@@ -374,7 +434,15 @@ export function registerChatHandlers(): void {
   ipcMain.handle("chat:latest", (_e, input: unknown) => {
     const projectId = projectIdOf(input, "chat:latest");
     if (live && live.projectId === projectId) {
-      if (live.controller.signal.aborted) ensureLiveSession(live.rootAbs, settingsStore().load(), projectId);
+      if (live.controller.signal.aborted) {
+        const aborted = live;
+        ensureLiveSession(
+          aborted.rootAbs,
+          settingsStore().load(),
+          projectId,
+          profileOfMeta(aborted.session.transcript().meta),
+        );
+      }
       return live ? live.session.transcript() : null;
     }
     const latest = chatStore().latest(projectId);
@@ -418,13 +486,24 @@ export function registerChatHandlers(): void {
     abortChatSession();
     live = null;
     const settings = settingsStore().load();
+    const profile = profileOfMeta(forked.snapshot.meta);
     const history: ChatHistory = {
       sessionId: forked.snapshot.meta.sessionId,
       entries: forked.snapshot.entries,
-      messages: messagesForProtocol(forked.snapshot.messages, toolProtocolOf(settings)),
+      messages: messagesForProtocol(
+        forked.snapshot.messages,
+        toolProtocolOf(settings, profile.providerId ?? settings.llmProvider),
+      ),
       meta: forked.snapshot.meta,
     };
-    return buildSession(rootAbs, settings, runtimeOf(rootAbs, settings), projectId, history).transcript();
+    return buildSession(
+      rootAbs,
+      settings,
+      runtimeOf(rootAbs, settings, profile),
+      projectId,
+      history,
+      profile,
+    ).transcript();
   });
 
   ipcMain.handle("chat:delete", (_e, input: unknown) => {
@@ -534,9 +613,17 @@ export function registerChatHandlers(): void {
     const projectId = projectIdOf(input, "chat:new");
     abortChatSession();
     live = null;
-    const rootAbs = requireProjectRoot(projectId, "开新会话");
+    const rootAbs = requireProjectRoot(projectId, "新建会话");
     const settings = settingsStore().load();
-    const session = buildSession(rootAbs, settings, runtimeOf(rootAbs, settings), projectId);
+    const profile = chatProfileOf(input);
+    const session = buildSession(
+      rootAbs,
+      settings,
+      runtimeOf(rootAbs, settings, profile),
+      projectId,
+      undefined,
+      profile,
+    );
     return { sessionId: session.sessionId };
   });
 

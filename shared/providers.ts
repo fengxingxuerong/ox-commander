@@ -205,6 +205,18 @@ export const PROVIDER_CATALOG: ProviderConfig[] = [
  * 跑在别的端口上的 LM Studio / vLLM、公司内网的网关，或者一个用来做离线演示
  * 与回归的假端点，都接不进来。这不是"灵活性"问题，是**本地部署接不进来**。
  */
+/**
+ * 模型名可否作为线程钉死目标（M3c-2）。
+ *
+ * 这里不是"猜端点支持什么"，而是挡住**不可能**成立的输入：空白、换行、超长串。
+ * 真正的可用性仍由端点决定（选了一个 404 的模型，第一轮就会收到错误）。
+ * 允许字母数字开头，后续允许 `._:/-` —— 够覆盖 `qwen2.5:14b`、`z-ai/glm-5.3-flash`、
+ * `claude-sonnet-4-20250514` 这些已登记形态。
+ */
+export function isModelId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,119}$/.test(value);
+}
+
 export function baseUrlEnvVar(providerId: string): string {
   return `OX_LLM_BASE_URL_${providerId.toUpperCase().replace(/-/g, "_")}`;
 }

@@ -111,6 +111,27 @@ describe("resolveChatRuntime（项目指令 + 配置 + 策略）", () => {
     expect(overridden.signature).not.toBe(base.signature);
   });
 
+  it("线程级线路（provider/model）进入签名，换模型会重建会话", () => {
+    const proj = project("model");
+    const settings = { ...DEFAULT_SETTINGS };
+    const base = resolveChatRuntime({ rootAbs: proj, settings });
+    const pinned = resolveChatRuntime({
+      rootAbs: proj,
+      settings,
+      profile: {
+        mode: "workspace-write",
+        approvalPolicy: "on-request",
+        providerId: "deepseek",
+        model: "deepseek-chat",
+      },
+    });
+    expect(pinned.signature).not.toBe(base.signature);
+    expect(
+      resolveChatRuntime({ rootAbs: proj, settings, profile: { mode: "workspace-write", approvalPolicy: "on-request" } })
+        .signature,
+    ).toBe(base.signature);
+  });
+
   it("策略/约定变化会让签名变化（宿主据此重建会话）", () => {
     const proj = project("signature");
     write("signature/.ox/policy.d/a.json", JSON.stringify({ version: 1, denyCommands: ["node"] }));
