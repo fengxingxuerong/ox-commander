@@ -300,7 +300,8 @@ function resumeIntoLive(projectId: string, sessionId: string, settings: ProjectS
     liveThreads.setActive(sessionId);
     return already.session;
   }
-  if (already !== undefined) liveThreads.remove(sessionId);
+  // 不必先 remove：`buildSession` 用同一个 sessionId 登记，登记表的"同 id 覆盖"
+  // 就是为重建准备的（删了再插也一样，多一行只是多一条要审计的位点）。
   const profile = profileOfMeta(env.snapshot.meta);
   const history: ChatHistory = {
     sessionId: env.snapshot.meta.sessionId,

@@ -935,6 +935,30 @@ describe("sendChat · 行级评论附录", () => {
     expect(useApp.getState().chat.reasoningEffort).toBeUndefined();
   });
 
+  /**
+   * 中止要**指名**：宿主能同时跑多条，不带 id 就是"最近活跃那条" —— 而操作者
+   * 按停止时看的是屏幕上这条。没有线程时则不要传 `{sessionId: undefined}`
+   * （那等于把一个不存在的 id 发过去，宿主只能猜）。
+   */
+  it("abortChat 带当前线程 id；没有当前线程时干脆不带参数", async () => {
+    const calls: unknown[] = [];
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      abortChat: async (input?: unknown) => {
+        calls.push(input);
+        return true;
+      },
+    };
+    useApp.setState({ chat: { ...useApp.getState().chat, sessionId: "chat-7" } });
+    await useApp.getState().abortChat();
+    expect(calls[0]).toEqual({ sessionId: "chat-7" });
+
+    useApp.setState({ chat: { ...useApp.getState().chat, sessionId: undefined } });
+    await useApp.getState().abortChat();
+    expect(calls[1]).toBeUndefined();
+  });
+
   it("新会话沿用当前线程线路与推理档（不是悄悄回到全局池）", async () => {
     const calls: Array<Record<string, unknown> | undefined> = [];
     const g = globalThis as { window?: unknown; oxCommander?: unknown };

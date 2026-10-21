@@ -3229,6 +3229,28 @@ describe("chat handlers（交互式编码会话）", () => {
     expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: "chat-unknown" })).toBe(false);
   });
 
+  /**
+   * `sessionId` 不是字符串时的口径：**当作没给**，走"本项目最近活跃那条"。
+   *
+   * 判据写宽一格（`typeof x === "string" || x !== ""`）就会出现两种坏结果：
+   * 数字 id 被当成真 id 传给登记表（查不到 → 走到 `resumeIntoLive` → 抛
+   * "会话不存在"），或者中止时传进 `undefined` 让"停止"静默失效。两种都不报
+   * 编译错，只在用户点了按钮之后表现为"点了没反应"。
+   */
+  it("sessionId 传非字符串时按缺省处理（不是拿数字去查表）", () => {
+    seedChatWorkspace();
+    const created = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
+    // 发送：数字 id 不该让"发一条新消息"变成"恢复一条不存在的会话"。
+    const sent = (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+      text: "hi",
+      projectId: "p-chat",
+      sessionId: 42,
+    }) as { sessionId: string };
+    expect(sent.sessionId).toBe(created.sessionId);
+    // 中止：数字 id 当缺省 → 中止最近活跃那条（返回 true），而不是 false。
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: 42 })).toBe(true);
+  });
+
   it("按 id 取转录：两条线程各读各的，不串台", () => {
     seedChatWorkspace();
     const first = (h.ipcMain as FakeIpcMain).invoke("chat:new", { projectId: "p-chat" }) as { sessionId: string };
@@ -3277,18 +3299,19 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(forFirst).toBeDefined();
     expect(forSecond).toBeDefined();
 
-    // 中止第一条：它的审批按拒绝收尾（runner 不该永远挂着），第二条原封不动。
-    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: first.sessionId })).toBe(true);
-    const stillPending = (forSecond as { request: { requestId: string } }).request.requestId;
+    // 中止**后请求的那条**（它在挂起表里排在后面）：判据若写成 break，
+    // 遍历到前面那条别人的审批就收摊，被中止线程的审批永远挂着。
+    expect((h.ipcMain as FakeIpcMain).invoke("chat:abort", { sessionId: second.sessionId })).toBe(true);
+    const stillPending = (forFirst as { request: { requestId: string } }).request.requestId;
     expect((h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", stillPending, { granted: true, scope: "once" })).toBe(
       true,
     );
     await vi.waitFor(() => {
-      expect(fs.existsSync(path.join(root, "b.txt"))).toBe(true);
+      expect(fs.existsSync(path.join(root, "a.txt"))).toBe(true);
     });
     // 被中止那条的审批已经不在挂起表里：再答一次是 false。
     expect(
-      (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", (forFirst as { request: { requestId: string } }).request.requestId, {
+      (h.ipcMain as FakeIpcMain).invoke("chat:approval-decide", (forSecond as { request: { requestId: string } }).request.requestId, {
         granted: true,
       }),
     ).toBe(false);

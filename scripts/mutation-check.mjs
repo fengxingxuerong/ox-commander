@@ -848,6 +848,7 @@ const SITE_BASELINE = {
   "electron/chat/runtime.ts": 12,
   "electron/chat/session-store.ts": 38,
   "electron/chat/session.ts": 44,
+  "electron/chat/thread-registry.ts": 12,
   "electron/chat/tool-runner.ts": 59,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -861,7 +862,7 @@ const SITE_BASELINE = {
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
-  "electron/ipc/chat.ts": 107,
+  "electron/ipc/chat.ts": 128,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -928,7 +929,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 68,
+  "src/store.ts": 79,
 };
 
 /**
@@ -1320,8 +1321,10 @@ const EQUIVALENT_SITES = [
    *
    * 2026-10-21：M3c-3 在 `chatProfileOf` 里插入推理强度校验（+27 行），锚点
    * 318 → 345。论证不变：`getProvider` / `isModelId` 仍是同一对兜底。
+   * 同日 M4a 又在其上方插入审批归属与寻址（+56 行）→ 401，随后删掉
+   * `resumeIntoLive` 里一行死代码（登记表同 id 覆盖已含删除）→ 402。
    */
-  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 345 },
+  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 402 },
   /**
    * `electron/ipc/chat.ts` `buildSession` 里 `...(pinned && profile?.reasoningEffort ? … : {})`
    * 的 `&& → ||` —— **可证明等价**（下游二次守卫）。
@@ -1343,7 +1346,7 @@ const EQUIVALENT_SITES = [
    * ⚠️ 行号是锚点：buildSession 结构变化使该行漂移时，变异会重新出现 ——
    * 届时按新行号校回，并重新确认 ChatSession 侧的二次守卫仍在。
    */
-  { file: "electron/ipc/chat.ts", op: "&& → ||", line: 172 },
+  { file: "electron/ipc/chat.ts", op: "&& → ||", line: 197 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

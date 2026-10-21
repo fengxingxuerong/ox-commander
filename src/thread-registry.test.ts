@@ -83,6 +83,34 @@ describe("ThreadRegistry", () => {
     expect(reg.latestOf("p-empty")).toBeUndefined();
   });
 
+  /**
+   * `latestOf` 的实现是「遍历整个表、最后一个匹配的赢」。两条 `continue` 都有
+   * **只在特定顺序下**才暴露的错法：
+   * - `continue → break` 于"项目不匹配"那一行：一旦表里先出现别的项目，遍历就
+   *   停在第一个异项目项上 —— 单项目测试永远绿（表里没有异项目项可停）。
+   * - `continue → break` 于"排除自己"那一行：要排除的项若不是最后一个，遍历
+   *   就提前收摊，返回 undefined（界面以为"这个项目没有其它线程"）。
+   * - `&& → ||` 于"排除自己"那一行：排除条件恒真 → 什么都匹配不上。
+   */
+  it("latestOf 遍历整表：异项目项在前面也不提前收摊", () => {
+    const reg = new ThreadRegistry<LiveThread>();
+    reg.add(thread("b-1", "p-b"));
+    reg.add(thread("a-1", "p-a"));
+    reg.add(thread("b-2", "p-b"));
+    // 表的顺序是 b-1, a-1, b-2：遇到 b-1 就 break 会返回 undefined。
+    expect(reg.latestOf("p-a")?.sessionId).toBe("a-1");
+  });
+
+  it("latestOf 的 except 不是收摊条件：被排除的项前面还有别人要返回", () => {
+    const reg = new ThreadRegistry<LiveThread>();
+    reg.add(thread("a-1"));
+    reg.add(thread("a-2"));
+    // a-1 被排除，但 a-2 仍在 —— 排到 a-1 就 break 会返回 undefined。
+    expect(reg.latestOf("p-1", "a-1")?.sessionId).toBe("a-2");
+    // 反过来：排的是最后一条，返回前面的那条。
+    expect(reg.latestOf("p-1", "a-2")?.sessionId).toBe("a-1");
+  });
+
   it("clear 清空指针，不是只清表（否则 active() 读到一个已不存在的 id）", () => {
     const reg = new ThreadRegistry<LiveThread>();
     reg.add(thread("s-1"));
