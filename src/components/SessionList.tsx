@@ -1,5 +1,6 @@
 import { useState } from "react";
 import type { ChatSessionSummary } from "../../shared/chat-events";
+import type { ThreadStatusView } from "../../shared/chat-thread-status";
 
 /**
  * 线程列表（M1 · 左侧栏的一块）。
@@ -11,7 +12,8 @@ import type { ChatSessionSummary } from "../../shared/chat-events";
  *
  * 三条界面纪律（沿用原页的）：
  * 1. 删除必须二次确认：历史线程里可能有还没归档的补丁。
- * 2. 运行 / 等审批时禁用一切切换：换线程会让在途的工具结果串到另一条线上。
+ * 2. 切换**不再**因为别处有线程在跑而禁用（M4b）：宿主已按 sessionId 寻址，
+ *    换线程只是换看哪条；仍要禁的是"会毁掉线程"的动作（删除一条正在跑的）。
  * 3. 按钮不带"发送"字样：列表里没有输入框，命名撞车只会让按 role 取按钮的
  *    界面测试变成多选。
  */
@@ -32,14 +34,15 @@ function statusText(status: string): string {
 export function SessionList({
   sessions,
   activeSessionId,
-  busy,
+  threads,
   onResume,
   onFork,
   onDelete,
 }: {
   sessions: ChatSessionSummary[];
   activeSessionId?: string;
-  busy: boolean;
+  /** 运行时状态位（M4b）：有事件的线程在这里，历史线程回落到 `s.status`。 */
+  threads: Record<string, ThreadStatusView>;
   onResume: (sessionId: string) => void;
   onFork: (sessionId: string) => void;
   onDelete: (sessionId: string) => void;
@@ -48,23 +51,41 @@ export function SessionList({
   return (
     <div className="chat-sessions" data-testid="chat-sessions">
       <span className="hud-stat-label">线程</span>
-      {sessions.map((s) => (
+      {sessions.map((s) => {
+        const live = threads[s.sessionId];
+        const status = live?.status ?? s.status;
+        const turns = live?.turns ?? s.turns;
+        // 一条正在跑的线程被删 = 中止它并抹掉记录。禁用的判据是**那一行自己的**
+        // 状态，不是"当前线程忙不忙" —— 后者会让"后台在跑"连带锁住整棵树。
+        const rowBusy = status === "running" || status === "awaiting-approval";
+        return (
         <div
           key={s.sessionId}
           className={`chat-session${s.sessionId === activeSessionId ? " active" : ""}`}
           data-testid="chat-session"
         >
+          <span
+            className={`chat-session-dot status-${status}`}
+            data-testid="thread-dot"
+            aria-label={statusText(status)}
+            title={statusText(status)}
+          />
           <button
             type="button"
             className="chat-session-title"
             onClick={() => onResume(s.sessionId)}
-            disabled={busy || s.sessionId === activeSessionId}
+            disabled={s.sessionId === activeSessionId}
             title={s.title}
           >
             {s.title || "新会话"}
           </button>
+          {live && live.unread > 0 ? (
+            <span className="chat-session-unread" data-testid="thread-unread" title="离开之后新增的条目">
+              {live.unread > 99 ? "99+" : live.unread}
+            </span>
+          ) : null}
           <span className="muted chat-session-meta">
-            {s.turns} 轮 · {statusText(s.status)}
+            {turns} 轮 · {statusText(status)}
           </span>
           {confirmDelete === s.sessionId ? (
             <>
@@ -81,7 +102,8 @@ export function SessionList({
                 type="button"
                 className="small"
                 onClick={() => void onFork(s.sessionId)}
-                disabled={busy}
+                disabled={rowBusy}
+                title={rowBusy ? "这条线程还在跑：先停它再分叉" : "复制一条新线程"}
               >
                 分叉
               </button>
@@ -89,14 +111,16 @@ export function SessionList({
                 type="button"
                 className="small"
                 onClick={() => setConfirmDelete(s.sessionId)}
-                disabled={busy}
+                disabled={rowBusy}
+                title={rowBusy ? "这条线程还在跑：先停它再删" : "删除这条线程"}
               >
                 删除
               </button>
             </>
           )}
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

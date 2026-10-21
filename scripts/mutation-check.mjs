@@ -586,6 +586,15 @@ const TARGETS = [
     tests: ["src/llm-pool.test.ts", "src/http-clients.test.ts"],
     tier: 2,
   },
+  // chat-thread-status.ts（M4b）：左栏状态位。错法全是**静默**的 —— 后台跑完
+  // 不标完成、等审批不变橙、正在看的那条给自己涨未读。它决定"谁在等我"，
+  // 判错之后人只是在错误的时间切到错误的线程。
+  // tier 1：纯归约，一个测试文件逐点杀。
+  {
+    file: "shared/chat-thread-status.ts",
+    tests: ["src/chat-thread-status.test.ts"],
+    tier: 1,
+  },
   // thread-registry.ts（M4a）：活线程登记表替掉了 `let live` 单例。这里的错法
   // 全是**静默**的 —— 同 id 覆盖写成并存（get 返回旧会话）、删活跃项后指针
   // 指向已删除对象（chat:latest 返回不存在的线程）、latestOf 跨项目回退

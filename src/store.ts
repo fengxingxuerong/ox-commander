@@ -6,6 +6,11 @@ import { formatUsageLine, type UsageSnapshot } from "../shared/usage-meter";
 import { renderIssueRequirement, type GithubIssue } from "../shared/github-issue";
 import type { ChatApprovalRequest, ChatEntry, ChatStatus } from "../shared/chat-events";
 import { reasoningEffortsOf, type ReasoningEffort } from "../shared/providers";
+import {
+  applyThreadStatus,
+  threadStatusOfSummary,
+  type ThreadStatusView,
+} from "../shared/chat-thread-status";
 
 const api = () => window.oxCommander;
 
@@ -103,6 +108,7 @@ export const useApp = create<AppState>((set, get) => ({
     notice: "",
     streaming: "",
     comments: [],
+    threads: {},
   },
   chatInput: "",
   reviewOpen: true,
@@ -316,6 +322,12 @@ export const useApp = create<AppState>((set, get) => ({
       set((s) => ({
         chat: {
           ...s.chat,
+          // 切回去 = 读过了：未读清零，状态以**转录 meta** 为准（它是那条线程的
+          // 真实现状；离开期间丢掉的 status 事件在这里一次补齐）。
+          threads: {
+            ...s.chat.threads,
+            [t.meta.sessionId]: threadStatusOfSummary(t.meta),
+          },
           sessionId: t.meta.sessionId,
           entries: t.entries,
           status: t.meta.status,
@@ -762,6 +774,19 @@ export const useApp = create<AppState>((set, get) => ({
 
   handleEvent: (payload) => {
     const p = payload as Record<string, unknown>;
+    // 左栏状态位先记（M4b）：**别的线程的事件不能只丢**，否则“谁在跑、谁在等我”
+    // 就只剩当前这条可见。状态位与视图是两条独立的账：前者聚合每一条线程，
+    // 后者只渲染当前这条。
+    if (typeof p.type === "string" && p.type.startsWith("chat:")) {
+      const sid = (p as { sessionId?: unknown }).sessionId;
+      if (typeof sid === "string" && sid !== "") {
+        set((s) => {
+          const next = applyThreadStatus(s.chat.threads[sid], p, s.chat.sessionId);
+          if (next === s.chat.threads[sid]) return {};
+          return { chat: { ...s.chat, threads: { ...s.chat.threads, [sid]: next as ThreadStatusView } } };
+        });
+      }
+    }
     // 宿主已经能同时跑多条线程（M4a），事件里带 sessionId。别的线程的事件**不进
     // 本视图** —— 串台的表现是"两条线程的正文拼进同一个转录"，比丢事件难查得多。
     // 当前还没拿到 id 时（首条消息的返回值可能晚于第一个事件）按本线程处理。

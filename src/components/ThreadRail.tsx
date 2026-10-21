@@ -23,15 +23,14 @@ export function ThreadRail() {
   const activeProjectId = useApp((s) => s.activeProjectId);
   const focusProject = useApp((s) => s.focusProject);
   const sessions = useApp((s) => s.chat.sessions);
+  const threads = useApp((s) => s.chat.threads);
   const sessionId = useApp((s) => s.chat.sessionId);
-  const status = useApp((s) => s.chat.status);
   const resumeChat = useApp((s) => s.resumeChat);
   const forkChat = useApp((s) => s.forkChat);
   const deleteChat = useApp((s) => s.deleteChat);
   const newChat = useApp((s) => s.newChat);
   const loadChatSessions = useApp((s) => s.loadChatSessions);
 
-  const busy = status === "running" || status === "awaiting-approval";
   const activeProject = projects.find((p) => p.id === activeProjectId);
 
   // 左栏自己管列表：它现在是线程的一等入口，不能等中栏挂载才知道有哪些线。
@@ -71,7 +70,7 @@ export function ThreadRail() {
             type="button"
             className="small"
             onClick={() => void newChat()}
-            disabled={busy || !activeProjectId}
+            disabled={!activeProjectId}
             title={activeProjectId ? "开一条新线程" : "先选一个项目"}
           >
             新线程
@@ -88,7 +87,7 @@ export function ThreadRail() {
           <SessionList
             sessions={sessions}
             activeSessionId={sessionId}
-            busy={busy}
+            threads={threads}
             onResume={(id) => void resumeChat(id)}
             onFork={(id) => void forkChat(id)}
             onDelete={(id) => void deleteChat(id)}

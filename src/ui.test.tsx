@@ -325,7 +325,13 @@ describe("左栏（ThreadRail）", () => {
     expect(btn.disabled).toBe(true);
   });
 
-  it("运行中禁用切换（在途的工具结果不许串到另一条线上）", async () => {
+  /**
+   * 旧的纪律是"这条在跑就锁住整棵树"（切线程会重建会话，工具结果会串台）。
+   * M4a 起宿主按 sessionId 寻址、切线程不重建任何东西，M4b 因此把锁拆掉：
+   * **切换与开新线程都放行**，锁只留给会毁掉在途结果的动作（删除/分叉一条
+   * 正在跑的线程）。这条测试钉的正是"锁的范围变了"——它曾经断言相反的事。
+   */
+  it("运行中仍可切换与开新线程；锁只落在会毁掉在途结果的动作上", async () => {
     useApp.setState({
       projects: [project("p-1", "一"), project("p-2", "二")],
       activeProjectId: "p-1",
@@ -333,7 +339,7 @@ describe("左栏（ThreadRail）", () => {
     });
     render(<ThreadRail />);
     expect((screen.getByRole("button", { name: "二" }) as HTMLButtonElement).disabled).toBe(false);
-    expect((screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "新线程" }) as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

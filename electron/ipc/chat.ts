@@ -27,6 +27,7 @@ import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
 import { ThreadRegistry, type LiveThread } from "../chat/thread-registry";
+import { focusChatSession } from "../chat/focus";
 import { writeFileAtomic } from "../atomic-file";
 import {
   getProvider,
@@ -70,6 +71,19 @@ interface LiveSession extends LiveThread {
  * `chat/thread-registry` 里单独测过，这里只做接线。
  */
 const liveThreads = new ThreadRegistry<LiveSession>();
+
+/**
+ * 切活跃线程 = 同时告诉通知判据"操作者正在看这条"（M4b）。
+ *
+ * 两个状态必须一起动：登记表的活跃项决定"省略 sessionId 时打给谁"，
+ * 焦点决定"后台审批要不要弹通知"。只更新一个的后果是坏的两种 ——
+ * 只更新登记表：审批弹窗会在你已经切过去之后又多弹一次；只更新焦点：
+ * 事件寻址会打给上一条线程。
+ */
+function focusLive(sessionId: string): void {
+  liveThreads.setActive(sessionId);
+  focusChatSession(sessionId);
+}
 let sessionStore: ChatSessionStore | null = null;
 /** 挂起等待人答复的审批：requestId -> 所属线程 + resolver（中止只清自己那几个）。 */
 const pendingApprovals = new Map<string, { sessionId: string; resolve: (answer: ChatApprovalAnswer) => void }>();
@@ -207,6 +221,7 @@ function buildSession(
       }
     },
   });
+  focusChatSession(session.sessionId);
   liveThreads.add({
     sessionId: session.sessionId,
     session,
@@ -256,7 +271,7 @@ function ensureLiveSession(
     existing.projectId === projectId &&
     !existing.controller.signal.aborted
   ) {
-    liveThreads.setActive(existing.sessionId);
+    focusLive(existing.sessionId);
     return existing.session;
   }
   // 重建只接**自己的**历史：设置变了不等于聊天记录消失，但另一条线程的转录
@@ -297,7 +312,7 @@ function resumeIntoLive(projectId: string, sessionId: string, settings: ProjectS
   // 已经在跑的那条直接切过去（它的内存态比盘上更新，重建会丢本轮增量）。
   const already = liveThreads.get(sessionId);
   if (already !== undefined && !already.controller.signal.aborted) {
-    liveThreads.setActive(sessionId);
+    focusLive(sessionId);
     return already.session;
   }
   // 不必先 remove：`buildSession` 用同一个 sessionId 登记，登记表的"同 id 覆盖"
@@ -551,7 +566,7 @@ export function registerChatHandlers(): void {
         );
         return liveThreads.get(projectLive.sessionId)?.session.transcript() ?? null;
       }
-      liveThreads.setActive(projectLive.sessionId);
+      focusLive(projectLive.sessionId);
       return projectLive.session.transcript();
     }
     const latest = chatStore().latest(projectId);

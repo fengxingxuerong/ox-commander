@@ -26,6 +26,16 @@ export interface NotifyEventShape {
   requestId?: string;
   command?: string;
   args?: string[];
+  /** `chat:approval-request` 的归属线程（M4b）。 */
+  sessionId?: string;
+  /** `chat:approval-request` 的请求体（工具名 + 目标，用来拼正文）。 */
+  request?: {
+    tool?: string;
+    reason?: string;
+    command?: string;
+    args?: readonly string[];
+    paths?: readonly string[];
+  };
 }
 
 /** summary/command 最长带这么多字符：通知是预告不是全文。 */
@@ -42,9 +52,13 @@ function clip(text: string | undefined, fallback: string): string {
  * 事件清单（三档，全部是"人不在场就卡住"的场景）：
  *   · receipt —— run 出了结论（交付与未交付都算：没交付更要回来）；
  *   · escalation —— 三选一裁决没人回答就挂住；
- *   · approval-request —— 命令审批 fail-closed，问不到人就不执行。
+ *   · approval-request —— 命令审批 fail-closed，问不到人就不执行；
+ *   · chat:approval-request —— **后台线程**在等审批（M4b）：正看着的那条不弹。
  */
-export function desktopNotificationOf(payload: NotifyEventShape): DesktopNotification | undefined {
+export function desktopNotificationOf(
+  payload: NotifyEventShape,
+  ctx?: { focusedChatSession?: string | null },
+): DesktopNotification | undefined {
   if (payload.type === "receipt") {
     const delivered = payload.receipt?.outcome === "delivered";
     return {
@@ -63,6 +77,25 @@ export function desktopNotificationOf(payload: NotifyEventShape): DesktopNotific
     return {
       title: "🛂 OxCommander：命令等待审批",
       body: clip(cmdline, "一条命令在等批准"),
+    };
+  }
+  if (payload.type === "chat:approval-request") {
+    // 正看着的那条不弹：对话框就在屏幕上，再弹一次只是噪声。
+    // 但"归属未知"（没有 sessionId）时**照弹** —— 宁可多提醒一次，也不要
+    // 因为一个字段缺失让真正的等待被静默吞掉。
+    if (ctx?.focusedChatSession !== undefined && ctx.focusedChatSession !== null && payload.sessionId === ctx.focusedChatSession) {
+      return undefined;
+    }
+    const req = payload.request ?? {};
+    const what =
+      req.command !== undefined
+        ? [req.command, ...(req.args ?? [])].join(" ")
+        : (req.paths ?? []).length > 0
+          ? `改 ${(req.paths ?? []).join("、")}`
+          : (req.reason ?? "");
+    return {
+      title: "⏳ OxCommander：线程在等审批",
+      body: clip(what, `${req.tool ?? "工具调用"} 在等人批准`),
     };
   }
   return undefined;

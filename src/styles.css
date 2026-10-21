@@ -2179,6 +2179,76 @@ select {
   font-size: 11px;
 }
 
+/**
+ * 线程状态点（M4b）+ 未读数。
+ *
+ * 点用**颜色 + 呼吸**两层编码：颜色区分"在跑 / 等我 / 结束"，呼吸只给
+ * "等我" —— 后台线程在跑时人可能不在屏幕前，静态红点太容易被忽略，
+ * 而把"在跑"也做成动画会让整棵树一直在闪（那正是通知疲劳的界面版本）。
+ */
+.chat-session-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--muted);
+  opacity: 0.5;
+}
+
+.chat-session-dot.status-running {
+  background: var(--accent);
+  opacity: 1;
+}
+
+.chat-session-dot.status-awaiting-approval {
+  background: #f5a623;
+  opacity: 1;
+  animation: thread-dot-pulse 1.4s ease-in-out infinite;
+}
+
+.chat-session-dot.status-done {
+  background: #4caf50;
+  opacity: 1;
+}
+
+.chat-session-dot.status-error {
+  background: #e05252;
+  opacity: 1;
+}
+
+.chat-session-dot.status-aborted {
+  background: var(--muted);
+  opacity: 0.8;
+}
+
+@keyframes thread-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(245, 166, 35, 0.5);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(245, 166, 35, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-session-dot.status-awaiting-approval {
+    animation: none;
+  }
+}
+
+.chat-session-unread {
+  flex: 0 0 auto;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
 .chat-runtime {
   display: flex;
   flex-wrap: wrap;

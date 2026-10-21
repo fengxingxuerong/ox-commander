@@ -92,6 +92,7 @@ beforeEach(() => {
       notice: "",
       streaming: "",
       comments: [],
+      threads: {},
     },
   });
 });
@@ -661,5 +662,83 @@ describe("会话页 · 流式预览", () => {
     render(<ChatPage />);
     expect(screen.queryByText(/还没有对话/)).toBeNull();
     expect(screen.getByTestId("chat-streaming").textContent).toContain("先说一句");
+  });
+});
+
+/**
+ * 左栏状态位（M4b）。
+ *
+ * M4a 之后宿主能同时跑多条线程，而界面只渲染当前这条。左栏因此要回答
+ * 三个只有多线程才存在的问题：
+ *   ① 后台那条在跑还是在等我？（圆点的颜色与呼吸）
+ *   ② 我离开之后它又说了多少？（未读数）
+ *   ③ 后台在跑的时候，我还能不能切过去？（M1 时代是"一律禁用"，因为切线程
+ *      会重建成另一个会话；M4a 起不会了）
+ */
+describe("左栏状态位（M4b）", () => {
+  const summary = (sessionId: string, title: string) => ({
+    sessionId,
+    projectId: "p-1",
+    title,
+    startedAt: 1,
+    updatedAt: 2,
+    status: "idle" as const,
+    turns: 0,
+    usageTokens: 0,
+  });
+
+  const seed = (): void => {
+    useApp.setState({
+      activeProjectId: "p-1",
+      projects: [{ id: "p-1", name: "示例项目", requirement: "r", rootPath: "/tmp/p-1", status: "ready" } as never],
+      chat: {
+        ...useApp.getState().chat,
+        sessionId: "chat-a",
+        sessions: [summary("chat-a", "前台的线"), summary("chat-b", "后台的线")],
+        threads: {
+          "chat-a": { status: "running", turns: 1, unread: 0, awaiting: false },
+          "chat-b": { status: "awaiting-approval", turns: 0, unread: 3, awaiting: true },
+        },
+      },
+    });
+  };
+
+  it("圆点按**运行时**状态上色（不是落盘摘要里的状态）", () => {
+    seed();
+    render(<ThreadRail />);
+    const dots = screen.getAllByTestId("thread-dot");
+    expect(dots).toHaveLength(2);
+    expect(dots[0].className).toContain("status-running");
+    expect(dots[1].className).toContain("status-awaiting-approval");
+    // 摘要里两条都是 idle —— 圆点若读摘要，会全是灰的。
+    expect(dots[0].className).not.toContain("status-idle");
+  });
+
+  it("未读数只出现在后台线程上，自己盯着的那条永远是 0", () => {
+    seed();
+    render(<ThreadRail />);
+    const unread = screen.getAllByTestId("thread-unread");
+    expect(unread).toHaveLength(1);
+    expect(unread[0].textContent).toBe("3");
+  });
+
+  it("后台线程在跑时仍可切换（M1 的“一律禁用”已经不成立）", () => {
+    seed();
+    render(<ThreadRail />);
+    const target = screen.getByRole("button", { name: "后台的线" }) as HTMLButtonElement;
+    expect(target.disabled).toBe(false);
+    // 当前这条仍然不可点（点了等于再恢复一次自己）。
+    const self = screen.getByRole("button", { name: "前台的线" }) as HTMLButtonElement;
+    expect(self.disabled).toBe(true);
+  });
+
+  it("后台线程等审批时，分叉/删除仍禁用（会毁掉在途的工具结果）", () => {
+    seed();
+    render(<ThreadRail />);
+    const row = screen.getAllByTestId("chat-session")[1];
+    const buttons = Array.from(row.querySelectorAll("button")).map((b) => b.textContent);
+    expect(buttons).toContain("分叉");
+    expect(buttons).toContain("删除");
+    expect((row.querySelector("button.small") as HTMLButtonElement).disabled).toBe(true);
   });
 });

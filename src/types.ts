@@ -17,6 +17,7 @@ import type {
 } from "../shared/chat-events";
 import type { ApprovalPolicy, SandboxMode } from "../shared/tools/policy";
 import type { ReasoningEffort } from "../shared/providers";
+import type { ThreadStatusView } from "../shared/chat-thread-status";
 import type { GithubIssue, GithubIssueListResult } from "../electron/context/github-readonly";
 
 /** Serializable agent summary shown in the settings panel (no credentials). */
@@ -213,6 +214,14 @@ export interface ChatView {
    * 系统说明会留下"当时附了 N 条评论"的痕迹）。
    */
   comments: InlineComment[];
+  /**
+   * 每条线程的状态位（M4b）：左栏的圆点与未读数。
+   *
+   * 与 `sessions`（落盘摘要）分工：摘要回答"历史上开过哪些线"，这里回答
+   * "此刻谁在跑、谁在等我、我离开之后它又说了多少" —— 只装**收到过事件**的
+   * 线程，历史线程不在这里，读的时候按 id 回落到摘要。
+   */
+  threads: Record<string, ThreadStatusView>;
 }
 
 /**

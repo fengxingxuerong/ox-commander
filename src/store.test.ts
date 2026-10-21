@@ -700,6 +700,7 @@ describe("handleEvent · chat 流式预览", () => {
         notice: "",
         streaming: "",
         comments: [],
+        threads: {},
       },
     });
   };
@@ -1051,5 +1052,80 @@ describe("isEventForChat", () => {
     expect(useApp.getState().chat.entries).toEqual([]);
     useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-1", entry: { kind: "assistant", text: "我的输出" } });
     expect(useApp.getState().chat.entries.map((e) => e.text)).toEqual(["我的输出"]);
+  });
+});
+
+/**
+ * 线程状态位（M4b）。
+ *
+ * 这一层是"事件归属"的另一半：M4a 只做了"别的线程的事件不进视图"，但如果
+ * **只是丢掉**，左栏就永远显示不出"后台那条在跑、还在等我"。所以同一个事件
+ * 要走两条账：视图只认当前这条，状态位聚合每一条。
+ */
+describe("线程状态位（M4b）", () => {
+  const resetChat = (): void => {
+    useApp.setState({
+      chat: {
+        ...useApp.getState().chat,
+        sessionId: "chat-a",
+        entries: [],
+        threads: {},
+        streaming: "",
+        status: "idle",
+      },
+    });
+  };
+  beforeEach(resetChat);
+
+  it("后台线程的事件：不进转录，但会涨未读并改状态", () => {
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-b", entry: { kind: "assistant", text: "后台输出" } });
+    expect(useApp.getState().chat.entries).toEqual([]);
+    expect(useApp.getState().chat.threads["chat-b"]).toMatchObject({ unread: 1 });
+
+    useApp.getState().handleEvent({ type: "chat:approval-request", sessionId: "chat-b", request: { requestId: "x" } });
+    expect(useApp.getState().chat.threads["chat-b"]).toMatchObject({
+      status: "awaiting-approval",
+      awaiting: true,
+    });
+    // 当前线程完全不受影响：没有凭空多出状态位。
+    expect(useApp.getState().chat.threads["chat-a"]).toBeUndefined();
+  });
+
+  it("自己盯着的那条涨的是转录、不是未读", () => {
+    useApp.getState().handleEvent({ type: "chat:status", sessionId: "chat-a", status: "running", turns: 0 });
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-a", entry: { kind: "assistant", text: "我的输出" } });
+    expect(useApp.getState().chat.entries.map((e) => e.text)).toEqual(["我的输出"]);
+    expect(useApp.getState().chat.threads["chat-a"]).toMatchObject({ status: "running", unread: 0 });
+  });
+
+  it("切回后台线程时未读清零（切回去 = 读过了）", async () => {
+    const g = globalThis as { window?: unknown; oxCommander?: unknown };
+    g.oxCommander = {
+      ...(g.oxCommander as object),
+      resumeChat: async () => ({
+        meta: {
+          sessionId: "chat-b",
+          startedAt: 1,
+          updatedAt: 2,
+          status: "running",
+          turns: 1,
+          usageTokens: 0,
+          mode: "workspace-write",
+          approvalPolicy: "on-request",
+        },
+        entries: [],
+        toolProtocol: "text",
+      }),
+      listChatSessions: async () => [],
+    };
+    useApp.setState({ activeProjectId: "p-1" });
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-b", entry: { kind: "assistant", text: "1" } });
+    useApp.getState().handleEvent({ type: "chat:entry", sessionId: "chat-b", entry: { kind: "assistant", text: "2" } });
+    expect(useApp.getState().chat.threads["chat-b"]?.unread).toBe(2);
+
+    await useApp.getState().resumeChat("chat-b");
+    expect(useApp.getState().chat.threads["chat-b"]?.unread).toBe(0);
+    // 状态本身保留：那条线程可能还在跑。
+    expect(useApp.getState().chat.threads["chat-b"]?.status).toBe("running");
   });
 });

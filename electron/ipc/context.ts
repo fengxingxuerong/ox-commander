@@ -15,6 +15,7 @@ import { AuditLog } from "../audit-log";
 import { taskTrail, trailBriefForRepair } from "../board-derive";
 import { brainTimeoutMsFor, createPlatform, executorTimeoutMsFor, type Platform } from "../platform";
 import { desktopNotificationOf, type NotifyEventShape } from "../notify-rules";
+import { focusedChatSession } from "../chat/focus";
 import { writeFileAtomic } from "../atomic-file";
 import { ProjectStore, SettingsStore } from "../store";
 import { KeysStore, createSafeStorageCrypto } from "../keys-store";
@@ -85,7 +86,9 @@ export function send(payload: Record<string, unknown>): void {
   // 长 run 在后台跑、窗口被切走时，后一条是操作者唯一还能收到的信号。
   // 判据是纯函数（notify-rules.ts），弹不弹只挑三类卡住/错过的事件；
   // 平台不支持（isSupported false）就安静降级，不抛。
-  const note = desktopNotificationOf(payload as NotifyEventShape);
+  const note = desktopNotificationOf(payload as NotifyEventShape, {
+    focusedChatSession: focusedChatSession(),
+  });
   if (note && Notification.isSupported()) {
     new Notification({ title: note.title, body: note.body }).show();
   }
