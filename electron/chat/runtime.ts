@@ -38,6 +38,11 @@ export interface ChatRuntimeOptions {
   globalPolicyDir?: string;
   /** 家目录，用于读 `~/.ox/AGENTS.md`；省略 = 不读全局约定。 */
   homeDir?: string;
+  /**
+   * 线程级覆盖（M3c）：显式选择的档位/审批策略要压过项目配置与全局设置。
+   * 省略 = 逐字沿用原来的合并顺序。
+   */
+  profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy };
 }
 
 export interface ChatRuntime {
@@ -111,9 +116,10 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
   const loaded = loadPolicyDirs(policyDirs);
   const policy: PolicyFile | undefined = loaded.files > 0 ? loaded.policy : undefined;
 
-  const mode: SandboxMode = project.config.sandboxMode ?? settings.sandboxMode ?? "workspace-write";
+  const mode: SandboxMode =
+    opts.profile?.mode ?? project.config.sandboxMode ?? settings.sandboxMode ?? "workspace-write";
   const approvalPolicy: ApprovalPolicy =
-    project.config.approvalPolicy ?? settings.approvalPolicy ?? "on-request";
+    opts.profile?.approvalPolicy ?? project.config.approvalPolicy ?? settings.approvalPolicy ?? "on-request";
   const approvalCommands = uniqueSorted([
     ...(settings.approvalCommands ?? []),
     ...(project.config.approvalCommands ?? []),

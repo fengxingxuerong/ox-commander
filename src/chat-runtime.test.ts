@@ -92,6 +92,25 @@ describe("resolveChatRuntime（项目指令 + 配置 + 策略）", () => {
     expect(runtime.issues).toEqual([]);
   });
 
+  it("线程级 profile 压过项目配置与全局设置，并进入签名", () => {
+    const proj = project("profile");
+    write("profile/.ox/config.json", JSON.stringify({
+      version: 1,
+      sandboxMode: "read-only",
+      approvalPolicy: "untrusted",
+    }));
+    const settings = { ...DEFAULT_SETTINGS, sandboxMode: "workspace-write" as const, approvalPolicy: "on-request" as const };
+    const base = resolveChatRuntime({ rootAbs: proj, settings });
+    const overridden = resolveChatRuntime({
+      rootAbs: proj,
+      settings,
+      profile: { mode: "danger-full-access", approvalPolicy: "never" },
+    });
+    expect(overridden.mode).toBe("danger-full-access");
+    expect(overridden.approvalPolicy).toBe("never");
+    expect(overridden.signature).not.toBe(base.signature);
+  });
+
   it("策略/约定变化会让签名变化（宿主据此重建会话）", () => {
     const proj = project("signature");
     write("signature/.ox/policy.d/a.json", JSON.stringify({ version: 1, denyCommands: ["node"] }));

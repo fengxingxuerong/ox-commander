@@ -6,7 +6,13 @@ import {
   type ChatSessionMeta,
   type ChatStatus,
 } from "../../shared/chat-events";
-import { describeSandbox, type ApprovalPolicy, type SandboxMode } from "../../shared/tools/policy";
+import {
+  APPROVAL_POLICIES,
+  SANDBOX_MODES,
+  describeSandbox,
+  type ApprovalPolicy,
+  type SandboxMode,
+} from "../../shared/tools/policy";
 import { diffText } from "../../shared/text-diff";
 import { insertMention, mentionCandidates, mentionTokenAt, type MentionToken } from "../chat-mention";
 
@@ -62,6 +68,18 @@ function chatMeta(chat: { sessionId?: string; status: ChatStatus; turns: number;
 }
 
 const DIFF_MARK: Record<string, string> = { same: " ", add: "+", del: "-" };
+
+const SANDBOX_TEXT: Record<SandboxMode, string> = {
+  "read-only": "只读",
+  "workspace-write": "工作区可写",
+  "danger-full-access": "完全访问",
+};
+
+const APPROVAL_TEXT: Record<ApprovalPolicy, string> = {
+  untrusted: "写/执行都问",
+  "on-request": "按策略问",
+  never: "从不问",
+};
 
 /** 一个 apply_patch 结果里的逐文件 diff；只读内容来自工具结果本身。 */
 function ChangesView({
@@ -168,6 +186,8 @@ export function ChatPage() {
   const chat = useApp((s) => s.chat);
   const input = useApp((s) => s.chatInput);
   const setInput = useApp((s) => s.setChatInput);
+  const setChatMode = useApp((s) => s.setChatMode);
+  const setChatApproval = useApp((s) => s.setChatApproval);
   const sendChat = useApp((s) => s.sendChat);
   const abortChat = useApp((s) => s.abortChat);
   const newChat = useApp((s) => s.newChat);
@@ -249,6 +269,40 @@ export function ChatPage() {
         <p className="card-sub">
           直接说话，让它自己读代码、打补丁、跑命令。当前：{describeSandbox(chat.mode, chat.approvalPolicy)}
         </p>
+
+        <div className="chat-runtime" data-testid="chat-runtime">
+          <label className="chat-runtime-field">
+            <span className="hud-stat-label">沙箱</span>
+            <select
+              aria-label="会话沙箱"
+              value={chat.mode}
+              disabled={busy}
+              onChange={(e) => setChatMode(e.target.value as SandboxMode)}
+            >
+              {SANDBOX_MODES.map((mode) => (
+                <option key={mode} value={mode}>
+                  {SANDBOX_TEXT[mode]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="chat-runtime-field">
+            <span className="hud-stat-label">审批</span>
+            <select
+              aria-label="会话审批"
+              value={chat.approvalPolicy}
+              disabled={busy}
+              onChange={(e) => setChatApproval(e.target.value as ApprovalPolicy)}
+            >
+              {APPROVAL_POLICIES.map((policy) => (
+                <option key={policy} value={policy}>
+                  {APPROVAL_TEXT[policy]}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="muted chat-runtime-hint">只影响这条线程，下一条消息生效；历史保留</span>
+        </div>
 
         <div className="chat-status">
           <span className="chat-stat">

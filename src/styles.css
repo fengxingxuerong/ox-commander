@@ -2179,6 +2179,32 @@ select {
   font-size: 11px;
 }
 
+.chat-runtime {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  margin: 10px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: rgba(4, 6, 11, 0.55);
+}
+
+.chat-runtime-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-runtime-field select {
+  min-width: 8.5rem;
+}
+
+.chat-runtime-hint {
+  font-size: 11px;
+}
+
 .chat-status {
   display: flex;
   flex-wrap: wrap;

@@ -2887,6 +2887,58 @@ describe("chat handlers（交互式编码会话）", () => {
     expect(transcript.entries.some((e) => e.kind === "tool_result" && e.text.includes("read-only"))).toBe(true);
   });
 
+  it("线程级 profile 的 read-only 压过项目 config 的 workspace-write，且写盘真的被拦", async () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, ".ox"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".ox", "config.json"),
+      JSON.stringify({ version: 1, sandboxMode: "workspace-write" }),
+      "utf8",
+    );
+    const patch = ["*** Begin Patch", "*** Add File: blocked-by-profile.txt", "+x", "*** End Patch"].join("\n");
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "apply_patch", arguments: { patch } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "没法写", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+      text: "写个文件",
+      projectId: "p-chat",
+      profile: { mode: "read-only", approvalPolicy: "on-request" },
+    });
+    await waitForEvent("chat:done");
+    expect(fs.existsSync(path.join(root, "blocked-by-profile.txt"))).toBe(false);
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      meta: { mode: string };
+      entries: Array<{ kind: string; text: string }>;
+    };
+    expect(transcript.meta.mode).toBe("read-only");
+    expect(transcript.entries.some((e) => e.kind === "tool_result" && e.text.includes("read-only"))).toBe(true);
+  });
+
+  it("chat:send 的 profile 拼错时原地报错，不静默退回默认档", () => {
+    seedChatWorkspace();
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "yolo", approvalPolicy: "on-request" },
+      }),
+    ).toThrow(/profile\.mode/);
+    expect(() =>
+      (h.ipcMain as FakeIpcMain).invoke("chat:send", {
+        text: "hi",
+        projectId: "p-chat",
+        profile: { mode: "read-only", approvalPolicy: "sometimes" },
+      }),
+    ).toThrow(/profile\.approvalPolicy/);
+  });
+
   it("撤销第 N 轮补丁：内容仍等于补丁后版本才恢复；之后被改过则跳过", async () => {
     const root = seedChatWorkspace();
     fs.mkdirSync(path.join(root, "src"), { recursive: true });

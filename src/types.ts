@@ -298,6 +298,9 @@ export interface AppState {
 
   setPage(page: Page): void;
   setChatInput(text: string): void;
+  /** 线程级运行档（M3c）：只改当前这条线程，下一条消息随 payload 带给主进程。 */
+  setChatMode(mode: SandboxMode): void;
+  setChatApproval(policy: ApprovalPolicy): void;
   /** 展开 / 收起右栏改动审查（M2）。显式给值，不做无参翻转 —— 翻转在多处触发时会分不清谁翻的。 */
   setReviewOpen(open: boolean): void;
   /**
@@ -498,7 +501,12 @@ declare global {
        * 发一句话进交互式会话；立刻返回 sessionId（过程走 onEvent 推）。
        * 需要 projectId：会话的工具边界就是那个项目的工作区。
        */
-      sendChat(input: { text: string; projectId: string }): Promise<{ sessionId: string; accepted: true }>;
+      sendChat(input: {
+        text: string;
+        projectId: string;
+        /** 线程自己的沙箱/审批档；省略 = 主进程按设置与项目配置合并。 */
+        profile?: { mode: SandboxMode; approvalPolicy: ApprovalPolicy };
+      }): Promise<{ sessionId: string; accepted: true }>;
       abortChat(): Promise<boolean>;
       newChat(input: { projectId: string }): Promise<{ sessionId: string }>;
       chatTranscript(): Promise<ChatTranscript | null>;

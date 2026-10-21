@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { act, render, screen, fireEvent, cleanup } from "@testing-library/react";
+import { act, render, screen, fireEvent, cleanup, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./pages/ChatPage";
@@ -18,7 +18,11 @@ import type { ChatApprovalRequest, ChatEntry } from "../shared/chat-events";
 //  Mock 带参数签名：否则 vi.fn() 推断出的实参类型是空元组，
 //  `mock.calls[0][0]` 这类断言会是编译错而不是运行错（这正是我们想要的那一类）。
 const bridge = {
-  sendChat: vi.fn(async (_input: { text: string; projectId: string }) => ({
+  sendChat: vi.fn(async (_input: {
+    text: string;
+    projectId: string;
+    profile?: { mode: "read-only" | "workspace-write" | "danger-full-access"; approvalPolicy: "untrusted" | "on-request" | "never" };
+  }) => ({
     sessionId: "chat-1",
     accepted: true as const,
   })),
@@ -111,7 +115,27 @@ describe("会话页（ChatPage）", () => {
     fireEvent.change(box, { target: { value: "把 a 改成 b" } });
     fireEvent.click(screen.getByRole("button", { name: "发送" }));
     await vi.waitFor(() => expect(bridge.sendChat).toHaveBeenCalled());
-    expect(bridge.sendChat.mock.calls[0][0]).toEqual({ text: "把 a 改成 b", projectId: "p-1" });
+    expect(bridge.sendChat.mock.calls[0][0]).toEqual({
+      text: "把 a 改成 b",
+      projectId: "p-1",
+      profile: { mode: "workspace-write", approvalPolicy: "on-request" },
+    });
+  });
+
+  it("线程头切沙箱/审批：只改本线程状态，并随下一条消息带出", async () => {
+    render(<ChatPage />);
+    fireEvent.change(screen.getByLabelText("会话沙箱"), { target: { value: "read-only" } });
+    fireEvent.change(screen.getByLabelText("会话审批"), { target: { value: "never" } });
+    expect(useApp.getState().chat.mode).toBe("read-only");
+    expect(useApp.getState().chat.approvalPolicy).toBe("never");
+
+    fireEvent.change(screen.getByLabelText("会话输入"), { target: { value: "看看现状" } });
+    fireEvent.click(screen.getByRole("button", { name: "发送" }));
+    await vi.waitFor(() => expect(bridge.sendChat).toHaveBeenCalled());
+    expect(bridge.sendChat.mock.calls[0][0].profile).toEqual({
+      mode: "read-only",
+      approvalPolicy: "never",
+    });
   });
 
   it("Enter 发送、Shift+Enter 不发送", () => {
@@ -136,7 +160,8 @@ describe("会话页（ChatPage）", () => {
     fireEvent.select(box);
 
     await vi.waitFor(() => expect(bridge.listChatFiles).toHaveBeenCalledWith({ projectId: "p-1" }));
-    const options = await screen.findAllByRole("option");
+    const listbox = screen.getByRole("listbox", { name: "文件补全" });
+    const options = await within(listbox).findAllByRole("option");
     expect(options.map((option) => option.textContent)).toEqual(["src/alpha.ts", "src/beta.ts"]);
 
     fireEvent.keyDown(box, { key: "ArrowDown" });

@@ -33,6 +33,17 @@ export interface ChatEntry {
 
 export type ChatStatus = "idle" | "running" | "awaiting-approval" | "done" | "aborted" | "error";
 
+/**
+ * 一条线程自己的运行边界（M3c）。
+ *
+ * 与全局设置的差别是**作用域**：改这里只影响这一条线程，下一句话会带着它
+ * 重建会话（历史保留），不会把设置页里其它项目的默认值一起改掉。
+ */
+export interface ChatRuntimeProfile {
+  mode: SandboxMode;
+  approvalPolicy: ApprovalPolicy;
+}
+
 export interface ChatSessionMeta {
   sessionId: string;
   /** 会话绑定的项目根（工具的路径判定以它为界）。 */

@@ -36,9 +36,11 @@ import {
   type ChatFileIndex,
   type ChatHistory,
   type ChatRevertResult,
+  type ChatRuntimeProfile,
   type ChatSessionSnapshot,
   type ChatTranscript,
 } from "../../shared/chat-events";
+import { isApprovalPolicy, isSandboxMode } from "../../shared/tools/policy";
 import type { ChatFileChange } from "../../shared/tools/spec";
 
 interface LiveSession {
@@ -159,12 +161,17 @@ function buildSession(
   return session;
 }
 
-function runtimeOf(rootAbs: string, settings: ProjectSettings): ChatRuntime {
+function runtimeOf(
+  rootAbs: string,
+  settings: ProjectSettings,
+  profile?: ChatRuntimeProfile,
+): ChatRuntime {
   return resolveChatRuntime({
     rootAbs,
     settings,
     globalPolicyDir: path.join(app.getPath("userData"), "policy.d"),
     homeDir: app.getPath("home"),
+    ...(profile ? { profile } : {}),
   });
 }
 
@@ -175,8 +182,13 @@ function runtimeOf(rootAbs: string, settings: ProjectSettings): ChatRuntime {
  * 在“停止”之后再也发不出下一条消息（表现为每句话都立刻变成“已中止”）。
  * 同项目内的重建会带上旧转录（设置变了不等于聊天记录消失），跨项目不带。
  */
-function ensureLiveSession(rootAbs: string, settings: ProjectSettings, projectId: string): ChatSession {
-  const runtime = runtimeOf(rootAbs, settings);
+function ensureLiveSession(
+  rootAbs: string,
+  settings: ProjectSettings,
+  projectId: string,
+  profile?: ChatRuntimeProfile,
+): ChatSession {
+  const runtime = runtimeOf(rootAbs, settings, profile);
   if (
     live !== null &&
     live.signature === runtime.signature &&
@@ -238,6 +250,18 @@ function sessionIdOf(input: unknown, channel: string): string {
   const sessionId = typeof payload.sessionId === "string" ? payload.sessionId : "";
   if (sessionId === "") throw new Error(`${channel} 需要 sessionId`);
   return sessionId;
+}
+
+/** 线程级运行档（M3c）：只接受两档已知值，拼错时原地报错而不是静默回退。 */
+function chatProfileOf(input: unknown): ChatRuntimeProfile | undefined {
+  const raw = (input as { profile?: unknown } | null | undefined)?.profile;
+  if (raw === undefined) return undefined;
+  const profile = (raw ?? {}) as { mode?: unknown; approvalPolicy?: unknown };
+  if (!isSandboxMode(profile.mode)) throw new Error("chat:send 的 profile.mode 不合法");
+  if (!isApprovalPolicy(profile.approvalPolicy)) {
+    throw new Error("chat:send 的 profile.approvalPolicy 不合法");
+  }
+  return { mode: profile.mode, approvalPolicy: profile.approvalPolicy };
 }
 
 const MENTION_IGNORED_DIRS = new Set([
@@ -328,10 +352,11 @@ export function registerChatHandlers(): void {
     if (projectId === "") throw new Error("chat:send 需要 projectId：会话绑在项目工作区里，路径判定以它为界");
     const rootAbs = requireProjectRoot(projectId, "发送消息");
     const settings = settingsStore().load();
+    const profile = chatProfileOf(input);
     // 换项目/换设置/上一个会话已被中止都在这一处收口。首条消息也必须从这里
     // 拿会话 —— 旧实现只在“已有会话且项目变化”时重建，新装应用第一次发送
     // 会直接对 null 取 `.session`。
-    const session = ensureLiveSession(rootAbs, settings, projectId);
+    const session = ensureLiveSession(rootAbs, settings, projectId, profile);
     void session.send(text).catch((e) => {
       send({ type: "chat:error", sessionId: session.sessionId, message: (e as Error).message });
     });

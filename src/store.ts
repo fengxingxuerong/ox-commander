@@ -94,6 +94,8 @@ export const useApp = create<AppState>((set, get) => ({
   setNewRequirement: (newRequirement) => set({ newRequirement }),
 
   setChatInput: (chatInput) => set({ chatInput }),
+  setChatMode: (mode) => set((s) => ({ chat: { ...s.chat, mode } })),
+  setChatApproval: (approvalPolicy) => set((s) => ({ chat: { ...s.chat, approvalPolicy } })),
   setReviewOpen: (reviewOpen) => set({ reviewOpen }),
 
   sendChat: async () => {
@@ -114,7 +116,11 @@ export const useApp = create<AppState>((set, get) => ({
       chatInput: "",
     }));
     try {
-      const res = await api().sendChat({ text: outgoing, projectId });
+      const res = await api().sendChat({
+        text: outgoing,
+        projectId,
+        profile: { mode: get().chat.mode, approvalPolicy: get().chat.approvalPolicy },
+      });
       set((s) => ({ chat: { ...s.chat, sessionId: res.sessionId, status: "running" } }));
       // 首条用户消息落盘后列表会出现这条会话；刷新一次让侧栏不用等下一轮。
       void get().loadChatSessions();
