@@ -779,7 +779,10 @@ export const useApp = create<AppState>((set, get) => ({
     // 后者只渲染当前这条。
     if (typeof p.type === "string" && p.type.startsWith("chat:")) {
       const sid = (p as { sessionId?: unknown }).sessionId;
-      if (typeof sid === "string" && sid !== "") {
+      // 只查"是不是字符串"：空串与非字符串在归约那一层本来就不改状态（它自己
+      // 又守了一次），这里多判一遍只是多一个等价变异要论证。`threads[""]`
+      // 也因为"不改"而不会被写出来。
+      if (typeof sid === "string") {
         set((s) => {
           const next = applyThreadStatus(s.chat.threads[sid], p, s.chat.sessionId);
           if (next === s.chat.threads[sid]) return {};
