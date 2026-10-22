@@ -1252,3 +1252,71 @@ describe("automation actions", () => {
     expect(useApp.getState().automationHistory.map((h) => h.ts)).toEqual(["t2", "t1"]);
   });
 });
+
+/**
+ * 导出分支的通知文案（M5a）。
+ *
+ * 这里钉的是**"缺一半也算缺"**与**"没有配置远端不等于推送成功"**两件事。判错的
+ * 形态都不吵：缺 projectId 时仍然去调 IPC（主进程再抛一次，用户看到的是另一句话）、
+ * 把「没事可做」的 skip 说成失败、把"没有远端"当成功 —— 三种都会让操作者对着
+ * notice 猜到底发生了什么。
+ */
+describe("exportChat 通知文案（M5a）", () => {
+  const g = () => globalThis as unknown as { oxCommander: Record<string, unknown> };
+
+  function withBridge(over: Record<string, unknown>) {
+    g().oxCommander = { ...g().oxCommander, ...over };
+  }
+
+  const result = (over: Record<string, unknown> = {}) => ({
+    ok: true,
+    branch: "oxcommander/thread-chat-1",
+    commit: "abc1234",
+    filesCommitted: 2,
+    unrevertable: [] as string[],
+    ...over,
+  });
+
+  it("projectId 或 sessionId 任一缺失都不发 IPC，只说没有可导出的会话", async () => {
+    const calls: unknown[] = [];
+    withBridge({
+      exportChat: async (input: unknown) => {
+        calls.push(input);
+        return result();
+      },
+    });
+
+    // 只有 sessionId：项目没选，导出不知道该落到哪个仓库。
+    useApp.setState({ activeProjectId: undefined, chat: { ...useApp.getState().chat, sessionId: "chat-1" } });
+    await useApp.getState().exportChat(false);
+    expect(useApp.getState().chat.notice).toBe("没有可导出的会话");
+
+    // 只有 projectId：没有会话就没有补丁可导。
+    useApp.setState({ activeProjectId: "p-1", chat: { ...useApp.getState().chat, sessionId: undefined } });
+    await useApp.getState().exportChat(false);
+    expect(useApp.getState().chat.notice).toBe("没有可导出的会话");
+
+    expect(calls).toEqual([]);
+  });
+
+  it("没有配置远端是「没事可做」，不是失败；真推送成功才说已推送", async () => {
+    useApp.setState({ activeProjectId: "p-1", chat: { ...useApp.getState().chat, sessionId: "chat-1" } });
+
+    withBridge({
+      exportChat: async () => result({ push: { ok: true, pushed: false, skipped: "no-remote" } }),
+    });
+    await useApp.getState().exportChat(true);
+    expect(useApp.getState().chat.notice).toContain("未推送：没有配置远端");
+    expect(useApp.getState().chat.notice).toContain("已导出分支 oxcommander/thread-chat-1");
+
+    // pushed 但**没有** skipped 字段：这句话不能也报"没有配置远端"。
+    withBridge({
+      exportChat: async () => result({ push: { ok: true, pushed: true, remote: "origin" } }),
+    });
+    await useApp.getState().exportChat(true);
+    expect(useApp.getState().chat.notice).toBe(
+      "已导出分支 oxcommander/thread-chat-1（abc1234） · 2 个文件；已推送到 origin",
+    );
+    expect(useApp.getState().chat.notice).not.toContain("未推送");
+  });
+});
