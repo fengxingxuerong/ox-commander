@@ -180,11 +180,11 @@ describe("dueAutomations", () => {
 });
 
 describe("nextWakeDelayMs", () => {
-  it("取启用任务里的最小剩余；停用不参与", () => {
+  it("取启用任务里的最小剩余；停用不参与（且停用项排在最前也不能让循环提前收工）", () => {
     const list = [
+      auto({ id: "auto-c", everyMs: 1000, enabled: false }),
       auto({ id: "auto-a", everyMs: 600_000, lastFiredMs: NOW - 100_000 }), // 剩 500s
       auto({ id: "auto-b", everyMs: 300_000, lastFiredMs: NOW - 200_000 }), // 剩 100s
-      auto({ id: "auto-c", everyMs: 1000, enabled: false }),
     ];
     expect(nextWakeDelayMs(list, NOW)).toBe(100_000);
   });

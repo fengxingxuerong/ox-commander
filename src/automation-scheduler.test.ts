@@ -213,6 +213,18 @@ describe("AutomationScheduler", () => {
     expect(h.nextAt()).toBe(T0 + 90_000);
   });
 
+  it("同一轮多个到点且都成功：逐个记账，不是一个成功就收工", async () => {
+    const h = harness({ automations: [auto({ id: "auto-a" }), auto({ id: "auto-b" })] });
+    h.scheduler.start();
+    h.at(T0 + 60_000);
+    await h.pump();
+    expect(h.triggered).toEqual(["auto-a", "auto-b"]);
+    expect(h.fired).toEqual([
+      { id: "auto-a", at: T0 + 60_000 },
+      { id: "auto-b", at: T0 + 60_000 },
+    ]);
+  });
+
   it("停用的不触发；全停用 = 睡死，reschedule 叫醒", async () => {
     const h = harness({ automations: [auto({ enabled: false })] });
     h.scheduler.start();

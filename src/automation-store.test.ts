@@ -75,15 +75,19 @@ describe("AutomationStore", () => {
   it("update：改间隔/改名/启停都走合并后重新过尺子", () => {
     const dir = path.join(root, "e");
     const store = new AutomationStore(dir);
-    const a = store.create(good(), NOW);
+    const a = store.create(good({ enabled: true }), NOW);
 
     const renamed = store.update(a.id, { name: "  每周构建  " }, NOW + 1000);
     expect(renamed?.name).toBe("每周构建");
+    // 改名**不能**顺手启停：只打 name 补丁时 enabled 必须原样留着
+    // （补丁判定写成"字段缺席也覆盖"会在这里露馅）
+    expect(renamed?.enabled).toBe(true);
     expect(renamed?.createdAt).toBe(a.createdAt); // 创建时间不属于可编辑范围
     expect(renamed?.updatedAt).toBe(NOW + 1000);
 
     expect(store.update(a.id, { everyMs: 60_000 }, NOW + 2000)?.everyMs).toBe(60_000);
     expect(store.update(a.id, { enabled: false }, NOW + 3000)?.enabled).toBe(false);
+    expect(store.update(a.id, { enabled: true }, NOW + 3500)?.enabled).toBe(true);
     // enabled 只认显式布尔：字符串 "false" 不是停用
     expect(store.update(a.id, { enabled: "false" as unknown as boolean }, NOW + 4000)?.enabled).toBe(false);
     expect(store.update("auto-nope", { name: "x" }, NOW)).toBeNull();
