@@ -49,6 +49,12 @@ const h = vi.hoisted(() => ({
   resumeEngine: null as any,
   /** 摄入半边：github:list-issues 的供数替身（不真跑 gh）。 */
   listGithubIssues: null as any,
+  /**
+   * 桌面自动化（M5b）：记录仓的替身状态。handler 测的是"闸门与三态映射"，
+   * 落盘语义由 automation-store.test.ts 用真临时目录覆盖。
+   */
+  automationRows: [] as any[],
+  automationInstances: [] as any[],
 }));
 
 vi.mock("electron", async () => {
@@ -113,6 +119,31 @@ vi.mock("../electron/audit-log", () => ({
     exportTo = vi.fn((p: string) => p);
     constructor() {
       h.auditInstances.push(this);
+    }
+  },
+}));
+
+/**
+ * 桌面自动化的记录仓：内存替身。**方法必须每次现读 `h.automationRows`**，
+ * 否则每条用例就得重建 store（而 `ipc/automations.ts` 里它是模块级单例）。
+ */
+vi.mock("../electron/automations/automation-store", () => ({
+  AutomationStore: class {
+    list = vi.fn(() => h.automationRows);
+    get = vi.fn((id: string) => h.automationRows.find((a: any) => a.id === id) ?? null);
+    create = vi.fn((input: any) => ({ id: "auto-new", enabled: false, createdAt: 1, updatedAt: 1, ...input }));
+    update = vi.fn((id: string, patch: any) => {
+      const cur = h.automationRows.find((a: any) => a.id === id);
+      return cur ? { ...cur, ...patch } : null;
+    });
+    remove = vi.fn((id: string) => {
+      const before = h.automationRows.length;
+      h.automationRows = h.automationRows.filter((a: any) => a.id !== id);
+      return h.automationRows.length < before;
+    });
+    markFired = vi.fn();
+    constructor() {
+      h.automationInstances.push(this);
     }
   },
 }));
@@ -299,6 +330,8 @@ beforeEach(() => {
   dynamicAgentMap().clear();
   setRunningProjectId(null);
   h.createPlatformCalls.length = 0;
+  // 自动化：每条用例从空表起（启用的行会在 reschedule 时排真 timer，见 describe 说明）
+  h.automationRows.length = 0;
   // 复跑默认「命令跑通」；要造矛盾的用例各自改返回值。
   h.verifyCommands?.mockReset();
   h.verifyCommands?.mockResolvedValue({ results: [] });
@@ -3802,5 +3835,146 @@ describe("task-note handlers（C2 操作者附言）", () => {
     expect(() => (h.ipcMain as FakeIpcMain).invoke("orchestration:task-note", "t1", 42)).toThrow(
       /note 必须是字符串/,
     );
+  });
+});
+
+/**
+ * 桌面自动化（M5b）：CRUD 转发 + 立即触发的三态映射 + 触发历史口径。
+ *
+ * 三态为什么逐条钉：**忙**在单飞语义下是正常结果，而它与"派不出去"若被混成
+ * 一个 false 或一个异常，界面就只能说一句含糊的"没成功" —— 可这两件事对操作者
+ * 的处置完全相反（等一会儿 vs 先去规划）。
+ *
+ * ⚠️ 夹具默认 `enabled: false`：create/update/delete 之后调度环会重排，一条**启用
+ * 且早已到点**的行会在测试进程里排一个真 timer（延迟 0 → 立刻起跑），把日志与
+ * 审计写到别的用例头上。启用态的排程语义由 automation-scheduler.test.ts 的注入式
+ * 时钟覆盖，这里只用停用行验证"转发与映射"。
+ */
+describe("automation handlers（M5b 定时任务）", () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "auto-1",
+    name: "每晚回归",
+    projectId: "p1",
+    everyMs: 3_600_000,
+    enabled: false,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  it("list：原样回传；读不出来时给空表 + problem 并记日志（不静默全没了）", () => {
+    h.automationRows.push(row());
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:list")).toEqual({ automations: [row()] });
+
+    const store = inst(h.automationInstances);
+    (store.list as Mock).mockImplementationOnce(() => {
+      throw new Error("Unexpected token } in JSON");
+    });
+    const res = (h.ipcMain as FakeIpcMain).invoke("automations:list") as {
+      automations: unknown[];
+      problem?: string;
+    };
+    expect(res.automations).toEqual([]);
+    expect(res.problem).toMatch(/Unexpected token/);
+    // 日志是唯一在现场留下的痕迹：界面可能没开在这一页。
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      "ox:event",
+      expect.objectContaining({ type: "log", text: expect.stringContaining("读取 automations.json 失败") }),
+    );
+  });
+
+  it("create 转发入参；update 让仓做合并后校验，id 不存在时明说", () => {
+    expect(
+      (h.ipcMain as FakeIpcMain).invoke("automations:create", { name: "每晚回归", projectId: "p1", everyMs: 60_000 }),
+    ).toMatchObject({ id: "auto-new", name: "每晚回归", projectId: "p1", everyMs: 60_000 });
+    const store = inst(h.automationInstances);
+    expect(store.create).toHaveBeenCalledWith({ name: "每晚回归", projectId: "p1", everyMs: 60_000 }, expect.any(Number));
+
+    h.automationRows.push(row());
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:update", "auto-1", { enabled: true })).toMatchObject({
+      enabled: true,
+    });
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("automations:update", "auto-ghost", { name: "x" })).toThrow(
+      /没有这条自动化/,
+    );
+  });
+
+  it("delete：回传仓的真结果（删不掉就是 false，不假装成功）", () => {
+    h.automationRows.push(row());
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:delete", "auto-1")).toBe(true);
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:delete", "auto-1")).toBe(false);
+  });
+
+  it("run：忙 → busy、没计划 → failed，两种都落审计（三态都记账）", () => {
+    h.automationRows.push(row());
+    const store = inst(h.projectInstances);
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+
+    setRunningProjectId("p9");
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:run", "auto-1")).toBe("busy");
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        phase: "automation",
+        automationId: "auto-1",
+        automationName: "每晚回归",
+        projectId: "p1",
+        automationOutcome: "busy",
+        ok: false,
+      }),
+    );
+    // 忙时**不**记账（不落 lastFiredMs）：下一轮还得再试
+    expect(inst(h.automationInstances).markFired).not.toHaveBeenCalled();
+    setRunningProjectId(null);
+
+    (store.get as Mock).mockReturnValue({ id: "p1", stage: "PRD" });
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:run", "auto-1")).toBe("failed");
+    expect(audit.append).toHaveBeenLastCalledWith(
+      expect.objectContaining({ automationOutcome: "failed", detail: expect.stringContaining("no plan") }),
+    );
+  });
+
+  it("run：accepted → 真起跑、落审计、并记 lastFiredMs（否则下一轮连跑两遍）", async () => {
+    h.automationRows.push(row());
+    const store = inst(h.projectInstances);
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    const automationStore = inst(h.automationInstances);
+    (store.get as Mock).mockReturnValue({ id: "p1", batchesJson: "[[{\"id\":\"t1\"}]]" });
+
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:run", "auto-1")).toBe("accepted");
+    expect(audit.append).toHaveBeenCalledWith(
+      expect.objectContaining({ phase: "automation", automationOutcome: "accepted", ok: true }),
+    );
+    expect(automationStore.markFired).toHaveBeenCalledWith("auto-1", expect.any(Number));
+    // 起火是异步的（不 await 整个 run），这里等它把 execute 走到
+    await vi.waitFor(() => expect(h.execute).toHaveBeenCalled());
+  });
+
+  it("run：未知 id 明说；history 把审计字段翻成界面口径（不动渲染层的字段认知）", () => {
+    expect(() => (h.ipcMain as FakeIpcMain).invoke("automations:run", "auto-ghost")).toThrow(/没有这条自动化/);
+
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    (audit.read as Mock).mockReturnValue([
+      {
+        ts: "2026-10-22T11:00:00.000Z",
+        phase: "automation",
+        automationId: "auto-1",
+        automationName: "每晚回归",
+        projectId: "p1",
+        automationOutcome: "busy",
+        detail: "项目 p9 正在执行中，无法同时启动",
+        ok: false,
+      },
+    ]);
+    expect((h.ipcMain as FakeIpcMain).invoke("automations:history", 10)).toEqual([
+      {
+        ts: "2026-10-22T11:00:00.000Z",
+        automationId: "auto-1",
+        automationName: "每晚回归",
+        projectId: "p1",
+        outcome: "busy",
+        detail: "项目 p9 正在执行中，无法同时启动",
+      },
+    ]);
+    expect(audit.read).toHaveBeenCalledWith({ limit: 10, phase: "automation" });
   });
 });

@@ -13,7 +13,13 @@ export type AuditPhase =
   /** 流水线阶段推进（board:recovery 用它恢复"上次跑到哪"）。 */
   | "stage"
   /** 一次 execute 的交付凭据收官（整份 DeliveryReceipt，已脱敏）。 */
-  | "receipt";
+  | "receipt"
+  /**
+   * 定时任务的一次触发尝试（M5b）：`accepted`（已派发）/ `busy`（撞单飞闸跳过）
+   * / `failed`（派不出去）。落盘动机与 `batch-guard` 相同：调度器是内存里的环，
+   * 而"这条自动化最近跑过没有、为什么没跑"必须能在重启后回答。
+   */
+  | "automation";
 
 export interface AuditRecord {
   /** ISO timestamp, stamped by the writer. */
@@ -77,6 +83,15 @@ export interface AuditRecord {
   stage?: Stage;
   /** The final delivery receipt of a run, redacted before it hits disk. */
   receipt?: DeliveryReceipt;
+  /**
+   * 定时任务（`automation` phase）：哪一条、叫什么、触发到哪个项目、结果如何。
+   * 名字单独落是因为它可改可删 —— 只留 id 的话，删掉之后历史里全是看不懂的
+   * `auto-<uuid>`。
+   */
+  automationId?: string;
+  automationName?: string;
+  /** 触发结果，与调度器的三态同词：`accepted` / `busy` / `failed`。 */
+  automationOutcome?: string;
 }
 
 export interface AuditLogOptions {

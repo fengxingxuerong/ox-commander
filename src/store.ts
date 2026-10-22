@@ -97,6 +97,9 @@ export const useApp = create<AppState>((set, get) => ({
   conflicts: [] as AppState["conflicts"],
   planning: false,
   planningError: undefined,
+  automations: [],
+  automationsError: undefined,
+  automationHistory: [],
   newProjectName: "",
   newRequirement: "",
   chat: {
@@ -513,6 +516,120 @@ export const useApp = create<AppState>((set, get) => ({
         projectsError: message,
         logs: [...s.logs, `[错误] 删除项目失败: ${message}`],
       }));
+    }
+  },
+
+  // ── 桌面自动化（M5b）──
+  // 列表与历史的读都在这里收口：这一页没有日志视图，失败必须落进 state 才看得
+  // 见（`automationsError` 与 `projectsError` 同款）。
+  loadAutomations: async () => {
+    try {
+      const { automations, problem } = await api().listAutomations();
+      set((s) => ({
+        automations,
+        // 文件读不出来时列表必然是空的 —— 把它说破，否则看起来就是"全没了"
+        automationsError: problem,
+        ...(problem ? { logs: [...s.logs, `[错误] 读取自动化失败: ${problem}`] } : {}),
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 读取自动化失败: ${message}`],
+      }));
+    }
+  },
+
+  loadAutomationHistory: async () => {
+    try {
+      const history = await api().automationHistory();
+      // 审计是时间正序读出的；界面要最新的在最前
+      set({ automationHistory: history.slice().reverse() });
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 读取触发历史失败: ${message}`],
+      }));
+    }
+  },
+
+  createAutomation: async (input) => {
+    try {
+      const created = await api().createAutomation(input);
+      set((s) => ({
+        automations: [...s.automations, created],
+        automationsError: undefined,
+        logs: [...s.logs, `[自动化] 已创建「${created.name}」`],
+      }));
+      return true;
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 创建自动化失败: ${message}`],
+      }));
+      return false;
+    }
+  },
+
+  updateAutomation: async (id, patch) => {
+    try {
+      const updated = await api().updateAutomation(id, patch);
+      set((s) => ({
+        automations: s.automations.map((a) => (a.id === id ? updated : a)),
+        automationsError: undefined,
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 更新自动化失败: ${message}`],
+      }));
+    }
+  },
+
+  deleteAutomation: async (id) => {
+    try {
+      const removed = await api().deleteAutomation(id);
+      // 主进程说没删掉（id 不存在）就不要从本地列表里抹掉：那会让界面显示
+      // "已经没了"而盘上还在。
+      if (!removed) throw new Error(`没有这条自动化：${id}`);
+      set((s) => ({
+        automations: s.automations.filter((a) => a.id !== id),
+        automationsError: undefined,
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 删除自动化失败: ${message}`],
+      }));
+    }
+  },
+
+  runAutomation: async (id) => {
+    try {
+      const outcome = await api().runAutomation(id);
+      const name = get().automations.find((a) => a.id === id)?.name ?? id;
+      const text =
+        outcome === "accepted"
+          ? `[自动化] 「${name}」已触发`
+          : outcome === "busy"
+            ? `[自动化] 「${name}」未触发：有别的项目正在执行（忙时跳过，不积压）`
+            : `[自动化] 「${name}」未触发：这个项目还没有可执行的计划（先规划）`;
+      set((s) => ({ logs: [...s.logs, text], automationsError: undefined }));
+      // 触发成功会刷新 lastFiredMs，历史也多一条 —— 两样都重读，界面当场变。
+      await get().loadAutomations();
+      await get().loadAutomationHistory();
+      return outcome;
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        automationsError: message,
+        logs: [...s.logs, `[错误] 触发自动化失败: ${message}`],
+      }));
+      return undefined;
     }
   },
 

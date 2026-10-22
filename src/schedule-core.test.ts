@@ -10,7 +10,7 @@ import {
   parseEvery,
   parseScheduleArgs,
   type ScheduleState,
-} from "../headless/schedule-core";
+} from "../shared/schedule-core";
 import { scheduleStateIo, startScheduleLoop } from "../headless/serve-main";
 
 describe("parseEvery（--every 的值）", () => {

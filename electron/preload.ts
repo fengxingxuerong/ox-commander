@@ -94,6 +94,19 @@ const api = {
     requestId: string,
     answer: { granted: boolean; scope?: "once" | "session"; reason?: string },
   ) => ipcRenderer.invoke("chat:approval-decide", requestId, answer),
+  // ── 桌面自动化（M5b）：时间触发 ──
+  // 触发走的就是 orchestration:start 那条路（同一道单飞闸），所以"忙"是正常结果
+  // 而不是异常：runAutomation 返回 accepted / busy / failed 三态。
+  listAutomations: () => ipcRenderer.invoke("automations:list"),
+  createAutomation: (input: { name: string; projectId: string; everyMs: number }) =>
+    ipcRenderer.invoke("automations:create", input),
+  updateAutomation: (
+    id: string,
+    patch: { name?: string; projectId?: string; everyMs?: number; enabled?: boolean },
+  ) => ipcRenderer.invoke("automations:update", id, patch),
+  deleteAutomation: (id: string) => ipcRenderer.invoke("automations:delete", id),
+  runAutomation: (id: string) => ipcRenderer.invoke("automations:run", id),
+  automationHistory: (limit?: number) => ipcRenderer.invoke("automations:history", limit),
   onEvent: (handler: (payload: unknown) => void) => {
     const listener = (_e: unknown, payload: unknown) => handler(payload);
     ipcRenderer.on("ox:event", listener);

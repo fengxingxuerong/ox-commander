@@ -214,7 +214,7 @@ const TARGETS = [
   // 2026-10-11：serve 定时运行的纯判定核心（竞品刷新第五轮，Orca scheduled
   // automations 对位）——间隔/参数解析、补跑判定、忙时重试间隔；调度环接线在
   // serve-main（注入式时钟/fetch，测试手动泵驱动）。
-  { file: "headless/schedule-core.ts", test: "src/schedule-core.test.ts", tier: 1 },
+  { file: "shared/schedule-core.ts", test: "src/schedule-core.test.ts", tier: 1 },
   // 2026-10-11：交付后 git 导出（5.7 本地半边）——porcelain -z 解析、zone 过滤、
   // 分块 add、身份兜底重试；真 git 集成用例在 src/git-export.test.ts 尾部。
   { file: "electron/engine/git-export.ts", test: "src/git-export.test.ts", tier: 1 },
@@ -920,7 +920,7 @@ const SITE_BASELINE = {
   "headless/protocol.ts": 120,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 33,
-  "headless/schedule-core.ts": 21,
+  "shared/schedule-core.ts": 21,
   "headless/serve-main.ts": 43,
   "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,

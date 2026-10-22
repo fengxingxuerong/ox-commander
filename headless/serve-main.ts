@@ -25,7 +25,7 @@ import {
   parseScheduleArgs,
   type ScheduleArgs,
   type ScheduleState,
-} from "./schedule-core";
+} from "../shared/schedule-core";
 import { readJsonFile, writeFileAtomic } from "../electron/atomic-file";
 
 /**

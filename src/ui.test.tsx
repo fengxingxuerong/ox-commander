@@ -54,6 +54,17 @@ const VERIFICATION: VerificationReport = {
   ],
 };
 
+/** 自动化夹具（M5b）：一条启用中的定时任务。 */
+const AUTOMATION = {
+  id: "auto-1",
+  name: "每晚回归",
+  projectId: "p-1",
+  everyMs: 3_600_000,
+  enabled: true,
+  createdAt: 1_700_000_000_000,
+  updatedAt: 1_700_000_000_000,
+};
+
 function agentSummary(over: Partial<AgentSummary> = {}): AgentSummary {
   return {
     id: "sensenova-api",
@@ -222,6 +233,14 @@ function makeBridge(): Bridge {
       unrevertable: [],
     })),
     resolveChatApproval: vi.fn(async () => true),
+    // 桌面自动化（M5b）：列表/历史默认空；触发默认 accepted（busy/failed 的
+    // 文案分支由专条用例自己改返回值覆盖）。
+    listAutomations: vi.fn(async () => ({ automations: [] })),
+    createAutomation: vi.fn(async () => AUTOMATION),
+    updateAutomation: vi.fn(async () => AUTOMATION),
+    deleteAutomation: vi.fn(async () => true),
+    runAutomation: vi.fn(async () => "accepted" as const),
+    automationHistory: vi.fn(async () => []),
   };
 }
 
@@ -245,6 +264,9 @@ function resetStore() {
     settings: undefined,
     settingsError: undefined,
     projectsError: undefined,
+    automations: [],
+    automationsError: undefined,
+    automationHistory: [],
     newProjectName: "",
     newRequirement: "",
     usage: undefined,
@@ -339,15 +361,6 @@ describe("IA-2 导航与占位页", () => {
     expect(useApp.getState().stage).toBe("PRD");
   });
 
-  it("自动化占位页说清引擎已有一半、界面在建，并可回到会话", () => {
-    useApp.setState({ page: "automations" });
-    render(<AutomationsPage />);
-    expect(screen.getByText(/引擎就绪，桌面入口在建/)).toBeTruthy();
-    expect(screen.getByText(/schedule-core/)).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
-    expect(useApp.getState().page).toBe("chat");
-  });
-
   it("技能占位页说清本地目录与 MCP client 的区别，并可回到会话", () => {
     useApp.setState({ page: "skills" });
     render(<SkillsPage />);
@@ -356,6 +369,78 @@ describe("IA-2 导航与占位页", () => {
     expect(screen.getAllByText(/MCP client/).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
     expect(useApp.getState().page).toBe("chat");
+  });
+});
+
+/**
+ * 自动化页（M5b）。钉四件事：
+ * 1. 列表把"项目 + 间隔 + 上次触发"拼成一句人话（`describeAutomation` 的接线）；
+ * 2. 立即运行的三态是**页面文案**而不是异常弹窗 —— 忙是单飞语义下的正常结果；
+ * 3. 读不出来（`problem`）必须摆出来，否则空列表看起来就是"全没了"；
+ * 4. 触发历史最新在前，且 outcome 映射成人话。
+ */
+describe("AutomationsPage（M5b）", () => {
+  const project = { id: "p-1", name: "回归项目", stage: "IDLE", requirement: "x" };
+
+  it("列出已配置的任务；停用按钮走 updateAutomation", async () => {
+    useApp.setState({ projects: [project], automations: [AUTOMATION] });
+    render(<AutomationsPage />);
+    expect(screen.getByText("每晚回归")).toBeTruthy();
+    expect(screen.getByText(/回归项目 · 每 1 小时 · 从未触发 · 启用中/)).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "停用" }));
+    await waitFor(() =>
+      expect(window.oxCommander.updateAutomation).toHaveBeenCalledWith("auto-1", { enabled: false }),
+    );
+  });
+
+  it("立即运行：忙时跳过说成人话，不是弹错误", async () => {
+    useApp.setState({ projects: [project], automations: [AUTOMATION] });
+    vi.mocked(window.oxCommander.runAutomation).mockResolvedValueOnce("busy");
+    render(<AutomationsPage />);
+    fireEvent.click(screen.getByRole("button", { name: "立即运行" }));
+    await waitFor(() => expect(screen.getByRole("status").textContent).toMatch(/忙时跳过/));
+    expect(screen.getByRole("status").textContent).toMatch(/不积压/);
+  });
+
+  it("列表读不出来时把原因摆出来（不静默空表）", async () => {
+    vi.mocked(window.oxCommander.listAutomations).mockResolvedValueOnce({
+      automations: [],
+      problem: "Unexpected token } in JSON",
+    });
+    render(<AutomationsPage />);
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toMatch(/Unexpected token/));
+  });
+
+  it("创建：名称 + 默认项目 + 默认间隔走 bridge，成功后清空名称", async () => {
+    useApp.setState({ projects: [project] });
+    render(<AutomationsPage />);
+    fireEvent.change(screen.getByPlaceholderText(/名称/), { target: { value: "每晚回归" } });
+    fireEvent.click(screen.getByRole("button", { name: "创建" }));
+    await waitFor(() =>
+      expect(window.oxCommander.createAutomation).toHaveBeenCalledWith({
+        name: "每晚回归",
+        projectId: "p-1",
+        everyMs: 300_000,
+      }),
+    );
+    await waitFor(() => expect((screen.getByPlaceholderText(/名称/) as HTMLInputElement).value).toBe(""));
+  });
+
+  it("触发历史：最新在前，outcome 映射成人话", async () => {
+    vi.mocked(window.oxCommander.automationHistory).mockResolvedValueOnce([
+      { ts: "2026-10-22T10:00:00.000Z", automationName: "每晚回归", outcome: "accepted" },
+      {
+        ts: "2026-10-22T11:00:00.000Z",
+        automationName: "每晚回归",
+        outcome: "busy",
+        detail: "项目 p-9 正在执行中，无法同时启动",
+      },
+    ]);
+    render(<AutomationsPage />);
+    const rows = await screen.findAllByTestId("automation-history-row");
+    expect(rows[0]!.textContent).toMatch(/忙时跳过/);
+    expect(rows[0]!.textContent).toMatch(/无法同时启动/);
+    expect(rows[1]!.textContent).toMatch(/已派发/);
   });
 });
 

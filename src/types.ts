@@ -5,6 +5,7 @@ import { type DeliveryReceipt } from "../shared/delivery-receipt";
 import type { DeliveryFileRead, DeliveryGuide, PreviewState } from "../shared/delivery-guide";
 import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
+import type { Automation, AutomationHistoryEntry } from "../shared/automation";
 import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 import type {
   ChatApprovalRequest,
@@ -326,6 +327,17 @@ export interface AppState {
    * state to be reachable at all.
    */
   projectsError?: string;
+  /**
+   * 桌面自动化（M5b）：时间触发的任务清单与触发历史。
+   *
+   * `automationsError` 与 `projectsError` 同款 —— 这一页没有日志视图，失败必须
+   * 留在 state 里才看得见（`automations:list` 的 `problem` 也落到这里：文件损坏
+   * 时列表会是空的，不说破就成了"我的自动化凭空消失"）。
+   */
+  automations: Automation[];
+  automationsError?: string;
+  /** 触发历史（最近在前）。来自审计 JSONL，重开窗口后仍在。 */
+  automationHistory: AutomationHistoryEntry[];
   newProjectName: string;
   newRequirement: string;
 
@@ -375,6 +387,23 @@ export interface AppState {
   clearInlineComments(): void;
   setNewProjectName(name: string): void;
   setNewRequirement(text: string): void;
+  /** 自动化页的读：列表 + 触发历史（两个都失败要说破，不能静默空表）。 */
+  loadAutomations(): Promise<void>;
+  loadAutomationHistory(): Promise<void>;
+  /** 创建成功返回 true（页面据此清空表单）；失败已经把原因写进 automationsError。 */
+  createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<boolean>;
+  /** 改名 / 改间隔 / 启停。`id` 不存在时主进程抛错，这里落到 automationsError。 */
+  updateAutomation(
+    id: string,
+    patch: { name?: string; projectId?: string; everyMs?: number; enabled?: boolean },
+  ): Promise<void>;
+  deleteAutomation(id: string): Promise<void>;
+  /**
+   * 立即触发一次（不等间隔）。`busy` = 有别的 run 在跑（单飞闸），`failed` =
+   * 派不出去（多半是项目还没有计划）—— 两种都不是异常，界面要能分别说清楚。
+   * 返回 `undefined` = 调用本身失败（原因在 `automationsError`）。
+   */
+  runAutomation(id: string): Promise<"accepted" | "busy" | "failed" | undefined>;
   refreshProjects(): Promise<void>;
   deleteProject(projectId: string): Promise<void>;
   createAndOpen(): Promise<void>;
@@ -582,6 +611,20 @@ declare global {
         requestId: string,
         answer: { granted: boolean; scope?: "once" | "session"; reason?: string },
       ): Promise<boolean>;
+      /**
+       * 桌面自动化（M5b）。`problem` = automations.json 读不出来：此时列表是空的，
+       * 界面必须把它摆出来，否则"我的自动化没了"没有任何解释。
+       */
+      listAutomations(): Promise<{ automations: Automation[]; problem?: string }>;
+      createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<Automation>;
+      updateAutomation(
+        id: string,
+        patch: { name?: string; projectId?: string; everyMs?: number; enabled?: boolean },
+      ): Promise<Automation>;
+      deleteAutomation(id: string): Promise<boolean>;
+      /** 立即触发一次；三态而不是抛错 —— 忙是正常情况，不是异常。 */
+      runAutomation(id: string): Promise<"accepted" | "busy" | "failed">;
+      automationHistory(limit?: number): Promise<AutomationHistoryEntry[]>;
       onEvent(handler: (payload: unknown) => void): () => void;
     };
   }

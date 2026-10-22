@@ -168,6 +168,53 @@ export function buildEngine(projectId: string): OrchestratorEngine {
   return engine;
 }
 
+/**
+ * 启动一次编排运行的前置判定（**唯一实现**）：单飞闸 + 计划存在性。
+ *
+ * `orchestration:start` 与桌面自动化的调度环（M5b）共用这一道闸 —— 两边各写
+ * 一遍"忙不忙/有没有计划"必然漂，而漂了的后果是自动化触发与手动启动对"能不能
+ * 起一个 run"给出不同答案。判定是同步的，于是调度器能在**不起火**的前提下
+ * 区分 busy 与 no-plan（返回三态之一，不靠错误消息 sniff）。
+ *
+ * 顺手把 batches/smoke 一起带回来：`startProjectRun` 与闸门读同一份记录，
+ * 不会出现"闸门放行后记录又变了"的半空档。
+ */
+export type RunGate =
+  | { kind: "busy"; message: string }
+  | { kind: "no-plan"; message: string }
+  | { kind: "ready"; batchesJson: string; smokeJson?: string };
+
+export function runGate(projectId: string): RunGate {
+  const running = getRunningProjectId();
+  if (running) return { kind: "busy", message: `项目 ${running} 正在执行中，无法同时启动` };
+  const rec = stores().get(projectId);
+  if (!rec?.batchesJson) return { kind: "no-plan", message: `no plan for project ${projectId}` };
+  return {
+    kind: "ready",
+    batchesJson: rec.batchesJson,
+    ...(rec.smokeJson !== undefined ? { smokeJson: rec.smokeJson } : {}),
+  };
+}
+
+/**
+ * 跑一个项目的编排（手动启动与自动化触发共用同一条路）。
+ *
+ * 与 `buildEngine` 的分工：那个造引擎（每次规划/执行都重建，设置改动即时生效），
+ * 这个管"一次运行的完整生命周期"（闸门 → 置运行标志 → execute → 收尾）。
+ */
+export async function startProjectRun(projectId: string): Promise<void> {
+  const gate = runGate(projectId);
+  if (gate.kind !== "ready") throw new Error(gate.message);
+  const engine = buildEngine(projectId);
+  setRunningProjectId(projectId);
+  try {
+    const smoke: SmokeCheck[] = gate.smokeJson ? (JSON.parse(gate.smokeJson) as SmokeCheck[]) : [];
+    await engine.execute(JSON.parse(gate.batchesJson) as Task[][], ensureWorkspace(projectId), { smoke });
+  } finally {
+    setRunningProjectId(null);
+  }
+}
+
 export function registerOrchestrationHandlers(): void {
   ipcMain.handle("orchestration:planning", async (_e, projectId: string) => {
     const rec = stores().get(projectId);
@@ -207,18 +254,7 @@ export function registerOrchestrationHandlers(): void {
   ipcMain.handle("board:recovery", () => deriveBoardView(ensureAudit().read()));
 
   ipcMain.handle("orchestration:start", async (_e, projectId: string) => {
-    const running = getRunningProjectId();
-    if (running) throw new Error(`项目 ${running} 正在执行中，无法同时启动`);
-    const rec = stores().get(projectId);
-    if (!rec?.batchesJson) throw new Error(`no plan for project ${projectId}`);
-    const engine = buildEngine(projectId);
-    setRunningProjectId(projectId);
-    try {
-      const smoke: SmokeCheck[] = rec.smokeJson ? (JSON.parse(rec.smokeJson) as SmokeCheck[]) : [];
-      await engine.execute(JSON.parse(rec.batchesJson) as Task[][], ensureWorkspace(projectId), { smoke });
-    } finally {
-      setRunningProjectId(null);
-    }
+    await startProjectRun(projectId);
   });
 
   ipcMain.handle("orchestration:cancel", () => {

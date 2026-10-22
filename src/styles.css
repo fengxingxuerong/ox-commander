@@ -2634,3 +2634,31 @@ select {
   font-size: 13px;
   color: #ffd0e6;
 }
+
+/* ── 自动化（M5b）───────────────────────────────────────────────── */
+
+.automation-list,
+.automation-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.automation-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.automation-list li:last-child {
+  border-bottom: none;
+}
+
+.automation-history li {
+  padding: 4px 0;
+  font-size: 12px;
+  line-height: 1.7;
+}
