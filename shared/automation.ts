@@ -140,11 +140,19 @@ export function scheduleBaseMs(a: Automation): number {
   return a.lastFiredMs ?? a.updatedAt;
 }
 
-/** 现在该触发的（启用中且已到点）。顺序稳定：按 `id` 字典序，避免同一时刻的触发顺序漂。 */
+/**
+ * 现在该触发的（启用中且已到点）。顺序稳定：按 `id` 字典序，避免同一时刻的触发
+ * 顺序漂。
+ *
+ * 比较器刻意写成**两分支**（与本仓 zone-coverage / batch-guard 的同一写法）：
+ * 三元的第三支（`a.id > b.id ? 1 : 0`）在实际排序里是死分支 —— 插入排序只在
+ * 比较结果为负时交换，"把大于判成相等"与"判成大于"的行为完全一样，于是那一格
+ * 成了等价变异（site 审计实测存活）。id 由 uuid 生成、天然唯一，两分支已是全序。
+ */
 export function dueAutomations(list: readonly Automation[], now: number): Automation[] {
   return list
     .filter((a) => a.enabled && nextDelayMs({ now, lastFiredMs: scheduleBaseMs(a), everyMs: a.everyMs }) === 0)
-    .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+    .sort((a, b) => (a.id < b.id ? -1 : 1));
 }
 
 /**

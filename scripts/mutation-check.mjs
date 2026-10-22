@@ -671,6 +671,26 @@ const TARGETS = [
   // 把本机判成远端 = 每次加载都喊狼来了，真出事那句已经被淹没。
   // tier 1：整份测试 6ms。
   { file: "electron/agents/remote-endpoint.ts", test: "src/remote-endpoint.test.ts", tier: 1 },
+
+  // ---- 2026-10-22（M5b）：桌面定时任务 ----
+  // 三条入表理由都是同一类"错了不报错"：
+  // ① 归一化（`automation.ts`）：写盘尺子与读盘尺子只要分叉一次，合法记录会在
+  //    下次启动被判坏 —— 界面上就是"我的自动化凭空少了几条"，没有任何异常；
+  // ② 到期/唤醒判定：`nextDelayMs === 0` 的判定一旦放宽成 `<=`，调度环会开始
+  //    空转或永远不触发（后者表现为"定时任务从来没跑过"，而进程一切正常）；
+  // ③ 调度环（`automation-scheduler.ts`）：记账与重试的组合判错，会把"忙时跳过
+  //    不积压"变成 tight loop（每轮事件循环真起一个 run），或把"触发过"记成
+  //    "没触发"（下一轮紧接着再跑一遍同一份工作）。
+  // 触发器接线（`ipc/automations.ts`）另有一条：三态映射混成一个 false，界面只能
+  // 说一句含糊的"没成功"，而"忙"与"没计划"对操作者的处置完全相反。
+  { file: "shared/automation.ts", test: "src/automation.test.ts", tier: 1 },
+  { file: "electron/automations/automation-store.ts", test: "src/automation-store.test.ts", tier: 1 },
+  { file: "electron/automations/automation-scheduler.ts", test: "src/automation-scheduler.test.ts", tier: 1 },
+  {
+    file: "electron/ipc/automations.ts",
+    tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
+    tier: 2,
+  },
 ];
 
 /**
