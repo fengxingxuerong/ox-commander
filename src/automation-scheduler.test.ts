@@ -217,7 +217,16 @@ describe("AutomationScheduler", () => {
     const h = harness({ automations: [auto({ id: "auto-a" }), auto({ id: "auto-b" })] });
     h.scheduler.start();
     h.at(T0 + 60_000);
-    await h.pump();
+    // 只烧**这一批**到点的 timer，不 pump 后续：否则"第一个成功就收工"会被下一轮
+    // tick 补上（第二个仍然会触发，只是晚一轮），两种实现的最终状态一样 —— 等价假象。
+    const batch = h.timers.filter((t) => !t.cleared && t.at <= T0 + 60_000);
+    expect(batch).toHaveLength(1);
+    for (const t of batch) {
+      t.cleared = true;
+      t.fn();
+      await new Promise<void>((r) => setImmediate(r));
+      await new Promise<void>((r) => setImmediate(r));
+    }
     expect(h.triggered).toEqual(["auto-a", "auto-b"]);
     expect(h.fired).toEqual([
       { id: "auto-a", at: T0 + 60_000 },

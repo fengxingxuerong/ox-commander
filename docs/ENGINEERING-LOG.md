@@ -19,6 +19,79 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（桌面自动化 M5b · 2026-10-22）
+
+**动机**：Codex 桌面把 Automations 做成一级公民。我们这一侧引擎其实早有定时能力 ——
+`headless/schedule-core.ts` 的 `--every` 自投递 `POST /run`（2026-10-11 竞品刷新
+第五轮，Orca scheduled automations 对位），但桌面端**零入口**，导航格 `automations`
+从 IA-2 起就是诚实占位页。这一轮补的是"引擎有、界面没有"。
+
+**形态（为什么不复用 serve 的调度环）**：serve 的环绑在 HTTP 自调用上（`POST /run`
++ 409 = 忙），桌面既没有 HTTP 服务，也不该为了定时起一个。所以拆成三层：
+
+- `shared/schedule-core.ts`（`git mv` 自 `headless/`，内容零改动）：间隔解析 /
+  补跑判定 / 忙时重试间隔 —— 两边共用一份算术，headless 行为零变化；
+- `shared/automation.ts`：记录归一化、到期判定、唤醒延迟（纯逻辑，可逐位点审）；
+- `electron/automations/`：记录仓（原子落盘）+ 调度环（定时器与 IO 在宿主层，
+  时钟/定时器可注入，测试手动泵驱动）。
+
+**两个硬点**：
+
+1. **写盘尺子 = 读盘尺子**。`normalizeAutomationInput` 同时服务"创建/更新入参"和
+   "读盘记录"（`normalizeAutomation` 只补 id / 时间戳 / 启停）。若两套尺子分叉，
+   合法记录会在下次启动被判坏 —— 界面上"凭空少几条"，没有任何异常可查。
+
+2. **`nextDelayMs` 对"从未触发"返回一个整间隔**（`lastFiredMs === undefined →
+   everyMs`），直接拿它做到期判定**永远不得到点**：每轮醒来都发现"没到"，任务永不
+   触发。首版就是这样（调度环能启动、日志正常、任务一次都没跑）。修法不是再造一套
+   算术，而是引入 `scheduleBaseMs`：触发过的看 `lastFiredMs`，从未触发的看
+   `updatedAt`（创建/启用/改间隔都会刷新它）。于是"首次触发在一个间隔之后"与 serve
+   的 fresh 分支同义，到期判定与剩余时间回到同一个表达式。
+
+**触发的复用（不做第二条执行路径）**：`orchestration:start` 的主体抽成
+`runGate(projectId)` + `startProjectRun(projectId)`。前者是**同步**三态判定
+（busy / no-plan / ready，顺带把 batches/smoke 带回来，避免闸门与启动读两份记录），
+后者跑一次完整生命周期。调度器与「立即运行」都走它 —— 手动启动与自动触发对"能不能
+起一个 run"永远给同一个答案。**同步**的理由是可判定性：`async function` 只能以
+rejected promise 表达"忙"，调度器无法在不起火的前提下区分 busy 与 no-plan（嗅错误
+消息是最脆的判据）。
+
+**调度语义与 serve 逐条对齐**：首次在一个间隔之后 / 停机补跑至多一次 / 忙跳过不积压
+（单飞闸是全局的，一个撞闸即不再逐个撞）/ 触发点按"上次触发 + 间隔"自校正。
+**短重试独占**：失败或跳过后，下一次尝试就是 `busyRetryMs` 之后，不与常规排程取 min
+—— 失败的任务 `nextDelayMs` 仍是 0，取 min 会立刻重试，把"稍后重试"变成 tight loop
+（每轮事件循环真起一个 run）。记账失败也归这条：`lastFiredMs` 写不下去又不欠短重试时，
+plan 会算出 0 延迟，同样自旋。
+
+**持久事实**：每次触发尝试落审计 `automation` phase（三态都记，含名字与项目）。
+名字单独落是因为它可改可删 —— 只留 id 的话删掉之后历史里全是看不懂的 `auto-<uuid>`。
+
+**门禁与负结果**：
+
+- 定向 site 审计：`shared/automation.ts` 47/47、`automation-store.ts` 18/18、
+  `automation-scheduler.ts` 6/6、`ipc/automations.ts` 14/14、`ipc/orchestration.ts`
+  14/14、`src/store.ts` 98/98。
+- 首轮存活 5 处，全部是**断言缺口**而不是等价变异（除第 1 条）：
+  1. `dueAutomations` 的比较器三分支（`? -1 : a.id > b.id ? 1 : 0`）判等价 —— 插入
+     排序只在比较结果为负时交换，"把大于判成相等"与"判成大于"行为相同。按本仓
+     `zone-coverage` / `batch-guard` 的两分支写法消除（id 由 uuid 生成、天然唯一）。
+  2. `nextWakeDelayMs` 的 `if (!a.enabled) continue;` → `break` 存活：夹具把停用项
+     排在**最后**，break 与 continue 无差别。改成停用项在最前。
+  3. `automation-store` 的 `patch.enabled !== undefined` → `===` 存活：改名用例没有
+     断言 `enabled`；夹具又默认停用，"false 还是原值"分不出来。改成启用态起手 + 逐条
+     断言"改名不顺手启停"。
+  4. `automation-scheduler` 的 accepted 分支 `continue` → `break` 存活：`pump()`
+     会把 break 之后立即排上的下一轮 tick 也烧掉，最终状态一致。改成**只烧这一批**
+     timer，断言同一 tick 内两个都触发。这条最值得记：它说明"最终状态一致"的断言
+     会系统性放过时序/轮次类的判据。
+- 全量测试 **XXXX 通过 + 8 跳过**（XX 个有可执行用例的文件）；基线
+  **106 个目标 / 2811 处位点**，`check:doc-claims` PASS。
+
+**边界**：只做时间触发。事件触发（issue / 告警 / CI / PR 的 webhook）不做承诺 ——
+需要常驻可达性，价值还没验证（蓝图 §五 可做档）。间隔下限 1 秒、上限 2147000000ms
+（Node `setTimeout` 的极限）；界面只给预设档（1 分钟 ~ 24 小时）。页面上的"上次
+N 秒前"由 15s tick 刷新，不是实时倒计时（定时任务的时间尺度不需要秒级刷新）。
+
 ### 新增（线程侧 commit/push M5a · 2026-10-21）
 
 **动机**：Codex App 的右栏能直接 commit/push 线程改动；我们此前只有编排侧

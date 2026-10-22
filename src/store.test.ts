@@ -30,6 +30,9 @@ function reset(): void {
     lineHealth: undefined,
     planning: false,
     planningError: undefined,
+    automations: [],
+    automationsError: undefined,
+    automationHistory: [],
     settings: undefined,
     settingsError: undefined,
   });
@@ -1127,5 +1130,125 @@ describe("线程状态位（M4b）", () => {
     expect(useApp.getState().chat.threads["chat-b"]?.unread).toBe(0);
     // 状态本身保留：那条线程可能还在跑。
     expect(useApp.getState().chat.threads["chat-b"]?.status).toBe("running");
+  });
+});
+
+/**
+ * 自动化动作（M5b）：这一层是"主进程说出三态 / 真列表"与"界面看到什么"之间的
+ * 唯一映射。判错的形态全是静默的 —— 成功的行没换、失败的行被当成功、忙被说成
+ * 已触发 —— 所以逐条钉住，并且钉**只动该动的那一行**。
+ */
+describe("automation actions", () => {
+  const row = (over: Record<string, unknown> = {}) => ({
+    id: "auto-1",
+    name: "每晚回归",
+    projectId: "p-1",
+    everyMs: 3_600_000,
+    enabled: true,
+    createdAt: 1,
+    updatedAt: 1,
+    ...over,
+  });
+
+  function bridge(over: Record<string, unknown>) {
+    const g = globalThis as { oxCommander?: Record<string, unknown> };
+    g.oxCommander = { ...g.oxCommander, ...over };
+  }
+
+  it("loadAutomations：problem 落到 automationsError 并记一行日志（不静默空表）", async () => {
+    bridge({ listAutomations: async () => ({ automations: [], problem: "Unexpected token" }) });
+    await useApp.getState().loadAutomations();
+    expect(useApp.getState().automations).toEqual([]);
+    expect(useApp.getState().automationsError).toBe("Unexpected token");
+    expect(useApp.getState().logs.at(-1)).toMatch(/读取自动化失败: Unexpected token/);
+
+    // 下一次读成功要把错误清掉（否则修好之后界面上那行红永远留着）
+    bridge({ listAutomations: async () => ({ automations: [row()] }) });
+    await useApp.getState().loadAutomations();
+    expect(useApp.getState().automationsError).toBeUndefined();
+    expect(useApp.getState().automations).toHaveLength(1);
+  });
+
+  it("createAutomation：成功追加并返回 true；失败返回 false 且原因留在 state", async () => {
+    bridge({
+      createAutomation: async () => row({ id: "auto-new", name: "新建的" }),
+      listAutomations: async () => ({ automations: [] }),
+    });
+    expect(await useApp.getState().createAutomation({ name: "新建的", projectId: "p-1", everyMs: 60_000 })).toBe(true);
+    expect(useApp.getState().automations.map((a) => a.id)).toEqual(["auto-new"]);
+
+    bridge({
+      createAutomation: async () => {
+        throw new Error("间隔不能小于 1000ms（1 秒）");
+      },
+    });
+    expect(await useApp.getState().createAutomation({ name: "x", projectId: "p-1", everyMs: 1 })).toBe(false);
+    expect(useApp.getState().automationsError).toMatch(/间隔不能小于/);
+  });
+
+  it("updateAutomation：只替换命中的那一行（另一行原样）", async () => {
+    useApp.setState({ automations: [row(), row({ id: "auto-2", name: "另一条" })], automationsError: "旧错误" });
+    bridge({
+      updateAutomation: async (id: string, patch: Record<string, unknown>) => ({ ...row({ id }), ...patch }),
+    });
+    await useApp.getState().updateAutomation("auto-1", { enabled: false });
+    const list = useApp.getState().automations;
+    expect(list[0]?.enabled).toBe(false);
+    // 另一条不许被顺手改掉（按 id 匹配写成"不等于"会把改错行这件事藏起来）
+    expect(list[1]).toEqual(row({ id: "auto-2", name: "另一条" }));
+    expect(useApp.getState().automationsError).toBeUndefined();
+  });
+
+  it("deleteAutomation：只删命中的那一行；主进程说没删掉时行要留住", async () => {
+    useApp.setState({ automations: [row(), row({ id: "auto-2", name: "另一条" })] });
+    bridge({ deleteAutomation: async () => true });
+    await useApp.getState().deleteAutomation("auto-1");
+    expect(useApp.getState().automations.map((a) => a.id)).toEqual(["auto-2"]);
+
+    // false = 盘上没有这条：不能从本地列表里抹掉（那会让界面显示"已删除"而盘上还在）
+    bridge({ deleteAutomation: async () => false });
+    await useApp.getState().deleteAutomation("auto-2");
+    expect(useApp.getState().automations.map((a) => a.id)).toEqual(["auto-2"]);
+    expect(useApp.getState().automationsError).toMatch(/没有这条自动化/);
+  });
+
+  it("runAutomation：三态各说各的话（忙不是错误，没计划要指路）", async () => {
+    useApp.setState({ automations: [row()] });
+    bridge({
+      runAutomation: async () => "accepted",
+      listAutomations: async () => ({ automations: [row()] }),
+      automationHistory: async () => [],
+    });
+    expect(await useApp.getState().runAutomation("auto-1")).toBe("accepted");
+    expect(useApp.getState().logs.at(-1)).toMatch(/「每晚回归」已触发/);
+    expect(useApp.getState().automationsError).toBeUndefined();
+
+    bridge({ runAutomation: async () => "busy" });
+    expect(await useApp.getState().runAutomation("auto-1")).toBe("busy");
+    expect(useApp.getState().logs.at(-1)).toMatch(/忙时跳过/);
+
+    bridge({ runAutomation: async () => "failed" });
+    expect(await useApp.getState().runAutomation("auto-1")).toBe("failed");
+    expect(useApp.getState().logs.at(-1)).toMatch(/先规划/);
+
+    // 调用本身失败（IPC 抛错）→ undefined，原因落 automationsError
+    bridge({
+      runAutomation: async () => {
+        throw new Error("没有这条自动化：auto-9");
+      },
+    });
+    expect(await useApp.getState().runAutomation("auto-9")).toBeUndefined();
+    expect(useApp.getState().automationsError).toMatch(/没有这条自动化/);
+  });
+
+  it("loadAutomationHistory：审计是正序读出的，界面要最新在前", async () => {
+    bridge({
+      automationHistory: async () => [
+        { ts: "t1", automationName: "一", outcome: "accepted" },
+        { ts: "t2", automationName: "二", outcome: "busy" },
+      ],
+    });
+    await useApp.getState().loadAutomationHistory();
+    expect(useApp.getState().automationHistory.map((h) => h.ts)).toEqual(["t2", "t1"]);
   });
 });
