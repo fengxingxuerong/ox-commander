@@ -1,36 +1,90 @@
+import { useEffect } from "react";
 import { useApp } from "../store";
 
 /**
- * 「技能」页（IA-2 导航格 · 诚实占位）。
+ * 「技能」页（M6a）。
  *
- * 与 Skill 真正的差别写在页面上，而不是藏起来：我们的会话工具目录是**硬编码
- * 六件套**（read/grep/apply_patch/run_command/…），没有任何注入第三方能力的通道；
- * 我们是 MCP **server**（`headless/mcp.ts`）—— 能被集成，不能去集成。M6 做的是
- * 本地 Skills 目录 + 注入通道，M7 才是 MCP client。
+ * 这一页只回答三件事：**有哪些技能**、**它们是项目级的还是全局的**、**哪些扫到了
+ * 但用不了**。它刻意不做"新建/编辑技能" —— 技能的内容是"教模型怎么做一件事"，
+ * 两行表单能生出来的只有空壳；Codex 自己最有效的获取方式也是"演示一遍生成
+ * SKILL.md"（蓝图里列为「可做」档）。
  *
- * 占位页的价值：导航格先到位，产品形状先对；内容没就绪就明说，不摆假按钮。
+ * 三条诚实边界（都写在界面上，不摆假按钮）：
+ * 1. **技能全文要靠 `read_skill` 现取**，而工具目录目前还是六件套 —— 目录块里
+ *    点名了 read_skill，但真正能取全文要等 M6b；
+ * 2. 技能是背景不是合同：与平台契约冲突时以契约为准（与项目约定同一条）；
+ * 3. 停用（同目录放 `.disabled`）不等于删除：它仍在列表里，只是不进目录。
  */
 export function SkillsPage() {
-  const setPage = useApp((s) => s.setPage);
+  const skills = useApp((s) => s.skills);
+  const issues = useApp((s) => s.skillIssues);
+  const error = useApp((s) => s.skillsError);
+  const loadSkills = useApp((s) => s.loadSkills);
+  const activeProjectId = useApp((s) => s.activeProjectId);
+
+  useEffect(() => {
+    void loadSkills();
+  }, [loadSkills, activeProjectId]);
 
   return (
     <section className="card">
       <h2>技能</h2>
-      <p className="card-sub">本地技能包 + MCP client · 界面在建（M6 / M7）</p>
-      <p className="muted">
-        当前会话可用的工具是固定的六个，没有注入第三方能力的通道。这一格要落的是两件事：
-        本地技能目录（<code>.ox/skills</code>）与 MCP client —— 前者是能力扩展面的地基，
-        后者是第三方工具的唯一标准通道。
+      <p className="card-sub">
+        项目 <code>.ox/skills</code> 与全局 <code>~/.ox/skills</code> · 同名时项目级优先
       </p>
-      <ul className="muted">
-        <li>插件市场不做（那是生态规模游戏；承接形态是本地目录 + agents.d manifest）。</li>
-        <li>我们已是 MCP server，缺的是 client 那一半。</li>
-      </ul>
-      <div className="btn-row">
-        <button type="button" onClick={() => setPage("chat")}>
-          回到会话
-        </button>
-      </div>
+
+      {error ? <p className="notice error">读取技能目录失败：{error}</p> : null}
+
+      {skills.length === 0 && issues.length === 0 ? (
+        <p className="muted" data-testid="skill-empty">
+          还没有技能。放一个目录进去就有了：在项目根的 <code>.ox/skills/&lt;名字&gt;/SKILL.md</code>
+          （或全局 <code>~/.ox/skills/</code>）写一个 front matter，里面给 <code>name</code> 与
+          <code> description</code>，正文写"该怎么做"。目录名起对了，front matter 里就可以不写 name。
+        </p>
+      ) : null}
+
+      {skills.length > 0 ? (
+        <div className="thread-rail-block">
+          <span className="hud-stat-label">可用技能（{skills.length}）</span>
+          <ul className="skill-list">
+            {skills.map((skill) => (
+              <li key={`${skill.origin}:${skill.name}`} className="skill-row" data-testid="skill-row">
+                <span className="skill-row-head">
+                  <b>{skill.name}</b>
+                  <span className={`skill-badge ${skill.origin}`} title={skill.path}>
+                    {skill.origin === "project" ? "项目" : "全局"}
+                  </span>
+                  {skill.enabled ? null : (
+                    <span className="skill-badge off" title="同目录里有 .disabled">
+                      已停用
+                    </span>
+                  )}
+                  <span className="muted skill-path">{skill.path}</span>
+                </span>
+                <span className="muted">
+                  {skill.description}
+                  {skill.descriptionTruncated ? "（描述超长已截断）" : ""}
+                </span>
+                <span className="muted skill-path">正文 {skill.bodyChars} 字符 · 全文由 read_skill 按需取</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+
+      {issues.length > 0 ? (
+        <div className="thread-rail-block">
+          <span className="hud-stat-label">扫到了但不可用（{issues.length}）</span>
+          <ul className="skill-list">
+            {issues.map((issue) => (
+              <li key={issue.path} className="skill-row" data-testid="skill-issue">
+                <span className="muted skill-path">{issue.path}</span>
+                <span className="muted">{issue.reason}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
     </section>
   );
 }

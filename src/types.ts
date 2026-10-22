@@ -6,6 +6,7 @@ import type { DeliveryFileRead, DeliveryGuide, PreviewState } from "../shared/de
 import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
 import type { Automation, AutomationHistoryEntry } from "../shared/automation";
+import type { Skill } from "../shared/skills";
 import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 import type {
   ChatApprovalRequest,
@@ -336,6 +337,11 @@ export interface AppState {
    */
   automations: Automation[];
   automationsError?: string;
+  /** 技能目录（M6a）：只含元数据，全文按名字现读。 */
+  skills: Skill[];
+  /** 扫到但不可用的技能（路径 + 原因）—— 列出来，不假装不存在。 */
+  skillIssues: Array<{ path: string; reason: string }>;
+  skillsError?: string;
   /** 触发历史（最近在前）。来自审计 JSONL，重开窗口后仍在。 */
   automationHistory: AutomationHistoryEntry[];
   newProjectName: string;
@@ -389,6 +395,7 @@ export interface AppState {
   setNewRequirement(text: string): void;
   /** 自动化页的读：列表 + 触发历史（两个都失败要说破，不能静默空表）。 */
   loadAutomations(): Promise<void>;
+  loadSkills(): Promise<void>;
   loadAutomationHistory(): Promise<void>;
   /** 创建成功返回 true（页面据此清空表单）；失败已经把原因写进 automationsError。 */
   createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<boolean>;
@@ -616,6 +623,15 @@ declare global {
        * 界面必须把它摆出来，否则"我的自动化没了"没有任何解释。
        */
       listAutomations(): Promise<{ automations: Automation[]; problem?: string }>;
+      /**
+       * 技能目录（M6a）：`projectId` 可选 —— 没选项目时只列全局技能，
+       * 而不是报错（技能页在没打开项目时也要能看一眼）。
+       */
+      listSkills(input?: { projectId?: string }): Promise<{
+        skills: Skill[];
+        issues: Array<{ path: string; reason: string }>;
+        problem?: string;
+      }>;
       createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<Automation>;
       updateAutomation(
         id: string,

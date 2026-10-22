@@ -195,6 +195,7 @@ describe("registerIpc · channel contract", () => {
       "receipt:verify",
       "settings:get",
       "settings:save",
+      "skills:list",
     ]);
   });
 

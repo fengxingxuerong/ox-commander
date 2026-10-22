@@ -203,3 +203,43 @@ describe("resolveChatRuntime（项目指令 + 配置 + 策略）", () => {
     expect(runtime.issues.some((i) => i.includes("maxTurns 无效"))).toBe(true);
   });
 });
+
+/**
+ * 技能目录进 system prompt（M6a）。
+ *
+ * 两条容易静默退化的契约：
+ *   ① 目录块真的拼进去了（模型不会自己发明技能，技能得在提示里被点名）；
+ *   ② 坏技能**说破**：它有路径与原因，而不是"看起来一个技能都没有"。
+ * 第二条尤其重要 —— 用户改的是那份文件，看不见原因就改不对。
+ */
+describe("resolveChatRuntime · 技能目录（M6a）", () => {
+  const skillDoc = (name: string, description: string): string =>
+    ["---", `name: ${name}`, `description: ${description}`, "---", "", "一、二、三"].join("\n");
+
+  it("技能目录拼进 system prompt，并点名 read_skill", () => {
+    const proj = project("skills-ok");
+    const home = project("skills-home");
+    write("skills-ok/.ox/skills/ship-it/SKILL.md", skillDoc("ship-it", "上线前该做什么"));
+
+    const withSkills = resolveChatRuntime({ rootAbs: proj, homeDir: home, settings: DEFAULT_SETTINGS });
+    expect(withSkills.systemPrompt).toContain("ship-it");
+    expect(withSkills.systemPrompt).toContain("上线前该做什么");
+    // 模型不会自己发明工具名：目录块必须把 read_skill 点出来，否则技能永远取不到全文。
+    expect(withSkills.systemPrompt).toContain("read_skill");
+    expect(withSkills.issues).toEqual([]);
+
+    const bare = resolveChatRuntime({ rootAbs: project("skills-none"), homeDir: home, settings: DEFAULT_SETTINGS });
+    // 没有技能时不该留一个空块（空块是纯噪声，还会让模型以为"技能"这个词有意义）。
+    expect(bare.systemPrompt).not.toContain("【可用技能");
+  });
+
+  it("坏技能进 issues（路径 + 原因），不是「看起来没有技能」", () => {
+    const proj = project("skills-bad");
+    const home = project("skills-bad-home");
+    write("skills-bad/.ox/skills/broken/SKILL.md", "没有 front matter 的正文");
+    const runtime = resolveChatRuntime({ rootAbs: proj, homeDir: home, settings: DEFAULT_SETTINGS });
+    expect(runtime.issues.some((i) => i.includes(".ox/skills/broken/SKILL.md"))).toBe(true);
+    expect(runtime.issues.some((i) => i.includes("front matter"))).toBe(true);
+    expect(runtime.systemPrompt).not.toContain("broken");
+  });
+});

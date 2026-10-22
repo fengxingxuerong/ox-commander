@@ -3978,3 +3978,56 @@ describe("automation handlers（M5b 定时任务）", () => {
     expect(audit.read).toHaveBeenCalledWith({ limit: 10, phase: "automation" });
   });
 });
+
+/**
+ * 技能（M6a）的桌面通道。
+ *
+ * 钉三条：项目内与全局**都**要列（漏一边等于"我明明加了技能却看不见"）、
+ * 不传 projectId 时只列全局（还没打开项目时不能报错）、坏技能以 issues 返回
+ * （而不是让 `skills` 少一个、看起来像"没扫到"）。
+ */
+describe("skill handlers（M6a 技能目录）", () => {
+  const doc = (name: string, description: string): string =>
+    ["---", `name: ${name}`, `description: ${description}`, "---", "", "正文"].join("\n");
+
+  const put = (rel: string, text: string): void => {
+    const abs = path.join(tmp, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, text, "utf8");
+  };
+
+  it("list：项目内 + 全局都列；同名时项目级优先", () => {
+    put("workspaces/p-skills/.ox/skills/ship-it/SKILL.md", doc("ship-it", "项目里的上线流程"));
+    put(".ox/skills/ship-it/SKILL.md", doc("ship-it", "全局默认的上线流程"));
+    put(".ox/skills/global-only/SKILL.md", doc("global-only", "只在全局有"));
+
+    const res = (h.ipcMain as FakeIpcMain).invoke("skills:list", { projectId: "p-skills" }) as {
+      skills: Array<{ name: string; origin: string; description: string }>;
+      issues: unknown[];
+    };
+    expect(res.skills.map((s) => s.name)).toEqual(["global-only", "ship-it"]);
+    expect(res.skills.find((s) => s.name === "ship-it")?.origin).toBe("project");
+    expect(res.issues).toEqual([]);
+  });
+
+  it("不传 projectId 时只列全局（还没打开项目不该报错）", () => {
+    // tmp 在每个用例里重建，所以全局目录要这条用例自己建。
+    put(".ox/skills/only-global/SKILL.md", doc("only-global", "只在全局有"));
+    const res = (h.ipcMain as FakeIpcMain).invoke("skills:list", {}) as {
+      skills: Array<{ name: string; origin: string }>;
+    };
+    expect(res.skills.map((s) => s.name)).toEqual(["only-global"]);
+    expect(res.skills[0]?.origin).toBe("global");
+  });
+
+  it("坏技能进 issues：路径 + 能照做的原因", () => {
+    put("workspaces/p-skills-bad/.ox/skills/broken/SKILL.md", "没有 front matter");
+    const res = (h.ipcMain as FakeIpcMain).invoke("skills:list", { projectId: "p-skills-bad" }) as {
+      skills: unknown[];
+      issues: Array<{ path: string; reason: string }>;
+    };
+    expect(res.skills).toEqual([]);
+    expect(res.issues.some((i) => i.path === ".ox/skills/broken/SKILL.md")).toBe(true);
+    expect(res.issues.some((i) => /front matter/.test(i.reason))).toBe(true);
+  });
+});

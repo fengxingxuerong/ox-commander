@@ -6,6 +6,8 @@ import { loadPolicyDirs } from "../sandbox/policy-dir";
 import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-policy";
 import { DEFAULT_FORBIDDEN_READ, DEFAULT_FORBIDDEN_WRITE, PathPolicy } from "../sandbox/path-policy";
 import { readProjectConventions } from "../engine/conventions";
+import { readSkills } from "../engine/skills";
+import { formatSkillCatalog } from "../../shared/skills";
 import { formatConventionsBlock } from "../../shared/project-conventions";
 import {
   commandPolicyOverrides,
@@ -149,13 +151,25 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
     opts.homeDir ? [{ name: "~/.ox/AGENTS.md", abs: path.join(opts.homeDir, ".ox", "AGENTS.md") }] : [],
   );
   const conventionsBlock = formatConventionsBlock(conventions.files);
-  const systemPrompt = conventionsBlock === "" ? BASE_PROMPT : `${BASE_PROMPT}\n\n${conventionsBlock}`;
+  // 技能目录（M6a）：只给"名字 + 用途"，全文要靠 read_skill 现取 —— 技能全文
+  // 动辄几千字，十几个全塞进提示就把上下文吃光了。
+  // 顺序：约定 → 技能 →（无）。技能与约定都是背景，但技能是**可按需取用**的，
+  // 所以放在能被重新读取的位置后面更好读。
+  const skillSources = [
+    ...(opts.homeDir ? [{ origin: "global" as const, rootAbs: path.join(opts.homeDir, ".ox", "skills") }] : []),
+    { origin: "project" as const, rootAbs: path.join(rootAbs, ".ox", "skills") },
+  ];
+  const skills = readSkills(skillSources);
+  const catalog = formatSkillCatalog(skills.skills);
+  const background = [conventionsBlock, catalog.text].filter((b) => b !== "").join("\n\n");
+  const systemPrompt = background === "" ? BASE_PROMPT : `${BASE_PROMPT}\n\n${background}`;
 
   const issues = [
     ...project.issues,
     ...loaded.errors.map((e) => `${e.file}：${e.issues.join("；")}`),
     ...conventions.unreadable.map((u) => `${u.name} 读取失败：${u.reason}`),
     ...conventions.skipped.map((s) => `${s.name} 超过单文件上限（${s.bytes} 字节），已跳过`),
+    ...skills.issues.map((i) => `技能 ${i.path} 不可用：${i.reason}`),
   ];
 
   const signature = createHash("sha256")

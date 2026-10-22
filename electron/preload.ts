@@ -98,6 +98,7 @@ const api = {
   // 触发走的就是 orchestration:start 那条路（同一道单飞闸），所以"忙"是正常结果
   // 而不是异常：runAutomation 返回 accepted / busy / failed 三态。
   listAutomations: () => ipcRenderer.invoke("automations:list"),
+  listSkills: (input?: { projectId?: string }) => ipcRenderer.invoke("skills:list", input),
   createAutomation: (input: { name: string; projectId: string; everyMs: number }) =>
     ipcRenderer.invoke("automations:create", input),
   updateAutomation: (

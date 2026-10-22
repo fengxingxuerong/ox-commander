@@ -7,7 +7,7 @@
  * These are render-level tests (not pixel tests): they pin the event→state→UI
  * mapping that store.test.ts covers only up to the store boundary.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
@@ -241,6 +241,7 @@ function makeBridge(): Bridge {
     deleteAutomation: vi.fn(async () => true),
     runAutomation: vi.fn(async () => "accepted" as const),
     automationHistory: vi.fn(async () => []),
+    listSkills: vi.fn(async () => ({ skills: [], issues: [] })),
   };
 }
 
@@ -361,14 +362,28 @@ describe("IA-2 导航与占位页", () => {
     expect(useApp.getState().stage).toBe("PRD");
   });
 
-  it("技能占位页说清本地目录与 MCP client 的区别，并可回到会话", () => {
-    useApp.setState({ page: "skills" });
+  /**
+   * M6a 之后这一格从**占位页**升级成真实列表：契约变了，用例跟着改 ——
+   * 原来断言的是"明说在建"，现在要断言"真的列出了技能与来源"。
+   * 保留的那一条不变：页面必须说清技能目录在哪（否则用户不知道往哪儿放）。
+   */
+  it("技能页（已升级为真实列表）说清技能目录在哪，并能列出技能", () => {
+    useApp.setState({
+      page: "skills",
+      skills: [
+        {
+          name: "ship-it",
+          description: "上线流程",
+          origin: "project",
+          path: ".ox/skills/ship-it/SKILL.md",
+          bodyChars: 12,
+          enabled: true,
+        },
+      ],
+    });
     render(<SkillsPage />);
-    expect(screen.getByText(/界面在建/)).toBeTruthy();
-    // 标题与正文都提到 MCP client；这里要的是"页面说到了它"，不是唯一性。
-    expect(screen.getAllByText(/MCP client/).length).toBeGreaterThan(0);
-    fireEvent.click(screen.getByRole("button", { name: "回到会话" }));
-    expect(useApp.getState().page).toBe("chat");
+    expect(screen.getByText("ship-it")).toBeTruthy();
+    expect(screen.getAllByText(/\.ox\/skills/).length).toBeGreaterThan(0);
   });
 });
 
@@ -1988,5 +2003,41 @@ describe("AuditPanel", () => {
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("导出失败");
     expect(alert.textContent).toContain("EACCES: 写不了");
+  });
+});
+
+/**
+ * 技能页（M6a）。
+ *
+ * 钉三条：技能与它的**来源**都显示（项目还是全局，决定"改哪份才生效"）、
+ * 坏技能**照样列出来**（列的是路径与原因 —— 改那份文件的人需要它）、
+ * 一个技能都没有时给的是"怎么加一个"的说明，而不是一块空白。
+ */
+describe("SkillsPage（M6a）", () => {
+  beforeEach(() => {
+    window.oxCommander.listSkills = vi.fn(async () => ({ skills: [], issues: [] }));
+  });
+
+  it("列出技能与来源；坏技能照样列（路径 + 原因）", async () => {
+    (window.oxCommander.listSkills as unknown as Mock).mockResolvedValueOnce({
+      skills: [
+        { name: "ship-it", description: "上线流程", origin: "project", path: ".ox/skills/ship-it/SKILL.md", bodyChars: 12, enabled: true },
+        { name: "global-one", description: "全局技能", origin: "global", path: "/home/.ox/skills/global-one/SKILL.md", bodyChars: 5, enabled: false },
+      ],
+      issues: [{ path: ".ox/skills/broken/SKILL.md", reason: "缺少 front matter" }],
+    });
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getAllByTestId("skill-row").length).toBe(2));
+    expect(screen.getByText("ship-it")).toBeTruthy();
+    expect(screen.getAllByText("项目").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("已停用").length).toBe(1);
+    const issue = screen.getByTestId("skill-issue");
+    expect(issue.textContent).toContain("缺少 front matter");
+  });
+
+  it("没有技能时给出「怎么加一个」，不是一块空白", async () => {
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getByTestId("skill-empty")).toBeTruthy());
+    expect(screen.getByTestId("skill-empty").textContent).toContain(".ox/skills");
   });
 });

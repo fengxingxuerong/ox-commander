@@ -541,6 +541,55 @@ body {
   padding-top: 8px;
 }
 
+/** 技能列表（M6a）。 */
+.skill-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.skill-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--panel-2);
+}
+
+.skill-row-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.skill-badge {
+  padding: 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--muted);
+}
+
+.skill-badge.project {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.skill-badge.off {
+  border-color: color-mix(in srgb, #e05252 50%, var(--border));
+}
+
+.skill-path {
+  font-size: 11px;
+  word-break: break-all;
+}
+
 .thread-rail .chat-sessions {
   border: none;
   padding: 0;

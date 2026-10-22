@@ -586,6 +586,22 @@ const TARGETS = [
     tests: ["src/llm-pool.test.ts", "src/http-clients.test.ts"],
     tier: 2,
   },
+  // skills.ts（M6a）：SKILL.md 的解析 / 归一化 / 同名去重 / 目录块。判错方向全是
+  // 静默的 —— 坏技能被当成不存在、截断不说破（模型以为看全了）、覆盖方向反了
+  // 就是"改了没用"。tier 1：纯函数。
+  {
+    file: "shared/skills.ts",
+    tests: ["src/skills.test.ts"],
+    tier: 1,
+  },
+  // engine/skills.ts（M6a）：技能目录扫描。错法同样静默：漏扫一边等于"我明明
+  // 加了技能却看不见"、坏技能消失、项目级被全局级顶掉。tier 1：读盘薄壳，
+  // 一个测试文件就能逐点杀。
+  {
+    file: "electron/engine/skills.ts",
+    tests: ["src/skills-scan.test.ts"],
+    tier: 1,
+  },
   // chat-conflict.ts（M4c）：并行写冲突判据。它决定"要不要拦一下人"，判错方向
   // 全是静默的：只认别人的写（自己接着打补丁不能被自己拦）、窗外的不算并发、
   // 同一路径只报最近那一条、时钟倒挂按"刚刚"处理（宁可多问一次）。tier 1。

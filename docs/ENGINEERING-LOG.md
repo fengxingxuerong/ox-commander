@@ -243,6 +243,31 @@ chat **105/105**、store **68/68** 全杀；基线 2554 → **2591 / 98 目标**
 一处等价白名单：`buildSession` 的 `pinned && profile?.reasoningEffort` —— 下游
 `ChatSession` 构造函数对同一条件做了二次守卫，`undefined` 不会进 meta。
 
+### 新增（技能目录 M6a · 2026-10-22）
+
+**动机**：Codex 的能力扩展面第一块是 Skills。会话工具目录此前是硬编码六件套，
+没有任何注入第三方能力的通道 —— 我们是 MCP *server*（能被集成），不是 client。
+M6a 做的是"技能进来"这一半：目录扫描 + 编目 + 进提示。
+
+**实现要点**：
+
+- `shared/skills.ts`（新，tier 1）：解析 `---` front matter（只认 `key: value`，
+  不支持嵌套/锚点 —— 半支持 YAML 比不支持更糟）、名字归一化（kebab-case，
+  不静默改写）、同名去重（项目级压全局级）、目录块拼装（预算按**整条**累加，
+  先拼后切会把最后一条描述剁掉一半）。
+- `electron/engine/skills.ts`（新，tier 1）：读盘薄壳，与 `conventions.ts` 同形状。
+  三条沿用：目录不存在 = 空（不是错误）；没有 SKILL.md 的子目录不是技能
+  （可能装脚本）；坏技能进 `issues` 而不是消失。
+- 注入：`resolveChatRuntime` 把目录块拼在约定块之后（两者都是背景），
+  坏技能的原因进 `runtime.issues`（宿主会打日志）；
+  `skills:list` IPC + 技能页真实化。
+- **顺序上的一个决定**：先做"技能进来"，后做"取全文"（`read_skill` 在 M6b）。
+  目录块里点名了 `read_skill`，但工具目录还是六件套 —— 这一条写在页面与
+  CHANGELOG 上，**不假装它已经能取**。
+
+**契约变了要让测试红一次**：IA-2 时期那条"技能占位页说清…界面在建"的用例
+被 M6a 推翻（占位升级成真实列表），用例连同注释一起改写。
+
 ### 新增（并行写冲突检测 M4c · P1 · 2026-10-21）
 
 **动机**：Codex 用 worktree 做物理隔离，我们按 D 类决议不走 worktree（会丢掉跨模块

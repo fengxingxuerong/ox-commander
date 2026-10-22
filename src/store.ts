@@ -99,6 +99,10 @@ export const useApp = create<AppState>((set, get) => ({
   planningError: undefined,
   automations: [],
   automationsError: undefined,
+  // 技能（M6a）：只存目录（名字+用途+来源），全文不落进 store —— 它需要时才读。
+  skills: [],
+  skillIssues: [],
+  skillsError: undefined,
   automationHistory: [],
   newProjectName: "",
   newRequirement: "",
@@ -536,6 +540,31 @@ export const useApp = create<AppState>((set, get) => ({
       set((s) => ({
         automationsError: message,
         logs: [...s.logs, `[错误] 读取自动化失败: ${message}`],
+      }));
+    }
+  },
+
+  /**
+   * 技能目录（M6a）。
+   *
+   * 与 automations 同款的两条：读不出来要把问题**说破**（否则"技能全没了"没有
+   * 痕迹），坏技能**照样列出来**（列的是它的路径与原因，不是假装它不存在）。
+   */
+  loadSkills: async () => {
+    const projectId = get().activeProjectId;
+    try {
+      const { skills, issues, problem } = await api().listSkills(projectId ? { projectId } : undefined);
+      set((s) => ({
+        skills,
+        skillIssues: issues,
+        skillsError: problem,
+        ...(problem ? { logs: [...s.logs, `[错误] 读取技能目录失败: ${problem}`] } : {}),
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        skillsError: message,
+        logs: [...s.logs, `[错误] 读取技能目录失败: ${message}`],
       }));
     }
   },
