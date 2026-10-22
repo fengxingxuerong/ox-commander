@@ -909,7 +909,7 @@ const SITE_BASELINE = {
   "electron/automations/automation-scheduler.ts": 6,
   "electron/automations/automation-store.ts": 18,
   "electron/board-derive.ts": 40,
-  "electron/chat/runtime.ts": 12,
+  "electron/chat/runtime.ts": 14,
   "electron/chat/session-store.ts": 38,
   "electron/chat/session.ts": 44,
   "electron/chat/thread-registry.ts": 12,
@@ -924,6 +924,7 @@ const SITE_BASELINE = {
   "electron/engine/orchestrator.ts": 83,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
+  "electron/engine/skills.ts": 6,
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
@@ -989,6 +990,7 @@ const SITE_BASELINE = {
   "shared/routing.ts": 9,
   "shared/schedule-core.ts": 21,
   "shared/schema.ts": 77,
+  "shared/skills.ts": 38,
   "shared/sse.ts": 51,
   "shared/text-diff.ts": 38,
   "shared/tools/patch.ts": 49,
@@ -998,7 +1000,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
-  "src/store.ts": 98,
+  "src/store.ts": 99,
 };
 
 /**

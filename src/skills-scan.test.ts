@@ -63,6 +63,27 @@ describe("readSkills", () => {
     expect(res.issues).toEqual([]);
   });
 
+  it("普通文件混在技能目录里挡不住扫描（扫的是目录，杂散文件排在谁前面都一样）", () => {
+    // 目录遍历按名字排序，杂散文件（README、笔记、IDE 垃圾）落在任何位置都
+    // 只该跳过它自己。目录扫描在它那里停下来的话，排在后面的技能会整批
+    // 无声消失 —— 技能页与提示都看不出少了东西，只会觉得「技能没生效」。
+    const project = dir("b2");
+    put(project, ".ox/skills/aaa-notes.txt", "这不是技能目录");
+    put(project, ".ox/skills/zz-ship/SKILL.md", doc("zz-ship", "上线流程"));
+    const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
+    expect(res.skills.map((s) => s.name)).toEqual(["zz-ship"]);
+    expect(res.issues).toEqual([]);
+  });
+
+  it("没有 SKILL.md 的目录挡不住后面的技能（脚本/资源目录是常态，不该连坐）", () => {
+    const project = dir("b3");
+    put(project, ".ox/skills/aaa-helper/run.sh", "echo hi");
+    put(project, ".ox/skills/zz-ship/SKILL.md", doc("zz-ship", "上线流程"));
+    const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
+    expect(res.skills.map((s) => s.name)).toEqual(["zz-ship"]);
+    expect(res.issues).toEqual([]);
+  });
+
   it("坏技能进 issues：原因能照着改，不是「不存在」", () => {
     const project = dir("c");
     put(project, ".ox/skills/no-front/SKILL.md", "直接写正文，没有 front matter");
@@ -108,6 +129,42 @@ describe("readSkills", () => {
     const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
     expect(res.skills).toEqual([]);
     expect(res.issues[0]?.reason).toMatch(/过大/);
+  });
+
+  it("超大技能只连坐它自己：进 issues，但后面的技能照常扫出来", () => {
+    // 判坏的影响面必须是「它自己那一格」：一份超大文件把整个目录扫描顶掉的话，
+    // 用户看到的是「所有技能都没了」，而真实原因（那一份超了上限）反而被藏住。
+    const project = dir("f2");
+    put(project, ".ox/skills/aaa-huge/SKILL.md", doc("aaa-huge", "很大", "x".repeat(300 * 1024)));
+    put(project, ".ox/skills/zz-ship/SKILL.md", doc("zz-ship", "上线流程"));
+    const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
+    expect(res.issues.map((i) => i.path)).toEqual([".ox/skills/aaa-huge/SKILL.md"]);
+    expect(res.skills.map((s) => s.name)).toEqual(["zz-ship"]);
+  });
+
+  it("SKILL.md 是个目录而不是文件时只报那一条，后面的技能照常扫出来", () => {
+    // `statSync` 对目录照样给出 size（过得了上限检查），真正炸的是 `readFileSync`
+    // —— 这个形态只有「读失败」这一档能接住，且影响面同样只许是它自己那一格。
+    const project = dir("f3");
+    put(project, ".ox/skills/aaa-odd/SKILL.md/inner.txt", "这使 SKILL.md 成为目录");
+    put(project, ".ox/skills/zz-ship/SKILL.md", doc("zz-ship", "上线流程"));
+    const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
+    expect(res.skills.map((s) => s.name)).toEqual(["zz-ship"]);
+    expect(res.issues.map((i) => i.path)).toEqual([".ox/skills/aaa-odd/SKILL.md"]);
+    expect(res.issues[0]?.reason).toMatch(/读取失败/);
+  });
+
+  it("同一层里重名时字典序在前的赢（扫描顺序钉死，重名取舍才可复现）", () => {
+    // 目录遍历的顺序不是文件系统给的（readdir 无序），这里排成字典序正是
+    // 「同名时先扫到的赢」可复现的前提 —— 顺序反过来，赢家就换成另一个目录，
+    // 用户改了 aaa 那份却一直读 zzz 那份，「改了没用」无从排查。
+    const project = dir("f4");
+    put(project, ".ox/skills/aaa-dir/SKILL.md", doc("dup", "甲"));
+    put(project, ".ox/skills/zzz-dir/SKILL.md", doc("dup", "乙"));
+    const res = readSkills([{ origin: "project", rootAbs: path.join(project, ".ox", "skills") }]);
+    expect(res.skills).toHaveLength(1);
+    expect(res.skills[0]?.description).toBe("甲");
+    expect(res.skills[0]?.path).toBe(".ox/skills/aaa-dir/SKILL.md");
   });
 
   it("来源顺序不影响最终排序（按名字排），但覆盖方向由 origin 决定", () => {

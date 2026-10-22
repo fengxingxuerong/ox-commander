@@ -1,14 +1,14 @@
 # `npm run verify` 的逐段机制（35 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、35 段、
-2828 通过 + 8 跳过，合计 2836 条，分布在 92 个有可执行用例的文件（2026-10-22 现跑：链首到
+2885 通过 + 8 跳过，合计 2893 条，分布在 95 个有可执行用例的文件（2026-10-23 现跑：链首到
 `mutation:baseline` 的 16 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**106 个目标** / 基线 **2811 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**108 个目标** / 基线 **2858 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -55,7 +55,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
  空语句合法 ⇒ 静默累积。摘掉那行吞分号的 `while` 会让自测里 5/7 条红（现场已核）。 |
 | 14 | `test` | `vitest run` | 用例失败即红；覆盖率**不**设阈值 |
 | 15 | `mutation:quick` | `mutation-check.mjs --tier=1 --limit=1` | 最弱变异档，见下 |
-| 16 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：工作区脏 ⇒ `HEAD`，干净 ⇒ `HEAD~1..HEAD` | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
+| 16 | `mutation:touched` | `scripts/mutation-touched.mjs`：按 diff 圈出**本次改到的**变异目标文件，逐个跑 site 口径全位点审计。基线：有**已跟踪/已暂存**改动 ⇒ `HEAD`，否则 `HEAD~1..HEAD`；未跟踪文件**不算脏**（旧口径拿 `--porcelain` 非空当脏，一个杂散文件就能把基线顶成 `HEAD`、待审集合为空而假 PASS，2026-10-23 实弹）但**恒并入待审集合**（全新的生产文件在 `git diff` 的两种形态里都看不见）。判定区由 `src/mutation-touched.test.ts` 按锚点抠出注入假 git 钉住 | 任一目标审出存活 ⇒ 红；**浅克隆（无 `HEAD~1`）也红**，并说明改用 `--base=<ref>`（CI 靠 `fetch-depth: 0`） |
 | 17 | `build` | `tsc -b && vite build && tsc -b tsconfig.electron.json` | |
 | 18 | `build:headless` | `tsc -b tsconfig.headless.json` | |
 | 19 | `smoke:artifact` | `scripts/artifact-smoke.mjs` | 依赖 17/18 的产物 |

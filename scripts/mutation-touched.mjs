@@ -8,8 +8,12 @@
  * 这一步把"改了就得审"变成机器判：范围只随本次 diff，成本随改动大小走。
  *
  * 基线取法（`--base=<ref>` 可覆盖）：
- *   1. 工作区/暂存区有改动 ⇒ 以 `HEAD` 为基线（审"我准备交出去的东西"）；
+ *   1. 工作区/暂存区有**已跟踪的**改动 ⇒ 以 `HEAD` 为基线（审"我准备交出去的东西"）；
  *   2. 否则取 `HEAD~1..HEAD`（审刚落在最后的这一笔）—— 在 `main` 上跑也不是空转。
+ *   未跟踪文件**不算脏、也不漏审**：不算脏，是因为它们不进 `git diff HEAD`，把它们
+ *   算进来会让一个杂散文件把基线顶成 HEAD、待审集合为空、这一步假 PASS（2026-10-23
+ *   实弹）；不漏审，是因为它们恒并入待审集合 —— 全新的生产文件在 diff 的两种形态里
+ *   都看不见，而它恰恰是"正在写、还没提交"的那批。口径细节见 resolveAuditScope。
  * 退出码：任一目标审出存活或基线失败 ⇒ 非 0（由审计器自己给）。
  */
 import { execFileSync, spawn } from "node:child_process";
@@ -56,41 +60,88 @@ function hasRev(rev) {
   }
 }
 
-function baseFromArgs() {
-  for (const a of process.argv.slice(2)) {
+/*
+ * 决定本轮审谁：基线选择 + 恒并入的未跟踪文件。
+ *
+ * 两条口径都是吃过亏才定的（本区由 src/mutation-touched.test.ts 按锚点抠出
+ * `resolveAuditScope` 注入假 git 逐条钉住 —— 门禁脚本刻意不在变异 TARGETS 里，
+ * 它的正确性靠这类用例担保）：
+ *
+ * 1. 「脏」只看已跟踪/已暂存的改动。旧判据是 `git status --porcelain` 非空，而它把
+ *    未跟踪文件也算进来；未跟踪文件又不进 `git diff HEAD`，于是工作区里一个杂散
+ *    文件（构建残渣、临时产物）就能把基线顶成 HEAD、让待审集合为空，这一步报
+ *    PASS 而「最后一笔提交」整个没被审（2026-10-23 现场：工作区明明干净、只因多了
+ *    一个未跟踪的 audit.json，输出就是「基线=HEAD 改动文件=0」）。审计范围不许被
+ *    无关文件静默改写。
+ * 2. 未跟踪文件恒并入待审集合。全新的生产文件在 `git diff HEAD` 与
+ *    `git diff --cached HEAD` 两种形态里都看不见（还没 add 时连暂存区都没有它），
+ *    而它恰恰是「正在写、还没提交」的那批 —— 落在变异目标路径上的新文件必须被审。
+ */
+function resolveAuditScope(gitFn, args) {
+  const explicit = explicitBase(args);
+  if (explicit !== undefined) return { base: explicit, untracked: listUntracked(gitFn) };
+  const base = hasTrackedChanges(gitFn) ? "HEAD" : "HEAD~1";
+  return { base, untracked: listUntracked(gitFn) };
+}
+
+/** 显式 `--base=<ref>`：覆盖基线选择（不覆盖「未跟踪恒并入」）。 */
+function explicitBase(args) {
+  for (const a of args) {
     const m = /^--base=(.*)$/.exec(a);
     if (m) return m[1];
   }
-  if (git(["status", "--porcelain"]).trim() !== "") return "HEAD";
-  /*
-   * CI 的 `actions/checkout` 默认是 depth=1 的浅克隆，那里**没有父提交**，
-   * `HEAD~1` 直接解析失败。以前这一步会把一坨裸 node 堆栈抛给 job 日志
-   * （2026-09-25 的 ubuntu/windows 两个 verify job 就是这么红的，而本机永远复现不了）。
-   *
-   * 也**不能**退化成"审 `git diff HEAD`" —— 干净工作区下那是个空集，
-   * 于是这一步会宣称 PASS 而一个位点都没审。宁可红着说清楚。
-   */
-  if (!hasRev("HEAD~1")) {
-    console.error(
-      "FAIL: 仓库是浅克隆（没有 HEAD~1），这一步无法确定「本次改了哪些文件」的基线。\n" +
-        "      CI 请把 checkout 改成 `fetch-depth: 0`（见 .github/workflows/verify.yml）；\n" +
-        "      本机可用 `--base=<ref>` 显式指定基线。",
-    );
-    process.exit(1);
-  }
-  return "HEAD~1";
+  return undefined;
 }
 
-const base = baseFromArgs();
+/** 工作区有没有已跟踪/已暂存的改动（未跟踪文件不算脏，见 resolveAuditScope 的口径 1）。 */
+function hasTrackedChanges(gitFn) {
+  return gitFn(["status", "--porcelain", "--untracked-files=no"]).trim() !== "";
+}
+
+/**
+ * 未跟踪文件清单（恒并入待审集合，见 resolveAuditScope 的口径 2）。
+ * 目录项带尾斜杠、剥掉即可；空目录剥完就是空串，滤掉。git 对非 ASCII 路径的
+ * 引号包裹刻意不去解：变异目标路径全是 ASCII，解不开的路径自然匹配不上任何目标。
+ */
+function listUntracked(gitFn) {
+  return gitFn(["status", "--porcelain", "--untracked-files=all"])
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith("?? "))
+    .map((l) => l.slice(3).replace(/\/$/, ""))
+    .filter((l) => l !== "");
+}
+
+/*
+ * 基线落定后的主流程。
+ */
+const { base, untracked } = resolveAuditScope(git, process.argv.slice(2));
+/*
+ * CI 的 `actions/checkout` 默认是 depth=1 的浅克隆，那里**没有父提交**，
+ * `HEAD~1` 直接解析失败。以前这一步会把一坨裸 node 堆栈抛给 job 日志
+ * （2026-09-25 的 ubuntu/windows 两个 verify job 就是这么红的，而本机永远复现不了）。
+ *
+ * 也**不能**退化成"审 `git diff HEAD`" —— 干净工作区下那是个空集，
+ * 于是这一步会宣称 PASS 而一个位点都没审。宁可红着说清楚。
+ */
+if (base === "HEAD~1" && !hasRev(base)) {
+  console.error(
+    "FAIL: 仓库是浅克隆（没有 HEAD~1），这一步无法确定「本次改了哪些文件」的基线。\n" +
+      "      CI 请把 checkout 改成 `fetch-depth: 0`（见 .github/workflows/verify.yml）；\n" +
+      "      本机可用 `--base=<ref>` 显式指定基线。",
+  );
+  process.exit(1);
+}
 if (base !== "HEAD" && !hasRev(base)) {
   // `--base=<ref>` 写错时也给一句人话，而不是让 `git diff` 抛一坨裸堆栈。
   console.error(`FAIL: 基线 "${base}" 在这个仓库里解析不出来（浅克隆？写错的 ref？）。`);
   process.exit(1);
 }
-const touched =
+const diffTouched =
   base === "HEAD"
     ? [...lines(git(["diff", "--name-only", "-M", "HEAD"])), ...lines(git(["diff", "--name-only", "-M", "--cached", "HEAD"]))]
     : lines(git(["diff", "--name-only", "-M", `${base}...HEAD`]));
+// 未跟踪文件不进任何一种 diff，这里与 diff 结果并成一份待审清单（口径 2）。
+const touched = [...diffTouched, ...untracked];
 
 const table = targetsTable();
 const uniq = [...new Set(touched.map((f) => f.replace(new RegExp(BS + BS, "g"), "/")))];

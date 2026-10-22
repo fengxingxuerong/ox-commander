@@ -71,6 +71,18 @@ describe("parseSkillDoc", () => {
     expect(parsed.issues).toEqual([]);
     expect(parsed.fields).toEqual({ name: "demo", description: "带:冒号" });
   });
+
+  it("引号不配对就一个都不剥（半截引号是坏输入，剥一半会吞掉正文首尾）", () => {
+    // 只剥「首尾是同一种引号」的成对包裹。首尾异种时整串原样保留 ——
+    // 手写 SKILL.md 时最常见的错法就是引号只写了一半，此时把第一个字符
+    // 剥掉等于替用户把正文吃掉一个字，而报错线索（那个孤引号）也一起没了。
+    const leading = parseSkillDoc(doc('name: demo\ndescription: "双引号开头单引号结尾\''));
+    expect(leading.issues).toEqual([]);
+    expect(leading.fields.description).toBe('"双引号开头单引号结尾\'');
+    const trailing = parseSkillDoc(doc("name: demo\ndescription: '单引号开头双引号结尾\""));
+    expect(trailing.issues).toEqual([]);
+    expect(trailing.fields.description).toBe("'单引号开头双引号结尾\"");
+  });
 });
 
 describe("normalizeSkillName", () => {
@@ -225,6 +237,18 @@ describe("formatSkillCatalog", () => {
     expect(catalog.dropped.length).toBe(2 - catalog.shown);
     for (const name of catalog.dropped) expect(catalog.text).toContain(name);
     expect(catalog.text).toContain("可以用 read_skill");
+  });
+
+  it("第一条超预算只丢它自己：更短的技能仍按序入列", () => {
+    // 预算判定是「逐条累加」，不是「碰到第一条超了就放弃整个目录」——
+    // 一份长描述把循环顶掉的话，用户看到的是「所有技能都没了」，
+    // 而真实原因（那一条超了）反而被藏住。
+    const skills = [skill({ name: "aa", description: "x".repeat(200) }), skill({ name: "bb", description: "短" })];
+    const catalog = formatSkillCatalog(skills, 300);
+    expect(catalog.shown).toBe(1);
+    expect(catalog.dropped).toEqual(["aa"]);
+    expect(catalog.text).toContain("- bb：短");
+    expect(catalog.text).not.toContain("一个都没列出来");
   });
 
   it("一条都放不下时仍给头与全部名字（否则表现为「没有技能」）", () => {

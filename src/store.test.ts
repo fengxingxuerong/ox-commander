@@ -1320,3 +1320,68 @@ describe("exportChat 通知文案（M5a）", () => {
     expect(useApp.getState().chat.notice).not.toContain("未推送");
   });
 });
+
+/**
+ * 技能动作（M6a）：`loadSkills` 是「技能页/会话提示里有没有项目技能」的唯一入口。
+ * 判错的形态全是**静默**的 —— 项目没带上，项目级技能（连同「项目压过全局」的覆盖）
+ * 整个不出现，界面与提示都看不出少了东西，用户只会觉得「技能没生效」。
+ */
+describe("skills actions", () => {
+  const bridge = (over: Record<string, unknown>) => {
+    const g = globalThis as { oxCommander?: Record<string, unknown> };
+    g.oxCommander = { ...g.oxCommander, ...over };
+  };
+
+  it("挂着项目时把 projectId 带上，没挂项目时不带（带错了哪一边都是静默少技能）", async () => {
+    const calls: Array<{ projectId?: string } | undefined> = [];
+    bridge({
+      listSkills: async (input?: { projectId?: string }) => {
+        calls.push(input);
+        return { skills: [], issues: [] };
+      },
+    });
+    useApp.setState({ activeProjectId: "p-77" });
+    await useApp.getState().loadSkills();
+    useApp.setState({ activeProjectId: undefined });
+    await useApp.getState().loadSkills();
+    expect(calls[0]).toEqual({ projectId: "p-77" });
+    expect(calls[1]).toBeUndefined();
+  });
+
+  it("problem 落到 skillsError 并记一行日志；坏技能照样进列表（不假装它不存在）", async () => {
+    const skill = {
+      name: "run-verify",
+      description: "跑本项目 verify 并解读失败",
+      origin: "project",
+      path: ".ox/skills/run-verify/SKILL.md",
+      bodyChars: 12,
+      enabled: true,
+    };
+    const issue = { path: ".ox/skills/broken/SKILL.md", reason: "缺少 front matter" };
+    bridge({
+      listSkills: async () => ({ skills: [skill], issues: [issue], problem: "Unexpected token" }),
+    });
+    await useApp.getState().loadSkills();
+    expect(useApp.getState().skills).toEqual([skill]);
+    expect(useApp.getState().skillIssues).toEqual([issue]);
+    expect(useApp.getState().skillsError).toBe("Unexpected token");
+    expect(useApp.getState().logs.at(-1)).toMatch(/读取技能目录失败: Unexpected token/);
+
+    // 下一次读成功要把错误清掉（否则修好之后界面上那行红永远留着）。
+    bridge({ listSkills: async () => ({ skills: [], issues: [] }) });
+    await useApp.getState().loadSkills();
+    expect(useApp.getState().skillsError).toBeUndefined();
+  });
+
+  it("主进程抛错（桥断了）也不让界面拿到半个状态：错误进 skillsError，列表不动", async () => {
+    bridge({
+      listSkills: async () => {
+        throw new Error("EPIPE");
+      },
+    });
+    const before = useApp.getState().skills;
+    await useApp.getState().loadSkills();
+    expect(useApp.getState().skills).toBe(before);
+    expect(useApp.getState().skillsError).toBe("EPIPE");
+  });
+});
