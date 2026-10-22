@@ -71,7 +71,9 @@ plan 会算出 0 延迟，同样自旋。
 - 定向 site 审计：`shared/automation.ts` 47/47、`automation-store.ts` 18/18、
   `automation-scheduler.ts` 6/6、`ipc/automations.ts` 14/14、`ipc/orchestration.ts`
   14/14、`src/store.ts` 98/98。
-- 首轮存活 5 处，全部是**断言缺口**而不是等价变异（除第 1 条）：
+- 首轮存活 7 处：5 处在 M5b 新代码里，2 处在 M5a 的 `exportChat`（`src/store.ts` 位点数
+  89 → 98 后整文件重审才暴露 —— 这提醒一件事：**"新位点"里混着老代码里从来没被断言过的
+  分支**，涨位点不是只审新增那几十行）。全部是**断言缺口**而不是等价变异（除第 1 条）：
   1. `dueAutomations` 的比较器三分支（`? -1 : a.id > b.id ? 1 : 0`）判等价 —— 插入
      排序只在比较结果为负时交换，"把大于判成相等"与"判成大于"行为相同。按本仓
      `zone-coverage` / `batch-guard` 的两分支写法消除（id 由 uuid 生成、天然唯一）。
@@ -84,7 +86,16 @@ plan 会算出 0 延迟，同样自旋。
      会把 break 之后立即排上的下一轮 tick 也烧掉，最终状态一致。改成**只烧这一批**
      timer，断言同一 tick 内两个都触发。这条最值得记：它说明"最终状态一致"的断言
      会系统性放过时序/轮次类的判据。
-- 全量测试 **XXXX 通过 + 8 跳过**（XX 个有可执行用例的文件）；基线
+  5. `exportChat` 的 `if (!projectId || !sessionId)` → `&&` 存活：既有用例只走过
+     "两个都缺"，于是"缺一半也该早退"这件事没人钉。补成"只有 sessionId / 只有
+     projectId"两次调用 + 断言 `exportChat` **一次都没发**（只断 notice 不够 ——
+     假分支里 IPC 会先抛错，notice 恰好也是"失败"，两种形态在文案上分不开）。
+  6. `push.skipped === "no-remote"` → `!==` 存活：只测过"没有远端"一侧，
+     `push.ok` 一侧只断言"有已推送"，没断言"不许同时出现未推送"。补一条真推送成功
+     的整串文案比对。`filesCommitted !== undefined` 那一处则已被 chat-ui 的导出用例
+     顺带杀死 —— 同一位点在不同文件里被覆盖，说明按文件审计（而不是按"我改了什么"）
+     才看得见真实覆盖面。
+- 全量测试 **2828 通过 + 8 跳过**（92 个有可执行用例的文件）；基线
   **106 个目标 / 2811 处位点**，`check:doc-claims` PASS。
 
 **边界**：只做时间触发。事件触发（issue / 告警 / CI / PR 的 webhook）不做承诺 ——
