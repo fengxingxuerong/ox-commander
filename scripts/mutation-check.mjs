@@ -2702,6 +2702,25 @@ if (slowest.length > 0 && slowest[0].ms > 0) {
 // 放在脚本里而不是 workflow 里：只有这里知道自己的口径（aggregate 的"全杀"
 // 不等价于 site 的"每处都验过"）与存活清单的格式。workflow 保持只认
 // `npm run mutation:audit`，不复制日志格式。
+/**
+ * 把一条失败写成 GitHub Actions **注解**。
+ *
+ * 为什么需要它（2026-10-23 实弹）：job 的日志正文匿名读不到（`GET …/jobs/{id}/logs`
+ * → 403），而"哪几处位点活着"此前只写在 step summary 与日志里 —— 维护者不在场、
+ * 手上没有 token 时拿不到结论，只能靠人把日志贴回来。注解走 checks API，公开仓库
+ * 无需 admin 即可读（README 里 release.yml 的打包诊断用的就是同一条通道）。
+ *
+ * 只在 Actions 里发（本机跑纯噪声）。单步注解有上限（约 10 条），超出的仍在
+ * summary 与日志里 —— 注解是**旁证通道**，不改变判定。
+ */
+function annotateFailure(message, file, line) {
+  if (process.env.GITHUB_ACTIONS !== "true") return;
+  const hasFile = typeof file === "string" && file !== "";
+  const loc = hasFile ? ` file=${file}${line ? `,line=${line}` : ""}` : "";
+  const text = String(message).replace(/\r?\n/g, " ").slice(0, 320);
+  console.log(`::error${loc}::${text}`);
+}
+
 function writeStepSummary(verdict, extra) {
   const p = process.env.GITHUB_STEP_SUMMARY;
   if (!p) return;
@@ -2757,8 +2776,14 @@ if (mode === "site") {
 // 三种情况都会让整块覆盖静默归零。这与「CI 里写错路径、从来没跑过的 job」同族。
 if (baselineFailures.length > 0) {
   console.error(`\nFAIL: ${baselineFailures.length} 个目标的基线测试未通过 —— 这些目标**完全没被验证**：`);
-  for (const r of baselineFailures)
+  for (const r of baselineFailures) {
     console.error(`  ${r.target.file}  ::  ${testFilesOf(r.target).join(", ")}`);
+    annotateFailure(
+      `基线测试未通过：${r.target.file}（${testFilesOf(r.target).join(", ")}）—— 该目标完全没被验证`,
+      r.target.file,
+      0,
+    );
+  }
   console.error(
     "\n基线失败的常见原因：测试文件路径写错 / 测试被改坏 / 被测源码有语法错误。\n" +
       "不要让它跳过就算了 —— 那等于这个目标从来没有门禁。\n",
@@ -2774,6 +2799,7 @@ if (survivors.length > MAX_SURVIVORS) {
   console.error(`\nFAIL: ${survivors.length} 个变异存活 —— 这些行为没有断言覆盖：`);
   for (const s of survivors) {
     const where = s.line ? `@${s.line} 行` : `(聚合 ${s.siteCount} 处)`;
+    annotateFailure(`变异存活：${s.file} :: ${s.op} ${where}`, s.file, s.line ?? 0);
     console.error(`  ${s.file}  ::  ${s.op} ${where}`);
   }
   console.error(

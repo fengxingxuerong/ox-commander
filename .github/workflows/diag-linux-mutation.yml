@@ -1,0 +1,60 @@
+name: diag-linux-mutation
+
+# 临时诊断（2026-10-23）：CI 的 `mutation (site, tier 1 1/1)` 在 ubuntu 上红，
+# 而同一份提交在 win32 本机跑 `--tier=1 --shard=1/1` 是 **exit 0 全绿** ——
+# 说明那处存活是 Linux 专有的，本机复现不出来（无 WSL/Docker）。
+#
+# 这里按**文件**起矩阵（每个目标一个 leg、各自一个 runner），跑完看哪个 leg 红
+# 就是哪个目标。`mutation-check` 已把存活位点写成 GitHub 注解，所以失败 leg 上
+# 还能直接读到「哪个算子、哪一行」。
+#
+# 用完即删，或者把 trigger 改成只留 `workflow_dispatch` 长期当"单文件复核"用。
+
+on:
+  push:
+    paths:
+      - ".github/workflows/diag-linux-mutation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+
+jobs:
+  audit:
+    name: audit (${{ matrix.file }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        file:
+          - shared/mcp.ts
+          - electron/mcp/manifest.ts
+          - electron/mcp/client.ts
+          - electron/mcp/pool.ts
+          - shared/tools/protocol.ts
+          - shared/tools/policy.ts
+          - shared/tools/spec.ts
+          - shared/chat-events.ts
+          - electron/chat/session.ts
+          - electron/chat/tool-runner.ts
+          - electron/chat/runtime.ts
+          - electron/ipc/chat.ts
+          - shared/skills.ts
+          - electron/engine/skills.ts
+          - src/store.ts
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Audit (site 口径，单文件)
+        run: node scripts/mutation-check.mjs --mode=site --limit=999 --file=${{ matrix.file }} --jobs=1
