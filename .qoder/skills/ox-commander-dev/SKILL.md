@@ -97,6 +97,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | `check:unwired` 红在"表项失效" | 你删/改了被豁免的符号 | 同步删该条 |
 | mutation 位点总数和你预期不符 | 注释/文档里留了算子字面量 | 改掉措辞，别去动基线 |
 | site 口径冒出"等价位点未命中" | 白名单行号漂移 | 按新行号校回 + 确认防御仍在 |
+| `mutation:baseline` 红在「EQUIVALENT_SITES 有 N 条失效条目」 | 那张表按 `(算子, 行号)` **精确**匹配，源码插几行就再也对不上：它豁免的是空气，而漂到新行的位点无人认领 → 会在 CI 的 site 分片上存活（2026-10-23 一天内因此红两轮，其中 `path-policy.ts` 直接拦住 0.2.0 发布） | 逐条按新行号校回并重新确认防御仍在；位点确已消失就删条目。**别为了让红变绿而新增条目** —— 历史上每次"新增一条"都留下一条死锚点 |
+| site 分片红而本机同一分片全绿 | 平台分叉（POSIX 可达、win32 不可达，或反过来）；本机没有 WSL/Docker 就复现不出来 | 别猜：`mutation-check` 会把存活位点写成 **GitHub 注解**（checks API 公开可读），失败 job 的注解里直接有文件名/算子/行号；要更细就跑只手动触发的 `diag-linux-mutation` 工作流（按文件起矩阵，失败 leg 名即目标） |
 | `smoke:gateway` / `smoke:coze` 偶发红 | 固定端口被占 / 机器慢过固定 sleep | 单跑复现，别看一次就归因代码 |
 | `mutation-check` 中途被打断后工作区脏 | 它会临时改写源文件（SIGKILL 时还原钩子跑不到，**活体变异会留在盘上**）。症状不是"红在无关文件"，而是 `npm test` 堆涨到 ~4.6GB 后 **heap OOM 且父进程不退出**（2026-09-28 实测两次） | `ls scripts/.mutation-pending/` 即判定；**`npm run check:residue` 还原**（verify 第 1 段就是它）。别用 `git checkout --` 手工还原——那会连同一文件里本轮的真实改动一起删。**别用后台跑全量 `mutation:audit`（15-28min > 后台 10min 上限），按 `--file=` 分档跑，单档 13–60s** |
 | `check:residue` 红在"另一轮变异正在运行" | 台账里的 pid 属于一个还活着的进程：本机有第二个会话正在跑变异档 | **不是你改坏了**。等那一轮跑完再跑；别去删 `scripts/.mutation-pending/`，那是那唯一一轮的还原凭据 |
