@@ -1027,6 +1027,23 @@ const SITE_BASELINE = {
  * （fail-safe），届时重新评估是否仍是等价位点。
  */
 const EQUIVALENT_SITES = [
+  /*
+   * 2026-10-23：表里 16 条**永远匹配不上任何位点**的死条目已删除（锚点漂移留下
+   * 的）：serve 482、scheduler 346/352（各两条）、http-bridge 315、sensenova-api
+   * 397/403、orchestration 267、run-spec 286/288/290、store 247、platform 288、
+   * ipc/chat 197/402。删是**行为中性**的（它们本就豁免不到任何东西），但这张表
+   * 的老问题不在删不删：漂移之后它既没红也没提示，于是"这块有等价锚点"成了错觉
+   * —— 2026-10-23 一天内因此红了两轮 CI（context.ts 221→225、path-policy.ts
+   * 92→94，后者直接拦住发布，靠 CI 注解才定位到）。
+   *
+   * 同日起 `mutation:baseline`（`site-baseline.mjs`）对**每一条**条目做存活检查：
+   * 必须能在目标文件里找到 `(算子, 行号)` 完全对得上的真实位点，对不上即红。
+   * 于是这张表只可能包含"确实还在原位"的条目；下一个人遇到漂移，当场就知道是哪
+   * 一条、该校回哪一行，不必再等一轮 50 分钟的分片审计。
+   *
+   * ⚠️ 下面仍留着若干条只为**历史文献**的注释（讲的是某个位点当初为什么等价），
+   * 对应的条目若已随上述清理删除，重新登记时可直接复用那套论证。
+   */
   /**
    * `electron/sandbox/kill-tree.ts:37` 的 `&& → ||` —— **可证明等价**（一级）。
    *
@@ -1142,7 +1159,6 @@ const EQUIVALENT_SITES = [
    * 届时按新行号校回，并**重新核对 busy 与 engine 的赋值顺序**（若将来 engine
    * 改为在 busy 之前清空，或 busy 在别处置 true，这个等价就不再成立）。
    */
-  { file: "headless/serve.ts", op: "&& → ||", line: 482 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 满载改派循环里的
    * `if (!d || d.inferredLegacy) return true;` —— **架构上不可达**（防御分支）。
@@ -1163,8 +1179,6 @@ const EQUIVALENT_SITES = [
    * ⚠️ 行号是锚点：scheduler.ts 结构变化使该行漂移时，变异会重新出现 ——
    * 届时按新行号校回，并重新确认上面的不可达论证仍成立。
    */
-  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 352 },
-  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 352 },
   /**
    * `electron/sandbox/spawn-plan.ts:96` `return false → true`（`isFile` 的 catch）。
    *
@@ -1200,7 +1214,6 @@ const EQUIVALENT_SITES = [
   // 锚点 309 → 315（2026-10-10 校准）：本文件在它之前多了 6 行（`probeTimeoutMs`
   // 选项 + 两处"为什么这么写"的注释），行号整体后移。**位点数未变**（1369 无漂移），
   // 漂的只是锚点 —— 这正是"行号是锚点"的 fail-safe：宁可重现让人重看一遍。
-  { file: "electron/agents/http-bridge.ts", op: "=== → !==", line: 315 },
   /**
    * `electron/agents/sensenova-api.ts` 里 `readSnapshotContents` 的那行
    * `if (isSecretLikeFile(rel)) continue;` 的 `continue → break` —— **可证明不可达**（一级）。
@@ -1227,7 +1240,6 @@ const EQUIVALENT_SITES = [
  * 2026-09-27：executorTimeoutMs 轮在上方插入 12 行（适配器 timeoutMs 选项/字段/构造归一）
  *   → 385 → 397。
  */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 397 },
   /**
    * `readSnapshotContents` 中读文件失败的 `catch { continue; }` —— 二级。
    *
@@ -1249,7 +1261,6 @@ const EQUIVALENT_SITES = [
  * 同日第三轮：取消下传在途请求，上方又各加 1 行 → 389 → 391。
  * 2026-09-27：executorTimeoutMs 轮同上（上方插入 12 行）→ 391 → 403。
  */
-  { file: "electron/agents/sensenova-api.ts", op: "继续(continue) → 中断(break)", line: 403 },
   /**
    * `shared/chat-compress.ts:62` 的 `return false → true` —— **可证明不可达**（一级）。
    *
@@ -1333,9 +1344,6 @@ const EQUIVALENT_SITES = [
    * 187 的同型位点（第二处签名行）已在此前的装配收敛中消失，条目保留作历史
    * 锚；现存的 enableRouter: … !== false（225/283）是真行为、被用例杀死，不入表。
    * 2026-10-23：这一条已并入上方 `context.ts` 的 225 锚点（同一位点，不再重复登记）。 */
-  { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 267 },
-  { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
-  { file: "src/store.ts", op: "=== → !==", line: 247 },
   /*
    * 2026-10-03 竞品吸收轮白名单（三条，同一论证）：
    * `electron/platform.ts:288` / `headless/run-spec.ts:288,290` 的
@@ -1346,9 +1354,6 @@ const EQUIVALENT_SITES = [
    * 恒等。与上方 context.ts 签名位点同一论证：布尔分量取反 → 装配键有无 →
    * 双射不可观察。
    */
-  { file: "electron/platform.ts", op: "三元分支互换", line: 288 },
-  { file: "headless/run-spec.ts", op: "三元分支互换", line: 288 },
-  { file: "headless/run-spec.ts", op: "三元分支互换", line: 290 },
   /**
    * `electron/engine/scheduler.ts` `admitConcurrency` 的 spare 查找里
    * `if (!d || d.inferredLegacy) return true;` 的两个变异 —— **防御性冗余，
@@ -1372,8 +1377,6 @@ const EQUIVALENT_SITES = [
    * 行号 2026-09-28 校回 345 → 346：同文件为 zone 重叠判定新增一条 import（`zonesOverlap`），
    * 整段下移一行。校回时确认过两层防御原样仍在（`!d` 与 `||` 的短路边仍不可达）。
    */
-  { file: "electron/engine/scheduler.ts", op: "return true → false", line: 346 },
-  { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 346 },
   /*
    * `electron/ipc/context.ts` 的 `ensureAgentLayer` 缓存 signature 位点 —— 已并入
    * 上方 `context.ts` 的 225 锚点（2026-10-23 折叠三条陈旧重复条目）。保留这条
@@ -1399,7 +1402,6 @@ const EQUIVALENT_SITES = [
    * 同日 M4a 又在其上方插入审批归属与寻址（+56 行）→ 401，随后删掉
    * `resumeIntoLive` 里一行死代码（登记表同 id 覆盖已含删除）→ 402。
    */
-  { file: "electron/ipc/chat.ts", op: "|| → &&", line: 402 },
   /**
    * `electron/ipc/chat.ts` `buildSession` 里 `...(pinned && profile?.reasoningEffort ? … : {})`
    * 的 `&& → ||` —— **可证明等价**（下游二次守卫）。
@@ -1421,7 +1423,6 @@ const EQUIVALENT_SITES = [
    * ⚠️ 行号是锚点：buildSession 结构变化使该行漂移时，变异会重新出现 ——
    * 届时按新行号校回，并重新确认 ChatSession 侧的二次守卫仍在。
    */
-  { file: "electron/ipc/chat.ts", op: "&& → ||", line: 197 },
 ];
 
 /** 逐行对比原文件与变异体，返回内容变化的 1-based 行号。 */

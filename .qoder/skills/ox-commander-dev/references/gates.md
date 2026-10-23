@@ -44,7 +44,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 10 | `check:ipc-channels` | `scripts/check-ipc-channels.mjs`：preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道 | 悬空通道（一调就 reject）→ 红；注册了但没暴露（**静默不可用**）→ 红；同通道 invoke/handle 两次 → 红；**任一侧解析为空也红**（解析失配当通过 = 永远绿的摆设）。反向注入 6/6 |
 | 11 | `check:mutation-targets` | `scripts/check-mutation-targets.mjs`：本次改动的生产文件必须已在 `TARGETS` 或显式豁免里 | 漏挂 → 红。漏挂的文件**不参与**变异统计，那个 PASS 对它没有含义（2026-10-05 三个漏挂文件入表后一次暴露 9 处存活位点）。反向注入 4/4 |
 | 12 | `check:doc-claims` | `scripts/check-doc-claims.mjs --selftest`：本表 / README / SKILL.md 里那几个数字对**实物**（`package.json` 的段数、`vitest list` 的收集数） | 段数任一处不等 → 红；链里某段在两处清单都没行 → 红；声明的用例数 ≠ 现跑收集数 → 红；**读不到声明也红**（措辞改了却不匹配 = 门禁空转）。36 例判据自测 |
-| 13 | `mutation:baseline` | `scripts/site-baseline.mjs --selftest`：逐目标重算位点数并与 `SITE_BASELINE` 比（**不跑变异**，约 1s） | 漂移 → 红。为什么现在进链：漂移判定此前**只写在 site 口径里**，而 site 口径本机 verify 从不跑
+| 13 | `mutation:baseline` | `scripts/site-baseline.mjs --selftest`：逐目标重算位点数并与 `SITE_BASELINE` 比（**不跑变异**，约 1s）；同批校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点** —— 逐条比 `(算子, 行号)`，复用门禁自己的 `findSites`，不另写"哪儿有位点" | 漂移 → 红。**等价条目失效 → 红**（豁免的是空气，而漂到新行的位点无人认领：2026-10-23 一天内因此红了两轮 CI）。为什么现在进链：漂移判定此前**只写在 site 口径里**，而 site 口径本机 verify 从不跑
  ⇒「全部 N 处位点已逐点验证」这句话在本机绿的时候，N 可能已经不是现在那个 N 了（2026-10-05 才把
  这个常量从注释里的承诺变成真判据，见 `mutation-check.mjs` 文件头）。
  ⚠️ 与 site 口径**刻意不对称**：site 只在位点**变多**时报（那才是"没人验证过"），本段对

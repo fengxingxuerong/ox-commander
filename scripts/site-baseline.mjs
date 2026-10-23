@@ -155,7 +155,18 @@ const ACTIVE_OPERATORS = OPERATORS.filter(
 );
 
 const ROOT = path.resolve(HERE, "..");
+
+// 复用门禁自己的 EQUIVALENT_SITES：等价条目也只能有一份来源（理由同上面的 TARGETS）。
+const equivalentsBlock = sliceTopLevelArray(src, "EQUIVALENT_SITES");
+if (!equivalentsBlock) {
+  console.error("无法在 mutation-check.mjs 里定位 EQUIVALENT_SITES（常量不存在或格式变了）");
+  process.exit(2);
+}
+const { EQUIVALENT_SITES } = new Function(`${equivalentsBlock}\nreturn { EQUIVALENT_SITES };`)();
+
 const counts = new Map();
+/** 每个目标文件里**真实存在**的位点键集合（`op\0line`）—— 等价条目要逐条对得上它。 */
+const siteKeysByFile = new Map();
 for (const t of TARGETS) {
   const abs = path.join(ROOT, t.file);
   let text;
@@ -167,9 +178,51 @@ for (const t of TARGETS) {
   }
   const masked = maskNonCode(text);
   let n = 0;
-  for (const op of ACTIVE_OPERATORS) n += findSites(text, masked, op).sites.length;
+  const keys = new Set();
+  for (const op of ACTIVE_OPERATORS) {
+    const found = findSites(text, masked, op);
+    n += found.sites.length;
+    for (const s of found.sites) keys.add(`${op.name}\u0000${s.line}`);
+  }
   counts.set(t.file, n);
+  siteKeysByFile.set(t.file, keys);
 }
+
+/**
+ * 等价白名单的**失效检查**（2026-10-23 新增）。
+ *
+ * 此前 `EQUIVALENT_SITES` 是"只加不减、行号漂了就永远对不上"的表：条目按
+ * `(file, op, line)` 精确匹配，源码里插几行就再也匹配不到任何位点，于是它
+ * 豁免的其实是**空气**；而真正漂到新行的那个位点无人认领，重新进入分母。
+ *
+ * 那不是理论风险：2026-10-23 一天之内因此红了两轮 CI（`ipc/context.ts` 的
+ * 签名行 221 → 225、`sandbox/path-policy.ts` 的 `parent === cur` 92 → 94），
+ * 每次都要靠一轮 50 分钟的分片审计才知道是哪个文件。而这两次"漂移"在表里
+ * 都留着一条看起来很正常、注释还写着"行号已校回、无漂移风险"的死条目。
+ *
+ * 判据：**每条等价条目都必须能在目标文件里找到一个 `(算子, 行号)` 完全对得上的
+ * 真实位点**。对不上 ⇒ 红（与 `check-unwired` / `check-script-wiring` 的
+ * "表项失效即红"同一条纪律）。判据用的是门禁自己的 `findSites` + 目标表，
+ * 不另写一份"哪儿有位点"的实现。
+ */
+const staleEquivalents = EQUIVALENT_SITES.filter((e) => {
+  const keys = siteKeysByFile.get(e.file);
+  if (!keys) return true; // 文件已不在 TARGETS（或已删除）
+  return !keys.has(`${e.op}\u0000${e.line}`);
+});
+if (staleEquivalents.length > 0) {
+  console.error(
+    `FAIL: EQUIVALENT_SITES 有 ${staleEquivalents.length} 条失效条目 —— 它们指向的行已经没有任何对应算子：`,
+  );
+  for (const e of staleEquivalents) console.error(`  ${e.file}  ::  ${e.op} @${e.line}`);
+  console.error(
+    "\n这不是卫生问题：失效条目豁免的是**空气**，而真正漂到新行的那个位点无人认领、\n" +
+      "重新进入分母并（在等价的前提下）存活 —— 2026-10-23 一天内因此红了两轮 CI。\n" +
+      "处置：按新行号校回（并重新确认那两层防御仍在），或确认位点已消失后删掉条目。\n",
+  );
+  process.exit(1);
+}
+
 
 /** Same idea as `sliceTopLevelArray`, for an object literal constant. */
 function sliceTopLevelObject(source, constName) {

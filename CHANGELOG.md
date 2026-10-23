@@ -8,6 +8,24 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
+## [未发布] — v0.2.0 之后（2026-10-23 →）
+
+### 门禁与维护（等价白名单的失效检查 · 2026-10-23）
+
+- **`EQUIVALENT_SITES` 的每一条都必须还能匹配到真实位点，否则红**（判据落在
+  `mutation:baseline` 段，复用门禁自己的 `findSites`，不另写"哪儿有位点"）。
+  这张表按 `(file, op, line)` 精确匹配，源码插几行就再也对不上 —— 于是它豁免的是
+  **空气**，而真正漂到新行的那个位点无人认领、重新进入分母并（在等价的前提下）存活。
+  2026-10-23 一天内因此红了两轮 CI（`ipc/context.ts` 221→225、`sandbox/path-policy.ts`
+  92→94，后者直接拦住 0.2.0 的发布），而两次都要靠一轮 50 分钟的分片审计才知道是哪个文件。
+- 同批**删掉 16 条**早已失效的死条目（serve 482 / scheduler 346、352 / http-bridge 315 /
+  sensenova-api 397、403 / orchestration 267 / run-spec 286、288、290 / store 247 /
+  platform 288 / ipc/chat 197、402）。删除是**行为中性**的（它们本就豁免不到任何东西），
+  历史论证保留在原处的注释里，重新登记时可直接复用。
+- 配套：`mutation-check` 现在把存活位点与基线失败写成 **GitHub 注解**（checks API 公开
+  可读，不依赖 job 日志的 admin 权限），并新增一个**仅手动触发**的单文件变异复核工作流
+  —— 上面那个 path-policy 位点就是靠它 + 注解在 Linux 上一次点名的。
+
 ## [0.2.0] — 2026-10-23
 
 ### 新增（MCP client · M7 · 2026-10-23）
