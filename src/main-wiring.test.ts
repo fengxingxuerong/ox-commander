@@ -153,6 +153,28 @@ describe("electron 入口 · 单实例锁", () => {
   });
 });
 
+describe("electron 入口 · 导航守卫（2026-10-23 加固）", () => {
+  it("不开新窗口：入口注册的策略一律 deny（子窗口会继承同一份 preload 桥）", async () => {
+    const { fake } = await loadEntry();
+    expect(fake.createdWindows[0]!.openWindow()).toEqual({ action: "deny" });
+  });
+
+  it("不把窗口导航走：外部地址被拦，应用自身地址放行", async () => {
+    const packaged = await loadEntry();
+    const win = packaged.fake.createdWindows[0]!;
+    expect(win.fireNavigation("https://evil.example.com/")).toBe(true);
+    expect(win.fireNavigation("file:///D:/ox/ox-commander/dist/index.html")).toBe(false);
+  });
+
+  it("dev 模式放行 vite 地址、其它端口照样拦（整页重载要能过）", async () => {
+    setEnv("OX_DEV_SERVER", "1");
+    const { fake } = await loadEntry();
+    const win = fake.createdWindows[0]!;
+    expect(win.fireNavigation("http://localhost:5173/")).toBe(false);
+    expect(win.fireNavigation("http://localhost:8787/")).toBe(true);
+  });
+});
+
 describe("electron 入口 · .env 装载", () => {
   it("只补缺失的变量，已被宿主设好的值不被文件覆盖", async () => {
     const dir = tempDir();

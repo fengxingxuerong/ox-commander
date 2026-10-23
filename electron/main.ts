@@ -72,6 +72,24 @@ function createWindow(): BrowserWindow {
 
   attachWindow(win);
 
+  // 两条导航守卫（2026-10-23 加固）。
+  //
+  // 为什么需要：这个窗口渲染的是**模型输出与第三方内容**（会话正文、预览、审计
+  // 文本），webPreferences 只关了 nodeIntegration —— 但 `window.open` 出来的子窗口
+  // 会继承同一份 preload 桥，一样能调 `window.ox`；而页面里任何一次跳转都会让应用
+  // 离开本地站点。两者都不是这个应用需要的能力。
+  //
+  // 为什么安全：全仓没有 `window.open` / `<a>` / `location.href=`（2026-10-23 grep
+  // 核过），对外打开走的是 `preview:open` IPC → `shell.openExternal`（带白名单、
+  // 有用例）。dev 模式下 Vite 的整页重载会触发 will-navigate，所以放行应用自身地址。
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, targetUrl) => {
+    const allowed = process.env.OX_DEV_SERVER
+      ? targetUrl.startsWith("http://localhost:5173")
+      : targetUrl.startsWith("file://");
+    if (!allowed) event.preventDefault();
+  });
+
   if (process.env.OX_DEV_SERVER) {
     win.loadURL("http://localhost:5173");
   } else {

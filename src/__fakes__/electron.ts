@@ -113,7 +113,13 @@ export interface FakeBrowserWindow {
   readonly messages: Array<{ channel: string; payload: unknown }>;
   /** Set by `close()`; mirrors the window being destroyed. */
   closed: boolean;
-  webContents: { send(channel: string, payload: unknown): void };
+  webContents: {
+    send(channel: string, payload: unknown): void;
+    /** 记录入口注册的窗口打开策略（返回 `{ action }`）。 */
+    setWindowOpenHandler(handler: (details: unknown) => unknown): void;
+    /** 记录 `webContents.on(...)` 的监听器，测试用 `fireNavigation` 触发。 */
+    on(name: string, listener: (event: unknown, url?: string) => void): void;
+  };
   loadURL(url: string): Promise<void>;
   loadFile(file: string): Promise<void>;
   on(name: string, listener: () => void): void;
@@ -122,6 +128,10 @@ export interface FakeBrowserWindow {
   focus(): void;
   /** Test helper: fires the `closed` listener so the entry can drop its reference. */
   close(): void;
+  /** Test helper: 问一次"新窗口该不该开"（直接调入口注册的那个 handler）。 */
+  openWindow(): unknown;
+  /** Test helper: 触发一次 will-navigate，返回 preventDefault 是否被调用。 */
+  fireNavigation(url: string): boolean;
 }
 
 export const createdWindows: FakeBrowserWindow[] = [];
@@ -133,6 +143,8 @@ export class BrowserWindow {
 
   constructor(public readonly options: Record<string, unknown>) {
     const windowEvents = new Map<string, () => void>();
+    const webContentsEvents = new Map<string, (event: unknown, url?: string) => void>();
+    let openHandler: ((details: unknown) => unknown) | null = null;
     const self: FakeBrowserWindow = {
       loaded: null,
       minimized: false,
@@ -143,6 +155,12 @@ export class BrowserWindow {
       webContents: {
         send: (channel, payload) => {
           self.messages.push({ channel, payload });
+        },
+        setWindowOpenHandler: (handler) => {
+          openHandler = handler;
+        },
+        on: (name, listener) => {
+          webContentsEvents.set(name, listener);
         },
       },
       loadURL: async (url) => {
@@ -165,6 +183,17 @@ export class BrowserWindow {
       close: () => {
         self.closed = true;
         windowEvents.get("closed")?.();
+      },
+      openWindow: () => {
+        if (!openHandler) throw new Error("入口没有注册 setWindowOpenHandler");
+        return openHandler({ url: "https://example.com" });
+      },
+      fireNavigation: (url) => {
+        const listener = webContentsEvents.get("will-navigate");
+        if (!listener) throw new Error("入口没有注册 will-navigate");
+        let prevented = false;
+        listener({ preventDefault: () => (prevented = true) }, url);
+        return prevented;
       },
     };
     createdWindows.push(self);

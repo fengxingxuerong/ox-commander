@@ -950,7 +950,7 @@ const SITE_BASELINE = {
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
-  "electron/main.ts": 6,
+  "electron/main.ts": 7,
   "electron/mcp/client.ts": 44,
   "electron/mcp/manifest.ts": 13,
   "electron/mcp/pool.ts": 9,
