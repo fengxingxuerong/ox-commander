@@ -1,4 +1,4 @@
-import type { ToolCall, ToolSpec } from "./tools/spec";
+import type { ToolCall, ToolSpecLike } from "./tools/spec";
 
 /**
  * 线程级推理强度（M3c-3）。
@@ -54,7 +54,7 @@ export interface ChatRequest {
    * 「工具能力」不依赖"端点恰好支持" —— 否则默认线路不支持时，这条能力对
    * 默认用户就是不可用的。
    */
-  tools?: readonly ToolSpec[];
+  tools?: readonly ToolSpecLike[];
   /**
    * Caller-side cancellation (run aborted / run deadline tripped).
    *

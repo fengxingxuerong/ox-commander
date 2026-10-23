@@ -16,7 +16,8 @@
  * 不可达就说不可达，不把失败包装成成功。
  */
 
-export const MCP_PROTOCOL_VERSION = "2024-11-05";
+import { MCP_PROTOCOL_VERSION } from "../shared/mcp";
+export { MCP_PROTOCOL_VERSION };
 
 /** serve 实例的 HTTP 面（真入口用 fetch 实现，测试注入假件）。允许 reject ——
  *  调用方（工具实现）负责把网络错误转成工具失败，而不是让异常逃出分发器。 */

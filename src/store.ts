@@ -103,6 +103,11 @@ export const useApp = create<AppState>((set, get) => ({
   skills: [],
   skillIssues: [],
   skillsError: undefined,
+  // MCP（M7）：清单摘要。server 进程不在这里起，也不在页面加载时起。
+  mcpServers: [],
+  mcpIssues: [],
+  mcpError: undefined,
+  mcpDir: undefined,
   automationHistory: [],
   newProjectName: "",
   newRequirement: "",
@@ -565,6 +570,31 @@ export const useApp = create<AppState>((set, get) => ({
       set((s) => ({
         skillsError: message,
         logs: [...s.logs, `[错误] 读取技能目录失败: ${message}`],
+      }));
+    }
+  },
+
+  /**
+   * MCP 清单（M7）。
+   *
+   * 与 loadSkills 同款：读不出来要说破（`mcpError`），坏清单逐条列出（服务没
+   * 消失，只是被跳过）。这里**不启动**任何 server —— 页面加载不该拉起外部进程。
+   */
+  loadMcpServers: async () => {
+    try {
+      const res = await api().listMcpServers();
+      set((s) => ({
+        mcpServers: res.servers,
+        mcpIssues: res.issues,
+        mcpError: res.problem,
+        mcpDir: res.dir,
+        ...(res.problem ? { logs: [...s.logs, `[错误] 读取 MCP 清单失败: ${res.problem}`] } : {}),
+      }));
+    } catch (err) {
+      const message = (err as Error).message;
+      set((s) => ({
+        mcpError: message,
+        logs: [...s.logs, `[错误] 读取 MCP 清单失败: ${message}`],
       }));
     }
   },

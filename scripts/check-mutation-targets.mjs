@@ -71,6 +71,12 @@ const EXEMPT = [
     reason: "只做 registerIpc() 的一行转发，逻辑在 electron/ipc/*.ts（那些文件都在表里）。",
   },
   {
+    file: "electron/ipc/mcp.ts",
+    reason:
+      "薄 IPC 适配层：读清单、投影成不含 env 值的摘要，没有可变异算子（mutation-check 实测 0 位点）。" +
+      "行为由 mcp-ipc.test.ts（字段投影/坏清单/problem）与 ipc.test.ts（通道接线）覆盖。",
+  },
+  {
     file: "headless/chat-main.ts",
     reason:
       "CLI 入口胶水：参数解析、readline 与事件打印，没有可单测的纯分支；" +

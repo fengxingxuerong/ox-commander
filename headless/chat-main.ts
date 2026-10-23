@@ -21,6 +21,7 @@ import { ChatSession } from "../electron/chat/session";
 import { ToolRunner } from "../electron/chat/tool-runner";
 import { ChatSessionStore, type ChatSessionEnvelope } from "../electron/chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../electron/chat/runtime";
+import { McpPool } from "../electron/mcp/pool";
 import { buildLlmClient } from "../shared/build-llm";
 import { createLlmClient } from "../shared/http-clients";
 import { getProvider, type ProviderConfig } from "../shared/providers";
@@ -230,6 +231,9 @@ function writeJson(payload: Record<string, unknown>): void {
 }
 
 function describeApproval(req: ChatApprovalRequest): string {
+  if (req.tool === "mcp") {
+    return `${req.mcp ? `${req.mcp.server}/${req.mcp.tool}` : "MCP 工具"} · ${req.command ?? ""}`.trim();
+  }
   if (req.tool === "run_command") return `${req.command ?? ""} ${(req.args ?? []).join(" ")}`.trim();
   return (req.paths ?? []).join("\n");
 }
@@ -337,11 +341,26 @@ function makeBundle(
     settings,
     globalPolicyDir: path.join(oxHome(), "policy.d"),
     homeDir: os.homedir(),
+    // CLI 侧与桌面侧同一个位置约定：`~/.ox/mcp.d`。OX_HOME 可整体重定向
+    // （集成测试据此接真实的本地 server，不碰用户目录）。
+    mcpDir: path.join(oxHome(), "mcp.d"),
   });
   for (const issue of runtime.issues) process.stderr.write(`[chat] ${issue}\n`);
   const providerId = args.provider;
   const controller = new AbortController();
   const requestApproval = approvalChannel(ask);
+  const mcpPool =
+    runtime.mcpServers.length > 0
+      ? new McpPool({
+          rootAbs,
+          manifests: runtime.mcpServers,
+          onEvent: (text) => {
+            const safe = redactSecrets(text);
+            if (args.json) writeJson({ type: "log", text: safe });
+            else process.stderr.write(`[mcp] ${safe}\n`);
+          },
+        })
+      : undefined;
   const runner = new ToolRunner({
     rootAbs,
     pathPolicy: runtime.pathPolicy,
@@ -359,6 +378,7 @@ function makeBundle(
     // 全局根直接传（可能是 undefined）：与整个键缺席等价，不造等价三元位点。
     skills: runtime.skills,
     skillGlobalRootAbs: runtime.skillGlobalRootAbs,
+    mcp: mcpPool,
   });
   const providerConfig: ProviderConfig = {
     ...getProvider(providerId, process.env),
@@ -387,6 +407,7 @@ function makeBundle(
     ...(history ? { history } : {}),
     systemPrompt: runtime.systemPrompt,
     toolProtocol: protocolFor(providerId),
+    ...(mcpPool ? { dynamicTools: () => mcpPool.discover() } : {}),
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     ...(args.maxTurns ? { maxTurns: args.maxTurns } : {}),
@@ -457,6 +478,8 @@ async function runExec(args: ChatArgs): Promise<number> {
   } finally {
     process.removeListener("SIGINT", onSigint);
     rl?.close();
+    // MCP 子进程是会话的资源：单发模式结束后必须杀，否则 CLI 退出前会挂住。
+    bundle.session.dispose();
   }
 }
 
@@ -502,6 +525,7 @@ async function runRepl(args: ChatArgs): Promise<number> {
             true,
           );
           bundle.controller.abort();
+          bundle.session.dispose();
           bundle = next;
           current = next.controller;
           process.stdout.write(`已恢复会话 ${next.session.sessionId}\n`);
@@ -520,6 +544,7 @@ async function runRepl(args: ChatArgs): Promise<number> {
       }
       if (line === "/new") {
         bundle.controller.abort();
+        bundle.session.dispose();
         bundle = makeBundle(store, bundle.rootAbs, args, printer, ask);
         current = bundle.controller;
         process.stdout.write(`新会话 ${bundle.session.sessionId}\n`);
@@ -529,6 +554,7 @@ async function runRepl(args: ChatArgs): Promise<number> {
     }
   } finally {
     rl.close();
+    bundle.session.dispose();
   }
 }
 

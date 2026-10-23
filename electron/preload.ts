@@ -99,6 +99,8 @@ const api = {
   // 而不是异常：runAutomation 返回 accepted / busy / failed 三态。
   listAutomations: () => ipcRenderer.invoke("automations:list"),
   listSkills: (input?: { projectId?: string }) => ipcRenderer.invoke("skills:list", input),
+  // MCP（M7）：只读清单，不在这里启动 server；连接发生在会话首次发送时。
+  listMcpServers: () => ipcRenderer.invoke("mcp:list"),
   createAutomation: (input: { name: string; projectId: string; everyMs: number }) =>
     ipcRenderer.invoke("automations:create", input),
   updateAutomation: (

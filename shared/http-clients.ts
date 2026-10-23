@@ -6,7 +6,7 @@ import {
   createSseDecoder,
   type RawToolCallFragment,
 } from "./sse";
-import type { ToolCall, ToolSpec } from "./tools/spec";
+import type { ToolCall, ToolSpecLike } from "./tools/spec";
 
 interface FetchLikeResponse {
   ok: boolean;
@@ -291,7 +291,7 @@ function looksLikeStreamUnsupported(e: unknown): boolean {
  * 少 `tool_calls` 里的 `id`）就会整条工具链失效，而失效表现为"模型忽然不再
  * 调用工具"——看不出是端点、平台还是模型的问题。
  */
-export function toOpenAiTools(specs: readonly ToolSpec[]): Array<Record<string, unknown>> {
+export function toOpenAiTools(specs: readonly ToolSpecLike[]): Array<Record<string, unknown>> {
   return specs.map((s) => ({
     type: "function",
     function: { name: s.name, description: s.description, parameters: s.parameters },
@@ -501,15 +501,13 @@ export class OpenAiCompatibleClient extends BaseHttpLlmClient {
 }
 
 /** Anthropic 侧的工具声明：`parameters` 改名叫 `input_schema`，其余同名。 */
-export function toAnthropicTools(specs: readonly ToolSpec[]): Array<Record<string, unknown>> {
+export function toAnthropicTools(specs: readonly ToolSpecLike[]): Array<Record<string, unknown>> {
   return specs.map((s) => ({
     name: s.name,
     description: s.description,
-    input_schema: {
-      type: s.parameters.type,
-      properties: s.parameters.properties,
-      required: s.parameters.required,
-    },
+    // 原样透传 schema：MCP 的 inputSchema 可能包含 oneOf / integer / 嵌套 object，
+    // 拆成三个字段重建会把它们静默丢掉（端点收到的是一个更宽松的假 schema）。
+    input_schema: s.parameters,
   }));
 }
 

@@ -12,6 +12,7 @@ import { ensureStores } from "./ipc/context";
 import { registerAgentHandlers, registerObservabilityHandlers } from "./ipc/agents";
 import { registerAutomationHandlers } from "./ipc/automations";
 import { registerSkillHandlers } from "./ipc/skills";
+import { registerMcpHandlers } from "./ipc/mcp";
 import { registerChatHandlers } from "./ipc/chat";
 import { registerDeliveryHandlers } from "./ipc/delivery";
 import { registerGithubHandlers } from "./ipc/github";
@@ -40,4 +41,5 @@ export function registerIpc(): void {
   registerChatHandlers();
   registerAutomationHandlers();
   registerSkillHandlers();
+  registerMcpHandlers();
 }

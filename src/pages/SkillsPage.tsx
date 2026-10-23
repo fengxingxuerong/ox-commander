@@ -20,10 +20,16 @@ export function SkillsPage() {
   const error = useApp((s) => s.skillsError);
   const loadSkills = useApp((s) => s.loadSkills);
   const activeProjectId = useApp((s) => s.activeProjectId);
+  const mcpServers = useApp((s) => s.mcpServers);
+  const mcpIssues = useApp((s) => s.mcpIssues);
+  const mcpError = useApp((s) => s.mcpError);
+  const mcpDir = useApp((s) => s.mcpDir);
+  const loadMcpServers = useApp((s) => s.loadMcpServers);
 
   useEffect(() => {
     void loadSkills();
-  }, [loadSkills, activeProjectId]);
+    void loadMcpServers();
+  }, [loadSkills, loadMcpServers, activeProjectId]);
 
   return (
     <section className="card">
@@ -84,6 +90,58 @@ export function SkillsPage() {
           </ul>
         </div>
       ) : null}
+
+      <div className="thread-rail-block" data-testid="mcp-section">
+        <span className="hud-stat-label">MCP servers（{mcpServers.length}）</span>
+        <p className="card-sub">
+          清单目录 <code>{mcpDir ?? "应用数据目录/mcp.d"}</code> · 每个 server 一个 JSON：{" "}
+          <code>{`{"command":"npx","args":["-y","<package>"],"env":{},"timeoutMs":60000}`}</code>
+        </p>
+        <p className="muted" data-testid="mcp-trust-note">
+          MCP server 是<strong>外部进程</strong>，运行在沙箱之外：平台只负责调用前审批、返回脱敏与超时清理，
+          不为它的行为背书。只放你自己写/审过的清单，不要把别人给的 JSON 直接丢进目录。
+        </p>
+        {mcpError ? <p className="notice error">读取 MCP 清单失败：{mcpError}</p> : null}
+        {mcpServers.length === 0 && mcpIssues.length === 0 ? (
+          <p className="muted" data-testid="mcp-empty">
+            还没有 MCP server。接入后，它的工具会以 <code>mcp__&lt;server&gt;__&lt;tool&gt;</code>{" "}
+            出现在会话里；会话第一次发送时才会启动进程。
+          </p>
+        ) : null}
+        {mcpServers.length > 0 ? (
+          <ul className="skill-list">
+            {mcpServers.map((server) => (
+              <li key={server.name} className="skill-row" data-testid="mcp-row">
+                <span className="skill-row-head">
+                  <b>{server.name}</b>
+                  <span className="skill-badge project">MCP</span>
+                  <span className="muted skill-path">
+                    {server.command}
+                    {server.args.length > 0 ? ` ${server.args.join(" ")}` : ""}
+                  </span>
+                </span>
+                <span className="muted">
+                  超时 {server.timeoutMs}ms
+                  {server.envNames.length > 0 ? ` · env：${server.envNames.join("、")}（值不显示）` : ""}
+                </span>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+        {mcpIssues.length > 0 ? (
+          <>
+            <span className="hud-stat-label">跳过的清单（{mcpIssues.length}）</span>
+            <ul className="skill-list">
+              {mcpIssues.map((issue) => (
+                <li key={`${issue.file}:${issue.message}`} className="skill-row" data-testid="mcp-issue">
+                  <span className="muted skill-path">{issue.file}</span>
+                  <span className="muted">{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+      </div>
     </section>
   );
 }

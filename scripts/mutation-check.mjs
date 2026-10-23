@@ -139,16 +139,16 @@ const TARGETS = [
   // **文本协议解析**（tool 块 → ToolCall）。入表理由：工具名或必填参数判错一次，
   // 模型那一轮调用的结果就是静默丢失 —— 表现是"模型假装读过了"，不落任何错误。
   { file: "shared/tools/spec.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
-  { file: "shared/tools/protocol.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  { file: "shared/tools/protocol.ts", tests: ["src/chat-tools.test.ts", "src/mcp-session.test.ts"], tier: 1 },
   // 2026-10-20：补丁解析与应用。入表理由：上下文匹配是补丁的**唯一**防漂移机制，
   // 模糊匹配会把"改错地方"变成"改了别的地方"——而后者在验收里是一片绿。
   { file: "shared/tools/patch.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
   // 2026-10-20：工具裁决（沙箱三档 × 审批策略）。入表理由：这一层同时决定
   // "read-only 下能不能写"与"要不要先问人"，两件事判反都不报错、只漏防护。
-  { file: "shared/tools/policy.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  { file: "shared/tools/policy.ts", tests: ["src/chat-tools.test.ts", "src/chat-tool-runner.test.ts"], tier: 1 },
   // 2026-10-20：会话事件契约与转录派生（摘要/一行说明）。入表理由：摘要是用户
   // 决定"该不该停下来看一眼"的那一行，口径错了没人会发现。
-  { file: "shared/chat-events.ts", tests: ["src/chat-tools.test.ts"], tier: 1 },
+  { file: "shared/chat-events.ts", tests: ["src/chat-tools.test.ts", "src/mcp-session.test.ts"], tier: 1 },
   // 2026-10-20（P1-1）：流式读取层（SSE 切分 / 两种端点形状的增量聚合 / 工具碎片
   // 拼接）。入表理由：切错一个 chunk 边界或少拼一段参数都不会抛错 —— 前者表现为
   // "模型偶尔不回话"，后者表现为"模型调用失败"，两条都会被当成模型的问题。
@@ -172,7 +172,7 @@ const TARGETS = [
   { file: "shared/chat-changes.ts", tests: ["src/chat-changes.test.ts"], tier: 1 },
   // 2026-10-20：会话循环。入表理由：中断与 fail-closed 两条行为错了都不会抛错，
   // 只表现为"点了没反应"或"没人答却执行了"——后者是必须被证明不会发生的那类。
-  { file: "electron/chat/session.ts", tests: ["src/chat-session.test.ts"], tier: 1 },
+  { file: "electron/chat/session.ts", tests: ["src/chat-session.test.ts", "src/mcp-session.test.ts"], tier: 1 },
   // 2026-10-20：会话宿主编排（首条消息建会话、设置/项目切换重建、会话列表/恢复/
   // 分叉/撤销的 IPC）。入表理由：首条消息空指针与"恢复后消息序列错位"都是
   // 页面照样能点、只是行为错的那类缺陷。
@@ -186,6 +186,19 @@ const TARGETS = [
   // 2026-10-20：项目级 `.ox/config.json` 归一化。入表理由：未知版本/非法档位
   // 必须整份忽略并说破，不能被半懂不懂地执行成一次放宽。
   { file: "shared/project-config.ts", tests: ["src/chat-runtime.test.ts"], tier: 1 },
+  // 2026-10-23（M7）：MCP 契约（清单归一化 / 名空间 / 宽松 schema 校验 / 结果展平）。
+  // 入表理由：名空间拆错一次，模型调的是另一个工具；schema 校验多拒一次，合法调用
+  // 会被静默丢掉；返回展平把 base64 灌进上下文则是一次昂贵的上下文事故。
+  { file: "shared/mcp.ts", tests: ["src/mcp-contract.test.ts"], tier: 1 },
+  // 2026-10-23（M7）：mcp.d 容错加载与签名指纹。坏清单被静默丢弃 = "我配的 server
+  // 没生效"且无迹可查；指纹漏项 = 改了配置却继续跑旧进程。
+  { file: "electron/mcp/manifest.ts", tests: ["src/mcp-contract.test.ts"], tier: 1 },
+  // 2026-10-23（M7）：stdio JSON-RPC 客户端。超时/中止/熔断三条错法都不会抛到
+  // 会话层：分别是"界面卡死"、"子进程继续跑"、"坏 server 每轮拖满超时"。
+  { file: "electron/mcp/client.ts", tests: ["src/mcp-client.test.ts"], tier: 1 },
+  // 2026-10-23（M7）：连接池的目录上限与路由。静默截断工具目录会让模型"看不见
+  // 某个工具"而人毫无线索；未声明工具被放行则越过了 tools/list 这道窄门。
+  { file: "electron/mcp/pool.ts", tests: ["src/mcp-client.test.ts", "src/mcp-session.test.ts"], tier: 1 },
   // 2026-10-17：桌面通知判据（C1，竞品缺口「通知」格）——哪些事件值得打扰人
   // （receipt / escalation / approval-request 三档，其余全不弹）与文案裁剪。
   // 入表理由：弹窗是 Electron 副作用无法单测，**判据错了就等于通知全错**，
@@ -909,11 +922,11 @@ const SITE_BASELINE = {
   "electron/automations/automation-scheduler.ts": 6,
   "electron/automations/automation-store.ts": 18,
   "electron/board-derive.ts": 40,
-  "electron/chat/runtime.ts": 16,
+  "electron/chat/runtime.ts": 17,
   "electron/chat/session-store.ts": 38,
-  "electron/chat/session.ts": 44,
+  "electron/chat/session.ts": 47,
   "electron/chat/thread-registry.ts": 12,
-  "electron/chat/tool-runner.ts": 73,
+  "electron/chat/tool-runner.ts": 86,
   "electron/chat/write-ledger.ts": 3,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -929,7 +942,7 @@ const SITE_BASELINE = {
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
   "electron/ipc/automations.ts": 14,
-  "electron/ipc/chat.ts": 139,
+  "electron/ipc/chat.ts": 140,
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
@@ -938,6 +951,9 @@ const SITE_BASELINE = {
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 6,
+  "electron/mcp/client.ts": 44,
+  "electron/mcp/manifest.ts": 13,
+  "electron/mcp/pool.ts": 9,
   "electron/notify-rules.ts": 17,
   "electron/platform.ts": 38,
   "electron/preview-manager.ts": 12,
@@ -968,7 +984,7 @@ const SITE_BASELINE = {
   "shared/chat-changes.ts": 13,
   "shared/chat-compress.ts": 14,
   "shared/chat-conflict.ts": 12,
-  "shared/chat-events.ts": 15,
+  "shared/chat-events.ts": 16,
   "shared/chat-thread-status.ts": 13,
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
@@ -979,6 +995,7 @@ const SITE_BASELINE = {
   "shared/graph.ts": 8,
   "shared/http-clients.ts": 137,
   "shared/llm-client.ts": 15,
+  "shared/mcp.ts": 101,
   "shared/page-smoke.ts": 17,
   "shared/policy-file.ts": 33,
   "shared/project-config.ts": 16,
@@ -994,8 +1011,8 @@ const SITE_BASELINE = {
   "shared/sse.ts": 51,
   "shared/text-diff.ts": 38,
   "shared/tools/patch.ts": 49,
-  "shared/tools/policy.ts": 20,
-  "shared/tools/protocol.ts": 13,
+  "shared/tools/policy.ts": 22,
+  "shared/tools/protocol.ts": 35,
   "shared/tools/spec.ts": 27,
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,

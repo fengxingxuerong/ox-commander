@@ -26,6 +26,7 @@ import { ChatSession } from "../chat/session";
 import { ToolRunner } from "../chat/tool-runner";
 import { ChatSessionStore } from "../chat/session-store";
 import { resolveChatRuntime, type ChatRuntime } from "../chat/runtime";
+import { McpPool } from "../mcp/pool";
 import { ThreadRegistry, type LiveThread } from "../chat/thread-registry";
 import { collectChangedFiles, exportablePaths, threadBranchName, threadExportMessage } from "../../shared/chat-changes";
 import { deliveryStamp, exportDeliveryBranch } from "../engine/git-export";
@@ -33,6 +34,7 @@ import { publishDeliveryRemote } from "../engine/git-remote";
 import { focusChatSession } from "../chat/focus";
 import { clearThreadWrites, recordThreadWrites, resetThreadWrites, threadWrites } from "../chat/write-ledger";
 import { writeFileAtomic } from "../atomic-file";
+import { redactSecrets } from "../../shared/redact";
 import {
   getProvider,
   isModelId,
@@ -132,18 +134,28 @@ function rejectApprovals(sessionId: string | null, reason: string): void {
   }
 }
 
-/** 中止一条活线程；`sessionId` 缺席 = 最近活跃的那条（兼容旧调用）。 */
+/**
+ * 中止一条活线程；`sessionId` 缺席 = 最近活跃的那条（兼容旧调用）。
+ *
+ * 先 abort 再 dispose：signal 的监听是同步的，在途 MCP 请求会先看到"已中止"
+ * 并把原因带回转录；dispose 随后杀掉子进程树。顺序反过来会让模型收到一条
+ * "server 已关闭"的内部错误，而用户按的是停止。
+ */
 export function abortChatSession(sessionId?: string): boolean {
   const target = sessionId === undefined ? liveThreads.active() : liveThreads.get(sessionId);
   if (!target) return false;
   target.controller.abort();
+  target.session.dispose();
   rejectApprovals(target.sessionId, "会话已中止");
   return true;
 }
 
 /** 应用退出 / 重装配 IPC：所有线程一起收尾（生产只在启动时走到一次）。 */
 function abortAllChatSessions(): void {
-  for (const entry of liveThreads.all()) entry.controller.abort();
+  for (const entry of liveThreads.all()) {
+    entry.controller.abort();
+    entry.session.dispose();
+  }
   rejectApprovals(null, "会话已中止");
   liveThreads.clear();
 }
@@ -184,6 +196,15 @@ function buildSession(
   // 从 `live` 反读会得到一个空 id，渲染层就无法把审批挂回当前会话。
   const sessionId = history?.sessionId ?? `chat-${randomUUID()}`;
   for (const issue of runtime.issues) send({ type: "log", text: `[chat] ${issue}` });
+  // MCP（M7）：只有配了 server 才建池；工具在第一次发送时懒发现（见 ChatSession）。
+  const mcpPool =
+    runtime.mcpServers.length > 0
+      ? new McpPool({
+          rootAbs,
+          manifests: runtime.mcpServers,
+          onEvent: (text) => send({ type: "log", text: redactSecrets(text) }),
+        })
+      : undefined;
   const runner = new ToolRunner({
     rootAbs,
     pathPolicy: runtime.pathPolicy,
@@ -212,6 +233,7 @@ function buildSession(
     // 永远等价的三元位点（与上面 reasoningEffort 同一条理由）。
     skills: runtime.skills,
     skillGlobalRootAbs: runtime.skillGlobalRootAbs,
+    mcp: mcpPool,
   });
   const session = new ChatSession({
     client: pinned ? buildLlmPinned(settings, pinned.providerId, pinned.model) : buildLlm(settings),
@@ -221,6 +243,7 @@ function buildSession(
     ...(history ? { history } : {}),
     systemPrompt: runtime.systemPrompt,
     toolProtocol,
+    ...(mcpPool ? { dynamicTools: () => mcpPool.discover() } : {}),
     mode: runtime.mode,
     approvalPolicy: runtime.approvalPolicy,
     ...(pinned ? { providerId: pinned.providerId, model: pinned.model } : {}),
@@ -262,6 +285,7 @@ function runtimeOf(
     settings,
     globalPolicyDir: path.join(app.getPath("userData"), "policy.d"),
     homeDir: app.getPath("home"),
+    mcpDir: path.join(app.getPath("userData"), "mcp.d"),
     ...(profile ? { profile } : {}),
   });
 }
@@ -295,17 +319,23 @@ function ensureLiveSession(
   // 重建只接**自己的**历史：设置变了不等于聊天记录消失，但另一条线程的转录
   // 与本条无关 —— 顺手接过来就是把两条线搅在一起（多线程下最隐蔽的串台）。
   let history: ChatHistory | undefined;
-  if (existing !== undefined && sameRoot(existing.rootAbs, rootAbs)) {
-    const snap = existing.session.snapshot();
-    history = {
-      sessionId: existing.session.sessionId,
-      entries: snap.entries,
-      messages: messagesForProtocol(
-        snap.messages,
-        toolProtocolOf(settings, profile?.providerId ?? settings.llmProvider),
-      ),
-      meta: snap.meta,
-    };
+  if (existing !== undefined) {
+    // 重建 = 旧会话退休：先 abort 再收 MCP 子进程。旧实现只从登记表移除，
+    // 池里的外部进程会一直活到应用退出。
+    existing.controller.abort();
+    if (sameRoot(existing.rootAbs, rootAbs)) {
+      const snap = existing.session.snapshot();
+      history = {
+        sessionId: existing.session.sessionId,
+        entries: snap.entries,
+        messages: messagesForProtocol(
+          snap.messages,
+          toolProtocolOf(settings, profile?.providerId ?? settings.llmProvider),
+        ),
+        meta: snap.meta,
+      };
+    }
+    existing.session.dispose();
     liveThreads.remove(existing.sessionId);
   }
   return buildSession(rootAbs, settings, runtime, projectId, history, profile);
@@ -333,8 +363,9 @@ function resumeIntoLive(projectId: string, sessionId: string, settings: ProjectS
     focusLive(sessionId);
     return already.session;
   }
-  // 不必先 remove：`buildSession` 用同一个 sessionId 登记，登记表的"同 id 覆盖"
-  // 就是为重建准备的（删了再插也一样，多一行只是多一条要审计的位点）。
+  // 已中止的旧线程还挂在登记表里：先收掉它（abort 已落下，dispose 只是杀
+  // MCP 子进程）。"同 id 覆盖"是登记表的行为，不是资源回收。
+  already?.session.dispose();
   const profile = profileOfMeta(env.snapshot.meta);
   const history: ChatHistory = {
     sessionId: env.snapshot.meta.sessionId,

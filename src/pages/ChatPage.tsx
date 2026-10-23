@@ -460,12 +460,21 @@ export function ChatPage() {
 
         {chat.pendingApproval ? (
           <div className="chat-approval">
-            <h3>🛂 {chat.pendingApproval.tool === "run_command" ? "命令需要确认" : "改动需要确认"}</h3>
+            <h3>
+              🛂{" "}
+              {chat.pendingApproval.tool === "run_command"
+                ? "命令需要确认"
+                : chat.pendingApproval.tool === "mcp"
+                  ? "MCP 工具需要确认"
+                  : "改动需要确认"}
+            </h3>
             <p className="muted">{chat.pendingApproval.reason}</p>
             <pre className="chat-detail">
               {chat.pendingApproval.tool === "run_command"
                 ? `${chat.pendingApproval.command ?? ""} ${(chat.pendingApproval.args ?? []).join(" ")}`
-                : (chat.pendingApproval.paths ?? []).join("\n")}
+                : chat.pendingApproval.tool === "mcp"
+                  ? `${chat.pendingApproval.mcp ? `${chat.pendingApproval.mcp.server}/${chat.pendingApproval.mcp.tool}` : "MCP 工具"}\n${chat.pendingApproval.command ?? ""}`
+                  : (chat.pendingApproval.paths ?? []).join("\n")}
             </pre>
             <input
               value={reason}

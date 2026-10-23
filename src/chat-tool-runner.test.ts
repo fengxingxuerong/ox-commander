@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { ToolRunner, compareEntryNames } from "../electron/chat/tool-runner";
+import { ToolRunner, compareEntryNames, type McpToolExecutor } from "../electron/chat/tool-runner";
 import type { ChatApprovalRequest } from "../shared/chat-events";
 import type { ToolCall } from "../shared/tools/spec";
 import type { Skill } from "../shared/skills";
@@ -508,5 +508,196 @@ describe("ToolRunner · read_skill", () => {
     );
     expect(res.ok).toBe(false);
     expect(res.reason).toContain("不是文件");
+  });
+});
+
+/**
+ * MCP 工具（M7）。
+ *
+ * 用注入的 executor 把"外部进程"缩成一个函数：这里要钉的是平台侧的四件事 ——
+ * 沙箱档位、审批三档、失败话术、输出脱敏/截断。真正的 stdio 进程由
+ * `mcp-client.test.ts` 用 fixture server 验证。
+ */
+describe("ToolRunner · MCP 工具（M7）", () => {
+  interface FakeExec extends McpToolExecutor {
+    calls: Array<{ server: string; tool: string; args: Record<string, unknown> }>;
+    disposed: number;
+  }
+
+  function exec(overrides: Partial<McpToolExecutor> = {}): FakeExec {
+    const calls: FakeExec["calls"] = [];
+    return {
+      calls,
+      disposed: 0,
+      async call(server, tool, args) {
+        calls.push({ server, tool, args });
+        return overrides.call
+          ? await overrides.call(server, tool, args)
+          : { ok: true, output: `${server}/${tool}` };
+      },
+      commandOf(server) {
+        return overrides.commandOf ? overrides.commandOf(server) : server === "demo" ? "node" : undefined;
+      },
+      dispose() {
+        this.disposed += 1;
+        overrides.dispose?.();
+      },
+    };
+  }
+
+  const mcpCall = (tool = "echo", args: Record<string, unknown> = { text: "hi" }): ToolCall =>
+    call(`mcp__demo__${tool}` as ToolCall["name"], args);
+
+  it("read-only 档下直接拒绝，executor 一次都不被调用", async () => {
+    const e = exec();
+    const r = runner(project(), { mode: "read-only", mcp: e });
+    const res = await r.run(mcpCall());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("read-only");
+    expect(e.calls).toEqual([]);
+  });
+
+  it("untrusted：审批请求带 mcp 身份与外部进程说明；批准后执行并回传参数", async () => {
+    const root = project();
+    const requests: ChatApprovalRequest[] = [];
+    const e = exec();
+    const r = runner(root, {
+      mode: "workspace-write",
+      approvalPolicy: "untrusted",
+      mcp: e,
+      requestApproval: async (req) => {
+        requests.push(req);
+        return { granted: true, scope: "once" };
+      },
+    });
+    const res = await r.run(mcpCall("echo", { text: "你好" }));
+    expect(res.ok).toBe(true);
+    expect(res.output).toBe("demo/echo");
+    expect(requests[0]).toMatchObject({
+      tool: "mcp",
+      command: "node",
+      mcp: { server: "demo", tool: "echo" },
+    });
+    expect(requests[0]?.reason).toContain("外部进程");
+    expect(e.calls).toEqual([{ server: "demo", tool: "echo", args: { text: "你好" } }]);
+  });
+
+  it("拒绝理由原样回灌，且不执行", async () => {
+    const e = exec();
+    const r = runner(project(), {
+      approvalPolicy: "untrusted",
+      mcp: e,
+      requestApproval: async () => ({ granted: false, reason: "这个 server 先别用" }),
+    });
+    const res = await r.run(mcpCall());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("这个 server 先别用");
+    expect(e.calls).toEqual([]);
+  });
+
+  it("「本会话不再问」按 server 的启动命令记账：第二个工具不再打扰", async () => {
+    const e = exec();
+    let asked = 0;
+    const r = runner(project(), {
+      approvalPolicy: "untrusted",
+      mcp: e,
+      requestApproval: async () => {
+        asked += 1;
+        return { granted: true, scope: "session" };
+      },
+    });
+    expect((await r.run(mcpCall("echo"))).ok).toBe(true);
+    expect((await r.run(mcpCall("other"))).ok).toBe(true);
+    expect(asked).toBe(1);
+  });
+
+  it("on-request 按 approvalCommands 的 basename 命中 MCP server 命令", async () => {
+    const e = exec();
+    const asked: string[] = [];
+    const r = runner(project(), {
+      approvalPolicy: "on-request",
+      approvalCommands: ["node"],
+      mcp: e,
+      requestApproval: async (req) => {
+        asked.push(req.command ?? "");
+        return { granted: true };
+      },
+    });
+    expect((await r.run(mcpCall())).ok).toBe(true);
+    expect(asked).toEqual(["node"]);
+  });
+
+  it("没有审批通道时 fail-closed", async () => {
+    const e = exec();
+    const r = runner(project(), { approvalPolicy: "untrusted", mcp: e });
+    const res = await r.run(mcpCall());
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("没有审批通道");
+    expect(e.calls).toEqual([]);
+  });
+
+  it("输出过 redact + truncate：密钥被替换，超长保留尾部并标注原文长度", async () => {
+    const root = project();
+    const secret = exec({ async call() { return { ok: true, output: "key=sk-abcdefghijklmnopqrstuvwxyz" }; } });
+    const redacted = await runner(root, { approvalPolicy: "never", mcp: secret }).run(mcpCall());
+    expect(redacted.ok).toBe(true);
+    expect(redacted.output).toContain("sk-[REDACTED]");
+    expect(redacted.output).not.toContain("abcdefghijklmnopqrstuvwxyz");
+
+    const big = exec({ async call() { return { ok: true, output: "头".repeat(9_000) + "尾结论" }; } });
+    const cut = await runner(root, { approvalPolicy: "never", mcp: big }).run(mcpCall());
+    expect(cut.ok).toBe(true);
+    expect(cut.truncatedFrom).toBe(9_003);
+    expect(cut.output).toContain("尾结论");
+    expect(cut.output).toContain("已截断");
+  });
+
+  it("工具失败把 server 的说明当理由（同样脱敏），不把异常抛给会话", async () => {
+    const failing = exec({ async call() { return { ok: false, output: "", reason: "boom token=sk-abcdefghijklmnopqrstuvwxyz" }; } });
+    const res = await runner(project(), { approvalPolicy: "never", mcp: failing }).run(mcpCall());
+    expect(res.ok).toBe(false);
+    expect(res.output).toBe("");
+    expect(res.reason).toContain("boom");
+    expect(res.reason).not.toContain("abcdefghijklmnopqrstuvwxyz");
+
+    const throwing = exec({ async call() { throw new Error("pipe closed"); } });
+    const thrown = await runner(project(), { approvalPolicy: "never", mcp: throwing }).run(mcpCall());
+    expect(thrown.ok).toBe(false);
+    expect(thrown.reason).toContain("pipe closed");
+  });
+
+  it("没有 executor / server 不在清单 / 名字形状不对，各给一条明确理由", async () => {
+    const root = project();
+    const noExec = await runner(root).run(mcpCall());
+    expect(noExec.reason).toContain("没有 MCP 连接器");
+
+    const unknownServer = await runner(root, { mcp: exec(), approvalPolicy: "never" }).run(
+      call("mcp__ghost__echo" as ToolCall["name"], {}),
+    );
+    expect(unknownServer.reason).toContain("不在本会话的清单里");
+
+    const malformed = await runner(root, { mcp: exec(), approvalPolicy: "never" }).run(
+      call("mcp____echo" as ToolCall["name"], {}),
+    );
+    expect(malformed.reason).toContain("MCP 工具名不合法");
+  });
+
+  it("会话已中止时不执行（signal 在调用前已落下）", async () => {
+    const e = exec();
+    const controller = new AbortController();
+    controller.abort();
+    const res = await runner(project(), { approvalPolicy: "never", mcp: e }).run(mcpCall(), {
+      signal: controller.signal,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("已中止");
+    expect(e.calls).toEqual([]);
+  });
+
+  it("dispose 把收尾转交给 executor（MCP 子进程的唯一持有者）", () => {
+    const e = exec();
+    const r = runner(project(), { mcp: e });
+    r.dispose();
+    expect(e.disposed).toBe(1);
   });
 });

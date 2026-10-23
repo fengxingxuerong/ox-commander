@@ -62,7 +62,13 @@ export function baseNameOf(command: string): string {
 }
 
 export interface ToolDecisionInput {
-  tool: ToolName;
+  /**
+   * 内置工具名，或 `"mcp"`（外部 MCP 工具的统一风险档）。
+   *
+   * MCP 工具名是运行时发现的，不能进闭合的 `ToolName`；但它们的行为等价于
+   * **执行外部进程**，所以风险档固定为 `exec`，审批口径与 `run_command` 同源。
+   */
+  tool: ToolName | "mcp";
   mode: SandboxMode;
   approvalPolicy: ApprovalPolicy;
   /** `on-request` 档下点名要问的命令（basename 口径）。 */
@@ -86,11 +92,12 @@ export type ToolDecision =
  * 混在一起会让界面把"read-only 下不能写"报成"你拒绝了这次修改"。
  */
 export function decideTool(input: ToolDecisionInput): ToolDecision {
-  const risk = toolRisk(input.tool);
+  const risk = input.tool === "mcp" ? "exec" : toolRisk(input.tool);
+  const action = input.tool === "mcp" ? "调用外部 MCP 工具" : risk === "write" ? "写文件" : "执行命令";
   if (input.mode === "read-only" && risk !== "read") {
     return {
       verdict: "deny",
-      reason: `沙箱档位为 read-only，不允许${risk === "write" ? "写文件" : "执行命令"}（改档位或换一个只读工具）`,
+      reason: `沙箱档位为 read-only，不允许${action}（改档位或换一个只读工具）`,
     };
   }
   if (risk === "read") return { verdict: "allow" };
@@ -103,13 +110,15 @@ export function decideTool(input: ToolDecisionInput): ToolDecision {
   if (input.approvalPolicy === "untrusted") {
     return {
       verdict: "ask",
-      reason: risk === "write" ? "当前审批策略为 untrusted：写文件需要人工确认" : "当前审批策略为 untrusted：执行命令需要人工确认",
+      reason: `当前审批策略为 untrusted：${action}需要人工确认`,
     };
   }
-  // on-request：只问策略点名的命令，其余交给地板。
+  // on-request：只问策略点名的命令，其余交给地板。MCP 的"命令"是它自己的
+  // server 启动命令 —— 名单里的 `npx` 覆盖所有以 npx 起的 server，这与
+  // run_command 的 basename 口径一致，不需要第二套命名。
   const named = input.approvalCommands ?? [];
   if (risk === "exec" && named.some((c) => baseNameOf(c) === baseNameOf(input.command ?? ""))) {
-    return { verdict: "ask", reason: `命令 ${baseNameOf(input.command ?? "")} 在审批名单内，需要人工确认` };
+    return { verdict: "ask", reason: `${action} ${baseNameOf(input.command ?? "")} 在审批名单内，需要人工确认` };
   }
   return { verdict: "allow" };
 }

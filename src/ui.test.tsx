@@ -242,6 +242,8 @@ function makeBridge(): Bridge {
     runAutomation: vi.fn(async () => "accepted" as const),
     automationHistory: vi.fn(async () => []),
     listSkills: vi.fn(async () => ({ skills: [], issues: [] })),
+    // MCP（M7）：清单只读；测试默认空目录，专条用例自己改返回值。
+    listMcpServers: vi.fn(async () => ({ dir: "C:\\tmp\\mcp.d", servers: [], issues: [] })),
   };
 }
 
@@ -268,6 +270,10 @@ function resetStore() {
     automations: [],
     automationsError: undefined,
     automationHistory: [],
+    mcpServers: [],
+    mcpIssues: [],
+    mcpError: undefined,
+    mcpDir: undefined,
     newProjectName: "",
     newRequirement: "",
     usage: undefined,
@@ -2013,9 +2019,14 @@ describe("AuditPanel", () => {
  * 坏技能**照样列出来**（列的是路径与原因 —— 改那份文件的人需要它）、
  * 一个技能都没有时给的是"怎么加一个"的说明，而不是一块空白。
  */
-describe("SkillsPage（M6a）", () => {
+describe("SkillsPage（M6a/M7）", () => {
   beforeEach(() => {
     window.oxCommander.listSkills = vi.fn(async () => ({ skills: [], issues: [] }));
+    window.oxCommander.listMcpServers = vi.fn(async () => ({
+      dir: "C:\\tmp\\mcp.d",
+      servers: [],
+      issues: [],
+    }));
   });
 
   it("列出技能与来源；坏技能照样列（路径 + 原因）", async () => {
@@ -2039,5 +2050,37 @@ describe("SkillsPage（M6a）", () => {
     render(<SkillsPage />);
     await waitFor(() => expect(screen.getByTestId("skill-empty")).toBeTruthy());
     expect(screen.getByTestId("skill-empty").textContent).toContain(".ox/skills");
+  });
+
+  it("MCP：列出 server、env 只显示名字、坏清单照样列，并写明外部进程边界", async () => {
+    (window.oxCommander.listMcpServers as unknown as Mock).mockResolvedValueOnce({
+      dir: "C:\\tmp\\mcp.d",
+      servers: [
+        {
+          name: "filesystem",
+          command: "npx",
+          args: ["-y", "server-filesystem"],
+          envNames: ["MCP_ROOT"],
+          timeoutMs: 60_000,
+        },
+      ],
+      issues: [{ file: "broken.json", message: "command 必须是非空字符串" }],
+    });
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getAllByTestId("mcp-row").length).toBe(1));
+    const row = screen.getByTestId("mcp-row");
+    expect(row.textContent).toContain("filesystem");
+    expect(row.textContent).toContain("npx -y server-filesystem");
+    expect(row.textContent).toContain("MCP_ROOT");
+    expect(row.textContent).toContain("值不显示");
+    expect(screen.getByTestId("mcp-issue").textContent).toContain("command 必须是非空字符串");
+    expect(screen.getByTestId("mcp-trust-note").textContent).toContain("外部进程");
+    expect(screen.getByTestId("mcp-trust-note").textContent).toContain("沙箱之外");
+  });
+
+  it("MCP：清单目录为空时给出接入方式（没有 server 不是错误）", async () => {
+    render(<SkillsPage />);
+    await waitFor(() => expect(screen.getByTestId("mcp-empty")).toBeTruthy());
+    expect(screen.getByTestId("mcp-empty").textContent).toContain("mcp__<server>__<tool>");
   });
 });

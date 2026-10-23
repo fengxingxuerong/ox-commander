@@ -20,10 +20,12 @@ import {
   TOOL_SPECS,
   isToolName,
   validateToolArgs,
+  type DynamicToolSpec,
   type ToolCall,
   type ToolResult,
-  type ToolSpec,
+  type ToolSpecLike,
 } from "./spec";
+import { validateMcpArgs } from "../mcp";
 
 /** 文本协议里的围栏语言标记。 */
 export const TOOL_FENCE = "tool";
@@ -60,7 +62,8 @@ export function extractToolBlocks(text: string): string[] {
  * （模型想一次调多个工具时用）。数组形式按 `MAX_TOOL_CALLS_PER_TURN` 截断 ——
  * 一轮塞几十个工具调用没人审得过来，而且失败会连成一串难读的噪声。
  */
-export function parseToolTurn(text: string): ParsedTurn {
+export function parseToolTurn(text: string, opts: { extraSpecs?: readonly DynamicToolSpec[] } = {}): ParsedTurn {
+  const extra = opts.extraSpecs ?? [];
   const blocks = extractToolBlocks(text);
   const calls: ToolCall[] = [];
   const problems: string[] = [];
@@ -84,18 +87,24 @@ export function parseToolTurn(text: string): ParsedTurn {
         continue;
       }
       const name = raw.tool ?? raw.name;
-      if (!isToolName(name)) {
-        problems.push(`未登记的工具名（已跳过）：${String(name)}`);
-        continue;
-      }
       const args = raw.arguments ?? raw.args ?? {};
-      const invalid = validateToolArgs(name, args);
+      let invalid: string | null = null;
+      if (isToolName(name)) {
+        invalid = validateToolArgs(name, args);
+      } else {
+        const dynamic = typeof name === "string" ? extra.find((s) => s.name === name) : undefined;
+        if (dynamic === undefined) {
+          problems.push(`未登记的工具名（已跳过）：${String(name)}`);
+          continue;
+        }
+        invalid = validateMcpArgs(name as string, dynamic.parameters, args);
+      }
       if (invalid) {
         problems.push(`${invalid}（该调用已跳过）`);
         continue;
       }
       seq += 1;
-      calls.push({ id: `t-${seq}`, name, args: args as Record<string, unknown> });
+      calls.push({ id: `t-${seq}`, name: name as string, args: args as Record<string, unknown> });
     }
   }
   const stripped = text
@@ -112,7 +121,7 @@ export function parseToolTurn(text: string): ParsedTurn {
  * 说话"写进规则 —— 不说清输出形状的模型会把 JSON 混进散文里，解析就会静默
  * 少执行一个工具，而"少执行"在会话里表现为"模型假装读过了"。
  */
-export function toolCatalogBlock(names: readonly string[], specs: readonly ToolSpec[] = TOOL_SPECS): string {
+export function toolCatalogBlock(names: readonly string[], specs: readonly ToolSpecLike[] = TOOL_SPECS): string {
   const usable = specs.filter((s) => names.includes(s.name));
   const lines: string[] = [
     "你可以使用以下工具。需要调用时，输出**且只输出**一个围栏块，块内是 JSON：",
@@ -130,12 +139,27 @@ export function toolCatalogBlock(names: readonly string[], specs: readonly ToolS
     "工具清单：",
   ];
   for (const spec of usable) {
-    const required = spec.parameters.required;
-    const props = Object.entries(spec.parameters.properties)
-      .map(([key, prop]) => `${key}（${prop.type}${required.includes(key) ? "，必填" : "，可选"}）：${prop.description}`)
+    // MCP 的 inputSchema 是任意 JSON Schema 子集：字段名固定（required/properties），
+    // 但每个属性的 type/description 可能是数组或缺席。这里只做展示级读取，
+    // 校验由 `validateMcpArgs` 负责 —— 两处不共用一份"猜测"。
+    const parameters = spec.parameters as { required?: unknown; properties?: unknown };
+    const required = Array.isArray(parameters.required)
+      ? parameters.required.filter((r): r is string => typeof r === "string")
+      : [];
+    const propsObj =
+      typeof parameters.properties === "object" && parameters.properties !== null && !Array.isArray(parameters.properties)
+        ? (parameters.properties as Record<string, unknown>)
+        : {};
+    const props = Object.entries(propsObj)
+      .map(([key, raw]) => {
+        const prop = typeof raw === "object" && raw !== null ? (raw as Record<string, unknown>) : {};
+        const type = typeof prop.type === "string" ? prop.type : Array.isArray(prop.type) ? prop.type.join("|") : "any";
+        const desc = typeof prop.description === "string" ? prop.description : "（无说明）";
+        return `${key}（${type}${required.includes(key) ? "，必填" : "，可选"}）：${desc}`;
+      })
       .join("；");
     lines.push(`- ${spec.name}：${spec.description}`);
-    lines.push(`  参数：${props}`);
+    lines.push(`  参数：${props === "" ? "（无参数）" : props}`);
   }
   return lines.join("\n");
 }

@@ -33,6 +33,10 @@ function reset(): void {
     automations: [],
     automationsError: undefined,
     automationHistory: [],
+    mcpServers: [],
+    mcpIssues: [],
+    mcpError: undefined,
+    mcpDir: undefined,
     settings: undefined,
     settingsError: undefined,
   });
@@ -1383,5 +1387,56 @@ describe("skills actions", () => {
     await useApp.getState().loadSkills();
     expect(useApp.getState().skills).toBe(before);
     expect(useApp.getState().skillsError).toBe("EPIPE");
+  });
+});
+
+/**
+ * MCP 清单动作（M7）。
+ *
+ * 这一页没有日志视图：读取失败必须落到 `mcpError`，坏清单必须逐条留下 ——
+ * 否则"我配的 server 没生效"在界面上就是一片空白，没有任何解释。
+ */
+describe("MCP actions", () => {
+  const bridge = (over: Record<string, unknown>) => {
+    const g = globalThis as { oxCommander?: Record<string, unknown> };
+    g.oxCommander = { ...g.oxCommander, ...over };
+  };
+
+  it("清单与目录进 state；problem 说破并记日志", async () => {
+    bridge({
+      listMcpServers: async () => ({
+        dir: "C:\\data\\mcp.d",
+        servers: [
+          { name: "fs", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem"], envNames: ["ROOT"], timeoutMs: 60_000 },
+        ],
+        issues: [{ file: "bad.json", message: "command 必须是非空字符串" }],
+        problem: "EACCES",
+      }),
+    });
+    await useApp.getState().loadMcpServers();
+    expect(useApp.getState().mcpDir).toBe("C:\\data\\mcp.d");
+    expect(useApp.getState().mcpServers[0]?.name).toBe("fs");
+    expect(useApp.getState().mcpIssues).toEqual([{ file: "bad.json", message: "command 必须是非空字符串" }]);
+    expect(useApp.getState().mcpError).toBe("EACCES");
+    expect(useApp.getState().logs.at(-1)).toMatch(/读取 MCP 清单失败: EACCES/);
+
+    // 修好后要把错误清掉，并保留空列表（不是停在旧值）。
+    bridge({ listMcpServers: async () => ({ dir: "C:\\data\\mcp.d", servers: [], issues: [] }) });
+    await useApp.getState().loadMcpServers();
+    expect(useApp.getState().mcpError).toBeUndefined();
+    expect(useApp.getState().mcpServers).toEqual([]);
+  });
+
+  it("桥抛错时错误进 mcpError，已有列表不被清空", async () => {
+    const before = [{ name: "keep", command: "node", args: [], envNames: [], timeoutMs: 1_000 }];
+    useApp.setState({ mcpServers: before });
+    bridge({
+      listMcpServers: async () => {
+        throw new Error("EPIPE");
+      },
+    });
+    await useApp.getState().loadMcpServers();
+    expect(useApp.getState().mcpError).toBe("EPIPE");
+    expect(useApp.getState().mcpServers).toBe(before);
   });
 });

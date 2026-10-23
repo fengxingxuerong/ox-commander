@@ -50,10 +50,33 @@ export interface ToolSpec {
   parameters: JsonSchemaObject;
 }
 
+/**
+ * 运行时发现的工具（M7 MCP）。
+ *
+ * `parameters` 是第三方 server 给的 **JSON Schema 原样**，不是本项目的最小
+ * 子集：内置工具的 schema 由我们自己写死，MCP 的 schema 由 server 决定，硬套
+ * `JsonSchemaObject` 会把 `object`/`integer`/`oneOf` 这些合法形状拒在门外。
+ * 声明与执行仍然走同一条工具循环，差别只在参数校验器（`validateMcpArgs`）。
+ */
+export interface DynamicToolSpec {
+  name: string;
+  description: string;
+  parameters: Record<string, unknown>;
+}
+
+export type ToolSpecLike = ToolSpec | DynamicToolSpec;
+
 export interface ToolCall {
   /** 端点给的工具调用 id（文本协议下由平台自己生成，形如 `t-1`）。 */
   id: string;
-  name: ToolName;
+  /**
+   * 内置工具名或 MCP 名空间 `mcp__<server>__<tool>`。
+   *
+   * 这里不写成 `ToolName`：MCP 工具是运行时发现的，闭合联合类型写不下它。
+   * 闭合性由执行层把守 —— 内置名字过 `assertKnownTool`，MCP 名字过
+   * `parseMcpToolName`，两条之外一律拒绝。
+   */
+  name: string;
   args: Record<string, unknown>;
 }
 
@@ -81,7 +104,7 @@ export interface ChatFileChange {
 
 export interface ToolResult {
   id: string;
-  name: ToolName;
+  name: string;
   ok: boolean;
   /** 成功时是工具输出（可能被截断，见 `truncateToolOutput`）。 */
   output: string;

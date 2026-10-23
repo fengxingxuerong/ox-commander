@@ -264,3 +264,46 @@ describe("resolveChatRuntime · 技能目录（M6a）", () => {
     expect(noHome.skills).toEqual([]);
   });
 });
+
+/**
+ * MCP 清单（M7）。
+ *
+ * runtime 只读清单不连进程；但它必须把清单与**文件指纹**纳入签名 —— 改了
+ * command/timeout 却复用旧会话，会让界面显示新配置、实际跑旧进程。
+ */
+describe("resolveChatRuntime · mcp.d", () => {
+  it("清单进 runtime；坏清单进 issues；缺省无 MCP", () => {
+    const proj = project("mcp-proj");
+    const dir = project("mcp-dir");
+    fs.writeFileSync(
+      path.join(dir, "fs.json"),
+      JSON.stringify({ command: "npx", args: ["-y", "fs"], env: { ROOT: "." }, timeoutMs: 2_000 }),
+      "utf8",
+    );
+    fs.writeFileSync(path.join(dir, "bad.json"), JSON.stringify({ args: [] }), "utf8");
+    const runtime = resolveChatRuntime({ rootAbs: proj, settings: { ...DEFAULT_SETTINGS }, mcpDir: dir });
+    expect(runtime.mcpServers).toHaveLength(1);
+    expect(runtime.mcpServers[0]).toMatchObject({ name: "fs", command: "npx", timeoutMs: 2_000 });
+    expect(runtime.issues.join()).toContain("MCP 清单");
+    expect(runtime.mcpIssues.join()).toContain("bad.json");
+
+    const none = resolveChatRuntime({ rootAbs: proj, settings: { ...DEFAULT_SETTINGS } });
+    expect(none.mcpServers).toEqual([]);
+    expect(none.mcpIssues).toEqual([]);
+  });
+
+  it("改清单会改变签名（会话重建），不改则签名稳定", () => {
+    const proj = project("mcp-signature");
+    const dir = project("mcp-signature-dir");
+    const file = path.join(dir, "s.json");
+    fs.writeFileSync(file, JSON.stringify({ command: "node" }), "utf8");
+    const first = resolveChatRuntime({ rootAbs: proj, settings: { ...DEFAULT_SETTINGS }, mcpDir: dir });
+    const second = resolveChatRuntime({ rootAbs: proj, settings: { ...DEFAULT_SETTINGS }, mcpDir: dir });
+    expect(second.signature).toBe(first.signature);
+
+    fs.writeFileSync(file, JSON.stringify({ command: "node", args: ["x.js"] }), "utf8");
+    const changed = resolveChatRuntime({ rootAbs: proj, settings: { ...DEFAULT_SETTINGS }, mcpDir: dir });
+    expect(changed.signature).not.toBe(first.signature);
+    expect(changed.mcpServers[0]?.args).toEqual(["x.js"]);
+  });
+});

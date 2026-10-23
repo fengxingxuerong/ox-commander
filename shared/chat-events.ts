@@ -11,6 +11,7 @@
 import type { ToolCall, ToolResult } from "./tools/spec";
 import type { SandboxMode, ApprovalPolicy } from "./tools/policy";
 import type { ChatMessage, ReasoningEffort } from "./providers";
+import { parseMcpToolName } from "./mcp";
 
 export type ChatEntryKind = "user" | "assistant" | "tool_call" | "tool_result" | "approval" | "error" | "system";
 
@@ -179,13 +180,15 @@ export function messagesForProtocol(
 
 export interface ChatApprovalRequest {
   requestId: string;
-  tool: "apply_patch" | "run_command";
+  tool: "apply_patch" | "run_command" | "mcp";
   reason: string;
-  /** `run_command` 才有。 */
+  /** `run_command` 与 `mcp` 才有：将被执行的命令（MCP 是 server 的启动命令）。 */
   command?: string;
   args?: readonly string[];
   /** `apply_patch` 才有：补丁里要动的文件路径，用来让人看清动了谁。 */
   paths?: readonly string[];
+  /** `mcp` 才有：点名的 server 与工具（人要知道不是内置工具在跑）。 */
+  mcp?: { server: string; tool: string };
 }
 
 /** 人的答复。`scope: "session"` = 这类动作本次会话不再问（对齐 Codex 的三选一）。 */
@@ -235,6 +238,10 @@ export function summarizeTranscript(t: ChatTranscript): {
 /** 工具调用的一行摘要：名字 + 最关键的那个参数（人扫一眼就知道它在干嘛）。 */
 export function describeToolCall(call: ToolCall): string {
   const args = call.args;
+  const mcp = parseMcpToolName(call.name);
+  // MCP 的一行摘要必须点出 server：同名工具挂在两个 server 上时，只写工具名
+  // 会让人以为"怎么同一个工具跑了两遍"。
+  if (mcp !== null) return `MCP ${mcp.server} · ${mcp.tool}`;
   switch (call.name) {
     case "read_file":
       return `读取 ${String(args.path ?? "")}`;

@@ -3831,6 +3831,56 @@ describe("chat handlers（交互式编码会话）", () => {
     const secondRequest = String(h.llmChat.mock.calls[1]?.[0]?.messages?.map((m: any) => m.content).join("\n"));
     expect(secondRequest).toContain("别建这个文件");
   });
+
+  /**
+   * M7：桌面侧真的把 `mcp.d` 接进会话。
+   *
+   * 这里不 mock 连接池：fixture 是一个真实的 stdio MCP server 子进程，工具的
+   * 输出必须真的从它那里回来。缺了这条，MCP 只会在单测里"能连"，而 IPC
+   * 装配漏掉 `mcpServers` / `dynamicTools` 时界面仍然一片绿。
+   */
+  it("MCP：mcp.d 清单进会话，工具由真实外部进程执行，mcp:list 也能看到", async () => {
+    seedChatWorkspace();
+    const dir = path.join(tmp, "mcp.d");
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(
+      path.join(dir, "fixture.json"),
+      JSON.stringify({
+        command: process.execPath,
+        args: [path.resolve(__dirname, "__fixtures__", "mcp-echo-server.mjs")],
+        timeoutMs: 5_000,
+      }),
+      "utf8",
+    );
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content:
+          "```tool\n" +
+          JSON.stringify({ tool: "mcp__fixture__echo", arguments: { text: "via ipc" } }) +
+          "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "MCP 完成", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "用 MCP 回显", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    const transcript = (h.ipcMain as FakeIpcMain).invoke("chat:transcript") as {
+      entries: Array<{ kind: string; text: string; result?: { ok: boolean; output: string } }>;
+    };
+    expect(transcript.entries.some((e) => e.kind === "system" && e.text.includes("已接入 MCP 工具 5 个"))).toBe(true);
+    const result = transcript.entries.find((e) => e.kind === "tool_result");
+    expect(result?.result).toMatchObject({ ok: true, output: "echo:via ipc" });
+
+    const list = (h.ipcMain as FakeIpcMain).invoke("mcp:list") as {
+      servers: Array<{ name: string; envNames: string[] }>;
+    };
+    expect(list.servers.map((s) => s.name)).toEqual(["fixture"]);
+    expect(list.servers[0]?.envNames).toEqual([]);
+    (h.ipcMain as FakeIpcMain).invoke("chat:abort");
+  });
 });
 
 describe("task-note handlers（C2 操作者附言）", () => {

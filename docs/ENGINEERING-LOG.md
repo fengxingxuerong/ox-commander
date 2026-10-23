@@ -19,6 +19,66 @@
 
 ## [未发布] — v0.1.9 之后（2026-10-18 →）
 
+### 新增（MCP client · M7 · 2026-10-23）
+
+**动机**：M6 做完"技能"（只读的能力包）之后，缺的另一半是**能执行的第三方工具**。我们是
+MCP *server*（`ox mcp`，外部可驱动我们）已经很久，方向反过来 —— 会话把外部 server 的工具
+并进工具循环 —— 一直没做。这一轮补上，判据先窄后宽：**只做 stdio**，网络型（SSE /
+streamable HTTP）留后。
+
+**形态（三层，与 `agents.d` 同一个信任模型）**：
+
+- `shared/mcp.ts`（新，tier 1，101 位点）：纯契约 —— 清单归一化、`mcp__<server>__<tool>`
+  名字空间、JSON Schema 子集校验、`tools/call` 结果展平。
+- `electron/mcp/`（新）：manifest 读盘（`manifest.ts`，13 位点）、stdio JSON-RPC 客户端
+  （`client.ts`）、连接池与聚合上限（`pool.ts`）。
+- 会话侧：`ChatSession` 在**首次发送时**发现动态工具（页面加载不拉外部进程）；`ToolRunner`
+  以 `tool: "mcp"` 走审批，返回过脱敏 + 截断。
+
+**四个值得单独记的设计点**：
+
+1. **名字空间是唯一寻址**：模型只见 `mcp__server__tool` 一个名字，平台据此拆出 server 与
+   tool，**永远不接受模型直接指定命令行**。server 名禁止 `__`，所以"第一个分隔符之后全是
+   tool 名"无歧义。
+2. **env 的值不出主机**：清单可以带 `env`（第三方 token），但界面与日志只露**变量名**；子
+   进程环境是 `scopedEnv()` + 清单 env，宿主的 provider key 不进外部进程。
+3. **业务错误不计熔断**：工具 `isError` 与 JSON-RPC error 都是"调用成功、业务失败"，只有
+   **传输失败**（spawn 失败、进程退出、超时、管道断）才累加连续失败计数 —— 否则模型手滑
+   调错三次就被冷却十分钟。
+4. **翻页的三种停条件**：`nextCursor` 不是字符串、与上一页相同、**在本次发现里出现过**。
+   第三条是成环（a → b → a）唯一能停的地方 —— 前两条都抓不到它。
+
+**门禁与负结果（首轮 227 处新位点，24 处存活）**：
+
+- 全杀：`shared/mcp.ts` 101/101、`electron/mcp/manifest.ts` 13/13、`chat/tool-runner.ts`
+  86/86、`chat/runtime.ts` 17/17、`ipc/chat.ts` 140/140、`tools/policy.ts` 22/22、
+  `chat-events.ts` 16/16。
+- 首轮存活 24 处，逐条处置（没有一条加白名单）：
+  1. `client.ts` 16 处：`asObject` 的 null/数组分支、`tools/list` 返回非对象、游标发没发出去、
+     翻页停条件、反向请求回话、`badLines === 1` 只报第一条、空行不中断解析、噪音与响应同
+     chunk、RPC 错误不熔断且 code 回落 -32603、错误文案取 message 还是整段 JSON、stderr
+     尾巴的有无、`killChild` 的 null 分支。**其中 5 处按纪律简化源码而不是加断言**：
+     `Pending` 的 `signal` + `onAbort` 两个恒同真假的字段收成 `abort: {signal, handler}`；
+     request/write 各自一份三连合取收成唯一的 `stdinStream()`（用 `!x` 写，连布尔算子位点
+     都不产生）；响应路径上多余的 id 早退删掉（紧接着的查表必然落空）；`killChild` 用
+     真值判断；`errorText` 的三元改成 if/return。
+  2. `protocol.ts` 5 处：畸形 schema 的渲染（`properties` 不是对象 / 属性值不是对象 /
+     描述缺席）—— 第三方 schema 是任意子集，一个坏 server 能让整个提示拼不出来。
+  3. `pool.ts` 2 处：坏 server 排**前面**时不许连坐后面的 server；达到会话上限后要继续把
+     溢出项**数全**（中断只会记一条，"后 N 个未声明"会骗人）。
+  4. `chat/session.ts` 1 处：发现只出问题（一个工具都没有）时也要落盘 —— 系统条目不能只活
+     在内存里，否则重启后"为什么一个工具都没有"毫无痕迹。
+- **夹具也跟着长**：`src/__fixtures__/mcp-echo-server.mjs` 加了 `--log=`（把**客户端写出去
+  的每一行**记进文件）与一组模式（游标严格/同值/成环/空串/数字、RPC 错误、反向请求、
+  tools/list 非对象、空行、噪音同 chunk、stderr 尾巴）。有些行为在 client API 上看不出差别，
+  但都能在"真正过管道的那一行"上看到 —— 断言那一行比在客户端加注入点更诚实。
+- 最终：**112 个目标 / 3079 处位点**（M7 新增 4 个目标文件、210 处位点）；全量
+  **2976 通过 + 8 跳过**（99 个文件）；`check:doc-claims` PASS。
+
+**边界（明说）**：不做网络型 MCP；不替 server 的行为背书（它跑在沙箱外）；不做 MCP
+resources / prompts / sampling 的**正向**能力 —— 反向请求一律回 `-32601`，让 server 自己
+降级，而不是假装支持。
+
 ### 新增（技能全文按需取 read_skill · M6b · 2026-10-23）
 
 **动机**：M6a 把技能目录注入了会话提示，但**全文取不到** —— 目录块点名了 `read_skill`，

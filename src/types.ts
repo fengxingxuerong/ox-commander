@@ -7,6 +7,7 @@ import type { UsageSnapshot } from "../shared/usage-meter";
 import type { LineHealth } from "../shared/http-clients";
 import type { Automation, AutomationHistoryEntry } from "../shared/automation";
 import type { Skill } from "../shared/skills";
+import type { McpListResult, McpManifestIssue, McpServerSummary } from "../shared/mcp";
 import type { BoardRecoveryView, TaskTrail } from "../electron/board-derive";
 import type {
   ChatApprovalRequest,
@@ -342,6 +343,12 @@ export interface AppState {
   /** 扫到但不可用的技能（路径 + 原因）—— 列出来，不假装不存在。 */
   skillIssues: Array<{ path: string; reason: string }>;
   skillsError?: string;
+  /** MCP 清单（M7）：只读摘要；连接发生在会话首次发送时。 */
+  mcpServers: McpServerSummary[];
+  mcpIssues: McpManifestIssue[];
+  /** 清单目录整体读不动时才有（与 skillsError 同款，要把问题说破）。 */
+  mcpError?: string;
+  mcpDir?: string;
   /** 触发历史（最近在前）。来自审计 JSONL，重开窗口后仍在。 */
   automationHistory: AutomationHistoryEntry[];
   newProjectName: string;
@@ -396,6 +403,7 @@ export interface AppState {
   /** 自动化页的读：列表 + 触发历史（两个都失败要说破，不能静默空表）。 */
   loadAutomations(): Promise<void>;
   loadSkills(): Promise<void>;
+  loadMcpServers(): Promise<void>;
   loadAutomationHistory(): Promise<void>;
   /** 创建成功返回 true（页面据此清空表单）；失败已经把原因写进 automationsError。 */
   createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<boolean>;
@@ -632,6 +640,8 @@ declare global {
         issues: Array<{ path: string; reason: string }>;
         problem?: string;
       }>;
+      /** MCP 清单（M7）：只列配置，不在这里启动外部进程。 */
+      listMcpServers(): Promise<McpListResult>;
       createAutomation(input: { name: string; projectId: string; everyMs: number }): Promise<Automation>;
       updateAutomation(
         id: string,

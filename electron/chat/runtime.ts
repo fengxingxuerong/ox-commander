@@ -7,6 +7,8 @@ import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-po
 import { DEFAULT_FORBIDDEN_READ, DEFAULT_FORBIDDEN_WRITE, PathPolicy } from "../sandbox/path-policy";
 import { readProjectConventions } from "../engine/conventions";
 import { readSkills } from "../engine/skills";
+import { loadMcpManifests, mcpDirFingerprint } from "../mcp/manifest";
+import type { McpServerManifest } from "../../shared/mcp";
 import { formatSkillCatalog, type Skill } from "../../shared/skills";
 import { formatConventionsBlock } from "../../shared/project-conventions";
 import {
@@ -42,6 +44,11 @@ export interface ChatRuntimeOptions {
   /** 家目录，用于读 `~/.ox/AGENTS.md`；省略 = 不读全局约定。 */
   homeDir?: string;
   /**
+   * `mcp.d` 目录（M7）。桌面 = `<userData>/mcp.d`，CLI = `~/.ox/mcp.d`。
+   * 省略 = 本会话不接 MCP；清单在会话构造时定死，改文件靠签名变化触发重建。
+   */
+  mcpDir?: string;
+  /**
    * 线程级覆盖（M3c）：显式选择的档位/审批策略要压过项目配置与全局设置。
    * 省略 = 逐字沿用原来的合并顺序。
    */
@@ -73,6 +80,10 @@ export interface ChatRuntime {
   skills: Skill[];
   /** 全局技能目录根（绝对）；没有全局来源（无 homeDir）时缺席。 */
   skillGlobalRootAbs?: string;
+  /** M7：`mcp.d` 里通过校验的 server（工具在会话首次发送时懒发现）。 */
+  mcpServers: McpServerManifest[];
+  /** `mcp.d` 的坏文件/超限问题（与技能问题同一条"只报不抛"）。 */
+  mcpIssues: string[];
 }
 
 const BASE_PROMPT = "你是一个在本项目里干活的编码智能体。用工具看清现状再动手，改完自己跑一遍验证。";
@@ -170,6 +181,9 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
   ];
   const skills = readSkills(skillSources);
   const catalog = formatSkillCatalog(skills.skills);
+  // MCP（M7）：只加载操作者自己写在 mcp.d 里的清单。这里只读清单，不连进程
+  // —— 会话第一次发送时才懒连接，避免打开页面就起一堆外部进程。
+  const mcp = opts.mcpDir ? loadMcpManifests(opts.mcpDir) : { servers: [], issues: [] };
   const background = [conventionsBlock, catalog.text].filter((b) => b !== "").join("\n\n");
   const systemPrompt = background === "" ? BASE_PROMPT : `${BASE_PROMPT}\n\n${background}`;
 
@@ -179,6 +193,7 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
     ...conventions.unreadable.map((u) => `${u.name} 读取失败：${u.reason}`),
     ...conventions.skipped.map((s) => `${s.name} 超过单文件上限（${s.bytes} 字节），已跳过`),
     ...skills.issues.map((i) => `技能 ${i.path} 不可用：${i.reason}`),
+    ...mcp.issues.map((i) => `MCP 清单 ${i.file} 已跳过：${i.message}`),
   ];
 
   const signature = createHash("sha256")
@@ -198,6 +213,10 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
         policy: policy ? describePolicy(policy) : "",
         policyFiles: policyFingerprint(policyDirs),
         systemPrompt,
+        // 清单文件指纹进签名：改了 command/timeout 却复用旧会话，会让界面
+        // 显示新配置、实际跑的仍是旧进程 —— 与 policy.d 同一条纪律。
+        mcp: mcp.servers.map((s) => [s.name, s.command, s.args, s.timeoutMs]),
+        mcpFiles: mcpDirFingerprint(opts.mcpDir),
       }),
     )
     .digest("hex");
@@ -214,5 +233,7 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
     issues,
     skills: skills.skills,
     ...(skillGlobalRootAbs ? { skillGlobalRootAbs } : {}),
+    mcpServers: mcp.servers,
+    mcpIssues: mcp.issues.map((i) => `${i.file}：${i.message}`),
   };
 }

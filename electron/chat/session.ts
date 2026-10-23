@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import type { LlmClient } from "../../shared/llm-client";
 import type { ChatMessage, ReasoningEffort } from "../../shared/providers";
-import type { ToolName } from "../../shared/tools/spec";
+import type { DynamicToolSpec, ToolName, ToolSpecLike } from "../../shared/tools/spec";
 import { TOOL_NAMES, TOOL_SPECS } from "../../shared/tools/spec";
 import { parseToolTurn, toolCatalogBlock, toolResultBlock } from "../../shared/tools/protocol";
 import type { ApprovalPolicy, SandboxMode } from "../../shared/tools/policy";
@@ -55,8 +55,13 @@ export interface ChatSessionOptions {
   onPersist?: (snapshot: ChatSessionSnapshot) => void;
   /** 附加的 system 提示（项目约定 / 宿主说明）。工具说明由本模块按协议追加。 */
   systemPrompt?: string;
-  /** 开放给模型的工具（缺省全开）。 */
+  /** 开放给模型的工具（缺省全开）。MCP 工具由 `dynamicTools` 追加。 */
   tools?: readonly ToolName[];
+  /**
+   * 运行时发现的工具（M7 MCP）。只在第一次 `send` 时调用一次；失败不阻断会话，
+   * 而是变成一条可见的系统条目 —— "工具没发现"不能表现为"模型不会用"。
+   */
+  dynamicTools?: () => Promise<DynamicToolLoad>;
   /**
    * 工具调用的传输方式。`native` 走端点的 function calling，`text` 走文本协议
    * —— 两者对**本模块**是同一种结构，差别只在消息怎么摆。
@@ -106,6 +111,12 @@ export const DEFAULT_MAX_TURNS = 24;
  */
 export const DEFAULT_MAX_PROMPT_TOKENS = 48_000;
 
+export interface DynamicToolLoad {
+  specs: readonly DynamicToolSpec[];
+  /** 发现阶段的问题（坏 server、工具上限…），逐条进系统条目。 */
+  issues?: readonly string[];
+}
+
 export interface CompactOptions {
   /** 触发预算（token）。超过就压。 */
   maxPromptTokens?: number;
@@ -125,8 +136,12 @@ export class ChatSession {
   private readonly client: LlmClient;
   private readonly runner: ToolRunner;
   private readonly rootAbs: string;
-  private readonly systemPrompt: string;
+  /** 不含工具目录的稳定提示；目录每轮现拼（MCP 工具是运行时发现的）。 */
+  private readonly basePrompt: string;
   private readonly tools: readonly ToolName[];
+  private readonly dynamicTools?: () => Promise<DynamicToolLoad>;
+  private dynamicSpecs: DynamicToolSpec[] = [];
+  private dynamicLoaded = false;
   private readonly toolProtocol: "native" | "text";
   private readonly maxTurns: number;
   private readonly onEvent?: (event: ChatEvent) => void;
@@ -156,6 +171,7 @@ export class ChatSession {
     this.runner = opts.runner;
     this.rootAbs = opts.rootAbs;
     this.tools = opts.tools ?? [...TOOL_NAMES];
+    this.dynamicTools = opts.dynamicTools;
     this.toolProtocol = opts.toolProtocol ?? "text";
     this.maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
     this.onEvent = opts.onEvent;
@@ -169,8 +185,9 @@ export class ChatSession {
     // 会话 id 会进文件名与恢复索引：`Math.random` 既不满足仓库"零随机"
     // 的约定，也没有跨进程唯一性保证。UUID 是宿主层能力，放这里不污染 shared。
     this.sessionId = opts.sessionId ?? opts.history?.sessionId ?? `chat-${randomUUID()}`;
-    const catalog = this.toolProtocol === "text" ? `\n\n${toolCatalogBlock(this.tools)}` : "";
-    this.systemPrompt = `${(opts.systemPrompt ?? "你是一个在本项目里干活的编码智能体。用工具看清现状再动手，改完自己跑一遍验证。").trim()}${catalog}`;
+    this.basePrompt = (
+      opts.systemPrompt ?? "你是一个在本项目里干活的编码智能体。用工具看清现状再动手，改完自己跑一遍验证。"
+    ).trim();
     const history = opts.history;
     this.meta = {
       sessionId: this.sessionId,
@@ -217,6 +234,55 @@ export class ChatSession {
   /** 只读的模型消息视图（测试/诊断用；恢复走 history）。 */
   modelMessages(): ChatMessage[] {
     return this.messages.map((m) => ({ ...m }));
+  }
+
+  /** 宿主收尾：runner 持有 MCP 子进程，会话不再用了就必须一起关。 */
+  dispose(): void {
+    this.runner.dispose();
+  }
+
+  /** 本轮开放的工具声明：内置 + 已发现的 MCP。 */
+  private specsForTurn(): ToolSpecLike[] {
+    const allowed = new Set<string>([...this.tools, ...this.dynamicSpecs.map((s) => s.name)]);
+    return [...TOOL_SPECS, ...this.dynamicSpecs].filter((s) => allowed.has(s.name));
+  }
+
+  /**
+   * 文本协议的工具目录每轮现拼：MCP 工具是运行时发现的，构造期固定下来的
+   * 提示会让"工具明明接上了，模型却说没有这个工具"。
+   */
+  private promptForTurn(): string {
+    if (this.toolProtocol !== "text") return this.basePrompt;
+    const specs = this.specsForTurn();
+    return `${this.basePrompt}\n\n${toolCatalogBlock(specs.map((s) => s.name), specs)}`;
+  }
+
+  /**
+   * 第一次发送前发现一次动态工具。
+   *
+   * 失败是**可见的降级**而不是异常：内置工具照用，转录里留下原因。发现结果
+   * 与问题都只报一次 —— 每一轮重连一个坏 server 会让每次发送都等满超时。
+   */
+  private async loadDynamicTools(): Promise<void> {
+    if (this.dynamicTools === undefined || this.dynamicLoaded) return;
+    this.dynamicLoaded = true;
+    let result: DynamicToolLoad;
+    try {
+      result = await this.dynamicTools();
+    } catch (e) {
+      this.push({ kind: "system", text: `工具发现失败（本会话按内置工具继续）：${(e as Error).message}` });
+      this.persist();
+      return;
+    }
+    this.dynamicSpecs = [...result.specs];
+    const issues = result.issues ?? [];
+    for (const issue of issues) this.push({ kind: "system", text: issue });
+    if (this.dynamicSpecs.length > 0) {
+      const names = this.dynamicSpecs.map((s) => s.name);
+      const shown = names.slice(0, 12).join("、") + (names.length > 12 ? ` 等 ${names.length} 个` : "");
+      this.push({ kind: "system", text: `已接入 MCP 工具 ${names.length} 个：${shown}` });
+    }
+    if (issues.length > 0 || this.dynamicSpecs.length > 0) this.persist();
   }
 
   /** 宿主侧动作（撤销/策略提示）落一条可见的系统条目，并立即持久化。 */
@@ -330,7 +396,7 @@ export class ChatSession {
     // ① 传 `this.messages`（它从来不含 system）时，planCompaction 会把第一条普通
     //    消息当成"要保留的头"跳过，最老的一条用户消息永远进不了压缩原文；
     // ② 不把 systemPrompt 计入预算，工具目录很长时会系统性低估。
-    const full: ChatMessage[] = [{ role: "system", content: this.systemPrompt }, ...this.messages];
+    const full: ChatMessage[] = [{ role: "system", content: this.promptForTurn() }, ...this.messages];
     const plan: CompactionPlan = planCompaction({
       messages: full,
       maxPromptTokens,
@@ -389,6 +455,9 @@ export class ChatSession {
 
   private async loop(): Promise<void> {
     this.setStatus("running");
+    // MCP 工具在第一次模型调用之前发现：原生协议要把它放进 tools，文本协议
+    // 要把它写进目录。发现失败只降级，不抛。
+    await this.loadDynamicTools();
     // 轮次是**会话累计值**，不是每次 send 从 1 重数：撤销按 turn 分组，
     // 重置会让第二个用户回合的改动与第一轮撞在同一个 turn 上，撤一轮撤两轮。
     const baseTurns = this.meta.turns;
@@ -402,10 +471,8 @@ export class ChatSession {
       // 等端点报"超窗"再处理已经晚了（那一轮的活白干）。
       await this.maybeCompact();
       const res = await this.client.chat({
-        messages: [{ role: "system", content: this.systemPrompt }, ...this.messages],
-        ...(this.toolProtocol === "native"
-          ? { tools: TOOL_SPECS.filter((s) => this.tools.includes(s.name)) }
-          : {}),
+        messages: [{ role: "system", content: this.promptForTurn() }, ...this.messages],
+        ...(this.toolProtocol === "native" ? { tools: this.specsForTurn() } : {}),
         ...(this.reasoningEffort ? { reasoningEffort: this.reasoningEffort } : {}),
         ...(this.signal ? { signal: this.signal } : {}),
         // 给了回调 = 想要增量：客户端先试 SSE，**零增量**就整段退回普通请求，
@@ -421,7 +488,10 @@ export class ChatSession {
       this.meta.usageTokens += res.usageTokens ?? 0;
 
       const native = res.toolCalls ?? [];
-      const parsed = this.toolProtocol === "native" ? { text: res.content, calls: native, problems: [] as string[] } : parseToolTurn(res.content);
+      const parsed =
+        this.toolProtocol === "native"
+          ? { text: res.content, calls: native, problems: [] as string[] }
+          : parseToolTurn(res.content, { extraSpecs: this.dynamicSpecs });
 
       if (parsed.calls.length === 0) {
         const finalText = parsed.text.trim() !== "" ? parsed.text.trim() : res.content.trim();

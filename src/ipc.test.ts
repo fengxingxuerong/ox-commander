@@ -176,6 +176,7 @@ describe("registerIpc · channel contract", () => {
       "keys:security",
       "keys:status",
       "llm:test",
+    "mcp:list",
       "orchestration:approval-decide",
       "orchestration:cancel",
       "orchestration:escalation-decide",

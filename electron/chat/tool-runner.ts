@@ -10,7 +10,15 @@ import { killTree } from "../sandbox/kill-tree";
 import { scopedEnv } from "../agents/scoped-env";
 import { writeFileAtomic } from "../atomic-file";
 import { matchesAnyGlob } from "../../shared/glob";
-import { truncateToolOutput, type ChatFileChange, type ToolCall, type ToolResult } from "../../shared/tools/spec";
+import { MCP_TOOL_PREFIX, parseMcpToolName } from "../../shared/mcp";
+import { redactSecrets } from "../../shared/redact";
+import {
+  truncateToolOutput,
+  type ChatFileChange,
+  type ToolCall,
+  type ToolName,
+  type ToolResult,
+} from "../../shared/tools/spec";
 import { parsePatch, applyFileOp, describePatchOps } from "../../shared/tools/patch";
 import {
   assertKnownTool,
@@ -41,6 +49,25 @@ export function compareEntryNames(a: { name: string }, b: { name: string }): num
  * 沙箱在这里的价值不是防恶意，是防**漂移**。
  */
 import { conflictFacts, describeConflictFacts, type ConflictFact, type ThreadWrite } from "../../shared/chat-conflict";
+
+/**
+ * MCP 执行器（M7）：由连接池实现，工具层只认这个窄接口。
+ *
+ * 为什么不直接把 `McpPool` 塞进来：`tool-runner` 的测试不需要起任何进程，
+ * 而"哪个名字归 MCP、审批怎么做、输出怎么脱敏/截断"才是它的职责。池只负责
+ * 传输。
+ */
+export interface McpToolExecutor {
+  call(
+    server: string,
+    tool: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<{ ok: boolean; output: string; reason?: string }>;
+  /** server 的启动命令：审批名单与"本会话不再问"的 key 都按它算。 */
+  commandOf(server: string): string | undefined;
+  dispose(): void;
+}
 
 export interface ToolRunnerOptions {
   /** 项目根：一切路径判定的边界。 */
@@ -93,6 +120,11 @@ export interface ToolRunnerOptions {
    * 那份管的是项目根，不该越界裁全局目录）。缺席 = 全局技能一律不可读。
    */
   skillGlobalRootAbs?: string;
+  /**
+   * MCP 执行器（M7）。缺席 = 本会话没有 MCP 工具；即使模型凭空给出
+   * `mcp__…` 名字也会得到一条明确的拒绝，而不是落到"未知工具"。
+   */
+  mcp?: McpToolExecutor;
 }
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -122,6 +154,8 @@ export class ToolRunner {
   private readonly skills: readonly Skill[];
   /** M6b：全局技能根（原始路径）与以它为界的读判定；缺席 = 全局技能不可读。 */
   private readonly skillGlobal?: { rootAbs: string; policy: PathPolicy };
+  /** M7：MCP 工具执行器；缺席 = 本会话没有 MCP。 */
+  private readonly mcp?: McpToolExecutor;
   /** 本次会话里人答过"不用再问"的动作（key 由 policy 层定义）。 */
   private readonly sessionApproved = new Set<string>();
 
@@ -150,6 +184,12 @@ export class ToolRunner {
     this.skillGlobal = opts.skillGlobalRootAbs
       ? { rootAbs: opts.skillGlobalRootAbs, policy: new PathPolicy({ projectRoot: opts.skillGlobalRootAbs }) }
       : undefined;
+    this.mcp = opts.mcp;
+  }
+
+  /** 会话/应用收尾：把 MCP 子进程一并关掉（runner 是它们的唯一持有者）。 */
+  dispose(): void {
+    this.mcp?.dispose();
   }
 
   /**
@@ -168,6 +208,20 @@ export class ToolRunner {
   }
 
   private async dispatch(call: ToolCall, signal?: AbortSignal, turn?: number): Promise<ToolResult> {
+    // MCP 名字先拆：它不进内置工具的闭合 switch。形状不对的 `mcp__…` 也必须
+    // 明确拒绝 —— 否则它会落到"未登记工具"，理由里却只列内置工具，误导模型
+    // 去重试一个永远不会成功的名字。
+    const mcp = parseMcpToolName(call.name);
+    if (mcp !== null) return this.callMcp(call, mcp, signal);
+    if (call.name.startsWith(MCP_TOOL_PREFIX)) {
+      return {
+        id: call.id,
+        name: call.name,
+        ok: false,
+        output: "",
+        reason: `MCP 工具名不合法：${call.name}（应为 mcp__<server>__<tool>，server 名不能含 \`__\`）`,
+      };
+    }
     // 名字先过闸：`call.name` 可能来自端点响应（原生 tools 路径），端点可以返回
     // 任意字符串；在 switch 里落到 default 等于"未知工具按已知工具处理"。
     if (assertKnownTool(call.name) === null) {
@@ -211,10 +265,17 @@ export class ToolRunner {
   /** 写与执行之前的统一裁决：沙箱档位 → 会话记忆 → 审批策略。 */
   private async guard(
     call: ToolCall,
-    extra: { command?: string; paths?: readonly string[] },
+    tool: ToolName | "mcp",
+    extra: {
+      command?: string;
+      paths?: readonly string[];
+      mcp?: { server: string; tool: string };
+      /** 审批理由前面的上下文（MCP 用它说破"这是外部进程"）。 */
+      context?: string;
+    },
   ): Promise<{ ok: true } | { ok: false; reason: string }> {
     const decision = decideTool({
-      tool: call.name,
+      tool,
       mode: this.mode,
       approvalPolicy: this.approvalPolicy,
       approvalCommands: this.approvalCommands,
@@ -234,11 +295,12 @@ export class ToolRunner {
     try {
       answer = await this.requestApproval({
         requestId: call.id,
-        tool: call.name === "run_command" ? "run_command" : "apply_patch",
-        reason: decision.reason,
+        tool: tool === "mcp" ? "mcp" : tool === "run_command" ? "run_command" : "apply_patch",
+        reason: extra.context ? `${extra.context}${decision.reason}` : decision.reason,
         ...(extra.command ? { command: extra.command } : {}),
-        ...(call.name === "run_command" ? { args: this.argsOf(call) } : {}),
+        ...(tool === "run_command" ? { args: this.argsOf(call) } : {}),
         ...(extra.paths ? { paths: extra.paths } : {}),
+        ...(extra.mcp ? { mcp: extra.mcp } : {}),
       });
     } catch (e) {
       // 审批回调炸了按拒绝处理，不把异常当成默许。
@@ -252,7 +314,9 @@ export class ToolRunner {
     }
     if (answer.scope === "session") {
       const key =
-        call.name === "run_command" ? `cmd:${baseNameOf(extra.command ?? "")}` : `tool:${call.name}`;
+        tool === "run_command" || tool === "mcp"
+          ? `cmd:${baseNameOf(extra.command ?? "")}`
+          : `tool:${tool}`;
       this.sessionApproved.add(key);
     }
     return { ok: true };
@@ -507,6 +571,54 @@ export class ToolRunner {
     return this.ok(call, hits.join("\n"));
   }
 
+  /**
+   * MCP 工具调用（M7）。
+   *
+   * 审批口径与 `run_command` 同源（`decideTool` 的 `mcp` 风险档固定为 exec），
+   * 但理由里必须多一句**外部进程**：MCP server 的代码不在本仓库，沙箱的路径/
+   * 命令地板对它无效，平台只能保证"调用前有人看见、返回后过脱敏"。
+   */
+  private async callMcp(
+    call: ToolCall,
+    target: { server: string; tool: string },
+    signal?: AbortSignal,
+  ): Promise<ToolResult> {
+    const fail = (reason: string): ToolResult => ({ id: call.id, name: call.name, ok: false, output: "", reason });
+    const executor = this.mcp;
+    if (executor === undefined) {
+      return fail(`本会话没有 MCP 连接器，无法调用 ${target.server}/${target.tool}`);
+    }
+    if (signal?.aborted) return fail("会话已中止，MCP 工具未执行");
+    const command = executor.commandOf(target.server);
+    if (command === undefined) {
+      return fail(`MCP server ${target.server} 不在本会话的清单里（或清单已被移除）`);
+    }
+    const guard = await this.guard(call, "mcp", {
+      command,
+      mcp: target,
+      context: `MCP 工具 ${target.server}/${target.tool} 将由外部进程「${command}」执行（平台不为它的行为背书）。`,
+    });
+    if (!guard.ok) return fail(guard.reason);
+    if (signal?.aborted) return fail("会话已中止，MCP 工具未执行");
+    let result: { ok: boolean; output: string; reason?: string };
+    try {
+      result = await executor.call(target.server, target.tool, call.args, signal);
+    } catch (e) {
+      return fail(redactSecrets(`MCP 工具调用失败：${(e as Error).message}`));
+    }
+    // 外部进程的返回是不可信输入：脱敏必须在进模型上下文之前做一遍。
+    const raw = result.ok ? result.output : [result.reason ?? "MCP 工具返回失败", result.output].filter((s) => s !== "").join("\n");
+    const cut = truncateToolOutput(redactSecrets(raw));
+    if (!result.ok) return fail(cut.text === "" ? "MCP 工具返回失败（没有说明）" : cut.text);
+    return {
+      id: call.id,
+      name: call.name,
+      ok: true,
+      output: cut.text,
+      ...(cut.truncatedFrom ? { truncatedFrom: cut.truncatedFrom } : {}),
+    };
+  }
+
   private async applyPatch(call: ToolCall, signal?: AbortSignal, turn = 0): Promise<ToolResult> {
     if (signal?.aborted) {
       return { id: call.id, name: call.name, ok: false, output: "", reason: "会话已中止，补丁未应用" };
@@ -524,7 +636,7 @@ export class ToolRunner {
       const verdict = await this.confirmConflict(call, conflicts);
       if (!verdict.ok) return { id: call.id, name: call.name, ok: false, output: "", reason: verdict.reason };
     }
-    const guard = await this.guard(call, { paths });
+    const guard = await this.guard(call, "apply_patch", { paths });
     if (!guard.ok) return { id: call.id, name: call.name, ok: false, output: "", reason: guard.reason };
 
     const done: string[] = [];
@@ -586,7 +698,7 @@ export class ToolRunner {
     if (!policy.ok) {
       return { id: call.id, name: call.name, ok: false, output: "", reason: policy.reason };
     }
-    const guard = await this.guard(call, { command });
+    const guard = await this.guard(call, "run_command", { command });
     if (!guard.ok) return { id: call.id, name: call.name, ok: false, output: "", reason: guard.reason };
 
     const spec = planSpawn(command, args, this.commandPolicy);
