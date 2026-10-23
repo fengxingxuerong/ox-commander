@@ -225,7 +225,7 @@ export class McpClient {
         {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: "ox-commander", version: "0.1.9" },
+          clientInfo: { name: "ox-commander", version: "0.2.0" },
         },
         this.manifest.timeoutMs,
         signal,
@@ -451,7 +451,19 @@ export class McpClient {
     this.child = null;
     // 真值判断而不是 `!== null`：后者翻转成 `=== null` 之后会拿 null 去杀，
     // 而那条分支在正常路径上永远走不到（site 审计实测）。
-    if (child) killTree(child);
+    if (!child) return;
+    // **先摘掉 close/error 处理器，再杀**。
+    //
+    // 这是 CI 抓到的平台时序分叉（2026-10-23，ubuntu+windows 的 verify 同时红）：
+    // 超时 → 杀旧进程 → 立刻重连起新进程，而旧进程的 `close` 事件可能**晚于**
+    // 新进程的 spawn 才到；那两个处理器里是无条件 `this.child = null` + `rejectAll`，
+    // 于是它把刚连上的新 child 顶掉、并把新请求以"进程已退出（signal=SIGTERM）"
+    // 拒掉。win32 上旧的 close 恰好先到，所以本机永远复现不出来 —— 正是
+    // gates.md 里那句"Windows 本地全绿不代表 Linux 绿"的又一处实例。
+    // 我们是这条进程的杀手：它的退出事件从此与我们无关。
+    child.removeAllListeners("close");
+    child.removeAllListeners("error");
+    killTree(child);
   }
 
   private recordFailure(reason: string): void {
