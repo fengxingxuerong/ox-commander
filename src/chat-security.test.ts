@@ -34,7 +34,7 @@ function runner(root: string, overrides: Partial<ConstructorParameters<typeof To
   return new ToolRunner({ rootAbs: root, approvalPolicy: "never", ...overrides });
 }
 
-const call = (name: "read_file" | "run_command" | "grep_files", args: Record<string, unknown>) =>
+const call = (name: "read_file" | "run_command" | "grep_files" | "read_skill", args: Record<string, unknown>) =>
   ({ id: `t-${name}`, name, args }) as const;
 
 describe("chat 工具层安全边界", () => {
@@ -133,5 +133,90 @@ describe("chat 工具层安全边界", () => {
     );
     expect(result.ok).toBe(false);
     expect(result.reason).toContain("禁止");
+  });
+
+  /**
+   * read_skill 的密钥边界（M6b 验收用例）：名字表里有它也照样拒 —— 判定发生在
+   * realpath 之后，链接的真身是 `.env` 就按 `.env` 拒。
+   */
+  it("read_skill 穿不进密钥：技能的 SKILL.md 是指向 .env 的软链（名字表里有它也不行）", async () => {
+    const root = project();
+    fs.writeFileSync(path.join(root, ".env"), "SKILL_LEAK_SENTINEL=1\n");
+    fs.mkdirSync(path.join(root, ".ox", "skills", "leak"), { recursive: true });
+    const link = path.join(root, ".ox", "skills", "leak", "SKILL.md");
+    try {
+      fs.symlinkSync(path.join(root, ".env"), link, "file");
+    } catch {
+      return; // 没有建文件软链权限的机器跳过；Linux CI 会真跑这条
+    }
+    const result = await runner(root, {
+      skills: [
+        { name: "leak", description: "想偷 key", origin: "project", path: ".ox/skills/leak/SKILL.md", bodyChars: 0, enabled: true },
+      ],
+    }).run(call("read_skill", { name: "leak" }));
+    expect(result.ok).toBe(false);
+    expect(result.reason).toContain("不允许读取");
+  });
+
+  it("read_skill 穿不出项目：技能目录本身是指向项目外的链接（junction 在 Windows 也真跑）", async () => {
+    const root = project();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-chat-outside-"));
+    try {
+      fs.writeFileSync(path.join(outside, "SKILL.md"), "OUTSIDE_SKILL\n");
+      fs.mkdirSync(path.join(root, ".ox", "skills"), { recursive: true });
+      const link = path.join(root, ".ox", "skills", "evil");
+      try {
+        fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+      } catch {
+        return; // 没有创建链接的权限；Linux CI 会真跑这几条断言
+      }
+      try {
+        const result = await runner(root, {
+          skills: [
+            { name: "evil", description: "想出去", origin: "project", path: ".ox/skills/evil/SKILL.md", bodyChars: 0, enabled: true },
+          ],
+        }).run(call("read_skill", { name: "evil" }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toContain("不允许读取");
+        expect(String(result.output)).not.toContain("OUTSIDE_SKILL");
+      } finally {
+        if (process.platform === "win32") fs.rmdirSync(link);
+        else fs.unlinkSync(link);
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("read_skill 的全局侧同一条边界：全局技能目录里的链接穿不出技能根", async () => {
+    const root = project();
+    const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ox-skills-global-"));
+    roots.push(globalRoot);
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "ox-chat-outside-"));
+    try {
+      fs.writeFileSync(path.join(outside, "SKILL.md"), "GLOBAL_ESCAPE\n");
+      const link = path.join(globalRoot, "escape");
+      try {
+        fs.symlinkSync(outside, link, process.platform === "win32" ? "junction" : "dir");
+      } catch {
+        return; // 同上：软链权限缺失的机器跳过
+      }
+      try {
+        const result = await runner(root, {
+          skills: [
+            { name: "escape", description: "想出去", origin: "global", path: path.join(globalRoot, "escape", "SKILL.md"), bodyChars: 0, enabled: true },
+          ],
+          skillGlobalRootAbs: globalRoot,
+        }).run(call("read_skill", { name: "escape" }));
+        expect(result.ok).toBe(false);
+        expect(result.reason).toContain("不允许读取");
+        expect(String(result.output)).not.toContain("GLOBAL_ESCAPE");
+      } finally {
+        if (process.platform === "win32") fs.rmdirSync(link);
+        else fs.unlinkSync(link);
+      }
+    } finally {
+      fs.rmSync(outside, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
   });
 });

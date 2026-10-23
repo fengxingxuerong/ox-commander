@@ -206,6 +206,12 @@ function buildSession(
         send({ type: "chat:approval-request", sessionId, request: { ...req, requestId: approvalId } });
       }),
     onEvent: (text) => send({ type: "log", text }),
+    // M6b：read_skill 的名字就绪表 —— 与目录块同一次扫描，模型点名的名字只在
+    // 这张表里查，永远不参与路径拼接。
+    // 全局根直接传（可能是 undefined）：传 undefined 与整个键缺席等价，少一层
+    // 永远等价的三元位点（与上面 reasoningEffort 同一条理由）。
+    skills: runtime.skills,
+    skillGlobalRootAbs: runtime.skillGlobalRootAbs,
   });
   const session = new ChatSession({
     client: pinned ? buildLlmPinned(settings, pinned.providerId, pinned.model) : buildLlm(settings),

@@ -355,6 +355,10 @@ function makeBundle(
       if (args.json) writeJson({ type: "log", text: safe });
       else process.stdout.write(`[log] ${safe}\n`);
     },
+    // M6b：read_skill 的名字就绪表 —— 与目录块同一次扫描（含全局技能根）。
+    // 全局根直接传（可能是 undefined）：与整个键缺席等价，不造等价三元位点。
+    skills: runtime.skills,
+    skillGlobalRootAbs: runtime.skillGlobalRootAbs,
   });
   const providerConfig: ProviderConfig = {
     ...getProvider(providerId, process.env),

@@ -7,7 +7,7 @@ import { CommandPolicy, createDefaultCommandPolicy } from "../sandbox/command-po
 import { DEFAULT_FORBIDDEN_READ, DEFAULT_FORBIDDEN_WRITE, PathPolicy } from "../sandbox/path-policy";
 import { readProjectConventions } from "../engine/conventions";
 import { readSkills } from "../engine/skills";
-import { formatSkillCatalog } from "../../shared/skills";
+import { formatSkillCatalog, type Skill } from "../../shared/skills";
 import { formatConventionsBlock } from "../../shared/project-conventions";
 import {
   commandPolicyOverrides,
@@ -65,6 +65,14 @@ export interface ChatRuntime {
   signature: string;
   /** 策略/配置/约定加载时的问题（给日志，不阻断会话）。 */
   issues: string[];
+  /**
+   * 会话技能（M6b）：与目录块**同一次扫描**的清单（含停用项）。read_skill 从这里
+   * 拿"名字 → 文件"，而不是在工具层再扫一遍盘 —— 目录块说有的技能，工具必须真给
+   * 得到；两次扫描之间文件被删/改名，会让提示与工具各说各话。
+   */
+  skills: Skill[];
+  /** 全局技能目录根（绝对）；没有全局来源（无 homeDir）时缺席。 */
+  skillGlobalRootAbs?: string;
 }
 
 const BASE_PROMPT = "你是一个在本项目里干活的编码智能体。用工具看清现状再动手，改完自己跑一遍验证。";
@@ -155,8 +163,9 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
   // 动辄几千字，十几个全塞进提示就把上下文吃光了。
   // 顺序：约定 → 技能 →（无）。技能与约定都是背景，但技能是**可按需取用**的，
   // 所以放在能被重新读取的位置后面更好读。
+  const skillGlobalRootAbs = opts.homeDir ? path.join(opts.homeDir, ".ox", "skills") : undefined;
   const skillSources = [
-    ...(opts.homeDir ? [{ origin: "global" as const, rootAbs: path.join(opts.homeDir, ".ox", "skills") }] : []),
+    ...(skillGlobalRootAbs ? [{ origin: "global" as const, rootAbs: skillGlobalRootAbs }] : []),
     { origin: "project" as const, rootAbs: path.join(rootAbs, ".ox", "skills") },
   ];
   const skills = readSkills(skillSources);
@@ -203,5 +212,7 @@ export function resolveChatRuntime(opts: ChatRuntimeOptions): ChatRuntime {
     systemPrompt,
     signature,
     issues,
+    skills: skills.skills,
+    ...(skillGlobalRootAbs ? { skillGlobalRootAbs } : {}),
   };
 }

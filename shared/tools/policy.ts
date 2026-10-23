@@ -45,6 +45,10 @@ const RISK_BY_TOOL: Record<ToolName, ToolRisk> = {
   find_by_name: "read",
   apply_patch: "write",
   run_command: "exec",
+  // 读技能与读文件同一风险档：只出正文、不落盘、不需要人看见。read-only 档下
+  // 也必须可用 —— 目录块把技能名给了模型，取不到全文的 read-only 会话等于
+  // 只读模式被降成了"看得到拿不着"。
+  read_skill: "read",
 };
 
 export function toolRisk(name: ToolName): ToolRisk {

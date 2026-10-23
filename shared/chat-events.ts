@@ -248,6 +248,8 @@ export function describeToolCall(call: ToolCall): string {
       return `应用补丁`;
     case "run_command":
       return `执行 ${String(args.command ?? "")} ${Array.isArray(args.args) ? args.args.join(" ") : ""}`.trim();
+    case "read_skill":
+      return `取技能 ${String(args.name ?? "")}`;
     default:
       return call.name;
   }

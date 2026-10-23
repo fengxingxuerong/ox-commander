@@ -242,4 +242,25 @@ describe("resolveChatRuntime · 技能目录（M6a）", () => {
     expect(runtime.issues.some((i) => i.includes("front matter"))).toBe(true);
     expect(runtime.systemPrompt).not.toContain("broken");
   });
+
+  it("技能清单与全局根随 runtime 带出（read_skill 与目录块同一次扫描，两头永远说同一套话）", () => {
+    const proj = project("skills-table");
+    const home = project("skills-table-home");
+    write("skills-table/.ox/skills/ship-it/SKILL.md", skillDoc("ship-it", "上线前该做什么"));
+    write("skills-table-home/.ox/skills/deploy/SKILL.md", skillDoc("deploy", "全局部署"));
+
+    const runtime = resolveChatRuntime({ rootAbs: proj, homeDir: home, settings: DEFAULT_SETTINGS });
+    // 表里同时有项目级与全局级，路径口径与扫描层一致（项目相对 / 全局绝对）。
+    expect(runtime.skills.map((s) => s.name).sort()).toEqual(["deploy", "ship-it"]);
+    const shipIt = runtime.skills.find((s) => s.name === "ship-it");
+    const deploy = runtime.skills.find((s) => s.name === "deploy");
+    expect(shipIt?.path).toBe(".ox/skills/ship-it/SKILL.md");
+    expect(deploy?.path).toBe(path.join(home, ".ox", "skills", "deploy", "SKILL.md"));
+    expect(runtime.skillGlobalRootAbs).toBe(path.join(home, ".ox", "skills"));
+
+    // 没有 homeDir 时全局侧缺席：没有全局根，也没有全局技能 —— 两处一致。
+    const noHome = resolveChatRuntime({ rootAbs: project("skills-no-home"), settings: DEFAULT_SETTINGS });
+    expect(noHome.skillGlobalRootAbs).toBeUndefined();
+    expect(noHome.skills).toEqual([]);
+  });
 });

@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { ToolRunner, compareEntryNames } from "../electron/chat/tool-runner";
 import type { ChatApprovalRequest } from "../shared/chat-events";
 import type { ToolCall } from "../shared/tools/spec";
+import type { Skill } from "../shared/skills";
 
 const roots: string[] = [];
 
@@ -406,5 +407,106 @@ describe("ToolRunner · 并行写冲突（M4c）", () => {
     });
     await r.run(call("apply_patch", { patch: patch("a.txt", "x") }));
     expect(recorded).toEqual(["a.txt"]);
+  });
+});
+
+/**
+ * read_skill（M6b）。判错的形态全是静默的「技能没生效」：名字查不到、停用被当
+ * 不存在、全局技能拿不到、会话开始后文件被删 —— 所以逐条钉住，并且**名字永远
+ * 不参与路径拼接**这一条放在最前面：模型给的 name 只在注入表里查。
+ */
+describe("ToolRunner · read_skill", () => {
+  const skill = (over: Partial<Skill> = {}): Skill => ({
+    name: "run-verify",
+    description: "跑本项目 verify 并解读失败",
+    origin: "project",
+    path: ".ox/skills/run-verify/SKILL.md",
+    bodyChars: 12,
+    enabled: true,
+    ...over,
+  });
+
+  it("项目技能给全文（目录块说有什么，工具就真的给得出）", async () => {
+    const root = project();
+    write(root, ".ox/skills/run-verify/SKILL.md", "---\nname: run-verify\ndescription: 跑 verify\n---\n第一步跑门禁。\n");
+    const res = await runner(root, { skills: [skill()] }).run(call("read_skill", { name: "run-verify" }));
+    expect(res.ok).toBe(true);
+    expect(res.output).toContain("第一步跑门禁。");
+  });
+
+  it("名字不在表里就是「没有这个技能」，并把可用名字列出来 —— 名字不参与路径拼接", async () => {
+    const root = project();
+    // 模型给的 name 就算长得像路径，也只是拿去表里查 —— 盘上真有这份文件也不给。
+    write(root, ".ox/skills/anything/SKILL.md", "正文");
+    const res = await runner(root, { skills: [skill()] }).run(call("read_skill", { name: "../../outside" }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("没有这个技能：../../outside");
+    expect(res.reason).toContain("run-verify");
+    // 没注入表时同样报「没有技能可读」，而不是自己扫盘。
+    const noTable = await runner(root).run(call("read_skill", { name: "run-verify" }));
+    expect(noTable.ok).toBe(false);
+    expect(noTable.reason).toContain("本会话没有可用技能");
+  });
+
+  it("停用的技能点名拒绝（停用不等于不存在，理由带上 .disabled）", async () => {
+    const root = project();
+    write(root, ".ox/skills/paused/SKILL.md", "正文");
+    const res = await runner(root, {
+      skills: [skill({ name: "paused", path: ".ox/skills/paused/SKILL.md", enabled: false })],
+    }).run(call("read_skill", { name: "paused" }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("已停用");
+    expect(res.reason).toContain(".disabled");
+  });
+
+  it("全局技能以技能目录根为界，一样给得出全文（项目外 ≠ 读不到）", async () => {
+    const root = project();
+    const globalRoot = fs.mkdtempSync(path.join(os.tmpdir(), "ox-skills-global-"));
+    roots.push(globalRoot);
+    write(globalRoot, "deploy/SKILL.md", "---\nname: deploy\ndescription: 部署\n---\n全局部署流程。\n");
+    const res = await runner(root, {
+      skills: [skill({ name: "deploy", origin: "global", path: path.join(globalRoot, "deploy", "SKILL.md") })],
+      skillGlobalRootAbs: globalRoot,
+    }).run(call("read_skill", { name: "deploy" }));
+    expect(res.ok).toBe(true);
+    expect(res.output).toContain("全局部署流程。");
+  });
+
+  it("全局技能根缺席时报「不可用」，而不是把全局技能当不存在", async () => {
+    const root = project();
+    const res = await runner(root, {
+      skills: [skill({ name: "deploy", origin: "global", path: path.join(root, "deploy", "SKILL.md") })],
+    }).run(call("read_skill", { name: "deploy" }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("全局技能目录在本会话不可用");
+  });
+
+  it("会话开始后技能文件被删：点名「可能被删除」，不装作从来不存在", async () => {
+    const root = project();
+    // 表里有、盘上没有 —— 目录块刚说过有这个技能。
+    const res = await runner(root, { skills: [skill()] }).run(call("read_skill", { name: "run-verify" }));
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("技能文件不存在");
+    expect(res.reason).toContain("可能被删除");
+  });
+
+  it("超限的技能文件拒绝（与 read_file 同一把尺子），话术点名「技能文件」", async () => {
+    const root = project();
+    write(root, ".ox/skills/big/SKILL.md", "x".repeat(600 * 1024));
+    const res = await runner(root, { skills: [skill({ name: "big", path: ".ox/skills/big/SKILL.md" })] }).run(
+      call("read_skill", { name: "big" }),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.reason).toMatch(/技能文件过大/);
+  });
+
+  it("技能文件变成目录（形态检查）：按「不是文件」拒绝", async () => {
+    const root = project();
+    write(root, ".ox/skills/odd/SKILL.md/inner.txt", "这使 SKILL.md 成为目录");
+    const res = await runner(root, { skills: [skill({ name: "odd", path: ".ox/skills/odd/SKILL.md" })] }).run(
+      call("read_skill", { name: "odd" }),
+    );
+    expect(res.ok).toBe(false);
+    expect(res.reason).toContain("不是文件");
   });
 });

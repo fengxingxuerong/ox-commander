@@ -131,7 +131,7 @@ describe("跨协议恢复（messagesForProtocol）", () => {
 });
 
 describe("工具契约（spec）", () => {
-  it("六个工具名都在册，且 isToolName 拒绝未登记的名字", () => {
+  it("七个工具名都在册，且 isToolName 拒绝未登记的名字", () => {
     expect(TOOL_NAMES).toEqual([
       "read_file",
       "list_dir",
@@ -139,6 +139,7 @@ describe("工具契约（spec）", () => {
       "find_by_name",
       "apply_patch",
       "run_command",
+      "read_skill",
     ]);
     for (const n of TOOL_NAMES) expect(isToolName(n)).toBe(true);
     expect(isToolName("rm_file")).toBe(false);
@@ -164,6 +165,15 @@ describe("工具契约（spec）", () => {
     expect(validateToolArgs("run_command", { command: "npm", args: [1] })).toMatch(/字符串数组/);
     expect(validateToolArgs("read_file", { path: "a.ts" })).toBeNull();
     expect(validateToolArgs("read_file", "x")).toMatch(/必须是一个对象/);
+  });
+
+  it("read_skill 的参数契约：name 必填字符串，多余参数拒绝（工具描述里点名了「停用会被拒绝」）", () => {
+    expect(validateToolArgs("read_skill", {})).toMatch(/缺少必填参数.*name/);
+    expect(validateToolArgs("read_skill", { name: 42 })).toMatch(/必须是字符串/);
+    expect(validateToolArgs("read_skill", { name: "deploy", full: true })).toMatch(/不接受参数/);
+    expect(validateToolArgs("read_skill", { name: "deploy" })).toBeNull();
+    const spec = toolSpecOf("read_skill");
+    expect(spec.description).toContain("停用的技能会被拒绝");
   });
 
   it("参数校验的几条边界：null 必填、undefined 键后的坏键、number 与字符串数组各走各的", () => {
@@ -467,6 +477,18 @@ describe("工具裁决（policy）", () => {
     expect(toolRisk("run_command")).toBe("exec");
   });
 
+  it("read_skill 与读文件同一风险档：read-only 也放行、任何审批策略都不问", () => {
+    // 目录块把技能名给了模型 —— read-only 会话取不到技能全文，等于只读模式被
+    // 降成"看得到拿不着"；而它只出正文、不落盘，没有理由让人看见。
+    expect(toolRisk("read_skill")).toBe("read");
+    expect(decideTool({ tool: "read_skill", mode: "read-only", approvalPolicy: "untrusted" })).toEqual({
+      verdict: "allow",
+    });
+    expect(decideTool({ tool: "read_skill", mode: "workspace-write", approvalPolicy: "untrusted" })).toEqual({
+      verdict: "allow",
+    });
+  });
+
   it("read-only 档位下写与执行都被拒，且理由区分于‘人拒绝了’", () => {
     expect(decideTool({ tool: "apply_patch", mode: "read-only", approvalPolicy: "never" })).toEqual({
       verdict: "deny",
@@ -599,6 +621,8 @@ describe("会话转录（chat-events）", () => {
       "执行 npm test",
     );
     expect(describeToolCall({ id: "t-2", name: "grep_files", args: { pattern: "TODO" } })).toBe("检索 TODO");
+    // read_skill 也要有人话摘要（落进 default 就会把工具名原样丢给界面）。
+    expect(describeToolCall({ id: "t-4", name: "read_skill", args: { name: "deploy" } })).toBe("取技能 deploy");
     expect(describeToolResult({ id: "t-3", name: "read_file", ok: false, output: "", reason: "路径穿越" })).toBe(
       "失败：路径穿越",
     );

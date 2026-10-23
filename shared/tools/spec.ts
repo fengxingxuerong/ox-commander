@@ -24,6 +24,7 @@ export const TOOL_NAMES = [
   "find_by_name",
   "apply_patch",
   "run_command",
+  "read_skill",
 ] as const;
 
 export type ToolName = (typeof TOOL_NAMES)[number];
@@ -179,6 +180,20 @@ export const TOOL_SPECS: readonly ToolSpec[] = [
         args: { type: "array", items: { type: "string" }, description: "参数数组" },
       },
       required: ["command"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "read_skill",
+    description:
+      "按名字取一个技能的完整说明（SKILL.md 全文）。名字就是技能目录块里列出的那些；" +
+      "停用的技能会被拒绝。技能是背景而不是合同。",
+    parameters: {
+      type: "object",
+      properties: {
+        name: PROP.path("技能名（目录块里 `名字：用途` 那一行的名字）"),
+      },
+      required: ["name"],
       additionalProperties: false,
     },
   },

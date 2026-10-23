@@ -21,6 +21,7 @@ import {
   type SandboxMode,
 } from "../../shared/tools/policy";
 import type { ChatApprovalAnswer, ChatApprovalRequest } from "../../shared/chat-events";
+import type { Skill } from "../../shared/skills";
 
 /** 目录项排序的唯一实现：walk 用它，测试直接对合成数组断言。 */
 export function compareEntryNames(a: { name: string }, b: { name: string }): number {
@@ -78,6 +79,20 @@ export interface ToolRunnerOptions {
   conflictWindowMs?: number;
   /** 写成功后回灌台账（M4c）：让别的线程知道"这个文件刚被改过"。 */
   onWrite?: (paths: readonly string[]) => void;
+  /**
+   * 会话技能（M6b）：read_skill 的名字就绪表，与提示里的目录块**同一次扫描**的产物
+   * —— 模型给的 name 只在这张表里查，永远不参与路径拼接，能读到的只能是扫描层
+   * 见过的那几份。缺席 = 本会话没有技能可读（一律报「没有这个技能」）。
+   * 停用项也在表里：停用的要点名拒绝，而不是装作不存在。
+   */
+  skills?: readonly Skill[];
+  /**
+   * 全局技能目录根（绝对路径）。全局技能在项目外，`pathPolicy` 管不到它 ——
+   * read_skill 对全局技能以这个根为界再走一次同一个 `PathPolicy` 判定
+   * （相对根解析 + realpath 包含 + 禁读地板；**不吃**项目的 policy.d 覆盖，
+   * 那份管的是项目根，不该越界裁全局目录）。缺席 = 全局技能一律不可读。
+   */
+  skillGlobalRootAbs?: string;
 }
 
 export const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
@@ -103,6 +118,10 @@ export class ToolRunner {
   private readonly conflictWrites?: () => readonly ThreadWrite[];
   private readonly conflictWindowMs?: number;
   private readonly onWrite?: (paths: readonly string[]) => void;
+  /** M6b：read_skill 的名字就绪表（含停用项）。 */
+  private readonly skills: readonly Skill[];
+  /** M6b：全局技能根（原始路径）与以它为界的读判定；缺席 = 全局技能不可读。 */
+  private readonly skillGlobal?: { rootAbs: string; policy: PathPolicy };
   /** 本次会话里人答过"不用再问"的动作（key 由 policy 层定义）。 */
   private readonly sessionApproved = new Set<string>();
 
@@ -123,6 +142,14 @@ export class ToolRunner {
     this.conflictWrites = opts.conflictWrites;
     this.conflictWindowMs = opts.conflictWindowMs;
     this.onWrite = opts.onWrite;
+    this.skills = opts.skills ?? [];
+    // 原始根与它的读判定收成一个字段：两者同生同灭，只留一处可判"缺席"。
+    // 相对路径必须按**原始根**算 —— `PathPolicy.projectRoot` 是 realpath 后的长名，
+    // 而扫描层给的 `skill.path` 走的是调用方传入的原始根，win32 的 8.3 短名
+    // (`ADMINI~1`) 在两者之间会让 `path.relative` 算出一串 `..`。
+    this.skillGlobal = opts.skillGlobalRootAbs
+      ? { rootAbs: opts.skillGlobalRootAbs, policy: new PathPolicy({ projectRoot: opts.skillGlobalRootAbs }) }
+      : undefined;
   }
 
   /**
@@ -159,6 +186,8 @@ export class ToolRunner {
         return this.applyPatch(call, signal, turn);
       case "run_command":
         return this.runCommand(call, signal);
+      case "read_skill":
+        return this.readSkill(call);
       default:
         return { id: call.id, name: call.name, ok: false, output: "", reason: `未实现的工具：${String(call.name)}` };
     }
@@ -318,6 +347,63 @@ export class ToolRunner {
     const tail =
       lines.length > maxLines ? `\n…（共 ${lines.length} 行，只给了前 ${maxLines} 行；可加大 maxLines 或先 grep 定位）` : "";
     return this.ok(call, numbered + tail);
+  }
+
+  /**
+   * read_skill（M6b）：按名字取技能全文。
+   *
+   * 安全口径与 `read_file` 同一条判据，**名字永远不参与路径拼接** —— 模型给的
+   * name 只在注入的技能表里查，能读到的只能是扫描层见过的那几份：
+   * - 项目级：`skill.path` 是相对项目根的 POSIX 路径，直接过 `pathPolicy.assertReadable`
+   *   （realpath 后再判禁读地板 —— 技能目录里放一个指向 `.env` 的软链，在 realpath
+   *   那一步就现形并被拒）；
+   * - 全局级在项目外，`pathPolicy` 管不到：以技能目录根为界再走**同一个** `PathPolicy`
+   *   实现（相对根解析 + realpath 包含 + 禁读地板）。刻意不吃项目的 `policy.d` 读覆盖
+   *   —— 那份声明管的是项目根，让它越界裁全局目录等于把项目配置升了权。
+   */
+  private readSkill(call: ToolCall): ToolResult {
+    const fail = (reason: string): ToolResult => ({ id: call.id, name: call.name, ok: false, output: "", reason });
+    const name = String(call.args.name ?? "").trim();
+    if (name === "") return fail("缺少技能名（name）");
+    const skill = this.skills.find((s) => s.name === name);
+    if (skill === undefined) {
+      const known = this.skills.map((s) => s.name).join("、");
+      return fail(`没有这个技能：${name}${known === "" ? "（本会话没有可用技能）" : `（可用：${known}）`}`);
+    }
+    // 停用不等于不存在（shared/skills.ts 的纪律 3）：要点名拒绝，理由里带上停用标记。
+    if (!skill.enabled) return fail(`技能已停用（同目录里有 .disabled）：${name}`);
+    if (skill.origin === "project") {
+      if (!this.pathPolicy.assertReadable(skill.path)) {
+        return fail(`不允许读取该技能文件（沙箱判定）：${skill.path}`);
+      }
+      return this.readSkillFile(call, this.absOf(skill.path), skill.path);
+    }
+    // 全局根缺席 = 全局技能一律不可读。根与 policy 收在同一个字段里，只判一次 ——
+    // 两个分开的可选字段会多出一个"永远同真同假"的分支，位点审计只会把它记成等价。
+    const global = this.skillGlobal;
+    if (global === undefined) {
+      return fail(`全局技能目录在本会话不可用：${name}`);
+    }
+    if (!global.policy.assertReadable(path.relative(global.rootAbs, skill.path))) {
+      return fail(`不允许读取该技能文件（沙箱判定）：${skill.path}`);
+    }
+    return this.readSkillFile(call, path.resolve(skill.path), skill.path);
+  }
+
+  /** 读一份技能文件：与 `readFile` 同一套存在性 / 形态 / 大小检查，只是话术点名「技能」。 */
+  private readSkillFile(call: ToolCall, abs: string, shown: string): ToolResult {
+    const fail = (reason: string): ToolResult => ({ id: call.id, name: call.name, ok: false, output: "", reason });
+    if (!fs.existsSync(abs)) {
+      return fail(`技能文件不存在（会话开始后可能被删除）：${shown}`);
+    }
+    const stat = fs.statSync(abs);
+    if (!stat.isFile()) {
+      return fail(`技能文件不是文件：${shown}`);
+    }
+    if (stat.size > this.maxFileBytes) {
+      return fail(`技能文件过大（${stat.size} 字节，上限 ${this.maxFileBytes}）：${shown}`);
+    }
+    return this.ok(call, this.readTextFile(abs));
   }
 
   /** 递归列目录（只走项目内，跳过构建产物目录）。 */

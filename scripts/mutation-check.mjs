@@ -909,11 +909,11 @@ const SITE_BASELINE = {
   "electron/automations/automation-scheduler.ts": 6,
   "electron/automations/automation-store.ts": 18,
   "electron/board-derive.ts": 40,
-  "electron/chat/runtime.ts": 14,
+  "electron/chat/runtime.ts": 16,
   "electron/chat/session-store.ts": 38,
   "electron/chat/session.ts": 44,
   "electron/chat/thread-registry.ts": 12,
-  "electron/chat/tool-runner.ts": 64,
+  "electron/chat/tool-runner.ts": 73,
   "electron/chat/write-ledger.ts": 3,
   "electron/context/github-readonly.ts": 65,
   "electron/engine/batch-guard.ts": 19,
@@ -1340,27 +1340,6 @@ const EQUIVALENT_SITES = [
    */
   { file: "electron/engine/scheduler.ts", op: "return true → false", line: 346 },
   { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 346 },
-  /**
-   * `shared/tools/spec.ts` `validateToolArgs` 的 boolean 类型分支 —— **当前
-   * 工具表闭合，不可达**。
-   *
-   * `TOOL_SPECS` 是闭合集合（未登记名字在 toolSpecOf 就抛错），而表里六个
-   * 工具没有任何参数声明 `type: "boolean"` —— string / number / boolean /
-   * array 四个类型分支里只有 boolean 这条永远取不到：变异
-   * `typeof value !== "boolean"` → `=== "boolean"` 要在"值真是布尔"时报错，
-   * 而该分支连值都读不到（前置合取 `prop.type === "boolean"` 恒假）。
-   *
-   * 分支刻意保留：它是 JSON Schema 类型分派的完整Dispatch，将来给工具加布尔
-   * 参数时这条就是承重的那一个；删掉它等于给未来的参数埋"任何值都放行"的坑。
-   * 位点重回分母即提示重新核对（与 scheduler 的 spare 查找、kill-tree 的双重
-   * 防线同一处置逻辑：防御冗余，有意保留）。
-   *
-   * 2026-10-20 交互式会话轮接入：逐位点审计（site 口径）实测该变异不可杀后
-   * 入表。同行 203 行的 number 分支同型不同命 —— grep_files 的 maxMatches
-   * 真在表里，那条由 src/chat-tools.test.ts 的「给数字放行、给字符串报错」
-   * 两条断言钉住，不入表。
-   */
-  { file: "shared/tools/spec.ts", op: "!== → ===", line: 204 },
   /**
    * `electron/ipc/context.ts` 的 `ensureAgentLayer` 缓存 signature 里
    * `settingsValue.agentRouter !== false` → `=== false` —— **可证明等价**。

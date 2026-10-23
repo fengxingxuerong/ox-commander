@@ -2916,6 +2916,37 @@ describe("chat handlers（交互式编码会话）", () => {
     );
   });
 
+  it("M6b：read_skill 端到端 —— 运行时扫到的技能能被工具取到全文并回灌给模型", async () => {
+    const root = seedChatWorkspace();
+    fs.mkdirSync(path.join(root, ".ox", "skills", "demo"), { recursive: true });
+    fs.writeFileSync(
+      path.join(root, ".ox", "skills", "demo", "SKILL.md"),
+      ["---", "name: demo", "description: 演示技能", "---", "", "技能正文：先跑门禁。"].join("\n"),
+      "utf8",
+    );
+    h.llmChat.mockReset();
+    h.llmChat
+      .mockResolvedValueOnce({
+        content: "```tool\n" + JSON.stringify({ tool: "read_skill", arguments: { name: "demo" } }) + "\n```",
+        provider: "fake",
+        model: "fake",
+        usageTokens: 1,
+      })
+      .mockResolvedValueOnce({ content: "读到了", provider: "fake", model: "fake", usageTokens: 1 });
+
+    (h.ipcMain as FakeIpcMain).invoke("chat:send", { text: "看看 demo 技能", projectId: "p-chat" });
+    await waitForEvent("chat:done");
+    // 第一轮请求里的目录块必须与工具表同源：提示点名了 demo，工具就得真给得到
+    // —— 断了这根线（比如把 skills 漏传给 runner），模型只会得到「没有这个技能」，
+    // 而提示里明明写着有，界面上没有任何痕迹。
+    const system = String(h.llmChat.mock.calls[0]?.[0]?.messages?.[0]?.content ?? "");
+    expect(system).toContain("demo");
+    expect(system).toContain("read_skill");
+    // 第二轮请求里必须带着技能全文 —— 工具结果真的回到了模型，不是"模型假装读过"。
+    const secondRequest = JSON.stringify(h.llmChat.mock.calls[1]?.[0]?.messages ?? []);
+    expect(secondRequest).toContain("技能正文：先跑门禁。");
+  });
+
   it("项目 .ox/config.json 的 read-only 档位真的拦住补丁写盘", async () => {
     const root = seedChatWorkspace();
     fs.mkdirSync(path.join(root, ".ox"), { recursive: true });
