@@ -1282,8 +1282,14 @@ const EQUIVALENT_SITES = [
  *   序列杀死它（值互换下 A→B→A 的第三次调用会命中第一次的键），但推演结论是
  *   杀不死 —— 双射下键与输入的绑定方向不可观察，缓存命中边界恒等，与上面的
  *   等价性论证互为印证。
+ * 2026-10-23：M3c/M4b/P0 三轮在 context.ts 里净增 9 行 → 221 → 225。这一漂移
+ *   是 **CI 的 tier2 分片抓出来的**（`mutation:touched` 只看最后一笔，看不到更早
+ *   几笔的位移；漂移让位点重新进入分母并存活）。同时把此前为同一处重复登记过的
+ *   两条陈旧锚点（187 / 222）一并折进这里 —— 历史上每次都"新增一条"而不是校回
+ *   旧条目，于是表里躺着两条永远匹配不上的死条目，而真正的位点在 225 上无人认领。
+ *   处置沿用本仓纪律：**校回行号 + 保留论证，不删表**（折掉的三条是同一位点）。
  */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 187 },
+  { file: "electron/ipc/context.ts", op: "!== → ===", line: 225 },
   /*
    * 2026-10-02 P2-3 审批 UI 面轮白名单（三条，各自论证）：
    * 1. `electron/ipc/context.ts:208` `agentRouter !== false` —— 层签名的
@@ -1314,8 +1320,8 @@ const EQUIVALENT_SITES = [
   /* 2026-10-17 再校回：通知接线在 context.ts 顶部加 1 行 import、send() 内加
    * 7 行 → 212 → 221。论证不变；fail-safe 再次以"存活"形式暴露漂移。
    * 187 的同型位点（第二处签名行）已在此前的装配收敛中消失，条目保留作历史
-   * 锚；现存的 enableRouter: … !== false（225/283）是真行为、被用例杀死，不入表。 */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 221 },
+   * 锚；现存的 enableRouter: … !== false（225/283）是真行为、被用例杀死，不入表。
+   * 2026-10-23：这一条已并入上方 `context.ts` 的 225 锚点（同一位点，不再重复登记）。 */
   { file: "electron/ipc/orchestration.ts", op: "return true → false", line: 267 },
   { file: "headless/run-spec.ts", op: "三元分支互换", line: 286 },
   { file: "src/store.ts", op: "=== → !==", line: 247 },
@@ -1357,21 +1363,12 @@ const EQUIVALENT_SITES = [
    */
   { file: "electron/engine/scheduler.ts", op: "return true → false", line: 346 },
   { file: "electron/engine/scheduler.ts", op: "|| → &&", line: 346 },
-  /**
-   * `electron/ipc/context.ts` 的 `ensureAgentLayer` 缓存 signature 里
-   * `settingsValue.agentRouter !== false` → `=== false` —— **可证明等价**。
-   *
-   * 这个布尔只作为 signature 字符串的一个片段，而 signature 的唯一用途是与
-   * 上一次的 `layerSignature` 做**字符串相等**比较；它从不被解析、不对外暴露。
-   * 对任意输入 v，`v === false` 恒等于 `!(v !== false)`，即变异只是把该片段
-   * 整体取反。取反是单射：`f(a) === f(b)` 当且仅当 `g(a) === g(b)`，所以
-   * 任意两次设置的「命中/未命中」关系完全不变 —— 变异只改缓存键的字面值，
-   * 不改任何可观测行为。
-   *
-   * ⚠️ 行号是锚点：signature 结构变化使该行漂移时，变异会重新出现 ——
-   * 届时按新行号校回，并重新确认它仍只参与相等比较。
+  /*
+   * `electron/ipc/context.ts` 的 `ensureAgentLayer` 缓存 signature 位点 —— 已并入
+   * 上方 `context.ts` 的 225 锚点（2026-10-23 折叠三条陈旧重复条目）。保留这条
+   * 注释作为历史：它记录的是同一位点在 222 行时的论证（取反是单射 → 缓存命中
+   * 边界恒等 → 无可观察差异），与上方那条逐字同义。
    */
-  { file: "electron/ipc/context.ts", op: "!== → ===", line: 222 },
   /**
    * `electron/ipc/chat.ts` `profileOfMeta` 的早退条件
    * `if (!meta.providerId || !meta.model) return base;` —— **可证明等价**。

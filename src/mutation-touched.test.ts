@@ -34,9 +34,14 @@ function fakeGit(statusNoUntracked: string, statusAll: string) {
  * 按锚点把判定区从门禁脚本里抠出来求值。
  * 区首/区尾锚点是两段块注释的完整开头（`决定本轮审谁` 与 `基线落定后的主流程`），
  * 两者都在脚本里唯一；挪动或改名会让这里红出来，处置是把锚点跟上（而不是删用例）。
+ *
+ * ⚠️ 先把行尾归一成 LF 再找锚点：win32 上的 git 检出是 **CRLF**，用 `\n` 组成的
+ * 锚点会一个都找不到 —— CI 的 windows job 就是这样红的（ubuntu 是 LF，本机工作区
+ * 也是 LF，所以本地永远绿）。切出来的区段同样来自归一后的文本，它是拿去
+ * `new Function` 的，行尾形式无所谓。
  */
 function loadResolveAuditScope(): (gitFn: (args: string[]) => string, args: string[]) => { base: string; untracked: string[] } {
-  const src = fs.readFileSync(SCRIPT, "utf8");
+  const src = fs.readFileSync(SCRIPT, "utf8").replace(/\r\n/g, "\n");
   const start = src.indexOf("/*\n * 决定本轮审谁");
   const end = src.indexOf("/*\n * 基线落定后的主流程");
   if (start < 0 || end < 0 || end <= start) {
