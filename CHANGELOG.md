@@ -8,7 +8,7 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
-## [未发布] — v0.1.9 之后（2026-10-18 →）
+## [0.2.0] — 2026-10-23
 
 ### 新增（MCP client · M7 · 2026-10-23）
 

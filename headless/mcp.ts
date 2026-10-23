@@ -298,7 +298,7 @@ export async function handleMcpMessage(msg: unknown, http: ServeHttp): Promise<R
     return rpcResult(req.id, {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: {} },
-      serverInfo: { name: "ox-commander", version: "0.1.9" },
+      serverInfo: { name: "ox-commander", version: "0.2.0" },
     });
   }
   // 客户端的 initialized 通知没有 id，在 asRequest 之后根本到不了这里带 id 的

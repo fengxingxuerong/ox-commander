@@ -43,7 +43,13 @@ jobs:
   verify:
     name: verify (release gate)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 90 分钟，不是 30。原来的 30 是按"链里最重的是 mutation:quick"定的；自从
+    # `mutation:touched` 进链（site 口径逐位点审计**本次改到的每个目标**），一次
+    # 大改动的 tag 上它会单独吃掉 30 分钟：2026-10-23 本机实测 M7 那一笔是
+    # 11 个目标 / 436 处位点 ≈ 32 分钟，再加 mutation:quick、测试、构建与 13 条
+    # 冒烟，整链 ~50 分钟。超时不是判据放宽（红仍然红），但"门禁比它自己的默认
+    # 时限还长"会让每次发布都假红一次，最后没人再信这个 gate。
+    timeout-minutes: 90
     env:
       # 这个 job 同样不启动 Electron，只要类型定义。
       ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
