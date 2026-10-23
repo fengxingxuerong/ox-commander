@@ -1,19 +1,17 @@
 name: diag-linux-mutation
 
-# 临时诊断（2026-10-23）：CI 的 `mutation (site, tier 1 1/1)` 在 ubuntu 上红，
-# 而同一份提交在 win32 本机跑 `--tier=1 --shard=1/1` 是 **exit 0 全绿** ——
-# 说明那处存活是 Linux 专有的，本机复现不出来（无 WSL/Docker）。
+# 单文件变异复核（Linux）。
 #
-# 这里按**文件**起矩阵（每个目标一个 leg、各自一个 runner），跑完看哪个 leg 红
-# 就是哪个目标。`mutation-check` 已把存活位点写成 GitHub 注解，所以失败 leg 上
-# 还能直接读到「哪个算子、哪一行」。
+# 起因（2026-10-23）：CI 的 `mutation (site, tier 1 1/1)` 在 ubuntu 上红，而同一份
+# 提交在 win32 本机跑同一分片是 **exit 0 全绿** —— 说明存活位点是 Linux 专有的，
+# 本机复现不出来（无 WSL/Docker）。那次靠这个矩阵 + `mutation-check` 新加的 GitHub
+# 注解，一次就定位到 `electron/sandbox/path-policy.ts :: === → !== @94`。
 #
-# 用完即删，或者把 trigger 改成只留 `workflow_dispatch` 长期当"单文件复核"用。
+# 现在只留 `workflow_dispatch`：**不自动跑**（免得每次碰这个文件都起 15 个 job）。
+# 要问"某个目标在 Linux 上到底绿不绿"时手动触发，或改下面的 file 列表。
+# 失败 leg 的注解自带文件名 / 算子 / 行号 —— 不用再向维护者要 job 日志。
 
 on:
-  push:
-    paths:
-      - ".github/workflows/diag-linux-mutation.yml"
   workflow_dispatch:
 
 permissions:
@@ -31,6 +29,8 @@ jobs:
       fail-fast: false
       matrix:
         file:
+          # 2026-10-23 实际拦住发布的那一个（win32 能杀、POSIX 不可达 → 靠等价锚点）：
+          - electron/sandbox/path-policy.ts
           - shared/mcp.ts
           - electron/mcp/manifest.ts
           - electron/mcp/client.ts
