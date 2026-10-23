@@ -1061,9 +1061,20 @@ const EQUIVALENT_SITES = [
    * CI ubuntu 首跑暴露此存活（Linux 上 27/27 全绿），诊断输出
    * （diff + 变异下通过报告）确认变异体在 POSIX 上从未被执行 ——
    * 平台相关等价的又一实锤，与 workflow 注释里"两个 OS 合起来才是全集"
-   * 的设计互为印证。行号 92 在两端一致，无漂移风险。
+   * 的设计互为印证。
+   *
+   * ⚠️ 2026-10-23 更正上面那句"无漂移风险"：P0 交互式会话那一笔在
+   * `path-policy.ts` 里加了 2 行（macOS 分支注释），92 → 94，位点重新进入分母
+   * 并在 **CI 的 tier1 分片**上存活（win32 本机有盘符不存在的用例会杀掉它，
+   * 所以本地全绿 —— 这正是"两个 OS 合起来才是全集"的反面教材）。
+   * 同一轮还发现表里另有 12 条更早留下的漂移锚点（scheduler 346/352、
+   * http-bridge 315、sensenova-api 397/403、store 247、ipc/chat 197/402、
+   * serve 482、run-spec 286/288/290 …）：它们指向的行早已没有对应算子，
+   * 属于**死条目**（不影响判定，因为 live 位点若没人杀会以存活形式自己红，
+   * 本条的 94 就是这么暴露的）。彻底清理要求逐个确认"这条原本豁免哪一处"，
+   * 留作下一轮的表维护；本轮只校回正在拦路的那一条。
    */
-  { file: "electron/sandbox/path-policy.ts", op: "=== → !==", line: 92 },
+  { file: "electron/sandbox/path-policy.ts", op: "=== → !==", line: 94 },
   /**
    * `electron/engine/router.ts` tie-break 排序里的
    * `if (anyDeclared && a.descriptor.inferredLegacy !== b.descriptor.inferredLegacy)`
