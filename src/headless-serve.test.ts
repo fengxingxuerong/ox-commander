@@ -383,6 +383,23 @@ describe("serve · HTTP", () => {
     await reader.cancel();
   });
 
+  it("sends the connect-comment frame immediately on a zero-history instance", async () => {
+    // 零历史的新实例：writeHead 不发送、第一条 write 才冲刷头 —— 历史回放循环
+    // 一条都不写时，订阅端要干等到第一个事件才看到流"活着"（浏览器 EventSource
+    // 停在 connecting）。连接注释帧（SSE 规范里冒号开头、客户端忽略）就是为此：
+    // 建立即到第一字节。2026-10-25 全量测试实测发现，裸 TCP 对全新实例拿到
+    // 零字节 —— 这条用例钉住它不再回来。
+    const srv = await startServe({ run: async () => 0 });
+    open.push(srv);
+    const res = await fetch(`http://127.0.0.1:${srv.port}/events`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+    const reader = res.body!.getReader();
+    const chunk = await reader.read();
+    expect(new TextDecoder().decode(chunk.value)).toContain(": connected");
+    await reader.cancel();
+  });
+
   it("refuses a second concurrent run with 409 and a reason", async () => {
     let release: (() => void) | undefined;
     const gate = new Promise<void>((r) => (release = r));

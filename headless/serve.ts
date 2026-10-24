@@ -742,6 +742,13 @@ export function startServe(opts: {
         "Cache-Control": "no-cache",
         Connection: "keep-alive",
       });
+      // 连接注释帧：writeHead 本身**不发送**任何字节 —— 头要等第一条 write 才
+      // 随之冲刷。零历史的新实例上（还没人 POST 过 run），下面那个循环一条都不
+      // 写，于是订阅端（浏览器 EventSource 停在 connecting、`curl -N` 无输出）
+      // 要一直干等到第一个事件。冒号开头的注释行按 SSE 规范被客户端忽略，
+      // 但它是"连接已建立"的第一字节（2026-10-25 全量测试实测发现：部署文档
+      // 的 SSE 验收步在全新实例上会假失败）。
+      res.write(": connected\n\n");
       // 先把历史事件补齐：后连上的客户端不该只看到半截。
       for (const [i, evt] of state.events.entries()) res.write(sseFrame(evt, i));
       clients.add(res);

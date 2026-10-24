@@ -17,6 +17,28 @@
 
 ---
 
+## [Unreleased · SSE 建连注释帧（全量测试发现）· 2026-10-25]
+
+**发现路径**：全量测试轮里对 serve 做部署验收清单实测 —— 无 token 401 / 对 token 200 /
+垃圾 spec 400 三条全过，唯独 SSE 一条 curl 静默。换裸 TCP 直连复测：**对全新实例拿到
+零字节**；而 `src/headless-serve.test.ts` 57 例全绿。
+
+**为什么测试全绿还有 bug**：现有 SSE 真实用例（"streams events and replays history"）
+先 POST 一次 run **制造历史**再订阅 —— 历史非空 ⇒ 回放循环有 write ⇒ 头随第一条 write
+冲刷。盲区恰好是"零历史"：`res.writeHead(200, …)` 只设置不发，循环零次 ⇒ 无任何字节。
+浏览器 EventSource 停在 connecting 直到第一个事件；我写的部署文档验收第 4 条在全新
+VPS 实例上会**假失败**（curl -N 一直空）。
+
+**修复**：SSE 分支建连即写注释帧 `res.write(": connected\\n\\n")` —— 冒号开头按规范被
+客户端忽略，但它是"连接已建立"的第一字节。新增用例"零历史实例建立即到注释帧"钉住；
+部署文档验收步改为 `head -1 → : connected`。
+
+**门禁账**：修复只加一行无分支 write ⇒ 变异位点零新增（基线 3098 不动，SITE_BASELINE
+无漂移）；serve.ts 单文件逐位点 73/73 全杀；用例 2992/3000；完整 verify exit 0。
+CHANGELOG 用例数声明同步（README/gates 的 2991→2992、合计→3000）。
+
+---
+
 ## [Unreleased · 竞品刷新第六轮（执行器接入）· 2026-10-25]
 
 **动机**：用户要求对照本周 GitHub 同类热点做一轮全面吸收 + 全面测试。检索（trending 一周

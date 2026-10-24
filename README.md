@@ -283,7 +283,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   同批还校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点**（`(算子, 行号)` 逐条比对，复用门禁
   自己的 `findSites`）：失效条目豁免的是空气，而漂到新行的那个位点无人认领 —— 2026-10-23 一天内
   因此红了两轮 CI（`context.ts` 221→225、`path-policy.ts` 92→94，后者直接拦住发布）
-→ vitest（2026-10-23 现跑 2991 通过 + 8 跳过，合计 2999 条，分布在 100 个有可执行用例的文件；
+→ vitest（2026-10-23 现跑 2992 通过 + 8 跳过，合计 3000 条，分布在 100 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；

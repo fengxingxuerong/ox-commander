@@ -84,8 +84,9 @@ curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8787/
 curl -s -H "Authorization: Bearer $(grep -oP '(?<=OX_SERVE_TOKEN=).*' /etc/oxcommander/serve.env)" \
   http://127.0.0.1:8787/ | head -5
 #   → 状态页 HTML
-curl -sN -H "Authorization: Bearer <token>" http://127.0.0.1:8787/events | head -3
-#   → SSE 事件流（后连上的客户端会先补齐历史）
+curl -sN -H "Authorization: Bearer <token>" http://127.0.0.1:8787/events | head -1
+#   → : connected（建连接注释帧，零历史的新实例也会立即出现；跑过 run 后
+#     这里起还会按序补齐历史事件）
 curl -s -X POST -H "Authorization: Bearer <token>" -H 'content-type: application/json' \
   -d @nightly.json http://127.0.0.1:8787/run -o /dev/null -w '%{http_code}\n'
 #   → 202（已在跑则 409 —— 单 run 语义，不是故障）
