@@ -8,7 +8,7 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
-## [Unreleased]
+## [0.3.0] — 2026-10-24
 
 ### 新增（远程常驻部署 · C7 · 2026-10-24）
 
