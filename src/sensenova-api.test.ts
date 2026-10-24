@@ -497,7 +497,10 @@ describe("SensenovaApiAdapter", () => {
     await terminalText(adapter, await run(adapter, root)); // fingerprint hit → no content reads
     expect(readSpy.mock.calls.length).toBe(readsAfterFirst);
 
-    fs.writeFileSync(path.join(root, "src", "core.js"), "module.exports.core=2;", "utf8"); // invalidate
+    // 失效指纹：**故意让长度也变**（`=2;` → `=22;`）。指纹是 `size + mtimeMs`，
+    // 而"同长度、只靠 mtime"在 mtime 分辨率/时钟合并的机器上会读到同一个时间戳 →
+    // 指纹不变 → 这条断言假红（2026-10-23 verify 上实测一次：2 不大于 2）。
+    fs.writeFileSync(path.join(root, "src", "core.js"), "module.exports.core=22;", "utf8");
     await terminalText(adapter, await run(adapter, root)); // fingerprint changed → re-read
     expect(readSpy.mock.calls.length).toBeGreaterThan(readsAfterFirst);
     readSpy.mockRestore();

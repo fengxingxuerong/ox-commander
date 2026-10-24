@@ -225,7 +225,7 @@ export class McpClient {
         {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: {},
-          clientInfo: { name: "ox-commander", version: "0.2.0" },
+          clientInfo: { name: "ox-commander", version: "0.2.1" },
         },
         this.manifest.timeoutMs,
         signal,

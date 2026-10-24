@@ -17,7 +17,34 @@
 
 ---
 
-## [未发布] — v0.2.0 之后（2026-10-23 →）
+## [0.2.1] — 2026-10-23
+
+### 安全（窗口与导航守卫 · 2026-10-23）
+
+**动机**：这个窗口的内容是**不可信文本** —— 模型输出、第三方 MCP 工具返回、预览与审计。
+`webPreferences` 里 `contextIsolation: true` + `nodeIntegration: false` 挡住了"页面里直接
+require"，但挡不住两件事：
+
+1. `window.open` 出来的子窗口**继承同一份 preload**（`window.ox` 照样能调）—— 而 IPC 那
+   一侧的能力面是写文件、起进程、审批；
+2. 页面里任何一次导航都会把应用带走（模型输出里有链接是常态）。
+
+**判据（为什么敢一刀切）**：全仓 grep 过 `window.open` / `<a ` / `location.href=` —— 0 处；
+对外打开统一走 `preview:open` IPC → `shell.openExternal`（带白名单、`ipc-handlers.test.ts`
+有用例）。于是 `setWindowOpenHandler(() => ({ action: "deny" }))` 与"`will-navigate` 只放行
+应用自身"对既有功能是零影响的。dev 下 Vite 的整页重载会走 `will-navigate`，所以 dev 分支
+放行 `http://localhost:5173`（其它端口照样拦）。
+
+**可测性**：`electron/main.ts` 本来就在变异 TARGETS 里（tier 1，配 `src/main-wiring.test.ts`
+—— 那份用例把入口**真跑起来**）。给 fixture 的 `webContents` 补两个记录点
+（`setWindowOpenHandler` / `will-navigate` 触发器）后新增三条断言：新窗口一律 deny、外部
+地址被拦而自身 `file://` 放行、dev 下放行 5173 但 8787 照样拦。位点 6 → 7，**7/7 全杀**。
+
+**窗口的迟到（记账，这条比代码更重要）**：两条守卫落地于 v0.2.0 打 tag **之后**（同日晚上），
+所以 0.2.0 的安装包**不包含**这条加固 —— 0.2.1 才是带加固的那一版。教训：安全类改动与版本
+发布之间要显式确认"谁包含谁"，而不是默认"推上去就在里面了"。发现过程也很典型：巡检查
+CHANGELOG 时发现这条用户可见的安全改动**没有条目**（违反本仓"每条可见变化都要记"的纪律），
+顺着往下才对上 tag 的时间线。
 
 ### 门禁与维护（等价白名单的失效检查 · 2026-10-23）
 
