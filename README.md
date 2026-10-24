@@ -150,6 +150,12 @@ node dist-headless/headless/serve-main.js --port=8787 \
 # 停机期间错过的触发点重启补跑一次（至多一次）；语义详见 docs/headless-protocol.md §8.1
 ```
 
+**再进一步：VPS 常驻部署**（2026-10-24，C7 —— 夜里跑、合上笔记本继续看）：
+`npm run serve:unit` 生成带安全判据的 systemd 单元（token 永不落单元、服务永远只听
+`127.0.0.1`、`ProtectSystem=strict` 与状态目录可写成对、定时参数成对或都不出现），反代终结
+TLS 指回回环 —— 公网入口与业务服务各管一段。完整步骤（建用户 / 环境文件 / caddy 或 nginx /
+验证清单）见 [docs/serve-deploy.md](docs/serve-deploy.md)。
+
 **或者把它接进 agent 生态**（反向 MCP，竞品调研 5.5）：
 
 ```bash

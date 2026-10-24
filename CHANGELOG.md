@@ -10,6 +10,22 @@
 
 ## [Unreleased]
 
+### 新增（远程常驻部署 · C7 · 2026-10-24）
+
+- **`npm run serve:unit`：生成 `oxcommander serve` 的 systemd 单元**（带判据自检的生成器，
+  不是安装器 —— 装进 systemd 的动权动作由人执行，脚本打印下一步清单）。固化的安全判据：
+  **token 永不进单元文件**（只走 `EnvironmentFile`）、`--host=127.0.0.1` 是唯一取值
+  （公网暴露与 TLS 是反向代理的职责）、`ProtectSystem=strict` 与
+  `ReadWritePaths=${STATE_DIRECTORY}` **成对出现**（只 strict 不开写路径，定时状态第一次
+  落盘就写崩）、`--schedule-state` 落状态目录、`--every`/`--spec` 成对或都不出现
+  （与 serve-main 的 `parseScheduleArgs` 同一条纪律）。
+- **[docs/serve-deploy.md](docs/serve-deploy.md)：VPS 常驻部署全步骤** —— 专用用户、单元
+  生成、token 环境文件、caddy/nginx 的 TLS 终结（SSE 关缓冲）、四条验收清单（无 token
+  必须 401）、安全模型（什么被保护 / 什么刻意不做：单 bearer token 不做成登录系统、TLS
+  不进 serve 进程、`?token=` 的日志代价说破）。
+- 缺口对照：cezar 的 `server-install`（HTTPS + 登录 + systemd）对位补齐到**单租户自托管**
+  形态；多租户治理层明确不做（与 2026-10-17 盘点 D 类口径一致）。
+
 ### 新增（成本对账 · C4 · 2026-10-24）
 
 - **凭据开始落 `usage.byModel` 明细**：此前"哪条线路花了多少"只活在 run 进行中的

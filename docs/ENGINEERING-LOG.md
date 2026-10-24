@@ -17,6 +17,38 @@
 
 ---
 
+## [Unreleased · 远程常驻部署（C7）· 2026-10-24]
+
+**动机**：10-17 盘点 C7 —— cezar `server-install`（HTTPS + 登录 + systemd）对位，
+"夜里跑、合上笔记本继续"的 24/7 场景此前只有零件（serve 常驻 + SSE + 定时 + opt-in
+token）没有装配图。勘查现状：鉴权底子其实已经在了（2026-10-10 的 OX_SERVE_TOKEN
+前置所有路由 + 非回环无 token 拒启 fail-closed），真正缺的是**部署形态**：systemd
+单元、TLS 终止、以及把安全默认值固化下来不让每个人重新踩一遍。
+
+**形态取舍**：
+
+- **生成器不是安装器**：拷贝/daemon-reload/enable 是改变机器状态的动权动作，人看着做；
+  但单元里有一堆安全判据（回环、token 不落单元、strict 与写路径成对）—— 生成器把这些
+  判据固化成同一份出处 + `--selftest` 逐条钉住，人只需要审一眼输出。
+- **TLS 不进 serve 进程**：终结 TLS 是反代（caddy/nginx）的生态位；自签证书既难维护又
+  容易配错。回环 + 代理是最少活动部件的形态，单元里 `--host=127.0.0.1` 因此是**唯一**
+  取值（自检断言），改它必须是人手改单元。
+- **多租户治理明确不做**：单 bearer token、无登录系统 —— 与盘点 D 类口径一致，写进
+  部署文档的"安全模型"节，防止被读成遗漏。
+
+**踩过的坑（自检首跑红的那条）**：判据 1 的断言"单元里不许出现 token 形态的赋值"
+误伤了**注释行**（放置指引 `# OX_SERVE_TOKEN=<随机值>` 是刻意保留的）。修正为
+结构性断言：含 `OX_SERVE_TOKEN` 的行必须全部以 `#` 开头。另：Git Bash 的 MSYS
+路径改写会把 `--spec=/etc/...` 改成 Windows 路径 —— 本地测试加
+`MSYS2_ARG_CONV_EXCL=*`，Linux 上无此问题。
+
+**门禁面**：脚本接入 `npm run serve:unit`（check:scripts-wired 口径）；`--selftest`
+5 组判据 + checklist 2 项；半对 `--every`/`--spec` 在生成器里就抛错（exit 2），不是
+等运行时才露馅。无 TS 生产代码变更 —— 不涉变异目标与基线；README/CHANGELOG/部署
+文档同批落，未新增受检数字声明。
+
+---
+
 ## [Unreleased · 成本对账（C4）· 2026-10-24]
 
 **动机**：竞品盘点（docs/2026-10-17-competitor-gap.md C4）指出成本明细只到 run 级总量，
