@@ -89,8 +89,13 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # tier 1（33 目标 / 737 位点）单片 ≈23min，够快，不再切。
-          - { tier: 1, shard: "1/1" }
+          # tier 1 也切 2 片（2026-10-25）。「33 目标 ≈23min 够快不再切」的旧结论
+          # 在目标长到 113 个后失效：2026-10-24/25 连续四次 push 的 tier 1 单片实测
+          # 44 / 57 / 66 / 45 分钟，重新贴到 runner 回收窗口。同日本地全量审计给出
+          # 病灶与"常被轮转进同片"的三个重目标：ipc/chat.ts 1055s · serve-main.ts
+          # 448s · mcp/client.ts 354s。切 2 片后期望最长杆回到 ~20 分钟量级。
+          - { tier: 1, shard: "1/2" }
+          - { tier: 1, shard: "2/2" }
           # tier 2（40 目标 / 980 位点）单片 ≈31min —— 贴着回收窗口，轮转切 2 片。
           - { tier: 2, shard: "1/2" }
           - { tier: 2, shard: "2/2" }
