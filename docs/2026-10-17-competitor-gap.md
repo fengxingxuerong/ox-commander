@@ -73,6 +73,23 @@
 | C7 | **远程 / 自托管常驻** | cezar `server-install`（HTTPS + 登录 + systemd）；superset remote access | http-bridge 只把**执行器**放远端；编排侧仍是本机单实例，鉴权只有单个 `OX_SERVE_TOKEN` | 24/7 场景（夜里跑、合上笔记本继续）完全够不着 |
 | C8 | **IDE handoff / SDK** | superset「Open in your IDE」+ `@superset_sh/sdk`；cezar HTTP API | 有 MCP + JSONL（很强），无 SDK 包、无 VS Code 扩展、无 TUI | MCP 已覆盖可编程性，SDK 优先级低于 A 类 |
 
+> **C4 已于 2026-10-24 落地**（v0.3.0，`usage:cost`）：勘查发现缺口比表格记的更深一层 ——
+> 不是没有视图，是**数据不持久**（byModel 只活在 run 进行中的 usage 协议事件里，凭据落盘时
+> 被裁掉）。所以先补数据（凭据随 `usage.byModel` 落盘，键序由 canonical 序列化排定），再补
+> 跨 run / 跨项目聚合（`electron/usage-cost.ts`，tier 1，17/17 逐位点全杀）。"哪个任务最贵"
+> 仍未回答且**刻意不回答**：按任务的归因不存在于任何持久事实，摊派就是编数字 —— 报告把
+> 这句话打出来（工程日志有完整账）。
+>
+> **C7 已于 2026-10-24 落地**（v0.3.0，`serve:unit` + [serve-deploy.md](serve-deploy.md)）：
+> 勘查发现鉴权底子已在（2026-10-10 的 token 前置所有路由 + 非回环无 token 拒启），缺的是
+> 部署形态。补的是**单租户自托管**：systemd 单元生成器（判据：token 永不落单元、
+> `--host=127.0.0.1` 唯一取值、strict 与可写路径成对）+ 反代 TLS（caddy/nginx，SSE 关缓冲）
+> + 四条验收清单。多租户登录体系明确不做（与 D 类口径一致）。
+>
+> **C8 暂缓**（2026-10-24 决定）：SDK 的公开 API 一旦发布就难改，而 npm 包尚未发布
+> （等维护者 `npm login`）—— 没有消费者的 API 设计是空转。npm 通道开通后再设计，
+> MCP + JSONL 在此之前覆盖可编程性。
+
 ### D 类：明确不补（附理由，别被带着跑）
 
 | 不做 | 理由 |

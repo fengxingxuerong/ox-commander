@@ -191,6 +191,7 @@ function writePackage(dir, version) {
     keywords: ["agent", "orchestrator", "multi-agent", "coding-agent", "ade", "headless", "mcp"],
     repository: { type: "git", url: "git+https://github.com/fengxingxuerong/ox-commander.git" },
     homepage: "https://github.com/fengxingxuerong/ox-commander#readme",
+    bugs: { url: "https://github.com/fengxingxuerong/ox-commander/issues" },
   };
   fs.writeFileSync(path.join(dir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   return manifest;
