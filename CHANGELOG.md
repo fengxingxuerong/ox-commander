@@ -8,6 +8,20 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
+## [Unreleased]
+
+### 新增（执行器接入 · 竞品刷新第六轮 · 2026-10-25）
+
+- **Qwen Code 接进执行器探测表**：仓内 `agents.d/qwen-code.example.json` 模板早已存在但
+  一直没接进「扫描本机执行器」—— 本轮补接线，装了 `qwen` 即可一键接入。安装命令与无头
+  形态 `qwen -p` 均逐字核实于官方 README（判据与 goose 判例同源：opencode / crush / amp
+  因**无头用法未见于官方文档**而明确不接，判据记录在案防止下次重查）。
+- **[第六轮竞品刷新](docs/2026-10-25-competitor-refresh.md)**：深读本周 trending 的
+  Orchestrator.inc（13.6k★，worker+worktree+常驻会话、40+ 执行器、PR/CI/评审看板）与
+  Ringer（"跑 check 定胜负 + 失败带上下文重试"—— 此格我们领先：repair loop 多轮归因）。
+  排期清单四项（看板"该你了"分组 / run 起跑打印状态页 URL / 预览浏览器 profile 隔离 /
+  规划会话持久化），明确不做移动端与常驻会话架构。
+
 ## [0.3.0] — 2026-10-24
 
 ### 新增（远程常驻部署 · C7 · 2026-10-24）

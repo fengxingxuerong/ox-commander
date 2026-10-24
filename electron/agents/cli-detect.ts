@@ -31,6 +31,8 @@ import {
  * npm 包页 @openai/codex；aider → aider 官方安装文档（pipx / pip 两途）；
  * gemini → npm 包页 @google/gemini-cli。goose 的是脚本安装且逐版本会变，
  * **没核实就不给命令** —— 一句装不上的安装命令比没有提示更糟。
+ * qwen-code → 2026-10-25 核实于 QwenLM/qwen-code 官方 README
+ * （`npm install -g @qwen-code/qwen-code@latest`，无头形态 `qwen -p "..."`）。
  */
 const INSTALL_HINTS: Record<string, string> = {
   "claude-code": "npm i -g @anthropic-ai/claude-code",
@@ -38,6 +40,7 @@ const INSTALL_HINTS: Record<string, string> = {
   "aider": "pipx install aider-chat",
   "gemini-cli": "npm i -g @google/gemini-cli",
   "goose": "官方安装脚本见 Block goose 文档（本项目未逐字核实，故不给出命令）",
+  "qwen-code": "npm i -g @qwen-code/qwen-code",
 };
 
 export const CANDIDATES: readonly CliCandidate[] = [
@@ -277,6 +280,64 @@ export const CANDIDATES: readonly CliCandidate[] = [
     // codex 这份直接复用 `exampleManifest()` —— 它是仓内唯一的 codex
     // 模板（`agents.d/codex.example.json` 与界面「填入示例」共用同一份）。
     manifest: exampleManifest() as unknown as Record<string, unknown>,
+  },
+  {
+    id: "qwen-code",
+    displayName: "Qwen Code（本机 CLI）",
+    command: "qwen",
+    installHint: INSTALL_HINTS["qwen-code"]!,
+    // 逐字取自 agents.d/qwen-code.example.json（守卫测试逐条比对 argsTemplate）。
+    // 模板随 resilience 提交进仓但一直没接进探测表 —— 2026-10-25 竞品刷新补接线：
+    // 无头形态 `qwen -p` 与安装命令 npm 包 @qwen-code/qwen-code 均核实于官方 README。
+    manifest:       {
+        "id": "qwen-code",
+        "displayName": "Qwen Code（本机 CLI）",
+        "adapter": "cli",
+        "entry": {
+          "kind": "cli",
+          "command": "qwen",
+          "argsTemplate": [
+            "-p",
+            "请严格执行文件 {{promptPath}} 中描述的任务（先读该文件，它是完整任务书）。只修改 zone「{{zone}}」内的文件。完成后直接结束。",
+            "--yolo"
+          ],
+          "probeArgs": [
+            "--version"
+          ]
+        },
+        "capabilities": {
+          "protocolVersion": "ox-agent/2",
+          "roles": [
+            "*"
+          ],
+          "zoneGlobs": [
+            "src",
+            "src/**"
+          ],
+          "supports": [
+            "read",
+            "edit",
+            "create",
+            "run-test"
+          ],
+          "artifactKinds": [
+            "files",
+            "diff"
+          ],
+          "maxConcurrency": 1,
+          "selfIsolated": false
+        },
+        "credential": {
+          "kind": "none"
+        },
+        "limits": {
+          "runDeadlineMs": 900000,
+          "idleTimeoutMs": 180000,
+          "maxStdoutBytes": 2097152
+        },
+        "priority": 20,
+        "enabled": true
+      } as Record<string, unknown>,
   },
 ];
 

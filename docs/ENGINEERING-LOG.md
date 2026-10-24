@@ -17,6 +17,32 @@
 
 ---
 
+## [Unreleased · 竞品刷新第六轮（执行器接入）· 2026-10-25]
+
+**动机**：用户要求对照本周 GitHub 同类热点做一轮全面吸收 + 全面测试。检索（trending 一周
+区间）锁定两个深读对象：Orchestrator.inc（13.6k★，v0.14.6 于 10-24 发布，nightly 日更）
+与 Ringer（303★，"parallel agents that prove their work"——与本项目命题同源）。
+
+**勘查发现（本轮最有价值的一条）**：`agents.d/` 下躺着**从未接进探测表的 example 模板**
+（qwen-code 即是）—— C6（执行器自动探测）落地时只接了 5 个。qwen-code 属于"模板先行、
+探测没跟上"的欠账：守卫测试要求候选表与模板逐字一致，但它只钉**已登记**的候选 ——
+没登记的模板就静默躺着，这正是"两处事实源"设计的盲区（守卫防漂移，不防缺登记）。
+本轮把 qwen-code 接上；bridge/remote-runner 模板各有专属接入路径（bridge 脚本），不算欠账。
+
+**接线时的核实账**：qwen 的安装命令（`@qwen-code/qwen-code`）与无头形态（`qwen -p`）
+逐字核实于官方 README；`--yolo` 在其 README/docs 树 0 命中 —— 但**模板是仓库自己的
+审定产物**（随 resilience 提交进仓），接线按守卫要求逐字复制模板，`--yolo` 的存废
+留待实测反馈，不在接线时擅改（改了反而破坏两源一致）。opencode / crush / amp 考察过：
+安装命令可核实、无头用法未见于官方 README —— 按 goose 判例不接，判据写进刷新文档。
+
+**Ringer 对照的一个正反馈**：它的核心卖点是"不采信 worker 自述、跑 check 定胜负、失败
+带上下文重试一次" —— 本项目的硬门禁 + repair loop（多轮、按 zone 归因、带基线区分）
+**严格强于**它。这是第一次在竞品对照里确认我们领先的一格（之前都是追平缺口）。
+
+**测试**：cli-detect 守卫 47/47；随后跑完整 `npm run verify`（全门禁链）。
+
+---
+
 ## [0.3.0 · 远程常驻部署（C7）· 2026-10-24]
 
 **动机**：10-17 盘点 C7 —— cezar `server-install`（HTTPS + 登录 + systemd）对位，
