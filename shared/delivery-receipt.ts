@@ -133,11 +133,22 @@ export interface ReceiptTask {
   repairs?: RepairRecord[];
 }
 
-/** 用量投影：只留"对账用得上"的字段，`byModel` 明细留给 `usage` 协议事件。 */
+/**
+ * 用量投影：只留"对账用得上"的字段。`byModel` 明细此前只活在 run 进行中的
+ * `usage` 协议事件里 —— 凭据一旦落盘，"哪条线路花了多少"就从任何持久事实里
+ * 消失了，跨 run / 跨项目对账（`usage:cost`）无从谈起。现在随凭据一起落，
+ * 键序由 `canonicalReceiptPayload` 排定，指纹不受 Map 插入顺序影响。
+ */
 export interface ReceiptUsage {
   totalTokens: number;
   calls: number;
   measuredCalls: number;
+  /**
+   * `provider/model → token`；**空明细时省略**（一次没上报用量的调用也没有，
+   * 一个空对象只会让人分不清"没有明细"与"明细是空"）。缺席的两种含义：
+   * 旧凭据（本字段落地之前）与本轮无可上报的用量 —— 聚合侧把缺席说破，不装作 0。
+   */
+  byModel?: Record<string, number>;
   /** 预算上限；settings 未配置时不出现（同 `UsageSnapshot`）。 */
   limit?: number;
 }
@@ -404,6 +415,7 @@ export function buildReceipt(input: ReceiptInput): DeliveryReceipt {
         calls: input.usage.calls,
         measuredCalls: input.usage.measuredCalls,
         ...(input.usage.limit !== undefined ? { limit: input.usage.limit } : {}),
+        ...(Object.keys(input.usage.byModel).length > 0 ? { byModel: input.usage.byModel } : {}),
       }
     : undefined;
   const headline = receiptHeadlineFor({

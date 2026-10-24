@@ -679,6 +679,11 @@ const TARGETS = [
   // （路径去重漏了 = 越权看起来更频繁；pass 算进"已处置" = 回滚覆盖率虚高；
   // 批次算成 0 段 = 互斥的代价凭空消失）。正该进变异门禁。tier 1：7ms。
   { file: "electron/zone-cost.ts", test: "src/zone-cost.test.ts", tier: 1 },
+  // usage-cost.ts 是「成本对账」的对外证据生成器（C4）：凭据份数、未上报边界、
+  // 按模型/按项目的聚合排名。与 zone-cost 同一类静默错：排序翻面 = 最贵的线路
+  // 看起来最便宜；旧凭据被装作 0 进排名 = 分母边界凭空消失；坏 JSON 被吞 =
+  // "这段历史丢了"看起来像"没发生过"。正该进变异门禁。tier 1。
+  { file: "electron/usage-cost.ts", test: "src/usage-cost.test.ts", tier: 1 },
   // headless 的常驻服务形态（serve）：路由判据与状态派生全是"错了也不报错"的形状 ——
   // 404 兜底成首页、POST 当 GET 收下、receipt 一到就报"已交付"（崩溃也会留下半截
   // 事件流，只有终态能区分跑完与跑挂）、事件文本不转义（文本来自模型输出 = 不可信
@@ -970,6 +975,7 @@ const SITE_BASELINE = {
   "electron/sandbox/spawn-plan.ts": 8,
   "electron/sandbox/timeout-gate.ts": 3,
   "electron/store.ts": 8,
+  "electron/usage-cost.ts": 17,
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
@@ -989,7 +995,7 @@ const SITE_BASELINE = {
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
   "shared/delivery-guide.ts": 31,
-  "shared/delivery-receipt.ts": 43,
+  "shared/delivery-receipt.ts": 44,
   "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,

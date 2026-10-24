@@ -17,6 +17,46 @@
 
 ---
 
+## [Unreleased · 成本对账（C4）· 2026-10-24]
+
+**动机**：竞品盘点（docs/2026-10-17-competitor-gap.md C4）指出成本明细只到 run 级总量，
+答不了"哪个模型最费/哪个项目最贵"。勘查发现更根本的一层：**数据本身不持久** ——
+`UsageMeter` 的 byModel 只进 run 进行中的 `usage` 协议事件，`buildDeliveryReceipt`
+落盘时把它裁掉（旧注释明写"byModel 明细留给 usage 协议事件"）。没有持久事实，
+任何跨 run 视图都无从谈起 —— 所以这一笔是**先补数据，再补视图**。
+
+**落地链**：
+
+1. `shared/delivery-receipt.ts`：`ReceiptUsage` 增可选 `byModel`（空明细省略；
+   旧凭据缺席 ≠ 空对象，与 `outcomeOk`/`repairs` 同一条"字段即承诺"纪律）。
+   指纹键序由 `canonicalReceiptPayload` 排定，Map 插入顺序不影响。
+   现有"projects usage without inventing a limit"用例（byModel: {} 输入断言输出无该键）
+   正好钉住"空明细省略"这条路，无需改。
+2. `electron/usage-cost.ts`（新，纯函数，tier 1）+ `src/usage-cost.test.ts`：
+   聚合判据 —— 未上报边界（calls−measuredCalls）与总量同行；byModel 只从带明细的
+   凭据累加（`detailed` 是分母，旧凭据不装作 0 进排名）；坏 JSON 计入 `broken`
+   说破不吞；按任务不可归因这句话必须出现在每份报告末行。
+3. `scripts/usage-cost-report.mjs`（`npm run usage:cost`）：--store（项目库，每项目
+   最新一份）与 --receipts（文件/目录）双源；统计实现只在 TS 侧，脚本读 dist-electron
+   产物（与 zone-cost 同约，先 `npm run build`）。
+
+**逐位点审计账**：首跑 site 口径 16/17，存活 1 处 —— `isReceiptLike` 的
+`"outcome" in value &&`（→||）。杀它的区分用例是 `{outcome: 42}`（键在、值非字符串）：
+原判据拒收（broken+1），变异体当凭据收（receipts+1 且总量多计）。既有测试只用了
+"没带键"的对象，两边同判 false 所以杀不死 —— 补"rejects a receipt whose outcome key
+exists but is not a string"后 17/17 全杀。这处存活正好证明形状守卫的"值这一层"此前
+没有被任何断言咬到。
+
+**基线与文档数字**：TARGETS +1（113）· SITE_BASELINE 3080→3098（+17 新模块、
++1 凭据构建处新增位点）· 用例 2979→2991（+11 新文件、+1 凭据用例）· 文件 99→100。
+`check:doc-claims` 与 `mutation:baseline` 双绿后落笔。
+
+**边界（刻意不做）**：按任务的 token 归因 —— 把 run 级总量摊到任务头上就是编数字；
+执行器自报的 usage 在 scheduler 里是 per-agent 账（预算闸用），多任务共 agent 时
+无法不重复计数地映射到任务。什么时候凭据里有了 per-task 的事实，什么时候这张表才扩。
+
+---
+
 ## [0.2.1] — 2026-10-23
 
 ### 安全（窗口与导航守卫 · 2026-10-23）

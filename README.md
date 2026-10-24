@@ -11,7 +11,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **112 个目标** / 基线 **3080 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **113 个目标** / 基线 **3098 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -64,7 +64,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算） |
 > | 交付分发（可选，默认关） | 过硬门禁后把 zone 内改动导出成 **git 分支 + commit**（**默认不 push**）；显式开关后可推到指定 remote / 开 PR / 等 CI 结论 —— **CI 结论只回流，不自动重修**；不碰凭据、永不 `--force` |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）+ **反向 MCP server**（agent 生态节点：查状态/取凭据/派单/暂停继续） |
-> | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话 |
+> | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话；`npm run usage:cost` 跨 run / 跨项目对账 token 成本（按模型排名、按凭据逐份、未上报边界同行）—— 凭据自 2026-10-24 起随 `usage.byModel` 落盘，聚合只认持久事实，按任务的归因不存在就不摊派 |
 
 ```
 需求 → PRD → PLANNING → DEVELOPMENT（zone 互斥并行） → VERIFICATION（build/typecheck/test） → DELIVERY → DONE
@@ -277,7 +277,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   同批还校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点**（`(算子, 行号)` 逐条比对，复用门禁
   自己的 `findSites`）：失效条目豁免的是空气，而漂到新行的那个位点无人认领 —— 2026-10-23 一天内
   因此红了两轮 CI（`context.ts` 221→225、`path-policy.ts` 92→94，后者直接拦住发布）
-→ vitest（2026-10-23 现跑 2979 通过 + 8 跳过，合计 2987 条，分布在 99 个有可执行用例的文件；
+→ vitest（2026-10-23 现跑 2991 通过 + 8 跳过，合计 2999 条，分布在 100 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；

@@ -37,6 +37,7 @@
     "check:unwired": "node scripts/check-unwired.mjs",
     "check:field-orphans": "node scripts/check-field-orphans.mjs",
     "zone:cost": "node scripts/zone-cost-report.mjs",
+    "usage:cost": "node scripts/usage-cost-report.mjs",
     "b2:report": "node scripts/b2-zone-vs-worktree-report.mjs",
     "check:residue": "node scripts/mutation-check.mjs --recover-only",
     "check:scripts": "node scripts/check-syntax.mjs",

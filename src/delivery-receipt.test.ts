@@ -353,6 +353,30 @@ describe("buildReceipt", () => {
     });
     expect("usage" in none).toBe(false);
   });
+
+  it("carries byModel into the receipt so cross-run cost reports have a source", () => {
+    const detailed = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+      usage: {
+        totalTokens: 90,
+        calls: 2,
+        measuredCalls: 2,
+        byModel: { "sensenova/glm-5.2": 60, "sensenova/deepseek-v4-flash": 30 },
+      },
+    });
+    // 原样投影：不做排序不做取舍 —— 排序是展示层（usage-cost）的事，凭据只存事实。
+    expect(detailed.usage).toEqual({
+      totalTokens: 90,
+      calls: 2,
+      measuredCalls: 2,
+      byModel: { "sensenova/glm-5.2": 60, "sensenova/deepseek-v4-flash": 30 },
+    });
+  });
 });
 
 /**
