@@ -56,6 +56,10 @@ release notes 的宣称下界。这份文档是**立项调研**，不是设计�
 > 但 `execute` 只收到 `{ smoke }`（`electron/ipc/orchestration.ts:212`），读回那条路在
 > headless（`headless/run-spec.ts:317`）。桌面是否**有意**不做中断续跑，需要单独核实；
 > 这里只记事实，不当结论用。
+>
+> → **已核实并修复（2026-10-25）**：不是有意取舍，是 `docs/2026-09-20-fullstack-review.md`
+> 记的 B2 待办一直没落。已补：`readJournal` / `clearJournal` + `startProjectRun` 的续跑判定
+> （快照可解析、需求逐字相同、不只是空快照），逐位点 33/33 全杀。详见 CHANGELOG 与工程日志。
 
 ## 二、缺口值多少（代价要能观察）
 

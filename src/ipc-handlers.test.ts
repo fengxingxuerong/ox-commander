@@ -259,6 +259,9 @@ import {
   setRunningProjectId,
   workspaceRoot,
   writeJournal,
+  readJournal,
+  setJournalRequirement,
+  clearJournal,
 } from "../electron/ipc/context";
 import { exampleManifest } from "../electron/agents/manifest-schema";
 import { SnapshotStore } from "../electron/sandbox/snapshot-store";
@@ -1367,6 +1370,8 @@ describe("orchestration handlers", () => {
     await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-run");
 
     const root = workspaceRoot("p-run");
+    // 第四个参数是续跑状态：没有快照时 `execute` 只收到 `{ smoke }`
+    // （`opts.resume` 缺席 —— 不是显式 undefined，见 startProjectRun）。
     expect(h.execute).toHaveBeenCalledWith(batches, root, { smoke });
     expect(fs.existsSync(path.join(root, "package.json"))).toBe(true);
     expect(fs.existsSync(path.join(root, "ox-scripts", "build.js"))).toBe(true);
@@ -1388,8 +1393,226 @@ describe("orchestration handlers", () => {
     expect(getRunningProjectId()).toBeNull();
   });
 
-  it("ensureWorkspace 幂等：脚手架已存在时不重写（重复 start 不冲掉手改内容）", () => {
-    // 二次调用走的是 `if (!fs.existsSync(pkg))` / `if (!fs.existsSync(file))`
+  /**
+   * 桌面断点续跑（2026-10-25）：journal 从 2026-09-19 起每批都落盘，却**从来没被读回**
+   * —— `execute` 只收到 `{ smoke }`，`ResumeState` 在桌面侧永远是 undefined。
+   * 于是长 run 被强杀 / 关窗之后，规划重做、已完成批次重做。这一组用例钉的是
+   * "读回来"这条路：什么时候续、什么时候绝不续。
+   */
+  describe("桌面断点续跑（journal 读回）", () => {
+    function seedJournal(projectId: string, requirement: string, snapshot: Record<string, unknown>): void {
+      setJournalRequirement(requirement);
+      try {
+        writeJournal(projectId, snapshot as never);
+      } finally {
+        setJournalRequirement(undefined);
+      }
+    }
+
+    const plan = [[task({ id: "t1" })]];
+    const realSnapshot = {
+      batches: plan,
+      allDone: ["t1"],
+      skipped: [],
+      attempts: {},
+      round: 1,
+      extraRounds: 0,
+      lastDigest: "红过",
+    };
+
+    it("有快照且需求没变 ⇒ 续跑：用快照里的 batches、带上 resume、跑完清掉快照", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-resume",
+        requirement: "需求甲",
+        // 项目记录里的计划**故意与快照不同**：续跑必须用快照里的那一份，
+        // 用当前记录会"上次跑到哪"与"这次跑什么"错配。
+        batchesJson: JSON.stringify([[task({ id: "t-current" })]]),
+      });
+      seedJournal("p-resume", "需求甲", realSnapshot);
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-resume");
+
+      expect(h.execute).toHaveBeenCalledTimes(1);
+      const [batches, , opts] = (h.execute as Mock).mock.calls[0] as [
+        Task[][],
+        string,
+        { smoke?: unknown; resume?: { allDone: string[]; round: number } },
+      ];
+      expect(batches).toEqual(plan); // 快照里的，不是记录里的
+      expect(opts.resume).toMatchObject({ allDone: ["t1"], round: 1 });
+      // 跑完就清：留着它下一次会拿"已全部完成"的旧快照再跑一遍（看着成功、其实空转）。
+      expect(readJournal("p-resume").kind).toBe("absent");
+    });
+
+    it("快照属于**另一份需求** ⇒ 绝不续（宁可重跑）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-mismatch",
+        requirement: "新需求",
+        batchesJson: JSON.stringify(plan),
+      });
+      // 快照是旧需求写下的。
+      seedJournal("p-mismatch", "旧需求", realSnapshot);
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-mismatch");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeUndefined();
+      // 旧快照留着（不清）：下一次如果需求改回去，还能续。
+      expect(readJournal("p-mismatch").kind).toBe("resumable");
+    });
+
+    it("快照损坏 ⇒ 按全新运行处理，并说破（不静默当成没有）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-corrupt",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      fs.mkdirSync(path.join(tmp, "runs"), { recursive: true });
+      fs.writeFileSync(path.join(tmp, "runs", "p-corrupt.json"), "{ broken", "utf8");
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-corrupt");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeUndefined();
+      const sent = win.webContents.send as unknown as Mock;
+      const logs = sent.mock.calls
+        .filter((c) => (c[1] as { type?: string }).type === "log")
+        .map((c) => (c[1] as { text: string }).text);
+      expect(logs.some((l) => l.includes("[journal]") && l.includes("解析失败"))).toBe(true);
+    });
+
+    it("快照刚写下第一笔（一批都没跑）⇒ 不当作'恢复'（续不续都一样）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-fresh",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      seedJournal("p-fresh", "需求甲", {
+        batches: plan,
+        allDone: [],
+        skipped: [],
+        attempts: {},
+        round: 0,
+        extraRounds: 0,
+        lastDigest: "",
+      });
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-fresh");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeUndefined();
+      // 没到"恢复"那一步，就不该播报"断点续跑"（播报会让人以为上次跑过东西）。
+      const sent = win.webContents.send as unknown as Mock;
+      const logs = sent.mock.calls
+        .filter((c) => (c[1] as { type?: string }).type === "log")
+        .map((c) => (c[1] as { text: string }).text);
+      expect(logs.some((l) => l.includes("断点续跑"))).toBe(false);
+    });
+
+    it("round=0 但已有完成的任务 ⇒ 仍然续跑（判据是「一批都没跑」，不是「round=0」）", async () => {
+      // 两个条件必须**同时**成立才算"刚写下第一笔"。只看 round 会把"第一批已跑完、
+      // 但轮次还是 0"的现场判成新 run，已完成的任务白跑一遍。
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-round0",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify([[task({ id: "t-other" })]]),
+      });
+      seedJournal("p-round0", "需求甲", {
+        batches: plan,
+        allDone: ["t1"],
+        skipped: [],
+        attempts: {},
+        round: 0,
+        extraRounds: 0,
+        lastDigest: "",
+      });
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-round0");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeDefined();
+    });
+
+    it("快照没有 smoke ⇒ resume 里也不带 smoke（不塞一个 undefined 进去）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-nosmoke",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      seedJournal("p-nosmoke", "需求甲", {
+        batches: plan,
+        allDone: ["t1"],
+        skipped: [],
+        attempts: {},
+        round: 1,
+        extraRounds: 0,
+        lastDigest: "",
+      });
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-nosmoke");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: object }];
+      // `smoke: undefined` 与"没有 smoke 这个键"在执行期行为一致，但在断言/序列化里
+      // 是两件事 —— 快照里没有的东西不该被凭空造出来。
+      expect(opts.resume).toBeDefined();
+      expect("smoke" in opts.resume!).toBe(false);
+    });
+
+    it("没有快照 ⇒ 行为与以前逐字一致（不传 resume）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-nosnap",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-nosnap");
+
+      const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeUndefined();
+    });
+
+    it("run 收尾后 journal 需求被清空（不把 A 项目的需求带进 B 项目的快照）", async () => {
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-clean",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      h.execute.mockImplementationOnce(async () => {
+        // run 进行中写一笔快照 —— 外壳里应该是这个项目的需求。
+        writeJournal("p-clean", realSnapshot as never);
+      });
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-clean");
+      const during = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-clean.json"), "utf8")) as {
+        requirement?: string;
+      };
+      expect(during.requirement).toBe("需求甲");
+
+      // 收尾之后（run 已结束）再有一笔写入：外壳里不该再有"需求甲"。
+      writeJournal("p-clean", realSnapshot as never);
+      const after = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-clean.json"), "utf8")) as {
+        requirement?: string;
+      };
+      expect("requirement" in after).toBe(false);
+    });
+  });
+
+  it("ensureWorkspace 幂等：脚手架已存在时不重写（重复 start 不冲掉手改内容）", () => {    // 二次调用走的是 `if (!fs.existsSync(pkg))` / `if (!fs.existsSync(file))`
     // 的 **else 分支** —— 头一次 start 只验证"写出来了"，没验证"第二次别再动"。
     // 幂等不是礼貌：智能体在项目里手改的 build.js / package.json，重跑一轮就被
     // 冲回模板，验证判据就跟这次会话的实际约定脱钩了。
@@ -1647,6 +1870,76 @@ describe("context singletons (seedKeys / journal / buildLlm / audit)", () => {
       throw new Error("disk full");
     });
     expect(() => writeJournal("p-j2", { batches: [] } as never)).not.toThrow();
+  });
+
+  it("writeJournal 把当前需求写进外壳（续跑靠它判'这份进度属于哪份需求'）", () => {
+    setJournalRequirement("需求甲");
+    try {
+      writeJournal("p-j3", { batches: [["t1"]] } as never);
+      const parsed = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-j3.json"), "utf8")) as {
+        requirement?: string;
+      };
+      expect(parsed.requirement).toBe("需求甲");
+    } finally {
+      setJournalRequirement(undefined);
+    }
+  });
+
+  it("writeJournal 没有当前需求时不写这个键（不写 undefined，也不写空串）", () => {
+    setJournalRequirement(undefined);
+    writeJournal("p-j4", { batches: [] } as never);
+    const parsed = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-j4.json"), "utf8")) as {
+      requirement?: string;
+    };
+    expect("requirement" in parsed).toBe(false);
+  });
+
+  it("readJournal：缺席 / 坏 JSON / 缺 batches 各报各的（不一律当'没有'）", () => {
+    expect(readJournal("p-absent")).toEqual({ kind: "absent" });
+
+    fs.mkdirSync(path.join(tmp, "runs"), { recursive: true });
+    fs.writeFileSync(path.join(tmp, "runs", "p-bad.json"), "{ not json", "utf8");
+    expect(readJournal("p-bad").kind).toBe("corrupted");
+
+    // 有 snapshot 但没有 batches：恢复不了批次，按损坏处理（headless 同一判据）。
+    fs.writeFileSync(
+      path.join(tmp, "runs", "p-nobatches.json"),
+      JSON.stringify({ snapshot: { allDone: [] } }),
+      "utf8",
+    );
+    expect(readJournal("p-nobatches").kind).toBe("corrupted");
+  });
+
+  it("readJournal 读回快照外壳里的需求", () => {
+    setJournalRequirement("需求乙");
+    try {
+      writeJournal("p-j5", { batches: [["t1"]], allDone: ["t1"], round: 1 } as never);
+    } finally {
+      setJournalRequirement(undefined);
+    }
+    const read = readJournal("p-j5");
+    expect(read.kind).toBe("resumable");
+    if (read.kind === "resumable") {
+      expect(read.requirement).toBe("需求乙");
+      expect(read.snapshot.allDone).toEqual(["t1"]);
+    }
+  });
+
+  it("clearJournal 清掉快照；没有快照时也不抛（卫生动作不制造故障）", () => {
+    setJournalRequirement("需求丙");
+    try {
+      writeJournal("p-j6", { batches: [], allDone: ["t1"], round: 1 } as never);
+    } finally {
+      setJournalRequirement(undefined);
+    }
+    expect(readJournal("p-j6").kind).toBe("resumable");
+
+    clearJournal("p-j6");
+    expect(readJournal("p-j6").kind).toBe("absent");
+
+    // 再清一次：不存在的文件不该让收尾路径抛错。
+    expect(() => clearJournal("p-j6")).not.toThrow();
+    expect(() => clearJournal("p-never-existed")).not.toThrow();
   });
 
   it("seedKeysFromStore expands the pool into provider env vars and seeds missing ones", () => {

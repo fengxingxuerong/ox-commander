@@ -7,19 +7,22 @@
 import { ipcMain } from "electron";
 import fs from "node:fs";
 import path from "node:path";
-import type { OrchestratorCallbacks, OrchestratorEngine, RunSnapshot } from "../engine";
+import type { OrchestratorCallbacks, OrchestratorEngine, ResumeState, RunSnapshot } from "../engine";
 import { redactSecrets } from "../../shared/redact";
 import {
   abortAllApprovals,
   abortAllEscalations,
   buildPlatformLayer,
+  clearJournal,
   enginesOf,
   ensureAudit,
   getRunningProjectId,
   logLine,
+  readJournal,
   resolveApproval,
   resolveEscalation,
   send,
+  setJournalRequirement,
   setRunningProjectId,
   settingsStore,
   stores,
@@ -294,18 +297,89 @@ export function runGate(projectId: string): RunGate {
  *
  * 与 `buildEngine` 的分工：那个造引擎（每次规划/执行都重建，设置改动即时生效），
  * 这个管"一次运行的完整生命周期"（闸门 → 置运行标志 → execute → 收尾）。
+ *
+ * **断点续跑（2026-10-25）**：启动前先看这个项目的 checkpoint journal —— 有快照且
+ * 需求没变就接着上次跑到的地方继续，而不是从零重做。此前桌面端只写不读，
+ * 长 run 被强杀或关窗后一律从头开始（规划重做、已完成批次重做）。
  */
 export async function startProjectRun(projectId: string): Promise<void> {
   const gate = runGate(projectId);
   if (gate.kind !== "ready") throw new Error(gate.message);
   const engine = buildEngine(projectId);
+  const resume = resumeStateFor(projectId);
+  // journal 外壳要记下这份进度属于哪份需求 —— 由宿主在起跑时设，收尾时清
+  // （不清的话，同一个进程紧接着跑另一个项目，会把上一个项目的需求写进去）。
+  const requirement = stores().get(projectId)?.requirement;
+  setJournalRequirement(requirement);
   setRunningProjectId(projectId);
   try {
-    const smoke: SmokeCheck[] = gate.smokeJson ? (JSON.parse(gate.smokeJson) as SmokeCheck[]) : [];
-    await engine.execute(JSON.parse(gate.batchesJson) as Task[][], ensureWorkspace(projectId), { smoke });
+    // 续跑时必须用**快照里的 batches**：那是上次真正跑过的计划。用项目记录里当前的
+    // batches 会把"上次跑到哪"与"这次要跑什么"错配（两次规划之间重规划过的话，
+    // 已完成集合与批次就对不上了）。
+    const batches = resume ? (resume.snapshot.batches as Task[][]) : (JSON.parse(gate.batchesJson) as Task[][]);
+    const smoke: SmokeCheck[] = resume
+      ? (resume.snapshot.smoke ?? [])
+      : gate.smokeJson
+        ? (JSON.parse(gate.smokeJson) as SmokeCheck[])
+        : [];
+    const opts = resume
+      ? { smoke, resume: resume.state }
+      : { smoke };
+    await engine.execute(batches, ensureWorkspace(projectId), opts);
+    // 跑完就把快照清掉：留着它，下一次启动会拿一份"已经全部完成"的旧快照再来一遍
+    // （execute 会跳过已完成任务、直接收尾 —— 看着像成功，其实这一轮什么都没做）。
+    if (resume) clearJournal(projectId);
   } finally {
     setRunningProjectId(null);
+    setJournalRequirement(undefined);
   }
+}
+
+/**
+ * 决定这次能不能续跑，并把结论说破（"静默续跑"与"静默不续跑"都是坏的）。
+ *
+ * 三条判据：快照存在、可解析、且**需求没变**。需求变了绝不能续 —— 那是上次的
+ * 计划，用在这次的需求上等于拿别人的进度交差。
+ */
+function resumeStateFor(projectId: string): { snapshot: RunSnapshot; state: ResumeState } | undefined {
+  const rec = stores().get(projectId);
+  const read = readJournal(projectId);
+  if (read.kind === "absent") return undefined;
+  if (read.kind === "corrupted") {
+    logLine("[journal] 快照解析失败，按全新运行处理");
+    return undefined;
+  }
+  if (read.kind === "mismatched") {
+    logLine("[journal] 快照与当前需求不匹配，按全新运行处理");
+    return undefined;
+  }
+  const snapshot = read.snapshot;
+  // 需求匹配：快照外壳里记着写下它的那份需求。判据与 headless 同源
+  // （`createFileJournal` 也把 requirement 放在外壳上）—— 不同需求续上别人的进度
+  // 是最坏的一种错，宁可重跑。
+  if (rec && read.requirement !== undefined && read.requirement !== rec.requirement) {
+    logLine("[journal] 快照属于另一份需求，按全新运行处理");
+    return undefined;
+  }
+  if (snapshot.allDone.length === 0 && snapshot.round === 0) {
+    // 快照刚写下第一笔（规划完、一批都还没跑）：续不续都一样，别拿它当"恢复"说事。
+    return undefined;
+  }
+  logLine(
+    `[journal] 断点续跑：恢复快照（round ${snapshot.round}，已完成 ${snapshot.allDone.length} 个任务），跳过规划`,
+  );
+  return {
+    snapshot,
+    state: {
+      ...(snapshot.smoke !== undefined ? { smoke: snapshot.smoke } : {}),
+      allDone: snapshot.allDone,
+      skipped: snapshot.skipped,
+      attempts: snapshot.attempts,
+      round: snapshot.round,
+      extraRounds: snapshot.extraRounds,
+      lastDigest: snapshot.lastDigest,
+    },
+  };
 }
 
 export function registerOrchestrationHandlers(): void {

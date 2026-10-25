@@ -449,6 +449,21 @@ export function buildLlmPinned(settingsValue: ProjectSettings, providerId: strin
   return buildLlmClient(providerId, { model, timeoutMs: brainTimeoutMsFor(settingsValue), onEvent: logLine });
 }
 
+/**
+ * 当前正在跑的项目的需求（写 journal 时带上，供下次启动做"需求匹配"）。
+ *
+ * 为什么要在这一层记：`RunSnapshot` 是引擎的恢复状态，不该为了"这份快照属于谁的需求"
+ * 而长出一个它自己并不使用的字段；需求归宿主（项目记录）所有，写的时候顺手抄一份进
+ * journal 外壳就够了 —— 与 headless 的 `createFileJournal` 把 `requirement` 写在
+ * 文件外壳上（而不是快照里）是同一个设计。
+ */
+let journalRequirement: string | undefined;
+
+/** 设置本轮 run 的需求（`startProjectRun` 进入时设，收尾时清）。 */
+export function setJournalRequirement(requirement: string | undefined): void {
+  journalRequirement = requirement;
+}
+
 /** Writes a checkpoint journal for one project. Best-effort: never breaks a run. */
 export function writeJournal(projectId: string, snapshot: RunSnapshot): void {
   try {
@@ -457,9 +472,69 @@ export function writeJournal(projectId: string, snapshot: RunSnapshot): void {
     // half-written snapshot and restart the run from a bogus state.
     writeFileAtomic(
       path.join(journalDir(), `${projectId}.json`),
-      JSON.stringify({ savedAt: new Date().toISOString(), snapshot }, null, 2),
+      JSON.stringify(
+        {
+          savedAt: new Date().toISOString(),
+          // 外壳字段（不进快照）：下次启动靠它判"这份进度属于哪份需求"。
+          ...(journalRequirement !== undefined ? { requirement: journalRequirement } : {}),
+          snapshot,
+        },
+        null,
+        2,
+      ),
     );
   } catch {
     // Checkpointing is a best-effort fuse; never break a run over it.
+  }
+}
+
+/** 读回来的结果：三选一，与 headless 的 `FileJournalHandle` 同形（缺席/不匹配/坏）。 */
+export type JournalRead =
+  | { kind: "resumable"; snapshot: RunSnapshot; requirement?: string }
+  | { kind: "absent" }
+  | { kind: "mismatched" }
+  | { kind: "corrupted" };
+
+/**
+ * 读一次桌面项目的 checkpoint journal（2026-10-25）。
+ *
+ * **这是本仓库一个存在了很久的缺口**：`writeJournal` 从 2026-09-19 起每批都落盘，
+ * 但**从来没被读回过** —— `startProjectRun` 调 `execute` 时只传 `{ smoke }`，
+ * `ResumeState` 那个入参在桌面侧永远是 `undefined`。于是长 run 被强杀（或用户关窗）
+ * 之后，桌面端**从零开始**：规划重做、已完成的批次重做。headless 有这条通路
+ * （`createFileJournal(...).load()`），桌面一直是半截 —— `docs/2026-09-20-fullstack-review.md`
+ * 把它记成 B2 待办，此后没人落。
+ *
+ * 判定口径照抄 headless 那一份（`electron/platform.ts` 的 `createFileJournal`）：
+ * 需求必须**逐字相同**才续跑（不同需求续上别人的进度是最坏的一种错），
+ * 解析失败按损坏处理。差别只在存储形态：桌面按项目分文件、由宿主写，
+ * 所以需求匹配在调用方做（项目记录里就有 requirement），这里只报"有没有快照"。
+ */
+export function readJournal(projectId: string): JournalRead {
+  const file = path.join(journalDir(), `${projectId}.json`);
+  if (!fs.existsSync(file)) return { kind: "absent" };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as {
+      snapshot?: RunSnapshot;
+      requirement?: string;
+    };
+    // `batches` 必须有 —— 没有它的快照恢复不了批次（headless 也是这个判据）。
+    if (!Array.isArray(parsed.snapshot?.batches)) return { kind: "corrupted" };
+    return {
+      kind: "resumable",
+      snapshot: parsed.snapshot,
+      ...(typeof parsed.requirement === "string" ? { requirement: parsed.requirement } : {}),
+    };
+  } catch {
+    return { kind: "corrupted" };
+  }
+}
+
+/** 清掉项目的 journal（续跑成功后调用；失败不影响已完成的交付）。 */
+export function clearJournal(projectId: string): void {
+  try {
+    fs.rmSync(path.join(journalDir(), `${projectId}.json`), { force: true });
+  } catch {
+    // 卫生动作：删不掉只是留个陈旧快照，下一次启动会再判一次。
   }
 }
