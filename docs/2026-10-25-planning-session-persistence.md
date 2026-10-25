@@ -42,10 +42,20 @@ release notes 的宣称下界。这份文档是**立项调研**，不是设计�
 - `ChatSessionStore` 按 `projectId` + `sessionId` 落盘，快照含 meta（会话 id、根路径、
   起止时间、轮数、运行档、provider / model、用量）与对话条目（`shared/chat-events.ts:62`、`:101`）；
   通道有 `chat:new` / `latest` / `list` / `resume` / `fork` / `revert` / `export`。
+- 恢复时喂给模型的是**全量模型消息**（`electron/ipc/chat.ts:370`），靠上下文压缩兜住长度：
+  阈值 `DEFAULT_MAX_PROMPT_TOKENS = 48_000`、保留尾部比例 `DEFAULT_KEEP_TAIL_RATIO = 0.5`
+  （`electron/chat/session.ts:112`、`shared/chat-compress.ts:98`），压缩后的摘要**没有独立持久字段**，
+  落盘的就是被替换过的 `messages` —— 也就是说"对话里曾经有过什么结论"在压缩后不再可核。
 - 但：**chat 不喂 PRD，PRD 不读 chat**。规划页（PRD 编辑走 `orchestration:update-prd`，
   `electron/ipc/orchestration.ts:236`）与会话页各自独立。
 
 **一句话结论**：我们有**对话历史**，没有**规划记忆**；有"每次 run 的现场"，没有"为什么这么拆"。
+
+> 顺带核实到的一条（**不属于本项**，标出来给下一个读的人）：断点续跑的 journal 桌面端
+> **只写不读** —— 快照照常落 `userData/runs/<projectId>.json`（`electron/ipc/context.ts:453`），
+> 但 `execute` 只收到 `{ smoke }`（`electron/ipc/orchestration.ts:212`），读回那条路在
+> headless（`headless/run-spec.ts:317`）。桌面是否**有意**不做中断续跑，需要单独核实；
+> 这里只记事实，不当结论用。
 
 ## 二、缺口值多少（代价要能观察）
 
@@ -93,6 +103,11 @@ release notes 的宣称下界。这份文档是**立项调研**，不是设计�
 
 - **记忆是提示，不是证据**。交付是否可信仍由门禁、凭据与指纹回答；备忘写错了，
   影响的是规划的起点，不能影响"这份交付过没过门禁"。
+- **必须补一个总量上限**：规划提示今天只有**分源**上限（约定 8000 字符、
+  外部上下文每份 8000，`shared/project-conventions.ts:28`、`electron/context/github-readonly.ts:46`），
+  **没有总预算常量**（装配顺序为 约定 → 外部上下文 → 需求，`shared/prompts.ts:92`）。
+  再加一路"记忆"而不立总量，等于允许三者相加无限长 —— 这是这份调研里唯一一处
+  **现在就存在的判据缺口**，做记忆时一并补上（超限说破，沿用约定那一套措辞）。
 - **绝不让模型自己改备忘**（不做"自动学习"）：把模型的推测固化进下一次规划，等于给
   漂移装上加速度。自动那一侧只允许汇总**可核事实**（例如"上次 red 在哪个验证命令"），
   且必须标明来源。
