@@ -1,14 +1,14 @@
 # `npm run verify` 的逐段机制（35 段）
 
 顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、35 段、
-3094 通过 + 8 跳过，合计 3102 条，分布在 105 个有可执行用例的文件（2026-10-25 现跑：链首到
+3095 通过 + 8 跳过，合计 3103 条，分布在 105 个有可执行用例的文件（2026-10-25 现跑：链首到
 `mutation:baseline` 的 16 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**118 个目标** / 基线 **3177 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**118 个目标** / 基线 **3176 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。

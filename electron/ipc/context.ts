@@ -488,11 +488,19 @@ export function writeJournal(projectId: string, snapshot: RunSnapshot): void {
   }
 }
 
-/** 读回来的结果：三选一，与 headless 的 `FileJournalHandle` 同形（缺席/不匹配/坏）。 */
+/**
+ * 读回来的结果：三选一（缺席 / 可续跑 / 坏）。
+ *
+ * ⚠️ **刻意没有 `mismatched` 这一档**（2026-10-25 自查出来的一处死分支）：headless 的
+ * `FileJournalHandle` 有它，是因为那边"读"这个动作自己就拿需求做比对
+ * （`createFileJournal` 把 requirement 闭包进去）。桌面的 `readJournal` **不认识需求**
+ * —— 需求归项目记录（`stores().get(projectId).requirement`），比对在调用方做。
+ * 照抄一个自己永远产生不了的枚举值，等于在调用方留一条**跑不到的分支**：
+ * 成对报告的那条"不匹配"日志永远不会出现，读代码的人却以为它在生效。
+ */
 export type JournalRead =
   | { kind: "resumable"; snapshot: RunSnapshot; requirement?: string }
   | { kind: "absent" }
-  | { kind: "mismatched" }
   | { kind: "corrupted" };
 
 /**

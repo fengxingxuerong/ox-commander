@@ -1463,6 +1463,43 @@ describe("orchestration handlers", () => {
       expect(opts.resume).toBeUndefined();
       // 旧快照留着（不清）：下一次如果需求改回去，还能续。
       expect(readJournal("p-mismatch").kind).toBe("resumable");
+      // 必须说破是"另一份需求"这一支 —— 2026-10-25 自查删掉了一个永远跑不到的
+      // `mismatched` 分支（桌面 `readJournal` 不认识需求，比对只在调用方做）。
+      // 这条断言钉住的是：那类情况仍然被**这一支**如实报告，没跟着一起丢。
+      const sent = win.webContents.send as unknown as Mock;
+      const logs = sent.mock.calls
+        .filter((c) => (c[1] as { type?: string }).type === "log")
+        .map((c) => (c[1] as { text: string }).text);
+      expect(logs.some((l) => l.includes("[journal]") && l.includes("另一份需求"))).toBe(true);
+    });
+
+    it("快照外壳里没有需求（旧版本写下的）⇒ 照常续跑，不因为缺这一栏就当成不匹配", async () => {
+      // 兼容面：`requirement` 是 2026-10-25 才加的外壳字段，此前写下的快照没有它。
+      // 判据写的是 `read.requirement !== undefined && 不相等` 才拒 —— 缺这一栏时
+      // 退化成"信任项目记录里的需求"，而不是把所有老快照一并判成不匹配。
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-old",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify([[task({ id: "t-other" })]]),
+      });
+      fs.mkdirSync(path.join(tmp, "runs"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmp, "runs", "p-old.json"),
+        JSON.stringify({ savedAt: "2026-09-20T00:00:00.000Z", snapshot: realSnapshot }),
+        "utf8",
+      );
+      h.execute.mockResolvedValue(undefined);
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-old");
+
+      const [batches, , opts] = (h.execute as Mock).mock.calls[0] as [
+        Task[][],
+        string,
+        { resume?: unknown },
+      ];
+      expect(opts.resume).toBeDefined();
+      expect(batches).toEqual(plan);
     });
 
     it("快照损坏 ⇒ 按全新运行处理，并说破（不静默当成没有）", async () => {

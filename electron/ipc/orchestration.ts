@@ -349,14 +349,13 @@ function resumeStateFor(projectId: string): { snapshot: RunSnapshot; state: Resu
     logLine("[journal] 快照解析失败，按全新运行处理");
     return undefined;
   }
-  if (read.kind === "mismatched") {
-    logLine("[journal] 快照与当前需求不匹配，按全新运行处理");
-    return undefined;
-  }
   const snapshot = read.snapshot;
   // 需求匹配：快照外壳里记着写下它的那份需求。判据与 headless 同源
   // （`createFileJournal` 也把 requirement 放在外壳上）—— 不同需求续上别人的进度
   // 是最坏的一种错，宁可重跑。
+  //
+  // 这里也覆盖了"快照属于别的项目/别的需求"这一整类：`readJournal` 不认识需求，
+  // 它只报"有没有快照、坏没坏"，比对只能在这一层做。
   if (rec && read.requirement !== undefined && read.requirement !== rec.requirement) {
     logLine("[journal] 快照属于另一份需求，按全新运行处理");
     return undefined;
