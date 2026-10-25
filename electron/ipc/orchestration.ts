@@ -28,6 +28,14 @@ import {
 } from "./context";
 import type { EscalationAction, PrdDocument, SmokeCheck, Task } from "../../shared/types";
 import { parsePrd } from "../../shared/schema";
+import {
+  formatPlanHistoryBlock,
+  planDiffOf,
+  planHistoryOf,
+  planSnapshotOf,
+  requirementFingerprint,
+  type PlanSnapshot,
+} from "../../shared/plan-history";
 import { deriveBoardView } from "../board-derive";
 import { stopPreview } from "../preview-manager";
 
@@ -169,6 +177,90 @@ export function buildEngine(projectId: string): OrchestratorEngine {
 }
 
 /**
+ * 读本项目的规划历史，并渲染成"上次规划 + 与这次的差异"块（形态 B，2026-10-25）。
+ *
+ * 两个"不许"：
+ * - **读不到不许当成"没有上次"**就不说话 —— 那与"从没规划过"混在一起，人会以为
+ *   第一次规划。这里读不到就退化成空块（提示里不产段），但路径本身就是 best-effort：
+ *   历史是背景，不是交付条件，读盘失败绝不能让规划起不来。
+ * - **不许拿残缺快照凑数**（`planHistoryOf` 里字段缺失的老记录一律跳过）。
+ */
+function planHistoryBlockFor(
+  projectId: string,
+  requirement: string,
+): { block: string; previous?: PlanSnapshot } {
+  try {
+    // 只读本项目：审计是全项目共用的一个文件，不按 projectId 过滤就会把别的项目
+    // 的规划当成"上次"（那会让两个项目互相污染拆法）。
+    const records = ensureAudit()
+      .read({ limit: 2000, phase: "plan" })
+      .filter((r) => r.projectId === projectId);
+    const history = planHistoryOf(records);
+    const previous = history[0];
+    if (!previous) return { block: "" };
+    // 差异：需求有没有改，用**当前需求原文**和上次的指纹比 —— 这是此刻唯一已存在
+    // 的事实（任务清单要等拆完才有）。任务级的 added/removed 在落快照那一侧才有意义
+    // （见 `recordPlanSnapshot`），所以这里给 `undefined`，块里就不产那一行。
+    const changed = requirementFingerprint(requirement) !== previous.requirementHash;
+    const diff = {
+      requirementChanged: changed,
+      taskCountBefore: previous.taskCount,
+      // 这次的任务数此刻还不知道：用上次自己的数占位会把"没变"说成"变了"，
+      // 所以这一项也用上次的值，并在块里避免印出前后相同的假差异。
+      taskCountAfter: previous.taskCount,
+      added: [],
+      removed: [],
+    };
+    return { block: formatPlanHistoryBlock(previous, diff), previous };
+  } catch {
+    return { block: "" };
+  }
+}
+
+/**
+ * 落一条规划快照（形态 B）。
+ *
+ * 刻意 best-effort：历史是背景，不是交付条件 —— 磁盘满 / 权限不对都不该让一次
+ * 规划失败。但也不静默：写不进去时说一声，否则"历史里为什么少了这一版"永远查不出来。
+ *
+ * 差异（`planDiffOf`）在这里算：**只有这一刻才知道"上次 vs 这次"的完整对照** ——
+ * 注入那次规划时这次的清单还不存在，落盘时才知道。算出来的差异写进日志，让人能
+ * 在日志里读到"这一版比上一版多了/少了哪几个任务"，而不必自己去翻审计。
+ */
+function recordPlanSnapshot(
+  projectId: string,
+  requirement: string,
+  prd: PrdDocument,
+  tasks: ReadonlyArray<Task>,
+): void {
+  try {
+    const snapshot = planSnapshotOf({
+      ts: new Date().toISOString(),
+      requirement,
+      prd,
+      tasks,
+    });
+    const previous = planHistoryOf(
+      ensureAudit()
+        .read({ limit: 2000, phase: "plan" })
+        .filter((r) => r.projectId === projectId),
+    )[0];
+    ensureAudit().append({ phase: "plan", projectId, plan: snapshot });
+    const diff = planDiffOf(previous, snapshot);
+    if (diff) {
+      logLine(
+        `[plan-history] 本次规划已落快照：需求${diff.requirementChanged ? "已改动" : "未变"}，` +
+          `任务数 ${diff.taskCountBefore} → ${diff.taskCountAfter}` +
+          (diff.added.length > 0 ? `，新增「${diff.added.join("、")}」` : "") +
+          (diff.removed.length > 0 ? `，不再出现「${diff.removed.join("、")}」` : ""),
+      );
+    }
+  } catch (err) {
+    logLine(`[plan-history] 这次规划的落盘快照没写成（不影响规划）：${(err as Error).message}`);
+  }
+}
+
+/**
  * 启动一次编排运行的前置判定（**唯一实现**）：单飞闸 + 计划存在性。
  *
  * `orchestration:start` 与桌面自动化的调度环（M5b）共用这一道闸 —— 两边各写
@@ -221,15 +313,21 @@ export function registerOrchestrationHandlers(): void {
     if (!rec) throw new Error(`project ${projectId} not found`);
     if (getRunningProjectId() === projectId) throw new Error("项目正在执行中，请先取消再重新规划");
     const engine = buildEngine(projectId);
+    // 规划历史（形态 B，2026-10-25）：先读上次的落盘快照，把它作为背景注入这次规划。
+    // 读的是**审计事实**而不是模型自述 —— 这是与"让模型记住上次"最根本的区别。
+    const history = planHistoryBlockFor(projectId, rec.requirement);
     // 项目约定（B3）：规划阶段也注入 —— 约定影响"技术栈/边界怎么定"，
     // 只在执行阶段带进去的话，PRD 早就把约定违背了。
-    const prd = await engine.generatePrd(rec.requirement, workspaceRoot(projectId));
+    const prd = await engine.generatePrd(rec.requirement, workspaceRoot(projectId), history.block);
     stores().update(projectId, { prdJson: JSON.stringify(prd), stage: "PLANNING" });
     send({ type: "stage", stage: "PLANNING" });
     // 与 headless 入口保持一致：把验证命令交给 zone 覆盖校验。它引用的文件若
     // 不被任何任务 zone 覆盖，重修会把整个预算烧在一个不可能完成的任务上。
     const { batches, smoke } = await engine.decompose(prd, settingsStore().load().verificationCommands);
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
+    // 收官即落快照：这次拆成什么样，是下一次规划的"上次"。落盘失败绝不能让规划失败
+    // （历史是背景，不是交付条件）。
+    recordPlanSnapshot(projectId, rec.requirement, prd, batches.flat());
     return { prd, batches };
   });
 
@@ -244,6 +342,9 @@ export function registerOrchestrationHandlers(): void {
     const engine = buildEngine(projectId);
     const { batches, smoke } = await engine.decompose(checked, settingsStore().load().verificationCommands);
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
+    // 人工改 PRD 也是一次"规划"，同样落快照：否则改完再重规划时，历史会跳过这一版，
+    // 看起来像"我们从来没定过这个拆法"。
+    recordPlanSnapshot(projectId, rec.requirement, checked, batches.flat());
     return { prd: checked, batches };
   });
 

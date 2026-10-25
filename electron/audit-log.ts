@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { PlanSnapshot } from "../shared/plan-history";
 import type { FailureClass, Stage } from "../shared/types";
 
 export type AuditPhase =
@@ -19,7 +20,17 @@ export type AuditPhase =
    * / `failed`（派不出去）。落盘动机与 `batch-guard` 相同：调度器是内存里的环，
    * 而"这条自动化最近跑过没有、为什么没跑"必须能在重启后回答。
    */
-  | "automation";
+  | "automation"
+  /**
+   * 一次规划的收官快照（形态 B，2026-10-25）：需求摘要 + PRD 目标 + 任务标题清单。
+   *
+   * 为什么落审计而不是新文件：审计 JSONL 已经是本仓库"跨 run 唯一可信的账本"，
+   * 再开一份存储等于造第二个真源，而两份真源必然漂。为什么要落盘：规划此前是
+   * **覆盖式**的（`prdJson` 一写，上次"为什么这么拆"就没了），于是隔天重规划
+   * 只能在不知情的情况下把商量好的取舍推翻一遍。字段（`plan`）的判据在
+   * `shared/plan-history.ts`，这一层只负责落。
+   */
+  | "plan";
 
 export interface AuditRecord {
   /** ISO timestamp, stamped by the writer. */
@@ -92,6 +103,11 @@ export interface AuditRecord {
   automationName?: string;
   /** 触发结果，与调度器的三态同词：`accepted` / `busy` / `failed`。 */
   automationOutcome?: string;
+  /**
+   * 规划快照（`plan` phase，形态 B）。形状与判据归 `shared/plan-history.ts`，
+   * 这一层只当载荷透传 —— 审计不该长出第二份"什么算一次规划"的定义。
+   */
+  plan?: PlanSnapshot;
 }
 
 export interface AuditLogOptions {

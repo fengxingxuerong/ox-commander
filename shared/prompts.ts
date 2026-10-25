@@ -63,6 +63,7 @@ export function buildPrdPrompt(
   externalContext?: readonly { name: string; text: string }[],
   conventionsBlock?: string,
   planMemoBlock?: string,
+  planHistoryBlock?: string,
 ): string {
   const ctx = externalContext ? externalContextBlock(externalContext) : "";
   // 项目约定（B3）放在需求之前：先给项目背景，再读本次需求。空块不产段 ——
@@ -77,10 +78,15 @@ export function buildPrdPrompt(
   // 规矩（长期）先于这一版的取舍。拼装与总预算在 `composeBackground` 里统一算，
   // 不能让这里各自判断（那样总额就再也说不清）。
   const memo = planMemoBlock ?? "";
+  // 上次规划（形态 B，2026-10-25）：排在备忘之后 —— 顺序是"长期规矩 → 这一版的
+  // 取舍 → 上次的落盘事实"。它是**最后被削的**背景之一，因为"上次拆过什么"只在
+  // 需要避免重复推翻时才用得上，而预算紧张时该先保前两块。
+  const history = planHistoryBlock ?? "";
   const background = composeBackground(
     [
       { label: "项目约定", text: conventions.trim() },
       { label: "规划备忘", text: memo.trim() },
+      { label: "上次规划", text: history },
       { label: "外部上下文", text: ctx },
     ],
     MAX_BACKGROUND_CHARS,

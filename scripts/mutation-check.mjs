@@ -274,6 +274,15 @@ const TARGETS = [
   // 2026-10-25：规划备忘（项目级规划记忆，形态 A）。入表理由：三个判据全都不抛错 ——
   // 备忘块的"背景不是证据"声明被吃掉，人会以为它代表门禁结论；超限静默截断，模型
   // 以为自己看全了；背景总预算算错，提示悄悄变长或变短，两端都看不出来。
+  // 2026-10-25：规划历史（形态 B：跨 run 的规划记忆走审计落盘事实）。入表理由：
+  // 四条判据全都不会抛错 —— 指纹算错，「需求改过」被说成「没改」；历史取错条，
+  // 注入的是上一版的上一版；差异算错，人会以为拆法一致而其实已经变了；
+  // 超限静默截断，模型以为自己看全了。
+  {
+    file: "shared/plan-history.ts",
+    tests: ["src/plan-history.test.ts", "src/prompts.test.ts", "src/orchestrator.test.ts"],
+    tier: 1,
+  },
   { file: "shared/plan-memo.ts", tests: ["src/plan-memo.test.ts", "src/prompts.test.ts"], tier: 1 },
   { file: "electron/engine/conventions.ts", tests: ["src/project-conventions.test.ts", "src/chat-runtime.test.ts"], tier: 1 },
   // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
@@ -959,7 +968,7 @@ const SITE_BASELINE = {
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 40,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 86,
+  "electron/engine/orchestrator.ts": 87,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,
@@ -971,7 +980,7 @@ const SITE_BASELINE = {
   "electron/ipc/context.ts": 28,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
-  "electron/ipc/orchestration.ts": 14,
+  "electron/ipc/orchestration.ts": 18,
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
@@ -1024,6 +1033,7 @@ const SITE_BASELINE = {
   "shared/llm-client.ts": 15,
   "shared/mcp.ts": 101,
   "shared/page-smoke.ts": 17,
+  "shared/plan-history.ts": 10,
   "shared/plan-memo.ts": 9,
   "shared/policy-file.ts": 33,
   "shared/preview-isolation.ts": 1,

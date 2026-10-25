@@ -998,6 +998,118 @@ describe("orchestration handlers", () => {
     ).rejects.toThrow(/项目正在执行中，请先取消再重新规划/);
   });
 
+  it("plans: 第二次规划把上一次的快照当背景注入（形态 B：读落盘事实，不是模型自述）", async () => {
+    const store = inst(h.projectInstances);
+    const prd = { title: "Todo", sections: [] };
+    const batches = [[task({ id: "t1", title: "拆分逻辑" })]];
+    (store.get as Mock).mockReturnValue({ id: "p1", requirement: "做一个 CSV 工具", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue(prd);
+    h.decompose.mockResolvedValue({ batches, smoke: [] });
+
+    // 第一次：还没有历史 ⇒ 第三个参数是空串（提示里不产段）。
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
+    expect(h.generatePrd).toHaveBeenLastCalledWith("做一个 CSV 工具", expect.anything(), "");
+    // 审计实例与 handler 用的是同一个（`ensureAudit()` 的单例），按实例数组取会拿到
+    // 一条旧用例留下的那个。
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    // 落快照：phase plan + projectId + 快照字段
+    const appended = (audit.append as Mock).mock.calls.map((c) => c[0] as {
+      phase: string;
+      projectId?: string;
+      plan?: { taskCount: number; taskTitles: string[]; requirementHash: string };
+    });
+    const planRecord = appended.find((r) => r.phase === "plan");
+    expect(planRecord).toBeDefined();
+    expect(planRecord!.projectId).toBe("p1");
+    expect(planRecord!.plan!.taskCount).toBe(1);
+    expect(planRecord!.plan!.taskTitles).toEqual(["拆分逻辑"]);
+    expect(planRecord!.plan!.requirementHash).toMatch(/^[0-9a-f]{8}$/);
+
+    // 第二次：审计里已经有本项目的 plan 快照 ⇒ 必须把它渲染成块传进去。
+    (audit.read as Mock).mockReturnValue([
+      { phase: "plan", projectId: "p1", ts: "2026-10-25T10:00:00.000Z", plan: planRecord!.plan },
+      // 别的项目的快照不该混进来（两个项目互相污染拆法是最隐蔽的一种错）。
+      { phase: "plan", projectId: "p2", ts: "2026-10-25T11:00:00.000Z", plan: planRecord!.plan },
+    ]);
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
+    const history = (h.generatePrd as Mock).mock.calls.at(-1)![2] as string;
+    expect(history).toContain("【上次规划");
+    expect(history).toContain("上次拆出 1 个任务");
+    expect(history).toContain("拆分逻辑");
+    // 需求没改：块里要印「未变」（这个项目两次的需求都是同一句）。
+    expect(history).toContain("未变");
+  });
+
+  it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {
+    // 这条钉的是 `filter((r) => r.projectId === projectId)`：判反（`!==`）会把
+    // 别的项目的拆法当成"上次"，于是差异会全部算错 —— 而提示看起来完全正常。
+    const store = inst(h.projectInstances);
+    const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
+    (store.get as Mock).mockReturnValue({ id: "p1", requirement: "需求 A", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue(prd);
+    h.decompose.mockResolvedValue({ batches: [[task({ id: "t1", title: "本项目任务" })]], smoke: [] });
+
+    const otherSnapshot = {
+      ts: "2026-10-25T09:00:00.000Z",
+      requirement: "别的项目",
+      goal: "别的目标",
+      taskTitles: ["别人的任务 A", "别人的任务 B", "别人的任务 C"],
+      taskCount: 3,
+      requirementHash: "deadbeef",
+      featureCount: 9,
+    };
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    audit.read.mockReturnValue([
+      // 顺序刻意把"别的项目"放前面：按 ts 它更早，但按项目它根本不该被看见。
+      { phase: "plan", projectId: "p2", ts: otherSnapshot.ts, plan: otherSnapshot },
+    ]);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
+
+    // 本项目的第一次规划 ⇒ 注入的历史必须是空串（不算"上次"）。
+    expect(h.generatePrd).toHaveBeenLastCalledWith("需求 A", expect.anything(), "");
+  });
+
+  it("plans: 同一项目的历史才会算出差异（新增/不再出现的任务都进日志）", async () => {
+    const store = inst(h.projectInstances);
+    const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
+    (store.get as Mock).mockReturnValue({ id: "p1", requirement: "需求 A", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue(prd);
+    h.decompose.mockResolvedValue({ batches: [[task({ id: "t1", title: "新任务" })]], smoke: [] });
+
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    audit.read.mockReturnValue([
+      {
+        phase: "plan",
+        projectId: "p1",
+        ts: "2026-10-25T09:00:00.000Z",
+        plan: {
+          ts: "2026-10-25T09:00:00.000Z",
+          requirement: "需求 A",
+          goal: "g",
+          taskTitles: ["旧任务"],
+          taskCount: 1,
+          requirementHash: "deadbeef",
+          featureCount: 0,
+        },
+      },
+    ]);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
+
+    // 差异进日志（`recordPlanSnapshot` 里那条）：新增「新任务」、不再出现「旧任务」、
+    // 需求已改动。日志是唯一能让人读到"这一版比上一版变了什么"的地方。
+    const sent = win.webContents.send as unknown as Mock;
+    const logLines = sent.mock.calls
+      .filter((c) => (c[1] as { type?: string }).type === "log")
+      .map((c) => (c[1] as { text: string }).text);
+    const diffLine = logLines.find((l) => l.includes("[plan-history]") && l.includes("任务数"));
+    expect(diffLine).toBeDefined();
+    expect(diffLine).toContain("已改动");
+    expect(diffLine).toContain("新增「新任务」");
+    expect(diffLine).toContain("不再出现「旧任务」");
+  });
+
   it("plans: persists PRD, decomposes, and stores batches + smoke", async () => {
     const store = inst(h.projectInstances);
     const prd = { title: "Todo", sections: [] };
@@ -1011,7 +1123,9 @@ describe("orchestration handlers", () => {
     expect(res).toEqual({ prd, batches });
     // B3 起第二个参数是项目根（规划阶段也注入项目约定）：断言它非空，
     // 而不是钉死 tmp 路径 —— 路径由 app.getPath("userData") 决定，逐版本会变。
-    expect(h.generatePrd).toHaveBeenCalledWith("r", expect.stringContaining("workspaces"));
+    // 形态 B 起第三个参数是"上次规划"块：这个项目还没有历史，所以是空串
+    // （历史缺席 = 提示里不产段，不是"没有这个参数"）。
+    expect(h.generatePrd).toHaveBeenCalledWith("r", expect.stringContaining("workspaces"), "");
     expect(store.update).toHaveBeenNthCalledWith(1, "p1", {
       prdJson: JSON.stringify(prd),
       stage: "PLANNING",

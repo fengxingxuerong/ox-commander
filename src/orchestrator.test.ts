@@ -1144,6 +1144,50 @@ describe("OrchestratorEngine · 项目约定注入（B3）", () => {
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
+
+  it("规划历史（形态 B）：传进来就进提示并说破长度，不传则两者都没有", async () => {
+    let prompt = "";
+    const llm: LlmClient = {
+      async chat(req) {
+        prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+        return { content: PRD_JSON, provider: "t", model: "m" };
+      },
+    };
+
+    // 不传：提示里不产段、日志里也没有这一行（`!==` 判反会变成"没有历史才记日志"）。
+    const withoutEvents: string[] = [];
+    await engineWith(llm, withoutEvents).generatePrd("demo");
+    expect(prompt).not.toContain("【上次规划");
+    expect(withoutEvents.some((e) => e.includes("[plan-history]"))).toBe(false);
+
+    // 传了：块进提示，并且**排在需求之前**（背景先于需求）；日志说出注入长度。
+    const withEvents: string[] = [];
+    await engineWith(llm, withEvents).generatePrd("demo", undefined, "HISTORY-MARK：上次拆了 t1、t2");
+    expect(prompt).toContain("HISTORY-MARK");
+    expect(prompt.indexOf("HISTORY-MARK")).toBeLessThan(prompt.indexOf("User requirement:"));
+    expect(withEvents.some((e) => e.includes("[plan-history]") && e.includes("已注入上次规划"))).toBe(true);
+  });
+
+  it("规划历史与约定 / 备忘同时给：三者都在，顺序是 约定 → 备忘 → 上次规划", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-hist-order-"));
+    try {
+      fs.writeFileSync(path.join(root, "OX.md"), "CONV-ORDER", "utf8");
+      fs.writeFileSync(path.join(root, "OX-PLAN.md"), "MEMO-ORDER", "utf8");
+      let prompt = "";
+      const llm: LlmClient = {
+        async chat(req) {
+          prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      await engineWith(llm, []).generatePrd("demo", root, "HIST-ORDER");
+      expect(prompt.indexOf("CONV-ORDER")).toBeLessThan(prompt.indexOf("MEMO-ORDER"));
+      expect(prompt.indexOf("MEMO-ORDER")).toBeLessThan(prompt.indexOf("HIST-ORDER"));
+      expect(prompt.indexOf("HIST-ORDER")).toBeLessThan(prompt.indexOf("User requirement:"));
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
 });
 
 describe("OrchestratorEngine brain cooldown handling", () => {

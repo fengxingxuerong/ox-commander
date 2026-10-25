@@ -398,7 +398,11 @@ export class OrchestratorEngine {
     throw new RunWallClockError(elapsed, limit);
   }
 
-  async generatePrd(userRequirement: string, projectRoot?: string): Promise<PrdDocument> {
+  async generatePrd(
+    userRequirement: string,
+    projectRoot?: string,
+    historyBlock?: string,
+  ): Promise<PrdDocument> {
     this.cb.onStage("PRD");
     const context = await this.collectExternalContext();
     // 项目约定（B3）：给了项目根才读（规划可能在任何根之前被调用，例如
@@ -407,6 +411,13 @@ export class OrchestratorEngine {
     // 规划备忘（2026-10-25）：与约定同一条读取纪律，但内容层次不同 ——
     // 约定是"这个项目的规矩"，备忘是"这一版决定了什么、为什么、否掉了什么"。
     const memo = this.planMemoFor(projectRoot);
+    // 规划历史（形态 B，2026-10-25）：由宿主从**审计落盘事实**里取出并渲染好再传进来
+    // （纯逻辑在 `shared/plan-history.ts`）。引擎不自己读历史：它没有审计句柄，
+    // 也就不会长出第二条读盘通路。
+    const history = historyBlock ?? "";
+    if (history !== "") {
+      this.cb.onLog(`[plan-history] 已注入上次规划（${history.length} 字符）`);
+    }
     const prd = await this.brainCall(
       "PRD 生成",
       () =>
@@ -416,7 +427,7 @@ export class OrchestratorEngine {
             messages: [
               {
                 role: "user",
-                content: buildPrdPrompt(userRequirement, context, conventions, memo),
+                content: buildPrdPrompt(userRequirement, context, conventions, memo, history),
               },
             ],
             signal: this.abort.signal,
