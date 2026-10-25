@@ -54,7 +54,9 @@ const api = {
     ipcRenderer.invoke("delivery:read", projectId, path),
   // ── 保活预览（item 2）：探活成功的 dev server 由主进程持有 ──
   previewStatus: () => ipcRenderer.invoke("preview:status"),
-  previewOpen: () => ipcRenderer.invoke("preview:open"),
+  // 隔离 profile 由 projectId 派生（C3 剩余半）：应用内窗口，不是系统浏览器。
+  previewOpen: (projectId: string) => ipcRenderer.invoke("preview:open", projectId),
+  previewReset: (projectId: string) => ipcRenderer.invoke("preview:reset", projectId),
   previewStop: () => ipcRenderer.invoke("preview:stop"),
   auditFiles: () => ipcRenderer.invoke("audit:files"),
   exportAudit: () => ipcRenderer.invoke("audit:export"),

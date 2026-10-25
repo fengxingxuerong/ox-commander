@@ -153,6 +153,25 @@ describe("electron 入口 · 单实例锁", () => {
   });
 });
 
+/**
+ * 预览窗口是主窗口的附属窗口（C3 剩余半，2026-10-25）。它一旦活过主窗口，
+ * 后果不是"多一个窗口"：`window-all-closed` 不再触发（非 darwin 上应用不退），
+ * macOS 上 `activate` 又因为"还有窗口"而不重建主窗口。
+ */
+describe("electron 入口 · 预览窗口的从属关系", () => {
+  it("主窗口关闭时预览窗口一起收", async () => {
+    const { fake } = await loadEntry();
+    const mod = await import("../electron/preview-window");
+
+    expect(mod.openPreviewWindow("p-1-1", "http://127.0.0.1:5173/")).toEqual({ ok: true });
+    expect(fake.createdWindows).toHaveLength(2);
+
+    fake.createdWindows[0]!.close();
+
+    expect(fake.createdWindows[1]!.closed).toBe(true);
+  });
+});
+
 describe("electron 入口 · 导航守卫（2026-10-23 加固）", () => {
   it("不开新窗口：入口注册的策略一律 deny（子窗口会继承同一份 preload 桥）", async () => {
     const { fake } = await loadEntry();

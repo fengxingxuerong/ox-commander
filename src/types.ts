@@ -566,9 +566,15 @@ declare global {
        * 没有预览时返回 null；进程退出后仍保留现场直到用户停止/下次接管。
        */
       previewStatus(): Promise<PreviewState | null>;
-      /** 在系统浏览器打开当前预览；只允许管理器里的本机 HTTP(S) 地址。 */
-      previewOpen(): Promise<{ ok: true } | { ok: false; reason: string }>;
-      /** 停止并清除当前预览；没有预览时返回 false。 */
+      /**
+       * 在**应用内预览窗口**打开当前预览：profile（cookie / localStorage）按 projectId
+       * 隔离，与系统浏览器、与别的项目都不共享。只允许管理器里的本机 HTTP(S) 地址；
+       * projectId 非法时拒绝打开（不退化成共享 profile）。
+       */
+      previewOpen(projectId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+      /** 清掉该项目预览 profile 的 cookie / localStorage：下一次预览需重新登录。 */
+      previewReset(projectId: string): Promise<{ ok: true } | { ok: false; reason: string }>;
+      /** 停止并清除当前预览（dev server 与预览窗口一起收）；没有预览时返回 false。 */
       previewStop(): Promise<boolean>;
       auditFiles(): Promise<string[]>;
       exportAudit(): Promise<AuditExportResult>;

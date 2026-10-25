@@ -2,6 +2,7 @@ import { app, BrowserWindow } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { registerIpc, attachWindow } from "./ipc";
+import { closePreviewWindow } from "./preview-window";
 
 // Software rendering is plenty for this board-style UI and keeps the app
 // alive on VMs / remote desktops where the GPU process dies on startup.
@@ -68,6 +69,10 @@ function createWindow(): BrowserWindow {
   mainWindow = win;
   win.on("closed", () => {
     if (mainWindow === win) mainWindow = null;
+    // 预览窗口也一起收：它是主窗口的附属窗口，留下的结果有两个 ——
+    // 只看板关了而应用不退（`window-all-closed` 不再触发），以及 macOS 上
+    // `activate` 看到还有一个窗口，于是主窗口再也回不来。
+    closePreviewWindow();
   });
 
   attachWindow(win);

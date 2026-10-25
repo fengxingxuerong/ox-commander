@@ -4,10 +4,14 @@ import type { PreviewState } from "../../shared/delivery-guide";
 
 /**
  * 保活预览卡（item 2）：探活成功的 dev server 由主进程持有，这里只显示
- * 管理器的事实（URL / 命令 / 日志尾部 / 到期时间）并给打开、停止两个动作。
+ * 管理器的事实（URL / 命令 / 日志尾部 / 到期时间）并给打开、清除数据、停止三个动作。
  *
- * 打开走系统浏览器而不是内嵌 webview：本地 dev server 的 CSP / HMR / 端口
- * 行为与真实浏览器一致，也避免把任意页面塞进 Electron 渲染进程。
+ * 打开走**应用内窗口 + 按项目隔离的 profile**（2026-10-25，C3 的剩余半）。此前走系统
+ * 浏览器，而"隔离"在那条路上根本做不到：profile 由使用者的浏览器决定 —— 一个项目的
+ * 登录态跟着使用者的日常浏览走，别的项目的预览也共用同一份 cookie。换成应用内窗口后，
+ * 被预览的页面待在独立 session 里、拿不到 IPC 桥、只允许在本机回环地址上导航
+ * （判据与守卫都在 `electron/preview-window.ts`）。代价是它不再是使用者的那个浏览器
+ * （扩展、DevTools 习惯都不同），换来的是"预览之间不串、也不脏我的浏览器"。
  */
 export function PreviewPanel() {
   const activeProjectId = useApp((s) => s.activeProjectId);
@@ -41,11 +45,21 @@ export function PreviewPanel() {
   const open = (): void => {
     setNote(null);
     window.oxCommander
-      .previewOpen()
+      .previewOpen(activeProjectId)
       .then((res) => {
         if (!res.ok) setNote(res.reason);
       })
       .catch((e: unknown) => setNote(`打开预览失败：${(e as Error).message}`));
+  };
+
+  const reset = (): void => {
+    setNote(null);
+    window.oxCommander
+      .previewReset(activeProjectId)
+      .then((res) => {
+        setNote(res.ok ? "已清除这个项目的预览数据。" : res.reason);
+      })
+      .catch((e: unknown) => setNote(`清除预览数据失败：${(e as Error).message}`));
   };
 
   const stop = (): void => {
@@ -77,7 +91,7 @@ export function PreviewPanel() {
         <>
           <p className="card-sub">
             {preview.title} · 由主进程保活，{new Date(preview.expiresAt).toLocaleTimeString()} 自动停止。
-            打开走系统浏览器（本机回环地址）。
+            打开走应用内窗口，profile 按项目隔离（本机回环地址）。
           </p>
           <p className="task-meta">
             <code>{preview.url}</code>
@@ -92,11 +106,17 @@ export function PreviewPanel() {
               className="primary"
               onClick={open}
               disabled={!preview.running}
-              title="在系统浏览器打开这个 dev server"
+              title="在本项目的隔离预览窗口里打开这个 dev server"
             >
               打开预览
             </button>
-            <button className="danger" onClick={stop} title="杀掉预览进程并清除这张卡">
+            <button
+              onClick={reset}
+              title="清掉这个项目的预览 cookie / localStorage（下次预览需重新登录）"
+            >
+              清除预览数据
+            </button>
+            <button className="danger" onClick={stop} title="杀掉预览进程、关掉预览窗口并清除这张卡">
               停止预览
             </button>
           </div>

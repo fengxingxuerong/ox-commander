@@ -76,6 +76,9 @@ export function resetFakeApp(): void {
   createdWindows.length = 0;
   app.requestSingleInstanceLock.mockReturnValue(true);
   app.whenReady.mockImplementation(() => Promise.resolve());
+  session.fromPartition.mockClear();
+  requestedPartitions.length = 0;
+  clearedPartitions.length = 0;
 }
 
 export const app = {
@@ -105,6 +108,8 @@ export const ipcMain = createFakeIpcMain();
  * eyeballed.
  */
 export interface FakeBrowserWindow {
+  /** 构造参数原样留档（`webPreferences` 的隔离 profile 与"没有 preload 桥"都断言在这里）。 */
+  readonly options: Record<string, unknown>;
   /** URL or file path passed to `loadURL` / `loadFile`. */
   loaded: string | null;
   minimized: boolean;
@@ -124,6 +129,7 @@ export interface FakeBrowserWindow {
   loadFile(file: string): Promise<void>;
   on(name: string, listener: () => void): void;
   isMinimized(): boolean;
+  isDestroyed(): boolean;
   restore(): void;
   focus(): void;
   /** Test helper: fires the `closed` listener so the entry can drop its reference. */
@@ -132,6 +138,8 @@ export interface FakeBrowserWindow {
   openWindow(): unknown;
   /** Test helper: 触发一次 will-navigate，返回 preventDefault 是否被调用。 */
   fireNavigation(url: string): boolean;
+  /** Test helper: 触发一次 will-redirect（服务端重定向），返回 preventDefault 是否被调用。 */
+  fireRedirect(url: string): boolean;
 }
 
 export const createdWindows: FakeBrowserWindow[] = [];
@@ -146,6 +154,7 @@ export class BrowserWindow {
     const webContentsEvents = new Map<string, (event: unknown, url?: string) => void>();
     let openHandler: ((details: unknown) => unknown) | null = null;
     const self: FakeBrowserWindow = {
+      options,
       loaded: null,
       minimized: false,
       focusCalls: 0,
@@ -173,6 +182,7 @@ export class BrowserWindow {
         windowEvents.set(name, listener);
       },
       isMinimized: () => self.minimized,
+      isDestroyed: () => self.closed,
       restore: () => {
         self.restoreCalls += 1;
         self.minimized = false;
@@ -195,11 +205,38 @@ export class BrowserWindow {
         listener({ preventDefault: () => (prevented = true) }, url);
         return prevented;
       },
+      fireRedirect: (url) => {
+        const listener = webContentsEvents.get("will-redirect");
+        if (!listener) throw new Error("这个窗口没有注册 will-redirect");
+        let prevented = false;
+        listener({ preventDefault: () => (prevented = true) }, url);
+        return prevented;
+      },
     };
     createdWindows.push(self);
     return self as unknown as BrowserWindow;
   }
 }
+
+/**
+ * `session.fromPartition` 替身（预览窗口的隔离 profile，C3 剩余半）。
+ *
+ * 判据是"清除落在**那个项目**的 profile 上"，所以这里分别记录：问过哪些 partition、
+ * 真的清过哪些 —— 只看"调用过 clearStorageData"是测不出清错项目的。
+ */
+export const requestedPartitions: string[] = [];
+export const clearedPartitions: string[] = [];
+export const session = {
+  fromPartition: vi.fn((partition: string) => {
+    requestedPartitions.push(partition);
+    return {
+      partition,
+      clearStorageData: vi.fn(async () => {
+        clearedPartitions.push(partition);
+      }),
+    };
+  }),
+};
 
 export const safeStorage = {
   isEncryptionAvailable: vi.fn(() => false),

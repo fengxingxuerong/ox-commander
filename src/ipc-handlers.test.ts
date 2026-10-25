@@ -235,7 +235,7 @@ h.builtAdapter = {
 };
 
 import type { FakeIpcMain } from "./__fakes__/electron";
-import { fireAppEvent } from "./__fakes__/electron";
+import { createdWindows, clearedPartitions, fireAppEvent } from "./__fakes__/electron";
 import { app, shell } from "electron";
 import { attachWindow, buildEngine, ensureWorkspace, registerIpc } from "../electron/ipc";
 import { registerChatHandlers } from "../electron/ipc/chat";
@@ -264,6 +264,7 @@ import { exampleManifest } from "../electron/agents/manifest-schema";
 import { SnapshotStore } from "../electron/sandbox/snapshot-store";
 import { HttpLlmError } from "../shared/http-clients";
 import { getPreview, keepDevServer, stopPreview } from "../electron/preview-manager";
+import { closePreviewWindow } from "../electron/preview-window";
 import { runSmokeChecks } from "../electron/engine/verifier";
 import type { AgentCapabilities, AgentDescriptor } from "../shared/agent-contract";
 import { DEFAULT_SETTINGS, type ProjectSettings, type Task } from "../shared/types";
@@ -2321,6 +2322,9 @@ describe("preview handlers（保活 dev server）", () => {
 
   afterEach(() => {
     stopPreview();
+    // 预览窗口是模块单例状态：不收干净会漏进下一条用例（窗口数断言就失真了）。
+    closePreviewWindow();
+    createdWindows.length = 0;
   });
 
   it("preview:status 没有预览时返回 null，有预览时返回完整事实", () => {
@@ -2340,40 +2344,42 @@ describe("preview handlers（保活 dev server）", () => {
     });
   });
 
-  it("preview:open 只打开管理器里的本机 HTTP(S) 地址", async () => {
-    const openExternal = shell.openExternal as unknown as Mock;
-    openExternal.mockClear();
-    const invoke = () => (h.ipcMain as FakeIpcMain).invoke("preview:open") as Promise<
-      { ok: true } | { ok: false; reason: string }
-    >;
+  it("preview:open 只在应用内窗口打开管理器里那条本机 HTTP(S) 地址（profile 按项目隔离）", async () => {
+    const open = (projectId?: unknown) =>
+      (h.ipcMain as FakeIpcMain).invoke("preview:open", projectId) as
+        | { ok: true }
+        | { ok: false; reason: string };
 
-    expect((await invoke()).ok).toBe(false);
-    expect(openExternal).not.toHaveBeenCalled();
+    expect(open("p-1-1").ok).toBe(false); // 还没有可预览的服务
+    expect(createdWindows).toHaveLength(0);
 
     keep();
-    expect(await invoke()).toEqual({ ok: true });
-    expect(openExternal).toHaveBeenCalledWith("http://127.0.0.1:5173/");
+    expect(open("p-1-1")).toEqual({ ok: true });
+    expect(createdWindows).toHaveLength(1);
+    expect(createdWindows[0]!.loaded).toBe("http://127.0.0.1:5173/");
+    expect(
+      (createdWindows[0]!.options.webPreferences as Record<string, unknown>).partition,
+    ).toBe("persist:ox-preview-p-1-1");
+    // 不再交给系统浏览器：隔离要求 profile 由我们指定，外部浏览器给不了这个控制权。
+    expect(shell.openExternal).not.toHaveBeenCalled();
 
     for (const allowed of [
       "http://localhost:5173/",
       "https://localhost:5173/",
       "http://[::1]:5173/",
     ]) {
-      openExternal.mockClear();
       stopPreview();
       keep(allowed);
-      expect(await invoke(), allowed).toEqual({ ok: true });
-      expect(openExternal).toHaveBeenCalledWith(allowed);
+      expect(open("p-1-1"), allowed).toEqual({ ok: true });
     }
 
     for (const blockedUrl of ["https://example.com/", "file:///etc/passwd", "not-a-url"]) {
-      openExternal.mockClear();
       stopPreview();
       keep(blockedUrl);
-      const blocked = await invoke();
+      const blocked = open("p-1-1");
       expect(blocked.ok, blockedUrl).toBe(false);
       if (!blocked.ok) expect(blocked.reason).toContain("本机 HTTP");
-      expect(openExternal, blockedUrl).not.toHaveBeenCalled();
+      expect(shell.openExternal, blockedUrl).not.toHaveBeenCalled();
     }
   });
 
@@ -2382,35 +2388,59 @@ describe("preview handlers（保活 dev server）", () => {
     child.exitCode = 1;
     child.emit("close", 1);
     expect(getPreview()!.running).toBe(false);
-    const out = (await (h.ipcMain as FakeIpcMain).invoke("preview:open")) as {
+    const out = (h.ipcMain as FakeIpcMain).invoke("preview:open", "p-1-1") as {
       ok: boolean;
       reason?: string;
     };
     expect(out.ok).toBe(false);
     expect(out.reason).toContain("已退出");
+    expect(createdWindows).toHaveLength(0);
+  });
+
+  it("preview:open 缺 projectId 或 id 非法：拒绝且一个窗口都不建（不回退到共享 profile）", () => {
+    keep();
+    for (const bad of [undefined, "", "项目", 42]) {
+      const out = (h.ipcMain as FakeIpcMain).invoke("preview:open", bad) as {
+        ok: boolean;
+        reason?: string;
+      };
+      expect(out.ok, String(bad)).toBe(false);
+      if (!out.ok) expect(out.reason).toContain("项目 id");
+    }
+    expect(createdWindows).toHaveLength(0);
     expect(shell.openExternal).not.toHaveBeenCalled();
   });
 
-  it("preview:open 把 shell.openExternal 的失败折成 reason", async () => {
-    keep();
-    (shell.openExternal as unknown as Mock).mockRejectedValueOnce(new Error("no browser"));
-    const out = (await (h.ipcMain as FakeIpcMain).invoke("preview:open")) as {
-      ok: boolean;
-      reason?: string;
-    };
-    expect(out.ok).toBe(false);
-    expect(out.reason).toContain("no browser");
+  it("preview:reset 清掉该项目预览 profile 的存储；id 非法时拒绝", async () => {
+    const reset = (projectId: unknown) =>
+      (h.ipcMain as FakeIpcMain).invoke("preview:reset", projectId) as Promise<
+        { ok: true } | { ok: false; reason: string }
+      >;
+
+    expect(await reset("p-1-1")).toEqual({ ok: true });
+    expect(clearedPartitions).toEqual(["persist:ox-preview-p-1-1"]);
+
+    const bad = await reset("项目");
+    expect(bad.ok).toBe(false);
+    if (!bad.ok) expect(bad.reason).toContain("项目 id");
+    expect(clearedPartitions).toEqual(["persist:ox-preview-p-1-1"]);
   });
 
-  it("preview:stop 停止并清除；应用退出时也会清掉", () => {
+  it("preview:stop 停止并清除（连预览窗口一起收）；应用退出时也会清掉", () => {
     keep();
+    (h.ipcMain as FakeIpcMain).invoke("preview:open", "p-1-1");
+    expect(createdWindows).toHaveLength(1);
+
     expect((h.ipcMain as FakeIpcMain).invoke("preview:stop")).toBe(true);
     expect(getPreview()).toBeNull();
+    expect(createdWindows[0]!.closed).toBe(true);
     expect((h.ipcMain as FakeIpcMain).invoke("preview:stop")).toBe(false);
 
     keep();
+    (h.ipcMain as FakeIpcMain).invoke("preview:open", "p-1-1");
     fireAppEvent("before-quit");
     expect(getPreview()).toBeNull();
+    expect(createdWindows[1]!.closed).toBe(true);
   });
 
   it("接线：验证器把通过冒烟的进程交给预览管理器；新引擎构建前先停旧预览", async () => {

@@ -189,6 +189,7 @@ function makeBridge(): Bridge {
     })),
     previewStatus: vi.fn(async () => null),
     previewOpen: vi.fn(async () => ({ ok: true as const })),
+    previewReset: vi.fn(async () => ({ ok: true as const })),
     previewStop: vi.fn(async () => true),
     setTaskNote: vi.fn(async () => true),
     auditFiles: vi.fn(async () => []),
@@ -926,11 +927,32 @@ describe("BoardPage", () => {
 
       fireEvent.click(screen.getByRole("button", { name: "打开预览" }));
       await waitFor(() => expect(window.oxCommander.previewOpen).toHaveBeenCalled());
+      // 隔离身份必须由渲染层给出（activeProjectId）：主进程拿它派生浏览器 profile，
+      // 缺了它预览会被拒 —— 所以这里钉住"传的是这个项目"。
+      expect(window.oxCommander.previewOpen).toHaveBeenCalledWith("p-1");
 
       fireEvent.click(screen.getByRole("button", { name: "停止预览" }));
       await waitFor(() => expect(window.oxCommander.previewStop).toHaveBeenCalled());
       await waitFor(() => expect(screen.queryByRole("button", { name: "打开预览" })).toBeNull());
       expect(screen.getByText("已停止预览。")).toBeTruthy();
+    });
+
+    it("清除预览数据走桥，并把结果说出来（不是静默成功）", async () => {
+      (window.oxCommander.previewStatus as ReturnType<typeof vi.fn>).mockResolvedValue(preview);
+      seedBoard();
+      render(<BoardPage />);
+      expect(await screen.findByText("运行预览")).toBeTruthy();
+
+      fireEvent.click(screen.getByRole("button", { name: "清除预览数据" }));
+      await waitFor(() => expect(window.oxCommander.previewReset).toHaveBeenCalledWith("p-1"));
+      expect(await screen.findByText("已清除这个项目的预览数据。")).toBeTruthy();
+
+      (window.oxCommander.previewReset as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+        ok: false as const,
+        reason: "清除预览数据需要一个合法的项目 id",
+      });
+      fireEvent.click(screen.getByRole("button", { name: "清除预览数据" }));
+      expect(await screen.findByText("清除预览数据需要一个合法的项目 id")).toBeTruthy();
     });
 
     it("已退出的预览标注退出码，且打开按钮不可用", async () => {

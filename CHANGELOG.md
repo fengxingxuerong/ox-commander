@@ -10,6 +10,27 @@
 
 ## [Unreleased]
 
+### 新增（预览的应用内隔离 profile · C3 剩余半 · 2026-10-25）
+
+- **预览不再交给系统浏览器**：`preview:open` 改为开**应用内窗口**，浏览器 profile 由
+  `projectId` 派生（`persist:ox-preview-<id>`）。此前所有项目共用使用者那一份浏览器
+  profile —— cookie 的边界是主机名而不是端口，于是 `localhost:5173` 上登录过的测试账号，
+  别的项目预览会带着它；应用的预览也写进使用者自己的浏览器，卸载都擦不掉。
+  现在每个项目的 cookie / localStorage / service worker 各归各的：**关窗不丢**
+  （同一项目下次预览仍然登录着），要清就点新的「清除预览数据」（`preview:reset`）。
+- **窗口的权限面三条**：不给 preload 桥（被预览的是模型产出 + 第三方页面，拿不到主窗口
+  那份 IPC 控制面）、`sandbox` 与 `contextIsolation` 开、`nodeIntegration` 关；
+  导航面：`setWindowOpenHandler` 一律 deny，`will-navigate` 与 `will-redirect` 只放行
+  本机回环（复用 `isLoopbackHttpUrl`，与 dev-server 冒烟同一份判据，不另写白名单）。
+- **单实例与从属**：同一项目再打开 = 聚焦已有窗口；换项目 = 旧窗口关掉、新窗口换
+  partition；主窗口关闭时预览窗口一起收 —— 否则 `window-all-closed` 不再触发（应用不退），
+  macOS 上 `activate` 又会因为"还有窗口"而不重建主窗口。
+- **身份缺失即拒绝**：没有合法 `projectId` 就不开窗，不退化成"共享 profile 也能看"。
+- 规模：TARGETS +2（**116**）· SITE_BASELINE 3112 → **3122**（逐位点 1/1 与 9/9 全杀）·
+  用例 **3022**（+17）/ 3030 · 103 个有可执行用例的文件。
+- **仍然不做的**：headless / serve 没有浏览器，这条能力只在桌面端；验证链依旧不做 DOM
+  渲染（页面冒烟只判明确错误页）—— 预览是给人看的，不是给门禁判的。
+
 ### 新增（serve 定时可见性 · 第一档竞品吸收 · 2026-10-25）
 
 - **`/state` 与状态页新增 `schedule` 块**（配 `--every` 才出现，字段即承诺）：

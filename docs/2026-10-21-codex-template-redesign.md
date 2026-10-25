@@ -104,7 +104,7 @@ aipedia.wiki 2026-04-16 稿注明 3 源交叉验证、developers.openai.com chan
 | F12 | 弹出独立窗口 | 无（Electron 单窗口） | 🔴 | M9 |
 | F13 | Memory | 只有静态约定注入（OX.md/AGENTS.md 进上下文，不会学习/更新） | 🔴 | **M8a**（显式形态） |
 | F14 | Computer Use | 无 | ⛔ | §五 |
-| F15 | in-app 浏览器 | dev-server 预览保活 + 系统浏览器打开 + 日志尾部（`PreviewPanel.tsx`、`electron/preview-manager.ts`）；无应用内浏览 | 🟡 | M9 |
+| F15 | in-app 浏览器 | dev-server 预览保活 + 系统浏览器打开 + 日志尾部（`PreviewPanel.tsx`、`electron/preview-manager.ts`）；无应用内浏览 —— **此处为 2026-10-21 的现场**；2026-10-25 起预览改为应用内窗口 + 按项目隔离的 profile（见 CHANGELOG 的 C3 剩余半条目） | 🟡 | M9 |
 | F16 | 插件市场 | `agents.d` manifest + 执行器自动探测一键接入（扫 PATH，只读不执行）；无市场 | ⛔ | §五（本地 Skills 承接） |
 | F17 | 图片生成 | 无 | 可做 | §五（经 Skills/MCP，不原生） |
 | F18 | PR 审查侧栏 | `git-remote.ts` 可开 PR、CI 结论回流（编排侧）；`IssuePicker.tsx` 只选 issue；无应用内 PR diff 审阅 | 🟡 | M9 |

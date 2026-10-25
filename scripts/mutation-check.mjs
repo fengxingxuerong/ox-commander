@@ -464,6 +464,18 @@ const TARGETS = [
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
     tier: 2,
   },
+  // 2026-10-25（C3 剩余半）：预览的浏览器身份隔离。判据只有"项目 id → profile 名"
+  // 这一条，但它是"隔离"这个词的全部内容 —— 映射错了两个项目就共用一份 cookie，
+  // 而界面上看不出任何异常；畸形身份若被放行，还会变成磁盘上的目录名。
+  { file: "shared/preview-isolation.ts", test: "src/preview-isolation.test.ts", tier: 1 },
+  // 2026-10-25（C3 剩余半）：应用内预览窗口 —— 隔离 profile、导航守卫、单例复用、
+  // 关闭与存储清理。判错都不抛异常：换项目时复用了旧窗口，表现为"两个项目共用登录态"；
+  // 守卫判反，表现为"预览页自己跳走了"，而主窗口的守卫拦不到它。
+  {
+    file: "electron/preview-window.ts",
+    tests: ["src/preview-window.test.ts", "src/ipc-handlers.test.ts", "src/main-wiring.test.ts"],
+    tier: 1,
+  },
   // 2026-10-19（item 2）：dev server 保活的生命周期（单实例替换、TTL 防误停、
   // 日志尾部、退出/停止清理、已死进程不接管）。判错会表现为"旧进程占着端口"
   // 或"预览被别人的定时器停掉"，都不抛异常。
@@ -966,6 +978,7 @@ const SITE_BASELINE = {
   "electron/notify-rules.ts": 17,
   "electron/platform.ts": 38,
   "electron/preview-manager.ts": 12,
+  "electron/preview-window.ts": 9,
   "electron/sandbox/action-gate.ts": 13,
   "electron/sandbox/approval-gate.ts": 3,
   "electron/sandbox/circuit-breaker.ts": 26,
@@ -1008,6 +1021,7 @@ const SITE_BASELINE = {
   "shared/mcp.ts": 101,
   "shared/page-smoke.ts": 17,
   "shared/policy-file.ts": 33,
+  "shared/preview-isolation.ts": 1,
   "shared/project-config.ts": 16,
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,

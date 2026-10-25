@@ -1,13 +1,13 @@
-import { app, ipcMain, shell } from "electron";
+import { app, ipcMain } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import {
   deriveDeliveryGuide,
   type DeliveryFileRead,
 } from "../../shared/delivery-guide";
-import { isLoopbackHttpUrl } from "../../shared/page-smoke";
 import { setDevServerKeeper } from "../engine/verifier";
 import { getPreview, keepDevServer, stopPreview } from "../preview-manager";
+import { closePreviewWindow, openPreviewWindow, resetPreviewStorage } from "../preview-window";
 import { ensureAudit, workspaceRoot } from "./context";
 
 /** 只读预览的上限：超过这个体积只给前 512KiB，并明确标 `truncated`。 */
@@ -97,6 +97,7 @@ export function registerDeliveryHandlers(): void {
   setDevServerKeeper(keepDevServer);
   app.on("before-quit", () => {
     stopPreview();
+    closePreviewWindow();
   });
 
   /**
@@ -127,23 +128,25 @@ export function registerDeliveryHandlers(): void {
   ipcMain.handle("preview:status", () => getPreview());
 
   /**
-   * 在系统浏览器打开预览。**不接收渲染层传的 URL**：只打开管理器里那一条
-   * 已经过探活的服务，且必须是本机 HTTP(S)。
+   * 在应用内预览窗口打开当前预览（C3 剩余半：按项目隔离 profile）。
+   * **不接收渲染层传的 URL**：只打开管理器里那一条已经过探活的服务；回环判定与
+   * 导航守卫都在 `electron/preview-window.ts`（真正加载 URL 的那一层），这里只透传结论。
+   * 渲染层必须给 projectId —— 隔离身份缺失时拒绝打开，不退化成共享 profile。
    */
-  ipcMain.handle("preview:open", async () => {
+  ipcMain.handle("preview:open", (_e, projectId: unknown) => {
     const preview = getPreview();
     if (!preview) return { ok: false as const, reason: "当前没有可预览的服务" };
     if (!preview.running) return { ok: false as const, reason: "预览服务已退出（可停止后清除）" };
-    if (!isLoopbackHttpUrl(preview.url)) {
-      return { ok: false as const, reason: `预览地址不是本机 HTTP(S)，拒绝打开：${preview.url}` };
-    }
-    try {
-      await shell.openExternal(preview.url);
-      return { ok: true as const };
-    } catch (err) {
-      return { ok: false as const, reason: `打开预览失败：${(err as Error).message}` };
-    }
+    return openPreviewWindow(projectId, preview.url);
   });
 
-  ipcMain.handle("preview:stop", () => stopPreview());
+  /** 清掉该项目预览 profile 的 cookie / localStorage（下一次预览需重新登录）。 */
+  ipcMain.handle("preview:reset", (_e, projectId: unknown) => resetPreviewStorage(projectId));
+
+  /** 停止预览：dev server 与预览窗口一起收（窗口留着看死页面没有意义）。 */
+  ipcMain.handle("preview:stop", () => {
+    const stopped = stopPreview();
+    closePreviewWindow();
+    return stopped;
+  });
 }

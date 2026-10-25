@@ -17,6 +17,41 @@
 
 ---
 
+## [Unreleased · 预览的应用内隔离 profile（C3 剩余半）· 2026-10-25]
+
+**为什么换掉系统浏览器（这是一次明确的方案反转，理由要留档）**：`PreviewPanel.tsx` 顶上
+原本写着"打开走系统浏览器而不是内嵌 webview"，理由是"避免把任意页面塞进 Electron 渲染
+进程"。那条理由今天仍然成立，但它换不来**隔离**：profile 由使用者的浏览器决定 ——
+cookie 的边界是主机名而不是端口，于是同一台机器上所有项目的预览共用一份登录态，而应用
+写进去的东西落在使用者的日常浏览里。竞品那一格（Orchestrator.inc 每 worker 隔离浏览器）
+要的正是这一点。绕开的路也评估过：`--user-data-dir` 需要先知道用户装了什么浏览器、macOS
+上还要 `open -n --args`，做不到"每个项目一份"且平台分支比收益多。结论：**自己开窗口**，
+用独立 partition，代价（不是使用者那个浏览器、没有他的扩展）写进 CHANGELOG 与组件注释。
+
+**判据形状的两次取舍**：
+1. 白名单直拼而不是哈希。partition 名会变成磁盘目录名（`userData/Partitions/<name>`），
+   直拼可读、可对照、单射；哈希省下的只是"id 里有怪字符"这一种情况，而那种情况我们
+   本来就该拒。
+2. **身份缺失不给退路**。写第一版时想的是"没有 projectId 就开一个公共 profile 吧" ——
+   这是把隔离降级成假象：使用者以为自己看的是隔离环境。改成拒绝并说明。
+
+**两处"不可观察的分支"是被纪律提前消掉的，不是被用例杀掉的**：
+- `previewPartitionOf` 最初同时写了 `length === 0` 与正则的 `+` 量词：空串两处都拒，
+  那条 `=== 0` 在变异里**必然存活**（改不改都不可观察）。按"首次遇到优先重构消除"删掉，
+  于是这个文件只剩 1 个位点（`typeof projectId !== "string"`），site 口径 **1/1 全杀**。
+- 关窗清理同理：既然 `openPreviewWindow` 会查 `isDestroyed()`，就不再注册 `closed` 监听
+  去清那份引用 —— 两套机制重叠时必有一处不可观察，而"最后发现某段代码没人能证明它有用"
+  比少一层兜底更贵。
+
+**测试基建擦出来的一个坑（记给下一个用这个 fake 的人）**：`BrowserWindow` 替身的构造函数
+是 `return self`，而 `options` 是 TS 参数属性（挂在**类实例**上）—— 于是 `win.options`
+在测试里是 `undefined`，`webPreferences` 一条都断言不了。把 `options` 放进 `self` 才拿到
+"partition 是这个项目的"与"**没有 preload 桥**"这两条判据（后者是这段代码的安全声明本体）。
+
+**门禁账**：`shared/preview-isolation.ts` 1/1、`electron/preview-window.ts` 9/9 逐位点全杀；
+TARGETS 114 → **116**；SITE_BASELINE 3112 → **3122**；用例 3005 → **3022**（+17）、
+文件 101 → **103**；README 与 gates.md 各四处数字同批校回（`check:doc-claims` 全绿）。
+
 ## [Unreleased · serve 定时可见性（第一档竞品吸收）· 2026-10-25]
 
 **吸收决策**：拉取第一档四家的 release/README/官网（Orchestrator.inc v0.14.6/7 + nightlies、
