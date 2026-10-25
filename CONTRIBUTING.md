@@ -44,6 +44,10 @@ npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <�
   SKILL.md、`references/gates.md` —— 漏一处的后果由 `check:doc-claims` 判红。
 - **别在注释里留裸算子字面量**（`&&`、`||`、`===` 等）—— 它们会被当作位点统计，
   位点总数会变，跨版本数字不可比。
+- **别用 shell 的正则批量改写含中文的 UTF-8 文档**（`README.md` / `docs/**` / `CHANGELOG.md`）。
+  2026-10-25 实测：PowerShell 的 `-replace | Set-Content` 把 README 与 gates.md 的中文写成乱码，
+  文件结构一并丢掉，`check:doc-claims` 当场报"解析不到声明"（它救了这一次）。改这些文件的
+  数字与措辞，用文本编辑工具做精确替换 —— 一行一处，看得见改了什么。
 - 改 `electron/sandbox/` 下的锚点文件前先查 SKILL.md 的行号锚点清单，
   在锚点行上方插行会让等价白名单失配、site 口径当场红。
 
