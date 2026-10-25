@@ -271,6 +271,10 @@ const TARGETS = [
   // （OX.md / AGENTS.md、单文件上限、读不动只报不抛）各一条目标 ——
   // 拼错一个字符就是"约定带进了提示但读的人看不懂"，而它在测试之外不可见。
   { file: "shared/project-conventions.ts", test: "src/project-conventions.test.ts", tier: 1 },
+  // 2026-10-25：规划备忘（项目级规划记忆，形态 A）。入表理由：三个判据全都不抛错 ——
+  // 备忘块的"背景不是证据"声明被吃掉，人会以为它代表门禁结论；超限静默截断，模型
+  // 以为自己看全了；背景总预算算错，提示悄悄变长或变短，两端都看不出来。
+  { file: "shared/plan-memo.ts", tests: ["src/plan-memo.test.ts", "src/prompts.test.ts"], tier: 1 },
   { file: "electron/engine/conventions.ts", tests: ["src/project-conventions.test.ts", "src/chat-runtime.test.ts"], tier: 1 },
   // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
   // 分隔符猜错平台就表现为"明明装了却说没装"，而这在本机测不出来。
@@ -955,7 +959,7 @@ const SITE_BASELINE = {
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 40,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 83,
+  "electron/engine/orchestrator.ts": 86,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,
@@ -1020,12 +1024,13 @@ const SITE_BASELINE = {
   "shared/llm-client.ts": 15,
   "shared/mcp.ts": 101,
   "shared/page-smoke.ts": 17,
+  "shared/plan-memo.ts": 9,
   "shared/policy-file.ts": 33,
   "shared/preview-isolation.ts": 1,
   "shared/project-config.ts": 16,
   "shared/project-conventions.ts": 2,
   "shared/prompt-text.ts": 1,
-  "shared/prompts.ts": 6,
+  "shared/prompts.ts": 8,
   "shared/providers.ts": 7,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
@@ -1980,22 +1985,47 @@ function isPidAlive(pid) {
   }
 }
 
-/** 取一个进程的命令行；拿不到（权限/平台/已退出）返回 null。 */
+/**
+ * 取一个进程的命令行；拿不到（权限/平台/已退出）返回 null。
+ *
+ * ⚠️ **"取到但为空" 必须当成取不到**（2026-10-25 实测修正）。
+ *
+ * 现场：`wmic` 在新版 Windows 上已经不存在（ENOENT，立刻返回），所以这条链实际只有
+ * PowerShell CIM 那一次调用。它平时 ~1.4s 就有输出，但**重负载下会间歇性地返回
+ * `status === 0` 而 stdout 为空**（实测一次 `status 0 / outLen 0`，错开再测 25 次又全有
+ * 输出）。原判据只看 `status === 0 && 非空` 才对，所以空输出会往下走完两种命令、
+ * 最终返回 `null` ⇒ 调用方 `isForeignMutationRun` 走"查不到就保守按活着算" ⇒
+ * **一份早已还原干净的台账被判成"另一轮变异正在运行"** ⇒ `check:residue` 退出 2 ⇒
+ * verify 链首红。
+ *
+ * 归因极难：单跑那个测试文件必绿（空输出是偶发），只有整链跑、机器被 104 个测试文件
+ * 占满时才红，且断言只看到 `expected 2 to be 0`。所以这里做两件事：
+ *   1. **空输出不是答案**：一次取不到就重试（至多 `PID_COMMANDLINE_ATTEMPTS` 次），
+ *      因为"取到空"与"这个 pid 属于别人"完全不是一回事；
+ *   2. 预算给足 `PID_COMMANDLINE_TIMEOUT_MS`，别让冷启动的 ~1.4s 在重负载下被截断。
+ * 判据本身不放松：仍然要求命令行里**真有** mutation-check。
+ */
+const PID_COMMANDLINE_TIMEOUT_MS = 30_000;
+/** 空输出时的重试次数（含首次）。偶发空输出是实测事实，一次就下结论会误判。 */
+const PID_COMMANDLINE_ATTEMPTS = 3;
+
 function pidCommandLine(pid) {
   if (process.platform === "win32") {
     // wmic 已弃用但仍在；退化到 PowerShell CIM。都失败返回 null（调用方保守处理）。
-    for (const [cmd, args] of [
-      ["wmic", ["process", "where", `processid=${pid}`, "get", "commandline"]],
-      [
-        "powershell",
-        ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
-      ],
-    ]) {
-      try {
-        const out = spawnSync(cmd, args, { encoding: "utf8", timeout: 8000 });
-        if (out.status === 0 && typeof out.stdout === "string" && out.stdout.trim() !== "") return out.stdout;
-      } catch {
-        /* 换下一种 */
+    for (let attempt = 0; attempt < PID_COMMANDLINE_ATTEMPTS; attempt += 1) {
+      for (const [cmd, args] of [
+        ["wmic", ["process", "where", `processid=${pid}`, "get", "commandline"]],
+        [
+          "powershell",
+          ["-NoProfile", "-Command", `(Get-CimInstance Win32_Process -Filter "ProcessId=${pid}").CommandLine`],
+        ],
+      ]) {
+        try {
+          const out = spawnSync(cmd, args, { encoding: "utf8", timeout: PID_COMMANDLINE_TIMEOUT_MS });
+          if (out.status === 0 && typeof out.stdout === "string" && out.stdout.trim() !== "") return out.stdout;
+        } catch {
+          /* 换下一种 */
+        }
       }
     }
     return null;

@@ -15,6 +15,7 @@ import {
   CONVENTION_FILE_NAMES,
   type ConventionFile,
 } from "../../shared/project-conventions";
+import { PLAN_MEMO_FILE_NAME } from "../../shared/plan-memo";
 
 /** 单个约定文件的读取上限：超过就不读（避免把几百 MB 的笔记塞进提示）。 */
 const MAX_SINGLE_FILE_BYTES = 256 * 1024;
@@ -67,4 +68,37 @@ export function readProjectConventions(
     }
   }
   return out;
+}
+
+/** 规划备忘的读取结果。与约定同形：缺席是常态、读不动不阻塞。 */
+export interface ReadPlanMemoResult {
+  /** 文件正文；缺席或空文件时为 `undefined`（调用方据此不产块）。 */
+  content?: string;
+  /** 读不动的原因（存在但读失败）。 */
+  unreadable?: string;
+  /** 超过单文件上限时的字节数。 */
+  skippedBytes?: number;
+}
+
+/**
+ * 读项目根的规划备忘（`OX-PLAN.md`，2026-10-25）。
+ *
+ * 与 `readProjectConventions` 同一套失败语义：**缺席是常态**、读不动不抛。
+ * 分开成两个函数而不是一个通用读取器：备忘是**单文件**，没有"多文件拼接顺序"
+ * 这件事，硬塞进通用形状只会多一个没人验证的分支。
+ */
+export function readPlanMemo(rootAbs: string): ReadPlanMemoResult {
+  const abs = path.join(rootAbs, PLAN_MEMO_FILE_NAME);
+  let bytes: number;
+  try {
+    bytes = fs.statSync(abs).size;
+  } catch {
+    return {}; // 不存在 = 常态
+  }
+  if (bytes > MAX_SINGLE_FILE_BYTES) return { skippedBytes: bytes };
+  try {
+    return { content: fs.readFileSync(abs, "utf8") };
+  } catch (err) {
+    return { unreadable: (err as Error).message };
+  }
 }

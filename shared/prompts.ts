@@ -1,3 +1,4 @@
+import { composeBackground, MAX_BACKGROUND_CHARS } from "./plan-memo";
 import type { PrdDocument } from "./types";
 
 /**
@@ -61,6 +62,7 @@ export function buildPrdPrompt(
   userRequirement: string,
   externalContext?: readonly { name: string; text: string }[],
   conventionsBlock?: string,
+  planMemoBlock?: string,
 ): string {
   const ctx = externalContext ? externalContextBlock(externalContext) : "";
   // 项目约定（B3）放在需求之前：先给项目背景，再读本次需求。空块不产段 ——
@@ -71,6 +73,19 @@ export function buildPrdPrompt(
   // "undefined" 拼进提示 —— site 审计在本行抓到过那个形态）。
   const conv = conventionsBlock ?? "";
   const conventions = conv.trim() !== "" ? `${conv}\n\n` : "";
+  // 规划备忘（2026-10-25）：与约定并列的背景块，但**顺序在约定之后** ——
+  // 规矩（长期）先于这一版的取舍。拼装与总预算在 `composeBackground` 里统一算，
+  // 不能让这里各自判断（那样总额就再也说不清）。
+  const memo = planMemoBlock ?? "";
+  const background = composeBackground(
+    [
+      { label: "项目约定", text: conventions.trim() },
+      { label: "规划备忘", text: memo.trim() },
+      { label: "外部上下文", text: ctx },
+    ],
+    MAX_BACKGROUND_CHARS,
+  );
+  const backgroundSection = background === "" ? "" : `${background}\n\n`;
   return `You are the planning brain of OxCommander, an orchestrator that decomposes software projects and dispatches them to coding agents.
 
 Convert the user's requirement below into a structured PRD.
@@ -89,7 +104,7 @@ Rules:
 - techStack: MUST stay inside the execution sandbox: Node.js (CommonJS modules), Node built-in modules and the built-in node:test runner only. NEVER propose Python, browsers/bundlers, or external npm packages — the workspace has no network installs and verification runs npm scripts backed by node only.
 - acceptanceCriteria: objective, machine-checkable criteria (build passes, tests pass, feature X works). Tests must be runnable via "npm test" with test files under tests/*.test.js using require("node:test").
 
-${conventions}${ctx ? `${ctx}\n\n` : ""}User requirement:
+${backgroundSection}User requirement:
 ${userRequirement}`;
 }
 

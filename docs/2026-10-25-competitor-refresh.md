@@ -85,6 +85,8 @@ worker 更新进 orchestrator chat 行、clone 失败恢复、孤儿 daemon 身�
 4. 规划会话持久化（动引擎，单独立项）—— **立项调研已于 2026-10-25 完成**：
    见 [2026-10-25-planning-session-persistence.md](2026-10-25-planning-session-persistence.md)
    （结论：先做"项目级规划备忘"这一最小形态，规划历史次之，常驻规划会话明确不做）
+   → **形态 A 同日落地**：`OX-PLAN.md` 进规划与执行上下文 + 背景块总预算
+   `MAX_BACKGROUND_CHARS`（此前只有分源上限）；见 CHANGELOG 与工程日志同名条目
 
 另：测试基建一项（2026-10-25 全量审计的产出）—— CI 的 tier 1 变异分片单片实测
 40–66 分钟贴到回收窗口，病灶是三个重目标（ipc/chat.ts 1055s · serve-main.ts 448s ·

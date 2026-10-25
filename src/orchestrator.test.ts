@@ -1079,6 +1079,71 @@ describe("OrchestratorEngine · 项目约定注入（B3）", () => {
       fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     }
   });
+
+  it("规划备忘（OX-PLAN.md）进 PRD 提示，且排在约定之后（规矩先于这一版的取舍）", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-memo-prd-"));
+    try {
+      fs.writeFileSync(path.join(root, "OX.md"), "CONV-MARK：只用 Node。", "utf8");
+      fs.writeFileSync(path.join(root, "OX-PLAN.md"), "MEMO-MARK：这一版按模块切 zone。", "utf8");
+      let prompt = "";
+      const llm: LlmClient = {
+        async chat(req) {
+          prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      const events: string[] = [];
+      await engineWith(llm, events).generatePrd("做一个 CSV 统计工具", root);
+
+      expect(prompt).toContain("CONV-MARK");
+      expect(prompt).toContain("MEMO-MARK");
+      expect(prompt).toContain("【规划备忘（项目根的 OX-PLAN.md）】");
+      // 顺序是承重的：长期规矩在前、这一版的取舍在后，两者都在需求之前。
+      expect(prompt.indexOf("CONV-MARK")).toBeLessThan(prompt.indexOf("MEMO-MARK"));
+      expect(prompt.indexOf("MEMO-MARK")).toBeLessThan(prompt.indexOf("User requirement:"));
+      // 注入了就要说得出来是哪一层（"以为带进去了"是这层最坏的失败形态）
+      expect(events.some((e) => e.includes("[plan-memo]") && e.includes("OX-PLAN.md"))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("没有备忘文件：不产块、不写日志（缺席是常态，不是故障）", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-memo-none-"));
+    try {
+      let prompt = "";
+      const llm: LlmClient = {
+        async chat(req) {
+          prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      const events: string[] = [];
+      await engineWith(llm, events).generatePrd("demo", root);
+      expect(prompt).not.toContain("【规划备忘");
+      expect(events.some((e) => e.includes("[plan-memo]"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
+
+  it("备忘读不动（同名目录）：说破但不影响 PRD 生成", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-memo-bad-"));
+    try {
+      fs.mkdirSync(path.join(root, "OX-PLAN.md"), { recursive: true });
+      const llm: LlmClient = {
+        async chat() {
+          return { content: PRD_JSON, provider: "t", model: "m" };
+        },
+      };
+      const events: string[] = [];
+      const prd = await engineWith(llm, events).generatePrd("demo", root);
+      expect(prd.goal).toBe("g");
+      expect(events.some((e) => e.includes("[plan-memo]") && e.includes("读不动"))).toBe(true);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+    }
+  });
 });
 
 describe("OrchestratorEngine brain cooldown handling", () => {

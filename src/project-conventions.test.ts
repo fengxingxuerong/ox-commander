@@ -7,7 +7,7 @@ import {
   MAX_CONVENTIONS_CHARS,
   formatConventionsBlock,
 } from "../shared/project-conventions";
-import { readProjectConventions } from "../electron/engine/conventions";
+import { readPlanMemo, readProjectConventions } from "../electron/engine/conventions";
 
 const roots: string[] = [];
 
@@ -115,5 +115,45 @@ describe("readProjectConventions", () => {
     expect(out.skipped[0]!.bytes).toBeGreaterThan(256 * 1024);
     expect(out.files.map((f) => f.name)).toEqual(["AGENTS.md"]);
     expect(out.files[0]!.content).toBe("agents-ok");
+  });
+});
+
+/**
+ * 规划备忘的读取器（2026-10-25）。与约定同一套失败语义，但**分开的函数** ——
+ * 备忘是单文件，没有"拼接顺序"这件事；这里钉的是三种"没读到"的形态各说各话：
+ * 缺席（常态）、读不动（要人处理）、超上限（要人处理）。
+ */
+describe("readPlanMemo", () => {
+  it("没有文件 ⇒ 空结果（缺席是常态，不是错误）", () => {
+    const root = scratch("memo-empty");
+    expect(readPlanMemo(root)).toEqual({});
+  });
+
+  it("读到正文：原样返回（不在这一层 trim，成块由上层做）", () => {
+    const root = scratch("memo-read");
+    fs.writeFileSync(path.join(root, "OX-PLAN.md"), "这一版：按模块切 zone。\n", "utf8");
+    expect(readPlanMemo(root).content).toBe("这一版：按模块切 zone。\n");
+  });
+
+  it("同名目录（读不动）⇒ unreadable 且不抛", () => {
+    const root = scratch("memo-dir");
+    fs.mkdirSync(path.join(root, "OX-PLAN.md"), { recursive: true });
+    const out = readPlanMemo(root);
+    expect(out.content).toBeUndefined();
+    expect(out.unreadable).toBeTruthy();
+  });
+
+  it("超过单文件上限 ⇒ 报字节数并跳过（与约定同一个上限）", () => {
+    const root = scratch("memo-huge");
+    fs.writeFileSync(path.join(root, "OX-PLAN.md"), "z".repeat(300 * 1024), "utf8");
+    const out = readPlanMemo(root);
+    expect(out.content).toBeUndefined();
+    expect(out.skippedBytes).toBeGreaterThan(256 * 1024);
+  });
+
+  it("空文件 ⇒ 返回空串正文（上层据此不产块）", () => {
+    const root = scratch("memo-blank");
+    fs.writeFileSync(path.join(root, "OX-PLAN.md"), "   \n", "utf8");
+    expect(readPlanMemo(root).content).toBe("   \n");
   });
 });

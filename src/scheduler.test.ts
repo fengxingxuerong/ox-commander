@@ -878,6 +878,36 @@ describe("Scheduler · 项目约定注入（B3）", () => {
       proj.cleanup();
     }
   });
+
+  it("规划备忘 OX-PLAN.md 也进 description，且排在约定之后、契约之前", async () => {
+    // 执行者只拿到任务书、看不到取舍时会按自己的理解重推一遍 —— 备忘进执行侧
+    // 就是为了堵这一格；同时它必须是**背景**，不能挤到契约块下面去。
+    const proj = projectWith({ "OX.md": "CONV-MARK", "OX-PLAN.md": "MEMO-MARK" });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      const desc = captured[0]!.description;
+      expect(desc).toContain("MEMO-MARK");
+      expect(desc).toContain("【规划备忘（项目根的 OX-PLAN.md）】");
+      expect(desc.indexOf("CONV-MARK")).toBeLessThan(desc.indexOf("MEMO-MARK"));
+      expect(desc.indexOf("MEMO-MARK")).toBeLessThan(desc.indexOf("[平台契约条款]"));
+    } finally {
+      proj.cleanup();
+    }
+  });
+
+  it("只有备忘、没有约定文件：备忘照样进 description（两块各自独立）", async () => {
+    const proj = projectWith({ "OX-PLAN.md": "MEMO-ONLY" });
+    try {
+      const captured: Array<{ taskId: string; description: string }> = [];
+      await new Scheduler([capturing(captured)]).runBatch([task("t1", "src")], proj.root);
+      const desc = captured[0]!.description;
+      expect(desc).toContain("MEMO-ONLY");
+      expect(desc).not.toContain("【项目约定");
+    } finally {
+      proj.cleanup();
+    }
+  });
 });
 
 describe("Scheduler · 事件流的终止判定", () => {

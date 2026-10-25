@@ -3,7 +3,8 @@ import type { LlmClient } from "../../shared/llm-client";
 import { chatJson, withCooldownRetry } from "../../shared/llm-client";
 import { buildDecomposePrompt, buildEscalationSummary, buildPrdPrompt } from "../../shared/prompts";
 import { formatConventionsBlock } from "../../shared/project-conventions";
-import { readProjectConventions } from "./conventions";
+import { formatPlanMemoBlock } from "../../shared/plan-memo";
+import { readPlanMemo, readProjectConventions } from "./conventions";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths, findGhostObligations, describeGhostObligations } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
@@ -403,6 +404,9 @@ export class OrchestratorEngine {
     // 项目约定（B3）：给了项目根才读（规划可能在任何根之前被调用，例如
     // 纯 PRD 预演）；读到就说一声 —— "这次注入了哪些约定"是可核的事实。
     const conventions = this.conventionsFor(projectRoot);
+    // 规划备忘（2026-10-25）：与约定同一条读取纪律，但内容层次不同 ——
+    // 约定是"这个项目的规矩"，备忘是"这一版决定了什么、为什么、否掉了什么"。
+    const memo = this.planMemoFor(projectRoot);
     const prd = await this.brainCall(
       "PRD 生成",
       () =>
@@ -410,7 +414,10 @@ export class OrchestratorEngine {
           this.deps.llm,
           {
             messages: [
-              { role: "user", content: buildPrdPrompt(userRequirement, context, conventions) },
+              {
+                role: "user",
+                content: buildPrdPrompt(userRequirement, context, conventions, memo),
+              },
             ],
             signal: this.abort.signal,
           },
@@ -439,6 +446,29 @@ export class OrchestratorEngine {
     if (block !== "") {
       const names = read.files.map((f) => f.name).join(" + ");
       this.cb.onLog(`[conventions] 已注入项目约定：${names}（${block.length} 字符）`);
+    }
+    return block;
+  }
+
+  /**
+   * 读规划备忘并成块（2026-10-25）；缺席/空 → 空串。
+   *
+   * 三种"没读到"的形态分开说破（读不动 / 超上限 / 没有这个文件）：前两种是
+   * 需要人处理的状态，第三种是常态，不该让人以为故障。这是约定那一层已经踩过的坑
+   * （"以为带进去了、其实没有"）。
+   */
+  private planMemoFor(projectRoot?: string): string {
+    if (!projectRoot) return "";
+    const read = readPlanMemo(projectRoot);
+    if (read.unreadable !== undefined) {
+      this.cb.onLog(`[plan-memo] OX-PLAN.md 读不动（不影响规划）：${read.unreadable}`);
+    }
+    if (read.skippedBytes !== undefined) {
+      this.cb.onLog(`[plan-memo] OX-PLAN.md 超过单文件上限（${read.skippedBytes} B），已跳过`);
+    }
+    const block = formatPlanMemoBlock(read.content ?? "");
+    if (block !== "") {
+      this.cb.onLog(`[plan-memo] 已注入规划备忘：OX-PLAN.md（${block.length} 字符）`);
     }
     return block;
   }

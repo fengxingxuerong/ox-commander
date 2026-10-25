@@ -27,6 +27,23 @@ export const CONVENTIONS_MARKER = "【项目约定（项目根的 OX.md / AGENTS
 /** 约定块总字符上限。超出部分不进上下文，并在块尾说明。 */
 export const MAX_CONVENTIONS_CHARS = 8000;
 
+/**
+ * 背景块截断的共用判据（项目约定与规划备忘同一套纪律，2026-10-25）。
+ *
+ * 为什么抽出来：两处都要"超限 → 截断 → **说破**原文长度与上限"，而说破的措辞
+ * 一旦两处各写一份就会漂（一处说原文长度、另一处只说上限）。这里只留一条，
+ * 主语由 `what` 传进来 —— 差异进句子，不进分支。
+ */
+export function clipBackgroundBlock(full: string, maxChars: number, what: string): string {
+  if (full.length <= maxChars) return full;
+  const kept = full.slice(0, maxChars);
+  return (
+    `${kept}\n` +
+    `（已截断：${what}原文共 ${full.length} 字符，上限 ${maxChars}；` +
+    `上面的内容之后还有内容没进上下文 —— 需要时请自行拆分文件。）`
+  );
+}
+
 export interface ConventionFile {
   /** 文件名（OX.md / AGENTS.md）。 */
   name: string;
@@ -60,13 +77,7 @@ export function formatConventionsBlock(entries: readonly ConventionFile[]): stri
   const body = sections.join("\n\n");
 
   const full = `${head}\n${body}`;
-  if (full.length <= MAX_CONVENTIONS_CHARS) return full;
-
-  // 截断：留出说明文字的余量，并**说破**被截掉多少。
-  const kept = full.slice(0, MAX_CONVENTIONS_CHARS);
-  return (
-    `${kept}\n` +
-    `（已截断：约定原文共 ${full.length} 字符，上限 ${MAX_CONVENTIONS_CHARS}；` +
-    `上面的内容之后还有约定没进上下文 —— 需要时请自行拆分文件。）`
-  );
+  // 截断与"说破"走共用判据（`clipBackgroundBlock`）：约定与规划备忘是同一套纪律，
+  // 措辞分两份写就一定会漂。
+  return clipBackgroundBlock(full, MAX_CONVENTIONS_CHARS, "约定");
 }

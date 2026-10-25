@@ -9,8 +9,9 @@ import type {
 import type { AgentDescriptor, AgentAction } from "../../shared/agent-contract";
 import { CONTRACT_MARKER, STANDARD_CONTRACT_RULES, buildOperatorNoteBlock } from "../../shared/prompts";
 import { formatConventionsBlock } from "../../shared/project-conventions";
+import { composeBackground, formatPlanMemoBlock, MAX_BACKGROUND_CHARS } from "../../shared/plan-memo";
 import { zonesOverlap } from "../../shared/glob";
-import { readProjectConventions } from "./conventions";
+import { readPlanMemo, readProjectConventions } from "./conventions";
 import { wrapLegacyDescriptor, type AgentRegistry } from "../agents/registry";
 import type { CapabilityRouter, RoutingDecision } from "./router";
 import type { CircuitBreaker } from "../sandbox/circuit-breaker";
@@ -611,7 +612,18 @@ export class Scheduler {
     const agentPool = await this.planPool(tasks, opts?.preferredAgentId, opts?.taskFailures);
     // 项目约定（B3）：每次 runBatch 现读一次（项目根的 OX.md / AGENTS.md）。
     // 局部常量而不是实例字段 —— 批内 jobs 并发跑，字段会被后一个批覆盖。
-    const conventionsBlock = formatConventionsBlock(readProjectConventions(projectRoot).files);
+    //
+    // 规划备忘（2026-10-25）与约定同一个读取点：执行期的任务描述里也要带"这一版
+    // 决定了什么"，否则执行者只看到任务书、看不到取舍，会按自己的理解重推一遍。
+    // 两者走 `composeBackground` 共用总预算 —— 执行期没有外部上下文，
+    // 但"背景最多占多少"这条线必须与规划期是同一条。
+    const backgroundBlock = composeBackground(
+      [
+        { label: "项目约定", text: formatConventionsBlock(readProjectConventions(projectRoot).files) },
+        { label: "规划备忘", text: formatPlanMemoBlock(readPlanMemo(projectRoot).content ?? "") },
+      ],
+      MAX_BACKGROUND_CHARS,
+    );
     const guard = this.opts.guard;
     // `guard` 与它开出的 `scope` 是同生共死的：要么都有，要么都没有。
     // 打成一对之后，收尾处只需要判一次真值。
@@ -665,7 +677,7 @@ export class Scheduler {
       // run 级最新纠偏。约定块自己也声明"不覆盖契约"。
       const baseDesc = task.description ?? "";
       const withConventions =
-        conventionsBlock === "" ? baseDesc : `${baseDesc}\n\n${conventionsBlock}`;
+        backgroundBlock === "" ? baseDesc : `${baseDesc}\n\n${backgroundBlock}`;
       const withContract = withConventions.includes(CONTRACT_MARKER)
         ? withConventions
         : `${withConventions}\n\n${CONTRACT_MARKER}\n${STANDARD_CONTRACT_RULES}`;

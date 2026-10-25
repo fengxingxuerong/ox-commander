@@ -420,6 +420,10 @@ describe("isForeignMutationRun · pid 活着之外还要看身份", () => {
   const END_ANCHOR = "/** 一条台账的落盘路径";
   const start = SRC.indexOf(START_ANCHOR);
   const end = SRC.indexOf(END_ANCHOR);
+  /** 重试轮数由脚本里的常量决定（测试不复制它的值，只读出来用）。 */
+  const PID_COMMANDLINE_ATTEMPTS = Number(
+    /const PID_COMMANDLINE_ATTEMPTS = (\d+)/.exec(SRC)?.[1] ?? "NaN",
+  );
 
   interface Identity {
     isForeignMutationRun: (pid: number) => boolean;
@@ -525,13 +529,36 @@ describe("isForeignMutationRun · pid 活着之外还要看身份", () => {
 
   it("两条查询都拿不到命令行时，保守按「活着算」", () => {
     // 把不确定当已退出会更糟：那等于让一次查询失败就授权去还原别人正在写的源码。
+    // 注意现在会**重试**（空输出与偶发失败不能一次定死），所以应答队列要给足轮数，
+    // 断言的仍是"最终拿不到 ⇒ 保守为真"这同一条结论。
+    const replies = [];
+    for (let i = 0; i < PID_COMMANDLINE_ATTEMPTS; i += 1) {
+      replies.push(new Error("wmic 已不在"), { status: 1, stdout: "" });
+    }
+    const { api, calls } = load({ platform: "win32", replies });
+
+    expect(api.isForeignMutationRun(4242)).toBe(true);
+    // 每轮都是 wmic → powershell：重试把两种命令各问一遍，不是只问一种。
+    expect(calls.filter((c) => c.cmd === "wmic")).toHaveLength(PID_COMMANDLINE_ATTEMPTS);
+    expect(calls.filter((c) => c.cmd === "powershell")).toHaveLength(PID_COMMANDLINE_ATTEMPTS);
+  });
+
+  it("偶发空输出不该被当成「拿不到」：第二轮有输出就是有输出", () => {
+    // 2026-10-25 实测：重负载下 Get-CimInstance 会 `status 0` 但 stdout 为空。
+    // 一次空就下结论会让一份干净的台账被判成"另一轮正在运行"（check:residue 退出 2）。
     const { api, calls } = load({
       platform: "win32",
-      replies: [new Error("wmic 已不在"), { status: 1, stdout: "" }],
+      replies: [
+        new Error("wmic 已不在"),
+        { status: 0, stdout: "" }, // 第一轮：取到但为空
+        new Error("wmic 已不在"),
+        { status: 0, stdout: "node  scripts\\mutation-check.mjs --mode=site" }, // 第二轮：有输出
+      ],
     });
 
     expect(api.isForeignMutationRun(4242)).toBe(true);
-    expect(calls.map((c) => c.cmd)).toEqual(["wmic", "powershell"]);
+    // 第二轮不该再问一遍 wmic 之后才成功——它是在 powershell 那次拿到的。
+    expect(calls.length).toBe(4);
   });
 
   it("探活返回 EPERM（进程属于别人）也算活着，接保守判定", () => {
