@@ -290,6 +290,10 @@ const TARGETS = [
   // kill-tree 是超时兜底的最后一道闸：A3 加固的 fallback/二次确认分支都在
   // 这里，一个算子翻转就意味着"杀不掉的进程"回来了。纯 mock 测试，毫秒级。
   { file: "electron/sandbox/kill-tree.ts", test: "src/kill-tree.test.ts", tier: 1 },
+  // attention.ts 是看板「该你了」注意力条的判据（第六轮竞品刷新排期第 1 项）：
+  // 优先级排序、去重（升级卡已覆盖的失败任务不双报）、空态不出条 —— 错了都是
+  // 静默的（该喊的不喊 = 人错过裁决；不该喊的喊 = 教人忽略整条）。纯函数。
+  { file: "src/attention.ts", test: "src/attention.test.ts", tier: 1 },
   {
     file: "src/store.ts",
     tests: ["src/store.test.ts", "src/store-errors.test.ts", "src/ui.test.tsx", "src/chat-ui.test.tsx"],
@@ -1023,6 +1027,7 @@ const SITE_BASELINE = {
   "shared/types.ts": 6,
   "shared/usage-meter.ts": 18,
   "shared/zone-coverage.ts": 36,
+  "src/attention.ts": 10,
   "src/store.ts": 99,
 };
 

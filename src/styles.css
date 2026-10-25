@@ -1350,6 +1350,29 @@ button.small {
   font-size: 13px;
 }
 
+/* 「该你了」注意力条：比 recovery 横幅更紧急的信号色（它聚合的是"不来就卡住"），
+   且带列表 —— 每行一件事，第一行标题报数。 */
+.attention-strip {
+  margin: -8px 0 14px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 111, 97, 0.5);
+  border-radius: 6px;
+  background: rgba(255, 111, 97, 0.08);
+  font-size: 13px;
+}
+.attention-strip h3 {
+  margin: 0 0 6px;
+  font-size: 13px;
+}
+.attention-strip ul {
+  margin: 0;
+  padding-left: 18px;
+}
+.attention-strip li {
+  margin: 2px 0;
+}
+
+
 .col {
   overflow-y: auto;
   padding-right: 2px;

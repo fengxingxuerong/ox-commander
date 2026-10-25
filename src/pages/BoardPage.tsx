@@ -9,6 +9,7 @@ import type { ReceiptTaskStatus, ReceiptVerdict } from "../../shared/delivery-re
 import { usageFact } from "../../shared/usage-meter";
 import type { FileDiff } from "../../shared/text-diff";
 import type { TaskTrail, TrailRun } from "../../electron/board-derive";
+import { attentionHeadline, attentionOf } from "../attention";
 
 /**
  * 阶段标签。键是 `Record<Stage, string>`（2026-10-09 盲区补扫收口）：此前是
@@ -575,6 +576,11 @@ export function BoardPage() {
   };
 
   const taskList = Object.values(tasks);
+  /* 「该你了」注意力条（竞品刷新第六轮排期第 1 项）：把"不来就卡住"的事从看板
+   * 各处聚到最顶上一眼可见 —— 升级卡 > 命令审批 > 静止的失败任务。刻意不喂
+   * interrupted：下面那条 recovery 横幅已经 owns 这个信号，双报只会教人忽略
+   * 其中一条。判据在 src/attention.ts（纯函数，进变异门禁）。 */
+  const attention = attentionOf({ tasks: taskList, escalations, approvals });
   // 运行态判据（2026-10-13）：引擎只在 run 活着时把 PLANNING→DELIVERY 推过来；
   // 凭据出现 = 本 run 已有结论（failed 也是结论）。confirmAndExecute 会清掉上一轮的
   // receipt/verification，所以"重新开始"也能正确回到运行态。此前四个控制按钮
@@ -593,6 +599,17 @@ export function BoardPage() {
         </button>
         {workspaceError && <span className="error-text">{workspaceError}</span>}
       </header>
+
+      {attention.length > 0 && (
+        <section className="attention-strip" role="status">
+          <h3>{attentionHeadline(attention)}</h3>
+          <ul>
+            {attention.map((item) => (
+              <li key={`${item.kind}:${item.taskId ?? item.label}`}>{item.label}</li>
+            ))}
+          </ul>
+        </section>
+      )}
 
       {interrupted && (
         <div className="recovery-banner" role="alert">
