@@ -17,6 +17,35 @@
 
 ---
 
+## [Unreleased · serve 定时可见性（第一档竞品吸收）· 2026-10-25]
+
+**吸收决策**：拉取第一档四家的 release/README/官网（Orchestrator.inc v0.14.6/7 + nightlies、
+Superset desktop-v1.40.0 + cli-v1.40.0、Orca v1.4.237–240 三天连发、coze-studio v0.5.1）。
+与本项目可对位的吸收项按性价比筛过：Orca 的 browser history / SSH recovery / 跨设备
+是桌面端大件（不做，形态不同）；Superset 的 relay/mobile 是云服务路线（不做）；Orchestrator
+的 agent mid-session 切换依赖常驻会话（worktree 路线特产，不做）。**定时可见性**是唯一
+"小改动、补真实缺口"的一项：我们的定时环语义比他们细（409 口径、补跑至多一次、坏账
+纪律），但下次触发点只活在启动日志里 —— `serve:unit` 的 VPS 场景正好没有日志可翻。
+
+**实现要点**：
+- `ServeState.schedule`（可选块）+ `serveSetSchedule` 唯一写入口；宿主在 scheduleAt
+  每次执行时覆盖写。为什么 serve 不自算：下次触发点 = 上次触发 + 间隔 + 409 重试
+  分支，只有定时环知道 —— 再算一份就是两处真源。
+- 启动即广播一次：测试时发现 catchup fetch 在途期间状态面什么都读不到
+  （挂起 fetch 的用例暴露），所以启动段按"上次 + 间隔"推算先给一版。
+- 状态页一行（未配置时整行不渲染，不出现"下次触发：undefined"）；/state JSON 原样
+  可读；协议文档 §8.2 补字段语义。
+
+**测试时序的两个坑（记录给下一个写定时测试的人）**：
+1. harness 的 fetchImpl 同步 resolve ⇒ catchup 在一轮微任务内完成并覆盖 lastFiredAt，
+   "在途时"的断言用同步 fake 测不到 —— 用永远挂起的 fetch 才暴露了"启动段没广播"
+   这个真缺陷。
+2. catchup 触发接受后 lastFiredAt 推进到本次触发时刻是**正确行为**，别把它断言成
+   账本值（我在这条上浪费了三轮）。
+
+**门禁账**：serve.ts 73/73（新代码零新位点）；serve-main.ts 47/47（新分支全被
+3 条新用例咬住）；基线 3108→3112；用例 3005（+4）；doc-claims 全绿。
+
 ## [Unreleased · 看板「该你了」注意力条 · 2026-10-25]
 
 **形态选择**：Orchestrator.inc 的启示是四泳道看板，但本项目的看板已有自己的结构

@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import { parseSpec, runtimeGap, type HeadlessEvent } from "./protocol";
 import { runSpec } from "./run-spec";
-import { DEFAULT_HOST, isLoopbackHost, startServe } from "./serve";
+import { DEFAULT_HOST, isLoopbackHost, serveSetSchedule, startServe } from "./serve";
 import {
   busyRetryMs,
   decideStartupCatchup,
@@ -201,6 +201,13 @@ export interface ScheduleLoopOptions {
   log: (text: string) => void;
   loadState: () => ScheduleState | undefined;
   saveState: (s: ScheduleState) => void;
+  /**
+   * 定时可见性（2026-10-25，第一档竞品吸收）：每次排程后把"下一次触发点"写进
+   * serve 状态 —— /state、状态页因此可预测（Orca automation 监控的对位）。
+   * 注入的是 `serveSetSchedule`；测试不传也不受影响（可见性是增强不是权威，
+   * 与 scheduleStateIo 同一纪律）。
+   */
+  announceSchedule?: (schedule: { everyMs: number; nextFireAt: string; lastFiredAt?: string }) => void;
   /** 以下四项只为测试注入；生产用全局实现。 */
   fetchImpl?: (url: string, init: { method: string; headers: Record<string, string>; body: string }) => Promise<{ ok: boolean; status: number }>;
   setTimeoutImpl?: (fn: () => void, ms: number) => unknown;
@@ -224,6 +231,8 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
       fetch(url, init));
   let stopped = false;
   let timer: unknown;
+  /** 上一次**被接受**的触发时刻（409 跳过不算 —— 与"跳过不计已触发"同口径）。 */
+  let lastAcceptedFiredMs: number | undefined;
 
   /** 返回 true = 触发被接受（时间戳已落盘）；false = 跳过/失败（时间戳不动）。 */
   const attemptFire = async (): Promise<boolean> => {
@@ -243,7 +252,8 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
         return false;
       }
       if (res.ok) {
-        opts.saveState({ lastFiredMs: now() });
+        lastAcceptedFiredMs = now();
+        opts.saveState({ lastFiredMs: lastAcceptedFiredMs });
         opts.log(`[schedule] 定时触发：run 已接受（间隔 ${Math.round(opts.args.everyMs / 1000)}s）`);
         return true;
       }
@@ -258,6 +268,13 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
   const scheduleAt = (atMs: number): void => {
     if (stopped) return;
     timer = setTimeoutImpl(() => void tick(), Math.max(0, atMs - now()));
+    // 每次排程重写"下一次触发点"（ISO）：409 重试也会走到这里，所以短重试窗口
+    // 的推算同样可见 —— 状态页读到的永远是当下最真的那一个。
+    opts.announceSchedule?.({
+      everyMs: opts.args.everyMs,
+      nextFireAt: new Date(atMs).toISOString(),
+      ...(lastAcceptedFiredMs !== undefined ? { lastFiredAt: new Date(lastAcceptedFiredMs).toISOString() } : {}),
+    });
   };
 
   const tick = async (): Promise<void> => {
@@ -270,6 +287,17 @@ export function startScheduleLoop(opts: ScheduleLoopOptions): { stop(): void } {
   };
 
   const lastFiredMs = opts.loadState()?.lastFiredMs;
+  // 可见性的 lastFiredAt 与补跑判断同一出处：重启后的"上次触发"来自持久账本，
+  // 不是空值 —— 否则状态页在重启后会谎称"从未触发过"。
+  lastAcceptedFiredMs = lastFiredMs;
+  // 启动即广播一次：catchup 的 fetch 在途期间（VPS 重启后第一次自调用可能
+  // 要等网络），状态面此刻就该能回答"间隔多少、上次什么时候触发过" ——
+  // 下次触发点未知，先以"上次 + 间隔"推算（fetch 收尾后的排程会覆盖它）。
+  opts.announceSchedule?.({
+    everyMs: opts.args.everyMs,
+    nextFireAt: new Date(now() + nextDelayMs({ now: now(), lastFiredMs, everyMs: opts.args.everyMs })).toISOString(),
+    ...(lastFiredMs !== undefined ? { lastFiredAt: new Date(lastFiredMs).toISOString() } : {}),
+  });
   const catchup = decideStartupCatchup({ now: now(), lastFiredMs, everyMs: opts.args.everyMs });
   if (catchup.fire) {
     opts.log(
@@ -408,8 +436,14 @@ async function main(): Promise<void> {
       // 无条件透传：token 缺席就是 undefined，调度环对它自己兜底（不带头）。
       token: process.env.OX_SERVE_TOKEN,
       log: (text) => process.stdout.write(`${text}\n`),
+      // 定时可见性（2026-10-25）：每次排程把下一次触发点写进 /state 与状态页 ——
+      // VPS 场景没有终端可翻日志，"下次什么时候跑"从状态面就能回答。
+      announceSchedule: (s) => serveSetSchedule(srv.state, s),
       ...io,
     });
+    process.stdout.write(
+      `[schedule] 定时已配置：间隔 ${Math.round(schedule.schedule.everyMs / 1000)}s · spec=${schedule.schedule.specFile} · 下次触发点见 /state 的 schedule 字段\n`,
+    );
   }
   for (const sig of ["SIGINT", "SIGTERM"] as const) {
     process.on(sig, () => {

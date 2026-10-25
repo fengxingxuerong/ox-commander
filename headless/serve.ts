@@ -72,6 +72,18 @@ export interface ServeState {
   /** 最近一次状态变化的时间（ISO）。 */
   updatedAt?: string;
   /**
+   * 定时触发面（2026-10-25，第一档竞品吸收：Orca/Superset 都把 automation 的
+   * 下次触发点摆进监控面）。由**宿主**（serve-main 的定时环）在每次排程时写入：
+   *   · `everyMs` —— 生效间隔（与 `--every` 的解析值同源）；
+   *   · `nextFireAt` —— 下一次触发的 ISO 时刻（按"上次触发 + 间隔"推算，
+   *     漂移自校正，所以每次排程都重写）；
+   *   · `lastFiredAt` —— 上一次**被接受**的触发时刻；从未触发过则键消失
+   *     （409 跳过不算触发 —— 与定时环"跳过不计已触发"的口径一致）。
+   * 未配定时（`--every` 缺席）时**整个键消失**（字段即承诺）—— 消费方据此
+   * 区分"没有定时"与"定时还没算出下一次"。
+   */
+  schedule?: { everyMs: number; nextFireAt: string; lastFiredAt?: string };
+  /**
    * 当前 run 是否被暂停（P1-5）：只在暂停期间为 true，恢复后**键消失**
    * （字段即承诺 —— "没有这个键"就是"没暂停"，不给宿主第三种状态可读）。
    */
@@ -90,6 +102,21 @@ export interface ServeState {
    * 生效（正在跑的那一批任务不会被掐断）。状态页因此只说"已请求中止"。
    */
   cancelled?: boolean;
+}
+
+/**
+ * 宿主写定时摘要的**唯一**入口（纯函数，2026-10-25）。
+ *
+ * 为什么由宿主在排程时调用而不是 serve 自己算：定时环持有"上次触发 + 间隔"的
+ * 推算（含 409 重试、启动补跑这些分支），下次触发点只有它知道 —— serve 再算
+ * 一份就是两处真源，漂了没人测得到。写入是**覆盖式**的：每次排程重写整个块，
+ * 陈旧的 nextFireAt 不会留存。
+ */
+export function serveSetSchedule(
+  state: ServeState,
+  schedule: { everyMs: number; nextFireAt: string; lastFiredAt?: string },
+): void {
+  state.schedule = schedule;
 }
 
 /**
@@ -340,6 +367,14 @@ export function serveIndexHtml(state: ServeState): string {
        <pre>${esc(JSON.stringify(state.receipt, null, 2))}</pre>`
     : "<p class=muted>还没有凭据（只在交付成功 / 重修耗尽两条出口上产生）。</p>";
   const acceptance = state.acceptance ? acceptanceHtml(state.acceptance, esc) : "";
+  // 定时可见性（2026-10-25）：配置了定时才渲染这一行 —— 没配时键消失，页面
+  // 不出现"下一次触发：undefined"这种把缺席读成空值的行。时刻用本地时区显示
+  // （远程服务器常见非本地时区，操作者要对的是自己钟表上的时间）。
+  const scheduleNote = state.schedule
+    ? `<p class=muted>定时：每 ${Math.round(state.schedule.everyMs / 1000)}s 触发一次 · 下次 ${esc(
+        new Date(state.schedule.nextFireAt).toLocaleString(),
+      )}${state.schedule.lastFiredAt ? ` · 上次已接受 ${esc(new Date(state.schedule.lastFiredAt).toLocaleString())}` : " · 尚未触发过"}</p>`
+    : "";
   return `<!doctype html>
 <meta charset="utf-8">
 <title>OxCommander · 运行状态</title>
@@ -352,6 +387,7 @@ li{white-space:pre-wrap;word-break:break-word}
 <h1>OxCommander · ${statusLabel(state)}</h1>
 ${pauseNote}
       ${cancelNote}
+${scheduleNote}
 ${approvals}
 <p class=muted>状态 ${esc(state.status)}${
     state.exitCode !== undefined ? ` · 退出码 ${state.exitCode}` : ""

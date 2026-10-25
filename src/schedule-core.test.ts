@@ -139,6 +139,7 @@ describe("startScheduleLoop", () => {
     const saved: ScheduleState[] = [];
     const fires: Array<{ url: string; auth?: string; body: string }> = [];
     const logs: string[] = [];
+    const announced: Array<{ everyMs: number; nextFireAt: string; lastFiredAt?: string }> = [];
     let state: ScheduleState | undefined = input.initialState;
     let timerSeq = 0;
     const loop = startScheduleLoop({
@@ -152,6 +153,10 @@ describe("startScheduleLoop", () => {
       saveState: (s) => {
         saved.push(s);
         state = s;
+      },
+      // 定时可见性（2026-10-25）：收下每次排程的"下一次触发点"供断言。
+      announceSchedule: (s) => {
+        announced.push(s);
       },
       fetchImpl: async (url, init) => {
         fires.push({ url, auth: init.headers.Authorization, body: init.body });
@@ -179,7 +184,7 @@ describe("startScheduleLoop", () => {
         }
       }
     };
-    return { loop, pump, timers, saved, fires, logs, at: (ms: number) => (clock = ms) };
+    return { loop, pump, timers, saved, fires, logs, announced, at: (ms: number) => (clock = ms) };
   }
 
   it("[10] fresh 启动：不立即触发，一个间隔后首次触发并落盘，下一点 = 触发点 + 间隔", async () => {
@@ -284,5 +289,86 @@ describe("startScheduleLoop", () => {
     h.at(1_060_000);
     await h.pump();
     expect(h.fires).toHaveLength(0);
+  });
+
+  it("[schedule 可见性] 每次排程都广播下一次触发点，409 重试窗口同样可见", async () => {
+    // 200 接受 → 正常排程；再撞 409 → 短重试窗口也要被广播（状态页读到的
+    // 永远是当下最真的那一个，而不是第一次排程的陈旧值）。
+    let status = 200;
+    const h = harness({ status: () => status });
+    // fresh 启动的首条广播：lastFiredAt 缺席（还没触发过）。
+    await h.pump();
+    expect(h.announced.length).toBeGreaterThanOrEqual(1);
+    expect("lastFiredAt" in h.announced[0]!).toBe(false);
+
+    // 到点触发（200 接受）后的重排程：lastFiredAt 出现，指向这次触发。
+    h.at(1_060_000);
+    await h.pump();
+    const afterFire = h.announced[h.announced.length - 1]!;
+    expect(afterFire).toEqual({
+      everyMs: 60_000,
+      nextFireAt: new Date(1_120_000).toISOString(),
+      lastFiredAt: new Date(1_060_000).toISOString(),
+    });
+
+    // 撞 409：短重试窗口被广播（不是陈旧的整间隔值）。
+    status = 409;
+    h.at(1_120_000);
+    await h.pump();
+    const busy = h.announced[h.announced.length - 1]!;
+    expect(new Date(busy.nextFireAt).getTime()).toBeGreaterThan(1_120_000);
+    expect(new Date(busy.nextFireAt).getTime()).toBeLessThan(1_180_000);
+    expect(busy.lastFiredAt).toBe(new Date(1_060_000).toISOString());
+  });
+
+  it("[schedule 可见性] 从未触发过时 lastFiredAt 键消失，不假装 0", () => {
+    const h = harness({ status: () => 200 });
+    // fresh 启动、还没到点：启动广播 + scheduleAt 各一条，两条都**没有**
+    // lastFiredAt —— 缺席 = 从未触发，不装作 0。
+    expect(h.announced).toHaveLength(2);
+    for (const a of h.announced) {
+      expect("lastFiredAt" in a).toBe(false);
+    }
+    // 启动广播的推算与 scheduleAt 一致（同一 nextDelayMs，同一时钟）。
+    expect(h.announced[0]!.nextFireAt).toBe(h.announced[1]!.nextFireAt);
+  });
+
+  it("[schedule 可见性] 重启后 lastFiredAt 来自持久账本，不谎称从未触发", async () => {
+    // 不用 harness：它注入的 fetchImpl 同步 resolve，"在途窗口"在微任务一轮内
+    // 就被接受值覆盖 —— 测不到。这里 fetch 挂住（真实形态：VPS 重启后第一次
+    // 自调用在途），此时状态面读到的 lastFiredAt 只能来自**持久账本**。
+    let clock = 1_000_000;
+    const timers: TimerRec[] = [];
+    const announced: Array<{ everyMs: number; nextFireAt: string; lastFiredAt?: string }> = [];
+    let state: ScheduleState | undefined = { lastFiredMs: 940_000 };
+    let seq = 0;
+    const loop = startScheduleLoop({
+      args: { everyMs: 60_000, specFile: "spec.json" },
+      specPayload: JSON.stringify({ requirement: "x" }),
+      port: 8787,
+      log: () => {},
+      loadState: () => state,
+      saveState: (s) => {
+        state = s;
+      },
+      announceSchedule: (s) => {
+        announced.push(s);
+      },
+      fetchImpl: () => new Promise(() => {}), // 永远挂起：钉的就是"在途时"的可见性
+      setTimeoutImpl: (fn, ms) => {
+        timers.push({ at: clock + ms, fn, cleared: false });
+        return timers[seq++];
+      },
+      clearTimeoutImpl: (h) => {
+        (h as TimerRec).cleared = true;
+      },
+      now: () => clock,
+    });
+    await new Promise<void>((r) => setImmediate(r));
+    const withLast = announced.find((a) => a.lastFiredAt !== undefined);
+    expect(withLast).toBeDefined();
+    expect(withLast!.lastFiredAt).toBe(new Date(940_000).toISOString());
+    expect(withLast!.everyMs).toBe(60_000);
+    loop.stop();
   });
 });

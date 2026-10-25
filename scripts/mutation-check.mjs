@@ -986,7 +986,7 @@ const SITE_BASELINE = {
   "headless/protocol.ts": 120,
   "headless/receipt-verify-main.ts": 8,
   "headless/run-spec.ts": 33,
-  "headless/serve-main.ts": 43,
+  "headless/serve-main.ts": 47,
   "headless/serve.ts": 73,
   "shared/agent-contract.ts": 5,
   "shared/automation.ts": 47,

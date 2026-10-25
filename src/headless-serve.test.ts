@@ -7,6 +7,7 @@ import {
   serveEmit,
   serveFinish,
   serveIndexHtml,
+  serveSetSchedule,
   sseFrame,
   startServe,
 } from "../headless/serve";
@@ -84,6 +85,32 @@ function guide(over: Partial<DeliveryGuide> = {}): DeliveryGuide {
 
 describe("serve · 状态派生", () => {
   const now = () => "2026-09-29T00:00:00.000Z";
+
+  it("schedule 可见性：写入即覆盖，状态页只在配置了定时那格渲染", () => {
+    const s = createServeState();
+    // 未配置定时：键消失，页面不出现"下次触发：undefined"那类把缺席读成空值的行。
+    expect("schedule" in s).toBe(false);
+    expect(serveIndexHtml(s)).not.toContain("定时：");
+
+    serveSetSchedule(s, { everyMs: 60_000, nextFireAt: "2026-10-25T12:00:00.000Z" });
+    expect(s.schedule).toEqual({ everyMs: 60_000, nextFireAt: "2026-10-25T12:00:00.000Z" });
+    expect(serveIndexHtml(s)).toContain("定时：");
+    expect(serveIndexHtml(s)).toContain("尚未触发过");
+
+    // 覆盖式重写：排程推进后旧时刻不留存；lastFiredAt 出现后页面如实显示。
+    serveSetSchedule(s, { everyMs: 60_000, nextFireAt: "2026-10-25T12:01:00.000Z", lastFiredAt: "2026-10-25T12:00:00.000Z" });
+    expect(s.schedule!.nextFireAt).toBe("2026-10-25T12:01:00.000Z");
+    const html = serveIndexHtml(s);
+    // 时刻按本地时区渲染（远程服务器时区不可假设），所以只锚定结构词与间隔，
+    // 不锚定具体钟点 —— JSON 面（/state）才承载精确值，上面已断。
+    expect(html).toContain("定时：");
+    expect(html).toContain("每 60s");
+    expect(html).not.toContain("尚未触发过");
+
+    // /state 原样可读（MCP 宿主与外部监控消费的是 JSON 面）。
+    const routed = routeRequest(s, "GET", "/state");
+    expect(JSON.parse(routed.body as string).schedule.everyMs).toBe(60_000);
+  });
 
   it("moves to running on hello and to delivered only on a terminal done", () => {
     const s = createServeState();
