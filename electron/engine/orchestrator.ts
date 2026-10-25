@@ -521,8 +521,14 @@ export class OrchestratorEngine {
   async decompose(
     prd: PrdDocument,
     verificationCommands?: readonly VerificationCommand[],
+    previousPlanBlock?: string,
   ): Promise<{ batches: Task[][]; smoke: SmokeCheck[] }> {
     this.cb.onStage("PLANNING");
+    // 上次拆法（2026-10-25）：任务级差异只有在**分解**这一步才可能被用上 ——
+    // PRD 提示那一刻这次的任务清单还不存在。块由宿主渲染好传进来（引擎不读审计）。
+    if (previousPlanBlock !== undefined && previousPlanBlock !== "") {
+      this.cb.onLog(`[plan-history] 已注入上次分解清单（${previousPlanBlock.length} 字符）`);
+    }
     // 规划校验失败（zone 覆盖缺口等）不是终点：把校验错误回喂大脑重新规划，
     // 最多 2 次修正重试 —— 比快速失败省一次人工介入，比硬着头皮派发省整轮配额。
     const MAX_PLAN_RETRIES = 2;
@@ -539,7 +545,7 @@ export class OrchestratorEngine {
                 {
                   role: "user",
                   content:
-                    buildDecomposePrompt(prd) +
+                    buildDecomposePrompt(prd, previousPlanBlock) +
                     (feedback ? `\n\n【上一次规划未通过 zone 覆盖校验，必须修正】\n${feedback}` : ""),
                 },
               ],

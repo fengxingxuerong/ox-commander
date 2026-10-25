@@ -159,6 +159,11 @@ export function planDiffOf(previous: PlanSnapshot | undefined, current: PlanSnap
  * 口径写在块内：**这是落盘事实，不是模型的记忆**，也不是"这次该怎么做"的建议 ——
  * 它只回答"上次是什么、变在哪"，避免下一次规划在不知情的情况下把已经商量好的
  * 取舍推翻重来。
+ *
+ * ⚠️ `diff` 里**任务级的 added / removed 只在"已经拆完"的那一侧才有意义**
+ * （见 `formatPlanHistoryForDecompose` 的注释）：PRD 提示那一刻这次的任务清单还不存在，
+ * 传进来的 diff 只能回答"需求改没改"。所以这两个字段是否印出来，取决于调用方给的是
+ * 哪一种 diff —— 本函数不做判断，如实印。
  */
 export function formatPlanHistoryBlock(
   previous: PlanSnapshot | undefined,
@@ -191,5 +196,37 @@ export function formatPlanHistoryBlock(
   return (
     `${kept}\n` +
     `（已截断：上次规划块原文共 ${full.length} 字符，上限 ${MAX_PLAN_HISTORY_CHARS}。）`
+  );
+}
+
+/**
+ * 分解提示里的"上次拆法"块（2026-10-25，补齐任务级差异）。
+ *
+ * **为什么还要单独一个块**：PRD 提示那一刻"这次拆成哪几个任务"根本不存在，所以
+ * `formatPlanHistoryBlock` 的 diff 里 added/removed 只能是空的 —— 任务级差异此前
+ * 只落在日志里，模型看不见。而真正会"把上次的拆法悄悄推翻"的时刻，正是**分解**这一步。
+ * 于是把它挪到这里：分解提示已经知道上次的完整任务清单，可以给出可执行的指令
+ * （"保持 / 显式说明为什么变"），而不是只让人看一段历史。
+ *
+ * 与 `formatPlanHistoryBlock` 的分工：那个给**规划**（我上次想到哪一步），这个给
+ * **分解**（我上次是怎么切的）。两处共用一个上限常量。
+ */
+export function formatPlanHistoryForDecompose(previous: PlanSnapshot | undefined): string {
+  if (!previous) return "";
+  const titles = previous.taskTitles.filter((t) => t.trim() !== "");
+  const lines: string[] = [
+    PLAN_HISTORY_MARKER,
+    "以下是这个项目**上一次分解**的任务清单（落盘事实，不是建议）：",
+    `- 上次 ${previous.taskCount} 个任务：${titles.join("、") || "（无）"}`,
+    "如果这次的 PRD 与上次的目标基本一致，请尽量沿用同一套切法（同样的任务与 zone 边界），",
+    "让两次交付之间可比、可 diff；如果你确实要改切法（合并/拆分/换 zone），请在任务描述里",
+    "写清为什么改 —— 否则下一个人看到 diff 会以为是无谓的重排。",
+  ];
+  const full = lines.join("\n");
+  if (full.length <= MAX_PLAN_HISTORY_CHARS) return full;
+  const kept = full.slice(0, MAX_PLAN_HISTORY_CHARS);
+  return (
+    `${kept}\n` +
+    `（已截断：上次分解块原文共 ${full.length} 字符，上限 ${MAX_PLAN_HISTORY_CHARS}。）`
   );
 }

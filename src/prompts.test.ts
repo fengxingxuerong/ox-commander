@@ -46,6 +46,26 @@ describe("buildDecomposePrompt", () => {
     expect(p).toMatch(/loopback http\(s\) URL/);
     expect(p).toMatch(/mutually exclusive/);
   });
+
+  it("不传上次拆法：提示与历史逐字同形（不产空段）", () => {
+    const p = buildDecomposePrompt(PRD);
+    expect(p).not.toContain("【上次规划");
+    // 注意不能断言"不含 undefined" —— 这条提示的规则里本来就有英文词 undefined
+    // （"Semantics the PRD leaves undefined must be EXPLICITLY pinned"）。
+    // 要钉的是**不要拼进字面量占位**：那长得像 `[undefined]` 或块尾多一段 undefined。
+    expect(p).not.toContain("[undefined]");
+    expect(p.trimEnd().endsWith("undefined")).toBe(false);
+  });
+
+  it("传了上次拆法：块进提示，且排在 JSON schema **之前**（背景先于指令）", () => {
+    const p = buildDecomposePrompt(PRD, "PREV-MARK：上次拆了 t1、t2");
+    expect(p).toContain("PREV-MARK");
+    expect(p.indexOf("PREV-MARK")).toBeLessThan(p.indexOf('"tasks"'));
+  });
+
+  it("空字符串的上次拆法不产段（缺席与空串行为一致）", () => {
+    expect(buildDecomposePrompt(PRD, "")).toBe(buildDecomposePrompt(PRD));
+  });
 });
 
 describe("平台契约模板（STANDARD_CONTRACT_RULES）", () => {

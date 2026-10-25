@@ -30,6 +30,7 @@ import type { EscalationAction, PrdDocument, SmokeCheck, Task } from "../../shar
 import { parsePrd } from "../../shared/schema";
 import {
   formatPlanHistoryBlock,
+  formatPlanHistoryForDecompose,
   planDiffOf,
   planHistoryOf,
   planSnapshotOf,
@@ -323,7 +324,15 @@ export function registerOrchestrationHandlers(): void {
     send({ type: "stage", stage: "PLANNING" });
     // 与 headless 入口保持一致：把验证命令交给 zone 覆盖校验。它引用的文件若
     // 不被任何任务 zone 覆盖，重修会把整个预算烧在一个不可能完成的任务上。
-    const { batches, smoke } = await engine.decompose(prd, settingsStore().load().verificationCommands);
+    //
+    // 上次拆法（2026-10-25）：任务级差异只可能在**分解**这一步被用上 —— PRD 提示那一刻
+    // 这次的任务清单还不存在，所以"上次拆出哪几个任务"只能在这里给。同一个 `previous`
+    // 既喂规划（上次想到哪一步）、也喂分解（上次是怎么切的）。
+    const { batches, smoke } = await engine.decompose(
+      prd,
+      settingsStore().load().verificationCommands,
+      formatPlanHistoryForDecompose(history.previous),
+    );
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
     // 收官即落快照：这次拆成什么样，是下一次规划的"上次"。落盘失败绝不能让规划失败
     // （历史是背景，不是交付条件）。
@@ -340,7 +349,14 @@ export function registerOrchestrationHandlers(): void {
     const checked = parsePrd(prd);
     stores().update(projectId, { prdJson: JSON.stringify(checked), batchesJson: undefined, smokeJson: undefined });
     const engine = buildEngine(projectId);
-    const { batches, smoke } = await engine.decompose(checked, settingsStore().load().verificationCommands);
+    // 人工编辑 PRD 后的那次分解同样是"重新切一遍"：把上次拆法给它，人改完 PRD
+    // 往往只是想调 PRD 而不是把整套任务重排一遍。
+    const history = planHistoryBlockFor(projectId, rec.requirement);
+    const { batches, smoke } = await engine.decompose(
+      checked,
+      settingsStore().load().verificationCommands,
+      formatPlanHistoryForDecompose(history.previous),
+    );
     stores().update(projectId, { batchesJson: JSON.stringify(batches), smokeJson: JSON.stringify(smoke) });
     // 人工改 PRD 也是一次"规划"，同样落快照：否则改完再重规划时，历史会跳过这一版，
     // 看起来像"我们从来没定过这个拆法"。

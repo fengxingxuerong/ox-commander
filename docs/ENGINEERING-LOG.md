@@ -17,6 +17,36 @@
 
 ---
 
+## [Unreleased · 规划历史的任务级差异进分解提示 · 2026-10-25]
+
+**上一轮我留了一个自己标出来的边角**：「上次规划」块里的 added/removed 只写进日志，
+模型看不见。原因不是漏写，是**位置放错**：PRD 提示那一刻"这次拆成哪几个任务"根本不存在，
+拿不到对照就印不出差异。而真正会"把上次的拆法悄悄推翻"的时刻是**分解**。
+
+**处置（而不是让提示去猜）**：把"上次切成哪几个任务"挪到分解提示 —— 那里它已经是完整事实，
+且能给出**可执行指令**（沿用同一套切法 / 若改则写清为什么），而不是一段只供阅读的历史。
+于是两个块分工明确：`formatPlanHistoryBlock` 给**规划**（我上次想到哪一步），
+`formatPlanHistoryForDecompose` 给**分解**（我上次是怎么切的）。两者共用同一个上限常量，
+超限同样截断并说破。
+
+**一处刻意的"不做"**：headless 的 `run-spec.ts` 不接这个能力，并在注释里写明理由 ——
+headless 的一次 run 是无状态的（没有审计句柄、也不写审计），把"上次规划"注进来就是凭空造
+一个它并不持有的真源。宁可少一格，也不造假。
+
+**测试里踩到的两个坑**：
+1. 「提示里不含 undefined」这条断言**不成立**：这条提示的规则里本来就有英文词 undefined
+   （"Semantics the PRD leaves undefined must be EXPLICITLY pinned"）。改成断言"不含
+   `[undefined]` 占位、不以 undefined 结尾" —— 判据要钉的是**占位形态**，不是那个词。
+2. 新用例调不到 `engineWith`：它定义在另一个 describe 的作用域里。而那个 describe 的
+   `silentEngine` 会丢掉日志，于是就地造了一个收集 `onLog` 的引擎。顺带发现用带产物路径的
+   PRD 会让 `decompose` 直接在校验处抛错 —— 用例改用不点名路径的干净 PRD。
+
+**门禁账**：`shared/plan-history.ts` **12/12**（+2 位点）、`shared/prompts.ts` **10/10**、
+`electron/ipc/orchestration.ts` 33/33、`electron/engine/orchestrator.ts`、
+`headless/run-spec.ts` —— 改动涉及的 5 个目标全部逐位点 100%。
+SITE_BASELINE 3151 → **3158**；用例 3072 → **3081**（+9）、文件仍 **105**。
+README 与 gates.md 同批校回，`check:doc-claims` 全绿。
+
 ## [Unreleased · 规划历史（排期第 4 项形态 B）· 2026-10-25]
 
 **为什么 A 之后还要 B**：备忘（形态 A）是**人写的**，它回答"我们决定了什么"，但人不一定

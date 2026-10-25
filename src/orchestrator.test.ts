@@ -1603,6 +1603,55 @@ describe("OrchestratorEngine · 分解校验失败带反馈重试", () => {
     expect(smoke).toEqual([]);
   });
 
+  it("decompose 传了上次拆法：进提示并说破长度；不传则两者都没有（形态 B 的任务级差异）", async () => {
+    // 任务级差异只可能在**分解**这一步被用上（PRD 提示那一刻这次的任务清单还不存在），
+    // 所以这条判据挂在这里：`previousPlanBlock !== ""` 判反会让"没有历史"时也记日志。
+    let prompt = "";
+    const llm: LlmClient = {
+      async chat(req) {
+        prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+        const plan = {
+          tasks: [
+            { id: "t1", title: "x", description: "x", zone: "src", dependencies: [], suggestedRole: "backend-dev" },
+          ],
+          smoke: [],
+        };
+        return { content: JSON.stringify(plan), provider: "fake", model: "fake" };
+      },
+    };
+    // 这个 describe 里的 `silentEngine` 会丢掉日志，而这条用例要断言日志 ——
+    // 所以就地造一个收集 onLog 的引擎（deps 形状与 silentEngine 相同）。
+    const engineFor = (events: string[]): OrchestratorEngine =>
+      new OrchestratorEngine(
+        {
+          llm,
+          scheduler: fakeScheduler(false),
+          verify: async () => makeReport(true),
+          settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+        },
+        {
+          onStage: () => {},
+          onLog: (l) => events.push(l),
+          onTaskStatus: () => {},
+          onVerification: () => {},
+          onEscalation: () => {},
+        },
+      );
+
+    const withoutEvents: string[] = [];
+    // 干净 PRD：不点名任何产物路径，于是 zone 覆盖校验没有缺口可报
+    // （上一版用了带路径的 PRD，decompose 直接在校验处抛错，测不到提示）。
+    const cleanPrd: PrdDocument = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
+    await engineFor(withoutEvents).decompose(cleanPrd);
+    expect(prompt).not.toContain("【上次规划");
+    expect(withoutEvents.some((e) => e.includes("[plan-history]"))).toBe(false);
+
+    const withEvents: string[] = [];
+    await engineFor(withEvents).decompose(cleanPrd, undefined, "PREV-DECOMPOSE：上次拆了 t1、t2");
+    expect(prompt).toContain("PREV-DECOMPOSE");
+    expect(withEvents.some((e) => e.includes("[plan-history]") && e.includes("上次分解清单"))).toBe(true);
+  });
+
   it("重试预算耗尽仍失败 → 抛出校验错误", async () => {
     let calls = 0;
     const llm: LlmClient = {

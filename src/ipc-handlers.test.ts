@@ -1038,6 +1038,14 @@ describe("orchestration handlers", () => {
     expect(history).toContain("拆分逻辑");
     // 需求没改：块里要印「未变」（这个项目两次的需求都是同一句）。
     expect(history).toContain("未变");
+    // 任务级差异（2026-10-25）：任务清单要等拆完才有，所以它只能喂给**分解**那一步 ——
+    // 这是"上次切成哪几个任务"真正能被模型看见的唯一位置。
+    const planInput = (h.decompose as Mock).mock.calls.at(-1)!;
+    const previousBlock = planInput[2] as string;
+    expect(previousBlock).toContain("【上次规划");
+    expect(previousBlock).toContain("上次 1 个任务");
+    expect(previousBlock).toContain("拆分逻辑");
+    expect(previousBlock).toContain("沿用同一套切法");
   });
 
   it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {
@@ -1130,7 +1138,7 @@ describe("orchestration handlers", () => {
       prdJson: JSON.stringify(prd),
       stage: "PLANNING",
     });
-    expect(h.decompose).toHaveBeenCalledWith(prd, ["node ox-scripts/test.js"]);
+    expect(h.decompose).toHaveBeenCalledWith(prd, ["node ox-scripts/test.js"], "");
     expect(store.update).toHaveBeenNthCalledWith(2, "p1", {
       batchesJson: JSON.stringify(batches),
       smokeJson: JSON.stringify(smoke),

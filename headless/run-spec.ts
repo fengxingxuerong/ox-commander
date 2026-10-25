@@ -431,6 +431,11 @@ export async function runSpec(spec: ParsedSpec, io: RunSpecIo): Promise<number> 
     } else {
       // 需求文本用解析后的（issue 形态下 spec.requirement 是空串占位）。
       // 项目约定（B3）与桌面端同一口径：项目根的 OX.md / AGENTS.md 进规划提示。
+      //
+      // 规划历史（形态 B，2026-10-25）**刻意不接在这一层**：它读的是审计 JSONL 里
+      // 本项目的历史快照，而 headless 的一次 run 是**无状态**的（没有审计句柄、也不写
+      // 审计），把"上次规划"注进来就等于凭空造一个 headless 并不持有的真源。
+      // 桌面端与 serve 各有自己的历史，这一格留给它们。
       const prd = spec.prd ?? (await engine.generatePrd(requirement, spec.projectRoot));
       io.emit({ type: "prd", prd });
       // 把宿主的验证命令一并交给 zone 覆盖校验：它引用的文件若不被任何任务

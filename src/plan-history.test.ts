@@ -6,6 +6,7 @@ import {
   PLAN_SNAPSHOT_MAX_TITLES,
   PLAN_SNAPSHOT_REQUIREMENT_CHARS,
   formatPlanHistoryBlock,
+  formatPlanHistoryForDecompose,
   planDiffOf,
   planHistoryOf,
   planSnapshotOf,
@@ -162,8 +163,7 @@ describe("planDiffOf · 上次 vs 这次", () => {
   });
 });
 
-describe("formatPlanHistoryBlock · 注入块", () => {
-  it("没有上次 ⇒ 空串（不产空标题）", () => {
+describe("formatPlanHistoryBlock · 注入块", () => {  it("没有上次 ⇒ 空串（不产空标题）", () => {
     expect(formatPlanHistoryBlock(undefined, undefined)).toBe("");
   });
 
@@ -234,6 +234,56 @@ describe("formatPlanHistoryBlock · 注入块", () => {
     expect(block.length).toBeLessThanOrEqual(MAX_PLAN_HISTORY_CHARS + 200);
     expect(block).toContain("已截断");
     expect(block).toMatch(/上次规划块原文共 \d+ 字符/);
+    expect(block).toContain(`上限 ${MAX_PLAN_HISTORY_CHARS}`);
+  });
+});
+
+/**
+ * 分解提示里的"上次拆法"块（2026-10-25）。
+ *
+ * 这是任务级差异真正能被模型看见的那一处 —— PRD 提示那一刻这次的任务清单还不存在，
+ * 所以"上次切成了什么"只能在这里给，且必须给成**可执行指令**（保持 / 显式说明为什么变），
+ * 而不是一段只供阅读的历史。
+ */
+describe("formatPlanHistoryForDecompose · 分解提示里的上次拆法", () => {
+  it("没有上次 ⇒ 空串（不产空标题）", () => {
+    expect(formatPlanHistoryForDecompose(undefined)).toBe("");
+  });
+
+  it("有上次：带标记、上次任务清单，并给出可执行指令（保持 or 写清为什么改）", () => {
+    const block = formatPlanHistoryForDecompose(snap({ taskTitles: ["配置模块", "统计模块"], taskCount: 2 }));
+    expect(block.startsWith(PLAN_HISTORY_MARKER)).toBe(true);
+    expect(block).toContain("配置模块、统计模块");
+    // 指令必须两条都在：沿用同一套切法、或写清改的理由 —— 缺任意一条，
+    // 「比 diff」这件事就变成无谓重排。
+    expect(block).toContain("沿用同一套切法");
+    expect(block).toContain("写清为什么改");
+    // 它仍然声明自己是事实而非建议（与 PRD 侧那个块同一口径）。
+    expect(block).toContain("落盘事实");
+  });
+
+  it("空标题被滤掉且不印出多余的分隔符", () => {
+    const block = formatPlanHistoryForDecompose(snap({ taskTitles: ["A", "", "B"], taskCount: 3 }));
+    expect(block).toContain("A、B");
+    expect(block).not.toContain("、、");
+    // taskCount 仍说 3（清单被过滤是展示层的事，事实不因展示而改）。
+    expect(block).toContain("上次 3 个任务");
+  });
+
+  it("全部标题为空 ⇒ 印「（无）」而不是一行空白", () => {
+    const block = formatPlanHistoryForDecompose(snap({ taskTitles: ["", " "], taskCount: 2 }));
+    expect(block).toContain("（无）");
+  });
+
+  it("超上限：截断并说破原文长度（与 PRD 侧那个块同一套纪律）", () => {
+    const block = formatPlanHistoryForDecompose(
+      snap({
+        taskTitles: Array.from({ length: PLAN_SNAPSHOT_MAX_TITLES }, (_, i) => `很长的任务标题${i}`.repeat(30)),
+        taskCount: 12,
+      }),
+    );
+    expect(block).toContain("已截断");
+    expect(block).toMatch(/上次分解块原文共 \d+ 字符/);
     expect(block).toContain(`上限 ${MAX_PLAN_HISTORY_CHARS}`);
   });
 });

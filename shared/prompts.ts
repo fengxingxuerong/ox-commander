@@ -129,10 +129,14 @@ export const STANDARD_CONTRACT_RULES = `【平台契约条款 · 必读】
 3. 测试断言必须从契约与真实样例数据推导，不得照抄实现行为（防止自测与实现同盲）。
 4. 只在你的 zone 目录内创建/修改文件；禁止触碰 node_modules/.git/.env/package.json/lockfile 与 ox-scripts。`;
 
-export function buildDecomposePrompt(prd: PrdDocument): string {
+export function buildDecomposePrompt(prd: PrdDocument, previousPlanBlock?: string): string {
+  // 上次拆法（2026-10-25）：**排在规则之前**，与 PRD 提示里的背景块同一位置语义
+  // （背景先于指令）。空块不产段 —— 没有历史的项目占多数。
+  const history = previousPlanBlock ?? "";
+  const historySection = history.trim() === "" ? "" : `${history}\n\n`;
   return `You are the planning brain of OxCommander. Decompose the PRD into parallelizable development tasks for coding agents.
 
-Respond with ONLY a JSON object (no markdown fences) matching:
+${historySection}Respond with ONLY a JSON object (no markdown fences) matching:
 {
   "tasks": [
     {
