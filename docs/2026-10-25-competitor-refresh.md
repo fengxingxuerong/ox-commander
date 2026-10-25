@@ -82,7 +82,9 @@ worker 更新进 orchestrator chat 行、clone 失败恢复、孤儿 daemon 身�
    预览改为应用内窗口，partition 由项目 id 派生（`persist:ox-preview-<id>`），
    权限面三条（不给 preload 桥 / 开沙箱 / 只放行本机回环导航）；关窗不丢登录态，
    清除是显式动作。判据与门禁账见 CHANGELOG 与工程日志同名条目。
-4. 规划会话持久化（动引擎，单独立项）
+4. 规划会话持久化（动引擎，单独立项）—— **立项调研已于 2026-10-25 完成**：
+   见 [2026-10-25-planning-session-persistence.md](2026-10-25-planning-session-persistence.md)
+   （结论：先做"项目级规划备忘"这一最小形态，规划历史次之，常驻规划会话明确不做）
 
 另：测试基建一项（2026-10-25 全量审计的产出）—— CI 的 tier 1 变异分片单片实测
 40–66 分钟贴到回收窗口，病灶是三个重目标（ipc/chat.ts 1055s · serve-main.ts 448s ·
