@@ -1108,6 +1108,32 @@ describe("OrchestratorEngine · 项目约定注入（B3）", () => {
     }
   });
 
+  it("可核事实块：传了进提示并说破长度，不传则提示与日志都没有（形态 B 的账）", async () => {
+    let prompt = "";
+    const llm: LlmClient = {
+      async chat(req) {
+        prompt = req.messages.filter((m) => m.role === "user").map((m) => String(m.content)).join("\n");
+        return { content: PRD_JSON, provider: "t", model: "m" };
+      },
+    };
+
+    const withoutEvents: string[] = [];
+    await engineWith(llm, withoutEvents).generatePrd("demo");
+    expect(prompt).not.toContain("【规划参考");
+    expect(withoutEvents.some((e) => e.includes("[plan-facts]"))).toBe(false);
+
+    const withEvents: string[] = [];
+    await engineWith(llm, withEvents).generatePrd(
+      "demo",
+      undefined,
+      "",
+      "FACTS-MARK：上一轮 test-red × 2",
+    );
+    expect(prompt).toContain("FACTS-MARK");
+    expect(prompt.indexOf("FACTS-MARK")).toBeLessThan(prompt.indexOf("User requirement:"));
+    expect(withEvents.some((e) => e.includes("[plan-facts]") && e.includes("可核事实"))).toBe(true);
+  });
+
   it("没有备忘文件：不产块、不写日志（缺席是常态，不是故障）", async () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-memo-none-"));
     try {
@@ -1168,8 +1194,7 @@ describe("OrchestratorEngine · 项目约定注入（B3）", () => {
     expect(withEvents.some((e) => e.includes("[plan-history]") && e.includes("已注入上次规划"))).toBe(true);
   });
 
-  it("规划历史与约定 / 备忘同时给：三者都在，顺序是 约定 → 备忘 → 上次规划", async () => {
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-hist-order-"));
+  it("规划历史与约定 / 备忘同时给：三者都在，顺序是 约定 → 备忘 → 上次规划", async () => {    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-hist-order-"));
     try {
       fs.writeFileSync(path.join(root, "OX.md"), "CONV-ORDER", "utf8");
       fs.writeFileSync(path.join(root, "OX-PLAN.md"), "MEMO-ORDER", "utf8");

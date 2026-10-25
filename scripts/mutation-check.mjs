@@ -284,6 +284,14 @@ const TARGETS = [
     tier: 1,
   },
   { file: "shared/plan-memo.ts", tests: ["src/plan-memo.test.ts", "src/prompts.test.ts"], tier: 1 },
+  // 2026-10-25：可核事实汇总（规划备忘的"自动汇总"半）。入表理由：这一层错了都不抛错 ——
+  // 计数错就给规划一份假账；**键序不稳定**会让同一份审计在不同进程里给出不同文字，
+  // 而"可复现"正是这个特性敢进提示的前提；缺 errorClass 的失败若被丢掉，账会静默变少。
+  {
+    file: "shared/plan-facts.ts",
+    tests: ["src/plan-facts.test.ts", "src/prompts.test.ts", "src/ipc-handlers.test.ts"],
+    tier: 1,
+  },
   { file: "electron/engine/conventions.ts", tests: ["src/project-conventions.test.ts", "src/chat-runtime.test.ts"], tier: 1 },
   // 2026-10-17（C6）：PATH 解析纯函数。位点少但每一处都是"能不能扫到"的分岔 ——
   // 分隔符猜错平台就表现为"明明装了却说没装"，而这在本机测不出来。
@@ -968,7 +976,7 @@ const SITE_BASELINE = {
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 40,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 90,
+  "electron/engine/orchestrator.ts": 91,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,
@@ -980,7 +988,7 @@ const SITE_BASELINE = {
   "electron/ipc/context.ts": 32,
   "electron/ipc/delivery.ts": 15,
   "electron/ipc/github.ts": 22,
-  "electron/ipc/orchestration.ts": 32,
+  "electron/ipc/orchestration.ts": 34,
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
   "electron/keys-store.ts": 21,
@@ -1033,6 +1041,7 @@ const SITE_BASELINE = {
   "shared/llm-client.ts": 15,
   "shared/mcp.ts": 101,
   "shared/page-smoke.ts": 17,
+  "shared/plan-facts.ts": 12,
   "shared/plan-history.ts": 12,
   "shared/plan-memo.ts": 9,
   "shared/policy-file.ts": 33,

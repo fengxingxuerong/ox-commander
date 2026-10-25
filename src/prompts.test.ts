@@ -67,7 +67,6 @@ describe("buildDecomposePrompt", () => {
     expect(buildDecomposePrompt(PRD, "")).toBe(buildDecomposePrompt(PRD));
   });
 });
-
 describe("平台契约模板（STANDARD_CONTRACT_RULES）", () => {
   it("覆盖历史漂移的全部语义维度（表头/空值/精度/错误/输出格式）", () => {
     const rules = STANDARD_CONTRACT_RULES;
@@ -258,6 +257,40 @@ describe("buildPrdPrompt · 外部上下文", () => {
     // 用户需求仍在，且排在上下文之后（背景在前、需求在后）
     expect(p).toContain("req");
     expect(p.indexOf("External context")).toBeLessThan(p.indexOf("req", p.indexOf("External context")));
+  });
+});
+
+/**
+ * 可核事实块（2026-10-25）。它排在背景块的**最后**（外部上下文之前）：
+ * 那是"账"而不是"决定"，预算紧张时最先该让步的就是账。
+ */
+describe("buildPrdPrompt · 可核事实块", () => {
+  it("不传 ⇒ 不产段（缺席零副作用）", () => {
+    const p = buildPrdPrompt("req");
+    expect(p).not.toContain("【规划参考");
+  });
+
+  it("空串 ⇒ 与不传逐字一致", () => {
+    expect(buildPrdPrompt("req", undefined, undefined, undefined, undefined, "")).toBe(
+      buildPrdPrompt("req"),
+    );
+  });
+
+  it("传了 ⇒ 块进提示，且排在需求之前、条目顺序在约定/备忘/上次规划之后", () => {
+    const p = buildPrdPrompt(
+      "REQ-MARK",
+      undefined,
+      "CONV-MARK",
+      "MEMO-MARK",
+      "HIST-MARK",
+      "FACTS-MARK：上一轮 test-red × 2",
+    );
+    expect(p).toContain("FACTS-MARK");
+    expect(p.indexOf("FACTS-MARK")).toBeLessThan(p.indexOf("REQ-MARK"));
+    // 顺序：规矩 → 这一版的取舍 → 上次拆法 → 账
+    expect(p.indexOf("CONV-MARK")).toBeLessThan(p.indexOf("MEMO-MARK"));
+    expect(p.indexOf("MEMO-MARK")).toBeLessThan(p.indexOf("HIST-MARK"));
+    expect(p.indexOf("HIST-MARK")).toBeLessThan(p.indexOf("FACTS-MARK"));
   });
 });
 

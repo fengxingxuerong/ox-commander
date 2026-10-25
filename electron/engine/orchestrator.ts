@@ -402,6 +402,7 @@ export class OrchestratorEngine {
     userRequirement: string,
     projectRoot?: string,
     historyBlock?: string,
+    factsBlock?: string,
   ): Promise<PrdDocument> {
     this.cb.onStage("PRD");
     const context = await this.collectExternalContext();
@@ -418,6 +419,12 @@ export class OrchestratorEngine {
     if (history !== "") {
       this.cb.onLog(`[plan-history] 已注入上次规划（${history.length} 字符）`);
     }
+    // 可核事实（2026-10-25）：由宿主从审计里聚合好传进来 —— 引擎没有审计句柄，
+    // 也就不可能自己长出一条读盘通路（与历史块同一个理由）。
+    const facts = factsBlock ?? "";
+    if (facts !== "") {
+      this.cb.onLog(`[plan-facts] 已注入上一轮的可核事实（${facts.length} 字符）`);
+    }
     const prd = await this.brainCall(
       "PRD 生成",
       () =>
@@ -427,7 +434,7 @@ export class OrchestratorEngine {
             messages: [
               {
                 role: "user",
-                content: buildPrdPrompt(userRequirement, context, conventions, memo, history),
+                content: buildPrdPrompt(userRequirement, context, conventions, memo, history, facts),
               },
             ],
             signal: this.abort.signal,

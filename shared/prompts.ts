@@ -64,6 +64,7 @@ export function buildPrdPrompt(
   conventionsBlock?: string,
   planMemoBlock?: string,
   planHistoryBlock?: string,
+  planFactsBlock?: string,
 ): string {
   const ctx = externalContext ? externalContextBlock(externalContext) : "";
   // 项目约定（B3）放在需求之前：先给项目背景，再读本次需求。空块不产段 ——
@@ -82,11 +83,15 @@ export function buildPrdPrompt(
   // 取舍 → 上次的落盘事实"。它是**最后被削的**背景之一，因为"上次拆过什么"只在
   // 需要避免重复推翻时才用得上，而预算紧张时该先保前两块。
   const history = planHistoryBlock ?? "";
+  // 可核事实（2026-10-25）：排在**最后** —— 它是"账"而不是"决定"，预算紧张时
+  // 最先该让步的就是账（决定丢了会把拆法推翻，账丢了只是少一份参考）。
+  const facts = planFactsBlock ?? "";
   const background = composeBackground(
     [
       { label: "项目约定", text: conventions.trim() },
       { label: "规划备忘", text: memo.trim() },
       { label: "上次规划", text: history },
+      { label: "可核事实", text: facts },
       { label: "外部上下文", text: ctx },
     ],
     MAX_BACKGROUND_CHARS,

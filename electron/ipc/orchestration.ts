@@ -40,6 +40,7 @@ import {
   requirementFingerprint,
   type PlanSnapshot,
 } from "../../shared/plan-history";
+import { collectPlanFacts, formatPlanFactsBlock } from "../../shared/plan-facts";
 import { deriveBoardView } from "../board-derive";
 import { stopPreview } from "../preview-manager";
 
@@ -222,6 +223,32 @@ function planHistoryBlockFor(
 }
 
 /**
+ * 聚合本项目的可核事实并渲染成块（2026-10-25）。
+ *
+ * 三条纪律（与 `shared/plan-facts.ts` 顶部的声明一一对应）：
+ * - **只读**：不修改审计、不写回 `OX-PLAN.md`、不参与任何决策；
+ * - **只本项目**：跨项目汇总会把 A 的坑算到 B 头上；
+ * - **可复现**：聚合层不印时间戳、键序固定 —— 同一份审计，任何时刻跑都同一段文字。
+ *
+ * 读失败 → 空块（事实是参考，不是交付条件），但**不静默**：写一行日志。
+ */
+function planFactsBlockFor(projectId: string, lastPlan?: PlanSnapshot): string {
+  try {
+    const records = ensureAudit()
+      .read({ limit: 5000 })
+      .filter((r) => r.projectId === projectId);
+    const block = formatPlanFactsBlock(collectPlanFacts(records, lastPlan));
+    if (block !== "") {
+      logLine(`[plan-facts] 已注入上一轮的可核事实（${block.length} 字符）`);
+    }
+    return block;
+  } catch (err) {
+    logLine(`[plan-facts] 读取审计事实失败（不影响规划）：${(err as Error).message}`);
+    return "";
+  }
+}
+
+/**
  * 落一条规划快照（形态 B）。
  *
  * 刻意 best-effort：历史是背景，不是交付条件 —— 磁盘满 / 权限不对都不该让一次
@@ -390,9 +417,17 @@ export function registerOrchestrationHandlers(): void {
     // 规划历史（形态 B，2026-10-25）：先读上次的落盘快照，把它作为背景注入这次规划。
     // 读的是**审计事实**而不是模型自述 —— 这是与"让模型记住上次"最根本的区别。
     const history = planHistoryBlockFor(projectId, rec.requirement);
+    // 可核事实（2026-10-25）：上一轮的账（失败按原因、zone 冲突、仲裁处置）。
+    // 与历史块同一个数据源、同一个过滤口径 —— 只读本项目、只读落盘事实。
+    const facts = planFactsBlockFor(projectId, history.previous);
     // 项目约定（B3）：规划阶段也注入 —— 约定影响"技术栈/边界怎么定"，
     // 只在执行阶段带进去的话，PRD 早就把约定违背了。
-    const prd = await engine.generatePrd(rec.requirement, workspaceRoot(projectId), history.block);
+    const prd = await engine.generatePrd(
+      rec.requirement,
+      workspaceRoot(projectId),
+      history.block,
+      facts,
+    );
     stores().update(projectId, { prdJson: JSON.stringify(prd), stage: "PLANNING" });
     send({ type: "stage", stage: "PLANNING" });
     // 与 headless 入口保持一致：把验证命令交给 zone 覆盖校验。它引用的文件若

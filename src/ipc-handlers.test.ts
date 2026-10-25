@@ -1011,7 +1011,7 @@ describe("orchestration handlers", () => {
 
     // 第一次：还没有历史 ⇒ 第三个参数是空串（提示里不产段）。
     await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
-    expect(h.generatePrd).toHaveBeenLastCalledWith("做一个 CSV 工具", expect.anything(), "");
+    expect(h.generatePrd).toHaveBeenLastCalledWith("做一个 CSV 工具", expect.anything(), "", "");
     // 审计实例与 handler 用的是同一个（`ensureAudit()` 的单例），按实例数组取会拿到
     // 一条旧用例留下的那个。
     const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
@@ -1051,8 +1051,80 @@ describe("orchestration handlers", () => {
     expect(previousBlock).toContain("沿用同一套切法");
   });
 
-  it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {
-    // 这条钉的是 `filter((r) => r.projectId === projectId)`：判反（`!==`）会把
+  /**
+   * 可核事实汇总（2026-10-25）。三条纪律在宿主侧的落点：
+   * 只本项目、只读、可复现。
+   */
+  it("plans: 上一轮的失败按原因进「可核事实」块（只本项目）", async () => {
+    const store = inst(h.projectInstances);
+    const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
+    (store.get as Mock).mockReturnValue({ id: "p-facts", requirement: "需求甲", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue(prd);
+    h.decompose.mockResolvedValue({ batches: [[task({ id: "t1" })]], smoke: [] });
+
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    audit.read.mockReturnValue([
+      { phase: "run-start", projectId: "p-facts" },
+      { phase: "run-end", projectId: "p-facts", ok: false, errorClass: "test-red" },
+      { phase: "run-end", projectId: "p-facts", ok: false, errorClass: "test-red" },
+      // 别的项目的失败**不许**算进来（跨项目汇总是把 A 的坑算到 B 头上）。
+      { phase: "run-end", projectId: "p-other", ok: false, errorClass: "p-other-only" },
+    ]);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p-facts");
+
+    const factsBlock = (h.generatePrd as Mock).mock.calls.at(-1)![3] as string;
+    expect(factsBlock).toContain("【规划参考");
+    expect(factsBlock).toContain("test-red × 2");
+    expect(factsBlock).not.toContain("p-other-only");
+    // 只陈述账、不给建议（信任面：平台不把自己的推断伪装成事实）。
+    expect(factsBlock).toContain("它们是**账**，不是决定");
+  });
+
+  it("plans: 上一轮全绿 ⇒ 不产事实块（没账可说就不占预算）", async () => {
+    const store = inst(h.projectInstances);
+    (store.get as Mock).mockReturnValue({ id: "p-allgreen", requirement: "需求甲", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue({ goal: "g", features: [], techStack: [], acceptanceCriteria: [] });
+    h.decompose.mockResolvedValue({ batches: [[task({ id: "t1" })]], smoke: [] });
+
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    audit.read.mockReturnValue([
+      { phase: "run-start", projectId: "p-allgreen" },
+      { phase: "run-end", projectId: "p-allgreen", ok: true },
+    ]);
+
+    await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p-allgreen");
+
+    expect((h.generatePrd as Mock).mock.calls.at(-1)![3]).toBe("");
+    // 空块时**也不能写那句"已注入"**：写了就是"注释说注入了、实际一个字没进"，
+    // 而那正是这层最坏的失败形态。`block !== ""` 判反时这句日志会在没注入时出现。
+    const sent = win.webContents.send as unknown as Mock;
+    const logs = sent.mock.calls
+      .filter((c) => (c[1] as { type?: string }).type === "log")
+      .map((c) => (c[1] as { text: string }).text);
+    expect(logs.some((l) => l.includes("[plan-facts]") && l.includes("已注入"))).toBe(false);
+  });
+
+  it("plans: 读审计失败时事实块为空且不影响规划（事实是参考，不是交付条件）", async () => {
+    const store = inst(h.projectInstances);
+    const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
+    (store.get as Mock).mockReturnValue({ id: "p-facts-err", requirement: "需求甲", stage: "DRAFT" });
+    h.generatePrd.mockResolvedValue(prd);
+    h.decompose.mockResolvedValue({ batches: [[task({ id: "t1" })]], smoke: [] });
+
+    const audit = ensureAudit() as unknown as { append: Mock; read: Mock };
+    audit.read.mockImplementation(() => {
+      throw new Error("audit disk gone");
+    });
+
+    const res = (await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p-facts-err")) as {
+      prd: unknown;
+    };
+    expect(res.prd).toEqual(prd);
+    expect((h.generatePrd as Mock).mock.calls.at(-1)![3]).toBe("");
+  });
+
+  it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {    // 这条钉的是 `filter((r) => r.projectId === projectId)`：判反（`!==`）会把
     // 别的项目的拆法当成"上次"，于是差异会全部算错 —— 而提示看起来完全正常。
     const store = inst(h.projectInstances);
     const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
@@ -1078,7 +1150,7 @@ describe("orchestration handlers", () => {
     await (h.ipcMain as FakeIpcMain).invoke("orchestration:planning", "p1");
 
     // 本项目的第一次规划 ⇒ 注入的历史必须是空串（不算"上次"）。
-    expect(h.generatePrd).toHaveBeenLastCalledWith("需求 A", expect.anything(), "");
+    expect(h.generatePrd).toHaveBeenLastCalledWith("需求 A", expect.anything(), "", "");
   });
 
   it("plans: 同一项目的历史才会算出差异（新增/不再出现的任务都进日志）", async () => {
@@ -1136,7 +1208,7 @@ describe("orchestration handlers", () => {
     // 而不是钉死 tmp 路径 —— 路径由 app.getPath("userData") 决定，逐版本会变。
     // 形态 B 起第三个参数是"上次规划"块：这个项目还没有历史，所以是空串
     // （历史缺席 = 提示里不产段，不是"没有这个参数"）。
-    expect(h.generatePrd).toHaveBeenCalledWith("r", expect.stringContaining("workspaces"), "");
+    expect(h.generatePrd).toHaveBeenCalledWith("r", expect.stringContaining("workspaces"), "", "");
     expect(store.update).toHaveBeenNthCalledWith(1, "p1", {
       prdJson: JSON.stringify(prd),
       stage: "PLANNING",
