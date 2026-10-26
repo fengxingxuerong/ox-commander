@@ -73,7 +73,7 @@
 
 ## 四、建议吸收（按投入产出排；动手另起一笔）
 
-### 吸收 1 · 归因随笔据走进 commit（小，建议先做）
+### 吸收 1 · 归因随笔据走进 commit（小，建议先做）—— **已于 2026-10-26 落地**
 
 现在导出分支的 commit message 就是 `OxCommander delivery <stamp>`（`electron/platform.ts:619`），
 `git-export.ts` 里 `Ox-` 零命中 —— 一次交付落地之后，commit 不知道自己是哪次 run、哪份凭据、哪些 zone。
@@ -92,6 +92,13 @@ Ox-Zones: src/engine, shared
 **判据**：`git log --format='%(trailers)'` 能原样读出；一条用例钉"导出结果里的指纹与凭据一致"；
 一条钉"没有凭据时不编造 trailer"。**代价小**。**边界**：trailer 是文本，不签名，改得动 —— 它是
 **索引**不是**认证**（paperclip 那种加密身份是另一个量级，记在「以后」）。
+
+> **落地时改掉的一格（2026-10-26，写在这里防止下一个读文档的人去找不存在的字段）**：
+> `Ox-Run` **没做** —— 这个仓到现在没有"一次 run"这个一等公民标识：`scheduler.ts` 里的 `runId`
+> 是**每次派发**自己的 id（`${task.id}-${Date.now()}-…`），拿它当 run id 会指向一个任务而不是一次交付。
+> 实际落地的是 `Ox-Receipt`（凭据指纹）+ `Ox-Zones`；要 `Ox-Run` 得先有 run 级标识，单独立项。
+> 另：审计事件里**没有**再抄一份指纹 —— 日志仍只记分支/commit/文件数，绑定只在 commit 自己身上
+> （抄两处就有两处会漂）。
 
 ### 吸收 2 · 预算 fail-closed 档（小）
 

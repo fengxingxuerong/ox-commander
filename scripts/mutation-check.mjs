@@ -974,7 +974,7 @@ const SITE_BASELINE = {
   "electron/engine/batch-guard.ts": 19,
   "electron/engine/conventions.ts": 2,
   "electron/engine/dev-server.ts": 5,
-  "electron/engine/git-export.ts": 40,
+  "electron/engine/git-export.ts": 44,
   "electron/engine/git-remote.ts": 39,
   "electron/engine/orchestrator.ts": 91,
   "electron/engine/router.ts": 25,

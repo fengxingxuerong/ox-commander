@@ -7,6 +7,7 @@ import {
   BRANCH_RE,
   deliveryStamp,
   exportDeliveryBranch,
+  formatCommitMessage,
   parseStatusZ,
   type GitExportInput,
 } from "../electron/engine/git-export";
@@ -377,5 +378,100 @@ describe("git-export · skippedPaths 的缺席语义（三元互换的 mutant �
     expect(b.ok).toBe(false);
     expect(b.reason).toContain("git add 失败");
     expect(b.skippedPaths).toBeUndefined();
+  });
+});
+
+/**
+ * commit trailer（2026-10-26，第七轮竞品刷新的「归因随改动走」）。
+ *
+ * 守的是**读得回来**：一次交付落地之后，`git log` 得能回答"这个 commit 是哪份凭据
+ * 保下来的、动了哪些 zone"。所以断言既有拼串的形状，也有真 git 的读回结果 ——
+ * 只断言拼串等于把"git 到底认不认它"交给运气。
+ */
+describe("git-export · commit trailer", () => {
+  it("[16] 没有 trailer 时 commit 信息逐字不变（不做 trim、不补空行）", () => {
+    expect(formatCommitMessage("OxCommander delivery", undefined)).toBe("OxCommander delivery");
+    expect(formatCommitMessage("OxCommander delivery", [])).toBe("OxCommander delivery");
+    // 一条也算"没有合法 trailer"：键非法、值缺席、值全空白 —— 三种都该原样返回。
+    expect(formatCommitMessage("msg  ", [{ key: "Ox Receipt", value: "abc" }])).toBe("msg  ");
+    expect(formatCommitMessage("msg", [{ key: "Ox-Receipt", value: undefined }])).toBe("msg");
+    expect(formatCommitMessage("msg", [{ key: "Ox-Receipt", value: "   " }])).toBe("msg");
+  });
+
+  it("[17] trailer 接在空行之后，一条一行；正文尾部的空白被收干净", () => {
+    expect(
+      formatCommitMessage("OxCommander delivery 20261026-120000", [
+        { key: "Ox-Receipt", value: "abc123" },
+        { key: "Ox-Zones", value: "src, shared" },
+      ]),
+    ).toBe("OxCommander delivery 20261026-120000\n\nOx-Receipt: abc123\nOx-Zones: src, shared");
+    // 正文本来就带换行：不能出现三个以上换行（否则 git 会把它读成正文里的空段落）。
+    expect(
+      formatCommitMessage("body\n\n", [{ key: "Ox-Receipt", value: "abc" }]),
+    ).toBe("body\n\nOx-Receipt: abc");
+  });
+
+  it("[18] 键不合法逐条跳过：空格、数字开头、下划线都不算 git trailer 键", () => {
+    const out = formatCommitMessage("m", [
+      { key: "Ox Receipt", value: "a" },
+      { key: "9x", value: "b" },
+      { key: "x_1", value: "c" },
+      { key: "Ox-Run", value: "kept" },
+    ]);
+    expect(out).toBe("m\n\nOx-Run: kept");
+  });
+
+  it("[19] 值里的换行与连续空白压成一个空格（否则 trailer 会被读成续行）", () => {
+    expect(formatCommitMessage("m", [{ key: "Ox-Zones", value: "src,\n  shared\n\ttools" }])).toBe(
+      "m\n\nOx-Zones: src, shared tools",
+    );
+  });
+
+  it("[20] 导出时 trailer 真的进了 git commit —— 真 git 读回来是 trailer，不是正文", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-gitrailer-"));
+    const g = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString();
+    g(["init", "-q"]);
+    g(["-c", "user.name=init", "-c", "user.email=init@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
+    fs.mkdirSync(path.join(root, "src"));
+    fs.writeFileSync(path.join(root, "src", "a.ts"), "export {};\n");
+
+    const fingerprint = "f".repeat(64);
+    const r = await exportDeliveryBranch(
+      base({
+        projectRoot: root,
+        zones: ["src"],
+        branch: "oxcommander/delivery-trailer",
+        message: "OxCommander delivery 20261026-120000",
+        trailers: [
+          { key: "Ox-Receipt", value: fingerprint },
+          { key: "Ox-Zones", value: "src" },
+        ],
+        run: undefined,
+      }),
+    );
+    expect(r.ok).toBe(true);
+
+    // ① 正文照旧，trailer 在空行之后。
+    expect(g(["log", "-1", "--format=%B"])).toContain(
+      "OxCommander delivery 20261026-120000\n\nOx-Receipt: ",
+    );
+    // ② git 自己认它是 trailer（这一条才是"读得回来"的判据 —— 形状对不等于 git 认）。
+    //    `%B` 与这里都自带行尾换行，trim 掉再比：比的是内容与顺序。
+    expect(g(["log", "-1", "--format=%(trailers)"]).trimEnd()).toBe(
+      `Ox-Receipt: ${fingerprint}\nOx-Zones: src`,
+    );
+  });
+
+  it("[21] 没有 trailer 时真 git 里也不多出任何 trailer（不编造）", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-gitrailer-none-"));
+    const g = (args: string[]) => execFileSync("git", args, { cwd: root, stdio: "pipe" }).toString();
+    g(["init", "-q"]);
+    g(["-c", "user.name=init", "-c", "user.email=init@localhost", "commit", "-q", "--allow-empty", "-m", "init"]);
+    fs.writeFileSync(path.join(root, "a.ts"), "export {};\n");
+    const r = await exportDeliveryBranch(
+      base({ projectRoot: root, zones: ["."], branch: "oxcommander/delivery-bare", run: undefined }),
+    );
+    expect(r.ok).toBe(true);
+    expect(g(["log", "-1", "--format=%(trailers)"]).trim()).toBe("");
   });
 });

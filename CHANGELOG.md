@@ -10,6 +10,25 @@
 
 ## [Unreleased]
 
+### 新增（交付 commit 带上凭据指纹与 zone · 第七轮竞品吸收 1 · 2026-10-26）
+
+- **导出的 commit 现在说得出"我是哪份凭据保下来的"**：`OxCommander delivery <stamp>` 之后追加
+  两行 trailer —— `Ox-Receipt: <指纹>` 与 `Ox-Zones: src/engine, shared`，
+  `git log --format='%(trailers)'` 一跳可读（真 git 用例钉的是"git 自己认它是 trailer"，
+  不是"字符串长得像"）。在此之前，一次交付落地后 commit 不知道自己属于哪次交付：分支名会被
+  `checkout -B` 覆盖、也会被人工改名，**只有 commit 活得久**。
+- **指纹是同一份，不是再算一遍**：引擎在 `emitReceipt` 时留一手，导出时把
+  `DeliveryReceipt.fingerprint` 交给宿主；宿主没接凭据（没有 sink）时导出层拿到 `undefined`，
+  trailer 里就没有那一行 —— **不编造**。
+- **`Ox-Run` 没做**：这个仓没有"一次 run"这个一等公民标识（`scheduler.ts` 的 `runId` 是
+  **每次派发**自己的 id，拿它当 run id 会指向一个任务而不是一次交付）。要它得先有 run 级标识，
+  单独立项 —— 记在 [docs/2026-10-26-competitor-refresh.md](docs/2026-10-26-competitor-refresh.md)
+  的落地注里，防止下一个读文档的人去找不存在的字段。
+- **它是什么、不是什么**：是**索引**（commit → 凭据），不是**认证**（文本、不签名、改得动）。
+  凭据本身有没有被改过，仍然只能靠 `receipt:verify` 复算指纹。
+- 规模：TARGETS 119 未变 · SITE_BASELINE 3191 → **3195**（git-export +4 位点）·
+  用例 **3129**（+8）/ 3137 · 106 个有可执行用例的文件。
+
 ### 修复（桌面续跑：全新 run 跑完也要清快照 · 2026-10-25）
 
 - **一个自相矛盾的状态机**：`clearJournal` 原先只在**续跑**那条路径上调用，而 `execute` 在执行中

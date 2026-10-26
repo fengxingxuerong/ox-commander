@@ -84,6 +84,14 @@ export interface OrchestratorDeps {
   exportDelivery?: (input: {
     projectRoot: string;
     zones: string[];
+    /**
+     * 本次交付凭据的指纹（`DeliveryReceipt.fingerprint`），没有凭据时为 `undefined`。
+     *
+     * 给导出层把它写进 commit 的 `Ox-Receipt` trailer —— 于是"这个 commit 是哪份凭据
+     * 保下来的"不用靠时间戳去猜。引擎只负责**传**，拼不拼进 commit 是宿主的事
+     * （与分支名/commit 信息同一条分工）。
+     */
+    receiptFingerprint?: string;
   }) => Promise<import("./git-export").GitExportResult>;
   /**
    * 交付后的可选远端分发（5.7 远端半边，2026-10-12）：把本地导出的分支推到
@@ -296,6 +304,17 @@ export class OrchestratorEngine {
    * （附言的用途已兑现，留着会让下一轮重修重复带旧指示）。
    */
   private readonly operatorNotes = new Map<string, string>();
+  /**
+   * 最近一次交付凭据的指纹（2026-10-26，第七轮竞品刷新「归因随凭据走进 commit」）。
+   *
+   * 为什么在引擎里留一手：凭据是**交给宿主**的（`onReceipt` sink），而导出分支的
+   * commit 信息由宿主拼（引擎只给 root/zones）。没有这一格，宿主拿不到"这一份"凭据
+   * 的指纹，只能写个时间戳 —— 而时间戳不指向任何东西。
+   *
+   * 只活一轮：`emitReceipt` 每次覆盖；没有凭据（宿主没接 sink）时保持 `undefined`，
+   * 导出层据此不写 `Ox-Receipt` trailer（不编造）。
+   */
+  private receiptFingerprint: string | undefined;
 
   constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {
     // 取消探针接进调度器的节流等待（2026-10-13）：节流指数退避封顶 5min 的整段
@@ -759,24 +778,26 @@ export class OrchestratorEngine {
       command: r.command,
       args: r.args,
     }));
-    sink(
-      sealReceipt(
-        buildReceipt({
-          outcome: args.outcome,
-          // 交付但没验过是合法状态（纯文档任务不需要构建），所以这两档独立：
-          // `verified` 说"有没有真验过"，`unverifiedReason` 说"为什么没有"。
-          verified: args.verified,
-          ...(args.unverifiedReason !== undefined ? { unverifiedReason: args.unverifiedReason } : {}),
-          rounds: args.round,
-          checks,
-          tasks,
-          conflicts: this.deps.conflicts?.() ?? [],
-          ...(this.deps.usage ? { usage: this.deps.usage() } : {}),
-        }),
-        // 盖章用的哈希：宿主层的决定。引擎只负责在凭据产出时贴一次指纹。
-        (s) => createHash("sha256").update(s).digest("hex"),
-      ),
+    const sealed = sealReceipt(
+      buildReceipt({
+        outcome: args.outcome,
+        // 交付但没验过是合法状态（纯文档任务不需要构建），所以这两档独立：
+        // `verified` 说"有没有真验过"，`unverifiedReason` 说"为什么没有"。
+        verified: args.verified,
+        ...(args.unverifiedReason !== undefined ? { unverifiedReason: args.unverifiedReason } : {}),
+        rounds: args.round,
+        checks,
+        tasks,
+        conflicts: this.deps.conflicts?.() ?? [],
+        ...(this.deps.usage ? { usage: this.deps.usage() } : {}),
+      }),
+      // 盖章用的哈希：宿主层的决定。引擎只负责在凭据产出时贴一次指纹。
+      (s) => createHash("sha256").update(s).digest("hex"),
     );
+    // 留一份指纹给导出层（`maybeExportDelivery` 紧跟在本方法之后调）：
+    // commit 的 `Ox-Receipt` trailer 要指向**这一份**凭据，而不是"最近一次"。
+    this.receiptFingerprint = sealed.fingerprint;
+    sink(sealed);
   }
 
   /**
@@ -789,8 +810,17 @@ export class OrchestratorEngine {
     if (!this.deps.settings.exportDeliveryBranch || !this.deps.exportDelivery) return;
     const zones = [...new Set(batches.flat().map((t) => t.zone))];
     try {
-      const result = await this.deps.exportDelivery({ projectRoot, zones });
+      const result = await this.deps.exportDelivery({
+        projectRoot,
+        zones,
+        // 直传（可能 undefined）：这一层不做条件展开 —— "没有凭据"与"有凭据但没指纹"
+        // 都由宿主按缺席处理，引擎再造一层三元只会多一个位点。
+        receiptFingerprint: this.receiptFingerprint,
+      });
       if (result.ok && !result.skipped) {
+        // 日志只记分支/commit/文件数：凭据与 commit 的绑定写在 commit 的
+        // `Ox-Receipt` trailer 里（`git log --format=%(trailers)` 一跳可读），
+        // 不在这儿再抄一遍指纹 —— 抄两处就有两处会漂。
         this.cb.onLog(
           `[git-export] 已导出分支 ${result.branch}（commit ${result.commit ?? "无"}，${result.filesCommitted ?? 0} 个文件）`,
         );

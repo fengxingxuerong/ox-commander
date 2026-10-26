@@ -17,6 +17,59 @@
 
 ---
 
+## [Unreleased · 交付 commit 带凭据 trailer（第七轮竞品吸收 1）· 2026-10-26]
+
+**起因是本周的一格竞品事实**：git-ai（988★，本周 v0.2.0 → v0.4.0 四发）横幅原话是
+"every change carrying the name of the agent that made it"，paperclip 更硬一层（每个 agent
+一把持久加密身份）。我们的归因目前只活在**自己的**账里：审计逐批 op、凭据 `tasks[].agentId`，
+而**交付落地之后**——导出的 commit 只有一个时间戳，`git-export.ts` 里 `Ox-` 零命中。
+读 `git log` 的人无从回答"这个 commit 是哪份凭据保下来的、动了哪些 zone"。
+
+**为什么是 trailer，不是分支名、也不是审计事件**：
+
+- 分支名会被 `git checkout -B` 覆盖（同一秒两次交付时以最新为准），也会被人工改名；
+- 审计事件在**我们**的日志里，而交付物是**别人的**仓库 —— 归因必须跟着改动走；
+- trailer 是 git 自己的机制：`git log --format='%(trailers)'` 直接读得出，`interpret-trailers`
+  系工具也认。写在空行之后，正文不受污染。
+
+**为什么引擎要留一手（`receiptFingerprint`）**：凭据是**交给宿主**的（`onReceipt` sink），
+而 commit 信息由宿主拼（引擎只给 root/zones，5.7 的分工）。不在引擎里留一格指纹，宿主只能写
+时间戳 —— 而时间戳不指向任何东西。落法是：`emitReceipt` 里 `sink(sealed)` 之前把它存到实例上，
+`maybeExportDelivery` 紧跟着直传（`undefined` 也直传，不在引擎里做条件展开）。
+
+**为什么值可以是 `undefined`**：宿主没接凭据时，`Ox-Receipt` 那一行**不写**。
+`formatCommitMessage` 逐条跳过空值/非法键，不做条件拼装 —— 少一层分支就少一处会漂的地方，
+而且"没有凭据"这件事在 commit 上就该表现为**没有那一行**，不是 `Ox-Receipt: `。
+
+**契约细节（都由用例钉住）**：
+
+- 键收窄到 `/^[A-Za-z][A-Za-z0-9-]{0,38}$/` —— 键只由我们生成，宽松的键集只是把"以后有人从
+  外面传进来"变成注入面；
+- 值里的换行/连续空白压成一个空格 —— 否则 trailer 会被读成续行，而那正是我们要它读出来的东西；
+- **没有合法 trailer 时逐字返回原 message**（连尾部空白都不动）—— 不开开关时历史对比不该凭空多空行；
+- 正文尾部空白先收干净再拼 —— 否则会拼出三段换行，git 会读成正文里的空段落。
+
+**`Ox-Run` 为什么没做（写在这里，防止下一个读刷新文档的人去找）**：文档里拟的第三条 trailer 是
+`Ox-Run: <runId>`。落地时发现这个仓**没有 run 级标识**：`scheduler.ts` 里的 `runId` 是
+**每次派发**自己的 id（`${task.id}-${Date.now()}-…`），拿它当 run id 会指向一个任务而不是一次交付。
+造一个"run id"是独立的一笔（它要跨批、跨重修轮、跨续跑都稳定），本轮不夹带。
+
+**判据（真 git，不靠拼串）**：`[20]` 在临时仓库里真导出一次，用 `git log -1 --format=%(trailers)`
+读回 `Ox-Receipt: <64 位指纹>` / `Ox-Zones: src`；`[21]` 反向钉住"没有 trailer 时 git 里也读不出
+任何 trailer"。只断言 `git commit -m` 的参数等于把"git 到底认不认它"交给运气。
+
+**门禁账**：`npm test` **3129 passed / 8 skipped（3137）**、106 个有可执行用例的文件；
+`typecheck` / `lint` EXIT 0；`check:doc-claims` 绿。
+逐位点审计（`--mode=site`，每次只改一处）：`electron/engine/git-export.ts` **44/44**（211.0s）、
+`electron/platform.ts` **38/38**（106.8s）、`electron/engine/orchestrator.ts` **91/91**（333.4s）——
+三个受影响目标全杀，无存活。
+SITE_BASELINE 3191 → **3195**（git-export 40 → 44，其余两个目标位点数未变）、TARGETS 119 不变。
+
+**一条按流程走的负结果**：第一次跑 site 审计时，git-export 的位点数从基线 40 涨到 44，
+脚本按漂移守卫判 FAIL（"位点涨了却仍然 PASS 等于每个位点都验过了的假象"）。处置不是抬基线了事，
+而是先确认 44 个新位点**逐个全杀**，再 `node scripts/site-baseline.mjs --write` 更新 —— 守卫在这里
+正好拦住了"加了代码顺手把基线抬上去"的那条捷径。
+
 ## [Unreleased · 桌面续跑：全新 run 跑完也要清快照 · 2026-10-25]
 
 **同一个位置第二次犯**：上一笔写桌面断点续跑时，`clearJournal` 落在"这次是续跑"那个分支里 ——

@@ -66,6 +66,7 @@ function engine(opts: {
   exportDelivery?: OrchestratorDeps["exportDelivery"];
   deliveryRemote?: ProjectSettings["deliveryRemote"];
   publishRemote?: OrchestratorDeps["publishRemote"];
+  onReceipt?: (receipt: DeliveryReceipt) => void;
 }): OrchestratorEngine {
   const deps: OrchestratorDeps = {
     llm: fakeLlm(),
@@ -99,6 +100,7 @@ function engine(opts: {
     onTaskStatus: (id, st) => opts.events.push(`task:${id}:${st}`),
     onVerification: () => opts.events.push("verify"),
     onEscalation: (_id, s) => opts.events.push(`escalation:${s.slice(0, 20)}`),
+    ...(opts.onReceipt ? { onReceipt: opts.onReceipt } : {}),
   });
 }
 
@@ -3423,6 +3425,41 @@ describe("OrchestratorEngine · 交付后 git 导出", () => {
     await eng.execute([TASKS], ".");
     expect(calls).toEqual([{ projectRoot: ".", zones: ["src/core"] }]);
     expect(events.some((l) => l.includes("已导出分支 oxcommander/delivery-x") && l.includes("abc1234"))).toBe(true);
+  });
+
+  it("交付时把**本次**凭据的指纹交给导出层（commit 的 Ox-Receipt 指向它）", async () => {
+    const receipts: DeliveryReceipt[] = [];
+    const handed: Array<string | undefined> = [];
+    const eng = engine({
+      failFirstRound: false,
+      events: [],
+      exportDeliveryBranch: true,
+      onReceipt: (r) => receipts.push(r),
+      exportDelivery: async (input) => {
+        handed.push(input.receiptFingerprint);
+        return exported(input);
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(receipts).toHaveLength(1);
+    // 同一个串：交出去的那份凭据上的指纹，就是递给导出的那个 —— 不是"再算一遍"。
+    expect(handed).toEqual([receipts[0]!.fingerprint]);
+    expect(handed[0]).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it("宿主没接凭据时导出拿到的指纹是 undefined（不编造一个）", async () => {
+    const handed: Array<string | undefined> = [];
+    const eng = engine({
+      failFirstRound: false,
+      events: [],
+      exportDeliveryBranch: true,
+      exportDelivery: async (input) => {
+        handed.push(input.receiptFingerprint);
+        return exported(input);
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(handed).toEqual([undefined]);
   });
 
   it("开关开但实现缺席：什么都不发生——连失败日志都没有", async () => {

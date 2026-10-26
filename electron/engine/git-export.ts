@@ -40,6 +40,16 @@ export interface GitExportInput {
   branch: string;
   /** commit 信息。 */
   message: string;
+  /**
+   * 追加在 commit 信息末尾的 trailer（`Ox-Receipt` / `Ox-Zones`）。
+   *
+   * 为什么要 trailer 而不是只在分支名里带时间戳：一次交付落地之后，读 `git log` 的人
+   * 与工具都得能回答"这个 commit 是哪份凭据保下来的、动了哪些 zone"。分支名会被
+   * `checkout -B` 覆盖、也会被人工改名，**只有 commit 本身活得久**。
+   *
+   * 这是**索引不是认证**：文本，改得动，没有签名。别把它读成"不可伪造的归属"。
+   */
+  trailers?: readonly CommitTrailer[];
   /** 单条 git 命令的超时（毫秒）；默认 120s。 */
   timeoutMs?: number;
   /**
@@ -64,6 +74,42 @@ export interface GitExportResult {
 
 /** 分支名字符集：git ref 安全 + 我们生成的固定前缀，杜绝注入面。 */
 export const BRANCH_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,80}$/;
+
+/** 一条 commit trailer。`value` 为 `undefined` = 这一条不写（值缺席，不是空串）。 */
+export interface CommitTrailer {
+  key: string;
+  value: string | undefined;
+}
+
+/**
+ * trailer 键的字符集：git 的 trailer 键是「字母开头 + 字母数字连字符」。
+ * 收窄到这一条是因为键只由**我们**生成（`Ox-Receipt` / `Ox-Zones`）——
+ * 宽松的键集只会让"以后有人从外面传进来"变成一条注入面。
+ */
+export const TRAILER_KEY_RE = /^[A-Za-z][A-Za-z0-9-]{0,38}$/;
+
+/**
+ * 把 trailer 拼到 commit 信息末尾（空行分隔，一条一行）。
+ *
+ * 三条纪律：
+ * 1. **没有合法的就原样返回**（逐字相同）—— 不开开关时 commit 信息与今天一字不差，
+ *    否则历史对比会凭空多出一个空行。
+ * 2. 键不合法 / 值为空**逐条跳过而不是 throw**：导出是分发层，一个怪值不该拖垮
+ *    整个交付（与 `exportDeliveryBranch` 永不 throw 同一条纪律）。
+ * 3. 值里的换行压成空格：trailer 必须一条一行，否则 `git log --format=%(trailers)`
+ *    会把续行读成正文，而那正是我们要它读得出来的东西。
+ */
+export function formatCommitMessage(message: string, trailers?: readonly CommitTrailer[]): string {
+  const lines: string[] = [];
+  for (const trailer of trailers ?? []) {
+    if (!TRAILER_KEY_RE.test(trailer.key)) continue;
+    const value = (trailer.value ?? "").replace(/\s+/g, " ").trim();
+    if (value.length === 0) continue;
+    lines.push(`${trailer.key}: ${value}`);
+  }
+  if (lines.length === 0) return message;
+  return `${message.trimEnd()}\n\n${lines.join("\n")}`;
+}
 
 /**
  * 分支/commit 信息的时间戳段（本地时间 yyyyMMdd-HHmmss）。同一秒内两次交付会
@@ -254,9 +300,11 @@ export async function exportDeliveryBranch(input: GitExportInput): Promise<GitEx
 
   // 6. commit。仓库没配身份时（CI/新克隆常见）用一次性 -c 补，不碰仓库配置
   //（git config 在拒绝地板里，本模块也绝不写它）。
-  let commit = await run("git", ["commit", "-m", input.message]);
+  // 重试的那次用**同一个** message：两次拼出来的串必须一致，否则"重试"会悄悄丢掉 trailer。
+  const message = formatCommitMessage(input.message, input.trailers);
+  let commit = await run("git", ["commit", "-m", message]);
   if (commit.code !== 0 && /user\.name|user\.email|tell me who you are/i.test(commit.stderr)) {
-    commit = await run("git", ["-c", "user.name=OxCommander", "-c", "user.email=oxcommander@localhost", "commit", "-m", input.message]);
+    commit = await run("git", ["-c", "user.name=OxCommander", "-c", "user.email=oxcommander@localhost", "commit", "-m", message]);
   }
   if (commit.code !== 0) {
     return { ok: false, reason: `git commit 失败：${tail(commit.stderr)}`, ...(skippedPaths.length > 0 ? { skippedPaths } : {}) };

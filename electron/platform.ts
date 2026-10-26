@@ -610,13 +610,26 @@ export function createPlatform(config: PlatformConfig): Platform {
       conflicts: () => verdictConflicts,
       // 5.7 本地半边（2026-10-11）：settings 开了才接——开关与实现缺一不可。
       // 分支名/commit 信息在这里成形（引擎只给 root 与 zones）。
+      //
+      // trailer（2026-10-26）：`Ox-Receipt` 指向本次凭据，`Ox-Zones` 指向这次交付
+      // 归属的目录 —— 于是 commit 自己说得清"我是哪份凭据保下来的、动了哪儿"。
+      // 两个值都可能为空（没有凭据 / zones 为空），**由 `formatCommitMessage` 逐条跳过**，
+      // 这里不做条件拼装：少一层分支，就少一处会漂的地方。
       ...(settings.exportDeliveryBranch
         ? {
-            exportDelivery: (input: { projectRoot: string; zones: string[] }) =>
+            exportDelivery: (input: {
+              projectRoot: string;
+              zones: string[];
+              receiptFingerprint?: string;
+            }) =>
               exportDeliveryBranch({
                 ...input,
                 branch: `oxcommander/delivery-${deliveryStamp()}`,
                 message: `OxCommander delivery ${deliveryStamp()}`,
+                trailers: [
+                  { key: "Ox-Receipt", value: input.receiptFingerprint },
+                  { key: "Ox-Zones", value: input.zones.join(", ") },
+                ],
               }),
           }
         : {}),
