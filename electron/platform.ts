@@ -18,6 +18,11 @@ import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, VariantStore, verifyProject } from "./engine";
 import { deliveryTrailers, exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
 import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from "./engine/git-remote";
+import {
+  publishDeliveryStatus,
+  type DeliveryStatusDecision,
+  type DeliveryStatusResult,
+} from "./engine/git-status";
 import { fetchGithubContext } from "./context/github-readonly";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
 import type { DispatchOutcome, VariantRater } from "./engine/scheduler";
@@ -322,6 +327,30 @@ export function deliveryRemoteHookFor(
 }
 
 /**
+ * commit status 的接线钩子（2026-10-26，第七轮竞品吸收 3）：没开 `deliveryStatus`
+ * 时返回 `undefined` —— 与 `deliveryRemoteHookFor` 同一条纪律（宿主不接，引擎侧判空
+ * 即"没接"，于是"接不接"没有第二个分支）。
+ *
+ * 判绿不在这里：`decision` 由引擎按 `deliveryStatusFor`（纯函数）算好递进来，
+ * 本层只负责"把这条递给哪个仓库的哪个 commit"。凭据由本机 `gh` 自己持有。
+ */
+export function deliveryStatusHookFor(
+  settings: ProjectSettings,
+): ((input: {
+  projectRoot: string;
+  commit: string;
+  decision: DeliveryStatusDecision;
+}) => Promise<DeliveryStatusResult>) | undefined {
+  if (!settings.deliveryStatus) return undefined;
+  return (input) =>
+    publishDeliveryStatus({
+      projectRoot: input.projectRoot,
+      commit: input.commit,
+      decision: input.decision,
+    });
+}
+
+/**
  * Assembles the agent pool and engine from one config object. Hosts differ only
  * in the callbacks they pass and whether they supply a journal — the structural
  * wiring (router, breaker, guard, scheduler limits, LLM grade) is identical.
@@ -615,6 +644,8 @@ export function createPlatform(config: PlatformConfig): Platform {
   // 刻意**不用三元**拼 deps —— "接不接"是引擎的判空语义，宿主这里不该再长一个
   // 不可观察的分支（那种分支在变异审计里活下来只能靠登记等价锚点，是纯负债）。
   const publishRemote = deliveryRemoteHookFor(settings);
+  // 凭据 → commit status（吸收 3）：开关关着就是 undefined，引擎侧判空即"没接"。
+  const publishStatus = deliveryStatusHookFor(settings);
   // 只读外部上下文源（P2-1 本地半边）：缺省 = 空数组（提示与历史逐字一致）。
   // 每个来源一次拉取；`gh` 不在 / 未登录由 `fetchGithubContext` 自己说破。
   const contextSources = contextSourcesFor(settings);
@@ -656,6 +687,10 @@ export function createPlatform(config: PlatformConfig): Platform {
       // `undefined`，引擎侧判空即没接）。这一层会碰外部系统（push / PR），
       // 默认必须是"什么都不做"；凭据由本机 git / gh 自己持有，这里不碰。
       publishRemote,
+      // 凭据 → commit status（吸收 3）：默认关，与 push/PR 同一条"外部动作要显式开"。
+      // 直传（可能 undefined）：与上一行 `publishRemote` 同一种接法 —— 引擎侧对外部动作
+      // 一律判空，所以这里不需要再造一个三元。两行动作接法一致，少一处会漂的写法。
+      publishStatus,
       journal: config.journal,
       // 前任履历（P1-3）：宿主给查询口，引擎只负责在重修轮把它拼进上下文。
       ...(config.priorAttempts ? { priorAttempts: config.priorAttempts } : {}),

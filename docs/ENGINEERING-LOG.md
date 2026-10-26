@@ -17,6 +17,56 @@
 
 ---
 
+## [Unreleased · 凭据发成 commit status，分支保护可以要求它（第七轮竞品吸收 3）· 2026-10-26]
+
+**这一格是本周竞品对比里"别人已经做了、而我们命题上最该做"的那个**：我们的卖点是"交付一份过了
+门禁的凭据"，可这份结论过去只活在**我们自己的界面**里 —— 桌面凭据卡、`receipt:verify` 的五档退出码。
+paperclip v2026.1023.0 把评审结论发成 commit 检查，并明说"分支保护可以要求它"。凭据要能被别人的
+流水线要求，就得挂到 commit 上。这是"证据挡下一步"的最后一步。
+
+**判据与发送分开（本项最重要的结构决定）**：`deliveryStatusFor` 是**纯函数**——吃一份凭据 + 指纹
+复算结论，吐 `{state, context, description}`，于是"什么情况下才敢给 success"能被逐位点审计；
+`publishDeliveryStatus` 只负责把决定递给 `gh api`，`orchestrator.maybePublishStatus` 只负责
+"递给谁"。三层里只有第一层含判断，也只有第一层需要变异门禁。
+
+**三档而不是四档，且 `error` 与 `failure` 刻意分开**：`failure` = 判了，没过（交付结论是 blocked）；
+`error` = **我判不了**（没指纹 / 指纹不符）。两者在分支保护上都不绿，但读的人需要知道该去修交付，
+还是该去查凭据有没有被改过 —— 合成一档会把两种完全不同的排查路径混起来（与
+`BudgetExceededError` / `UnpricedUsageError` 分开同一条理由）。
+
+**顺序是承重的（两条）**：
+1. status 只在**推送真的成功**之后发 —— status 挂在远端 commit 上，没推上去就无处可挂；
+2. 本轮没产出凭据就不发 —— **绝不编造一条没有凭据的状态**（engine 侧 `lastReceipt` 为空即返回）。
+
+**永不重试成绿**：`gh` 失败只报失败并写原因，不重试、不降级 —— 那正是"给自述背书的橡皮图章"
+的另一种写法（`receipt-verify` 文件头已经写过一次同样的纪律）。
+
+**三个变异活口，三种不同的处置（这是本项最值得记的部分）**：
+
+1. `orchestrator.ts` 三连守卫的 `||` → `&&`（"开关/实现/commit 缺一不可"）**存活** ——
+   因为我只测了"推送没成功"，没测"推送成功但**没有 commit 号**"。换了变异后，缺 commit 时
+   会拿 `undefined` 去请求一个不存在的 commit：这不是"少发一条"，是把判据交给网络错误去兜。
+   补了一条用例（导出成功但不给 commit ⇒ 一次都不调）。
+2. `platform.ts` 的 `...(publishStatus ? { publishStatus } : {})` **三元分支互换存活** ——
+   因为 `undefined` 与"不在"对引擎是同一件事（都是判空），这个三元**本来就是等价的**。
+   处置不是补断言（补不出来），而是**按"一件事只留一种做法"删掉它**：紧挨着的 `publishRemote`
+   就是直传。删完 47/47 全杀，位点数 48 → 47 —— 等价变异的最好处置是让它没地方发生。
+3. `shared/schema.ts`、`shared/types.ts`、`git-status.ts`、`orchestrator.ts` 其余位点首轮即全杀。
+
+**门禁账**：`npm test` **3178 passed / 8 skipped（3186）**、107 个有可执行用例的文件；
+`typecheck` / `lint` EXIT 0；`check:doc-claims` / `check:unwired` / `check:field-orphans` /
+`check:mutation-targets` 绿。
+逐位点审计（`--mode=site`）：`electron/engine/git-status.ts` **9/9**（6.9s）、
+`electron/engine/orchestrator.ts` **95/95**（797.1s）、`electron/platform.ts` **47/47**（144.8s，
+删三元后重审）、`shared/schema.ts` **77/77**（62.0s）、`shared/types.ts` **8/8**（15.9s）——
+五个受影响目标全杀。
+TARGETS 119 → **120**（`git-status.ts` 新登记 tier 1）、SITE_BASELINE 3220 → **3233**。
+
+**已知边界（写在这里，不留给读者猜）**：status 是**外部状态**，撤销只能由人在 GitHub 那边做；
+我们只在交付那一次写一条，不持续同步。headless 一侧本轮**没接**（它的交付分发本来就只到
+`exportDeliveryBranch` 为止，没有 push/PR 通道）：要给 headless 加，得先给它加远端分发 —— 那是
+另一笔，不在本轮夹带。
+
 ## [Unreleased · 预算 fail-closed：端点不回报用量时不再盲着花（第七轮竞品吸收 2）· 2026-10-26]
 
 **竞品事实**：paperclip v2026.1023.0 给预算策略加了一条默认 `block` —— 用量**没有可靠计价**时

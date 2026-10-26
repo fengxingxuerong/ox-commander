@@ -10,6 +10,7 @@ import {
   createPlatform,
   createVariantRater,
   deliveryRemoteHookFor,
+  deliveryStatusHookFor,
   executorTimeoutMsFor,
 } from "../electron/platform";
 import { createAgentLayer } from "../electron/agents";
@@ -1171,6 +1172,23 @@ describe("createPlatform · 远端分发接线（5.7 远端半边，2026-10-12�
       settings({ deliveryRemote: { mode: "pr", remote: "upstream", base: "next", draft: true, awaitChecks: {} } }),
     )!;
     expect(typeof hook).toBe("function");
+  });
+});
+
+describe("createPlatform · commit status 接线（第七轮竞品吸收 3，2026-10-26）", () => {
+  it("没开 deliveryStatus：不接（引擎侧判空即没接，与 push/PR 同一条纪律）", () => {
+    expect(deliveryStatusHookFor(settings())).toBeUndefined();
+    expect(deliveryStatusHookFor(settings({ deliveryStatus: false }))).toBeUndefined();
+  });
+
+  it("开了：接上，且把 decision 原样递给发送器（判绿在引擎侧算，装配点不改判据）", async () => {
+    const hook = deliveryStatusHookFor(settings({ deliveryStatus: true }));
+    expect(typeof hook).toBe("function");
+    const decision = { state: "failure" as const, context: "oxcommander/delivery", description: "未交付 · 凭据 abc" };
+    const r = await hook!({ projectRoot: tempDir(), commit: "abc1234", decision });
+    // 没有 gh 的测试环境里必然失败 —— 关键是它**没把 failure 折成 success**。
+    expect(r.context).toBe("oxcommander/delivery");
+    expect(r.state === undefined || r.state === "failure").toBe(true);
   });
 });
 

@@ -236,6 +236,11 @@ const TARGETS = [
   // 轮询的停条件。spawn 由平台注入，所以判定核心在这里就能被逐点审计；
   // orchestrator/platform 的接线位点随各自既有目标审计。
   { file: "electron/engine/git-remote.ts", test: "src/git-remote.test.ts", tier: 1 },
+  // 2026-10-26：交付凭据 → commit status（第七轮竞品吸收 3）——判绿三条（delivered +
+  // 指纹一致才 success；没指纹/指纹不符一律 error；blocked 只能 failure）、
+  // commit sha 字符集、description 收成一行且不超上限、gh 失败绝不折成 success。
+  // 纯函数 + 注入 runner，测试不碰网络；接线位点随 orchestrator/platform 各自既有目标审计。
+  { file: "electron/engine/git-status.ts", test: "src/git-status.test.ts", tier: 1 },
   // 2026-10-12：规划前的只读外部上下文（P2-1 本地半边）——`gh` 命令构造白名单、
   // owner/repo 与 PR 号字符集、条数/字符预算收敛、issue/PR 输出解析与裁剪。
   // 全是纯函数 + 注入 runner（默认分支才真 spawn，测试不碰网络）。tier 1：整份 ~0.4s。
@@ -976,7 +981,8 @@ const SITE_BASELINE = {
   "electron/engine/dev-server.ts": 5,
   "electron/engine/git-export.ts": 44,
   "electron/engine/git-remote.ts": 39,
-  "electron/engine/orchestrator.ts": 91,
+  "electron/engine/git-status.ts": 9,
+  "electron/engine/orchestrator.ts": 95,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,

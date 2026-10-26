@@ -8,7 +8,7 @@ import { readPlanMemo, readProjectConventions } from "./conventions";
 import { parseDecompose, parsePrd, SchemaValidationError } from "../../shared/schema";
 import { findOrphanPaths, describeZoneGaps, verificationCommandPaths, checkContractPaths, findGhostObligations, describeGhostObligations } from "../../shared/zone-coverage";
 import type { UsageSnapshot } from "../../shared/usage-meter";
-import { buildReceipt, receiptTaskStatus, sealReceipt } from "../../shared/delivery-receipt";
+import { buildReceipt, receiptTaskStatus, sealReceipt, verifyReceiptFingerprint } from "../../shared/delivery-receipt";
 import type {
   DeliveryReceipt,
   ReceiptCheck,
@@ -16,6 +16,7 @@ import type {
   ReceiptOutcome,
   ReceiptTask,
 } from "../../shared/delivery-receipt";
+import { deliveryStatusFor } from "./git-status";
 import { runSmokeChecks } from "./verifier";
 import type { ActionGateLike } from "../sandbox/action-gate";
 import type { RepairRecord, SmokeCheck } from "../../shared/types";
@@ -116,6 +117,20 @@ export interface OrchestratorDeps {
     projectRoot: string;
     branch: string;
   }) => Promise<import("./git-remote").GitRemoteResult>;
+  /**
+   * 交付凭据 → commit status（2026-10-26，第七轮竞品吸收 3）。
+   *
+   * 什么时候被调：`settings.deliveryStatus` 为真、本回调在场、**推送真的成功**
+   * （status 挂在远端 commit 上，没推上去就无处可挂）、且本轮产出过凭据。
+   * 判绿的全部逻辑在 `git-status.deliveryStatusFor`（纯函数，逐位点可审）：
+   * 本层只负责"递给谁"。
+   * 永不 throw；失败只写日志，**绝不影响交付结论**，也**绝不被重试成 success**。
+   */
+  publishStatus?: (input: {
+    projectRoot: string;
+    commit: string;
+    decision: import("./git-status").DeliveryStatusDecision;
+  }) => Promise<import("./git-status").DeliveryStatusResult>;
   /**
    * 跨动作状态机（竞品调研 §5.1，可选）：批次边界上由引擎 reset —— 批次是
    * "已发生过什么"的生命周期单位。观察面（agent 日志）与执行面（验证命令
@@ -315,6 +330,13 @@ export class OrchestratorEngine {
    * 导出层据此不写 `Ox-Receipt` trailer（不编造）。
    */
   private receiptFingerprint: string | undefined;
+  /**
+   * 最近一次交付凭据本体（2026-10-26，第七轮竞品吸收 3）。
+   *
+   * 与 `receiptFingerprint` 分开存而不是只留指纹：commit status 要按凭据的 `outcome`
+   * 判绿，光有指纹判不出"交没交"。同一生命周期（每轮覆盖、没有 sink 时保持 undefined）。
+   */
+  private lastReceipt: DeliveryReceipt | undefined;
 
   constructor(private deps: OrchestratorDeps, private cb: OrchestratorCallbacks) {
     // 取消探针接进调度器的节流等待（2026-10-13）：节流指数退避封顶 5min 的整段
@@ -797,6 +819,8 @@ export class OrchestratorEngine {
     // 留一份指纹给导出层（`maybeExportDelivery` 紧跟在本方法之后调）：
     // commit 的 `Ox-Receipt` trailer 要指向**这一份**凭据，而不是"最近一次"。
     this.receiptFingerprint = sealed.fingerprint;
+    // 也留一份整凭据：commit status（吸收 3）要按**这一份**的 outcome 与指纹判绿。
+    this.lastReceipt = sealed;
     sink(sealed);
   }
 
@@ -824,7 +848,7 @@ export class OrchestratorEngine {
         this.cb.onLog(
           `[git-export] 已导出分支 ${result.branch}（commit ${result.commit ?? "无"}，${result.filesCommitted ?? 0} 个文件）`,
         );
-        await this.maybePublishRemote(projectRoot, result.branch);
+        await this.maybePublishRemote(projectRoot, result.branch, result.commit);
       } else if (result.skipped === "no-repo") {
         this.cb.onLog("[git-export] 跳过：项目不在 git 仓库内（要导出请先 git init）");
       } else if (result.skipped === "no-changes") {
@@ -847,7 +871,7 @@ export class OrchestratorEngine {
    * 输入；这里**不自动触发重修** —— "CI 红了要不要再派一轮"需要幂等与次数上限
    * 的设计，v1 刻意不做，日志里说破。
    */
-  private async maybePublishRemote(projectRoot: string, branch?: string): Promise<void> {
+  private async maybePublishRemote(projectRoot: string, branch?: string, commit?: string): Promise<void> {
     const mode = this.deps.settings.deliveryRemote?.mode;
     if (!mode || mode === "off" || !branch || !this.deps.publishRemote) return;
     try {
@@ -870,8 +894,36 @@ export class OrchestratorEngine {
         }
       }
       if (!r.ok) this.cb.onLog(`[git-remote] 失败（不影响交付）：${r.reason}`);
+      // 6. 推成功了才发 status —— 挂不上远端的 commit 就没有意义（顺序是承重的）。
+      if (r.pushed) await this.maybePublishStatus(projectRoot, commit);
     } catch (err) {
       this.cb.onLog(`[git-remote] 失败（不影响交付）：${(err as Error).message}`);
+    }
+  }
+
+  /**
+   * 凭据 → commit status（吸收 3）。三个条件缺一不动：开关开、回调和 commit 都在、
+   * 本轮真的有凭据。**判绿不在这里**：`deliveryStatusFor` 决定状态与文案，
+   * 本层只负责把"这一份"递过去 —— 判据住在一个能被逐位点审计的纯函数里。
+   */
+  private async maybePublishStatus(projectRoot: string, commit?: string): Promise<void> {
+    if (!this.deps.settings.deliveryStatus || !this.deps.publishStatus || !commit) return;
+    const receipt = this.lastReceipt;
+    if (!receipt) return;
+    try {
+      const fingerprintOk =
+        verifyReceiptFingerprint(receipt, (s) => createHash("sha256").update(s).digest("hex")).reason === "match";
+      const decision = deliveryStatusFor(receipt, fingerprintOk);
+      const r = await this.deps.publishStatus({ projectRoot, commit, decision });
+      if (r.skipped === "bad-commit") {
+        this.cb.onLog(`[git-status] 跳过：commit 号不像 sha（${commit}）`);
+      } else if (r.ok) {
+        this.cb.onLog(`[git-status] 已发 ${r.context} = ${r.state}（commit ${commit}）`);
+      } else {
+        this.cb.onLog(`[git-status] 失败（不影响交付）：${r.reason}`);
+      }
+    } catch (err) {
+      this.cb.onLog(`[git-status] 失败（不影响交付）：${(err as Error).message}`);
     }
   }
 

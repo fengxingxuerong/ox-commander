@@ -11,7 +11,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **119 个目标** / 基线 **3220 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **120 个目标** / 基线 **3233 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -62,7 +62,7 @@ Electron 桌面端 + headless CLI 双入口。
 > | 运行预览 | dev server 冒烟（探活 + 页面冒烟）通过后，桌面主进程把它保活为预览：单实例（新预览替换旧的）、日志尾部 16KiB、默认 30 分钟自动停止，应用退出/新一轮开始前清理；看板可**在应用内预览窗口打开**（窗口的浏览器 profile 按项目隔离：cookie / localStorage 各归各的，关窗不丢登录态，清除是显式动作；窗口不给 preload 桥、开沙箱、导航与重定向只放行本机回环）、看日志、手动停止。地址只接受本机回环 `http(s)`；headless/serve 不保活（仍跑完即杀） |
 | 沙箱 | 路径七级判定、命令白名单 + 元字符拦截、双超时、熔断、循环输出检测（卡死空转即中止）、快照回滚 |
 > | 预算 | token 用量可见性 + `maxTokensPerRun` 软上限闸门（**只看得见端点上报的用量**；遇到不回报 usage 的调用会当场说破"这道闸看不见它们"，刻意不估算）；盲区处置 `onUnpricedUsage` 两档 —— 缺省 `block`（配了预算时：这种调用出现后下一次调用在发出前被拒，`UnpricedUsageError`）、`allow` 只说破放行；策略/设置/headless spec 三处入口，冲突取更严 |
-> | 交付分发（可选，默认关） | 过硬门禁后把 zone 内改动导出成 **git 分支 + commit**（**默认不 push**）；显式开关后可推到指定 remote / 开 PR / 等 CI 结论 —— **CI 结论只回流，不自动重修**；不碰凭据、永不 `--force` |
+> | 交付分发（可选，默认关） | 过硬门禁后把 zone 内改动导出成 **git 分支 + commit**（**默认不 push**），commit 带 `Ox-Receipt` / `Ox-Zones` trailer；显式开关后可推到指定 remote / 开 PR / 等 CI 结论 —— **CI 结论只回流，不自动重修**；再开 `deliveryStatus` 则把凭据发成 **`oxcommander/delivery` commit status**（分支保护可以要求它；只有 `delivered` 且指纹复算一致才 success，没指纹/指纹不符一律 error、绝不重试成绿）；不碰凭据、永不 `--force` |
 > | 协议 | headless JSONL 协议（外部宿主可编程驱动）+ **反向 MCP server**（agent 生态节点：查状态/取凭据/派单/暂停继续） |
 > | 代价可量化 | `npm run zone:cost` 从审计事实算出越权次数与并行度代价 —— 少数派路线要拿数字说话；`npm run usage:cost` 跨 run / 跨项目对账 token 成本（按模型排名、按凭据逐份、未上报边界同行）—— 凭据自 2026-10-24 起随 `usage.byModel` 落盘，聚合只认持久事实，按任务的归因不存在就不摊派 |
 
@@ -283,7 +283,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   同批还校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点**（`(算子, 行号)` 逐条比对，复用门禁
   自己的 `findSites`）：失效条目豁免的是空气，而漂到新行的那个位点无人认领 —— 2026-10-23 一天内
   因此红了两轮 CI（`context.ts` 221→225、`path-policy.ts` 92→94，后者直接拦住发布）
-→ vitest（2026-10-26 现跑 3155 通过 + 8 跳过，合计 3163 条，分布在 106 个有可执行用例的文件；
+→ vitest（2026-10-26 现跑 3178 通过 + 8 跳过，合计 3186 条，分布在 107 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；

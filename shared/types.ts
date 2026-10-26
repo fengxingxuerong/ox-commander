@@ -547,6 +547,21 @@ export interface ProjectSettings {
     timeoutMs?: number;
   };
   /**
+   * 交付凭据发成 **GitHub commit status**（2026-10-26，第七轮竞品吸收 3）。
+   *
+   * 缺省 = 关（与 push/PR 同一口径：碰外部系统的动作必须显式打开）。
+   * 打开后，**推送成功**的那一次交付会往推上去的 commit 上写一条名为
+   * `oxcommander/delivery` 的状态 —— 于是分支保护可以**要求**它，凭据不再只是
+   * 我们界面里的一份文件。
+   *
+   * 判绿（`git-status.deliveryStatusFor`，纯函数）：只有 `outcome: delivered`
+   * **且**指纹复算一致才给 `success`；没指纹 / 指纹不符一律 `error`（不认作通过，
+   * 也绝不重试成绿）。失败只写日志，不影响交付结论。
+   *
+   * 前置：这一项依赖远端分发真的把分支推上去了（status 挂在远端 commit 上）。
+   */
+  deliveryStatus?: boolean;
+  /**
    * 本次 run 的墙钟上限（毫秒）。只在批/轮边界生效，不掐断在途请求 ——
    * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。
    * `undefined` 或 `<= 0` 都是不限（要"不限"就省略这个字段，与 maxTokensPerRun 同风格）。

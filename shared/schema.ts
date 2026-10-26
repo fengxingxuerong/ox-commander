@@ -333,6 +333,7 @@ export function parseSettings(raw: unknown): ProjectSettings {
   stringOpt(o, "manifestDir", issues);
   boolOpt(o, "agentRouter", issues);
   boolOpt(o, "exportDeliveryBranch", issues);
+  boolOpt(o, "deliveryStatus", issues);
   stringArrayOpt(o, "enabledAgents", issues);
   stringArrayOpt(o, "llmPool", issues);
   stringArrayOpt(o, "disabledKeyVars", issues);

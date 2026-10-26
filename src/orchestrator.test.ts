@@ -66,6 +66,8 @@ function engine(opts: {
   exportDelivery?: OrchestratorDeps["exportDelivery"];
   deliveryRemote?: ProjectSettings["deliveryRemote"];
   publishRemote?: OrchestratorDeps["publishRemote"];
+  deliveryStatus?: boolean;
+  publishStatus?: OrchestratorDeps["publishStatus"];
   onReceipt?: (receipt: DeliveryReceipt) => void;
 }): OrchestratorEngine {
   const deps: OrchestratorDeps = {
@@ -77,9 +79,11 @@ function engine(opts: {
       maxRepairRounds: opts.maxRounds ?? 3,
       ...(opts.exportDeliveryBranch !== undefined ? { exportDeliveryBranch: opts.exportDeliveryBranch } : {}),
       ...(opts.deliveryRemote ? { deliveryRemote: opts.deliveryRemote } : {}),
+      ...(opts.deliveryStatus !== undefined ? { deliveryStatus: opts.deliveryStatus } : {}),
     },
     ...(opts.exportDelivery ? { exportDelivery: opts.exportDelivery } : {}),
     ...(opts.publishRemote ? { publishRemote: opts.publishRemote } : {}),
+    ...(opts.publishStatus ? { publishStatus: opts.publishStatus } : {}),
   };
   // verify passes when scheduler's first round succeeded; else fails until repair.
   // 第 1 次调用是**基线验证**（引擎动手前跑的），它必须返回绿：基线红会往日志与
@@ -3718,6 +3722,167 @@ describe("orchestrator · 远端分发接线（5.7 远端半边，2026-10-12）"
     await eng.execute([TASKS], ".");
     expect(events.some((l) => l.includes("[git-remote] 失败（不影响交付）：gh gone"))).toBe(true);
     expect(events).toContain("stage:DONE");
+  });
+});
+
+/**
+ * 凭据 → commit status 的接线（2026-10-26，第七轮竞品吸收 3）。
+ *
+ * 判绿本身在 `git-status.test.ts`（纯函数）。这里守的是**接线与顺序**：
+ * status 只能挂在真的推上去的那个 commit 上，且没凭据时不许编造一条。
+ */
+describe("orchestrator · commit status 接线（第七轮竞品吸收 3）", () => {
+  const exported = () => ({ ok: true, branch: "oxcommander/delivery-x", commit: "abc1234", filesCommitted: 1 });
+
+  function wired(over: {
+    events: string[];
+    deliveryStatus?: boolean;
+    pushed?: boolean;
+    withReceipt?: boolean;
+    commit?: string;
+    onStatus?: (input: { projectRoot: string; commit: string; decision: { state: string; context: string } }) => void;
+    statusResult?: Awaited<ReturnType<NonNullable<OrchestratorDeps["publishStatus"]>>>;
+  }): OrchestratorEngine {
+    return engine({
+      failFirstRound: false,
+      events: over.events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      ...(over.deliveryStatus !== undefined ? { deliveryStatus: over.deliveryStatus } : { deliveryStatus: true }),
+      ...(over.withReceipt === false ? {} : { onReceipt: () => {} }),
+      exportDelivery: async () => ({ ...exported(), ...(over.commit ? { commit: over.commit } : {}) }),
+      publishRemote: async (input) => ({ ok: true, pushed: over.pushed ?? true, branch: input.branch }),
+      publishStatus: async (input) => {
+        over.onStatus?.(input as never);
+        return over.statusResult ?? { ok: true, context: "oxcommander/delivery", state: "success" };
+      },
+    });
+  }
+
+  it("推送成功 + 有凭据 ⇒ 发一条 status，commit 用的是导出的那个", async () => {
+    const events: string[] = [];
+    const seen: Array<{ commit: string; state: string }> = [];
+    const eng = wired({ events, onStatus: (i) => seen.push({ commit: i.commit, state: i.decision.state }) });
+    await eng.execute([TASKS], ".");
+    expect(seen).toEqual([{ commit: "abc1234", state: "success" }]);
+    expect(events.some((l) => l.includes("[git-status] 已发 oxcommander/delivery = success"))).toBe(true);
+  });
+
+  it("没开 deliveryStatus：一次都不调（外部动作默认关）", async () => {
+    const events: string[] = [];
+    const seen: unknown[] = [];
+    const eng = wired({ events, deliveryStatus: false, onStatus: (i) => seen.push(i) });
+    await eng.execute([TASKS], ".");
+    expect(seen).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-status]"))).toHaveLength(0);
+  });
+
+  it("推送没成功 ⇒ 不发（status 没有可挂的远端 commit）", async () => {
+    const events: string[] = [];
+    const seen: unknown[] = [];
+    const eng = wired({ events, pushed: false, onStatus: (i) => seen.push(i) });
+    await eng.execute([TASKS], ".");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("本轮没有凭据 ⇒ 不发（不编造一条没有凭据的状态）", async () => {
+    const events: string[] = [];
+    const seen: unknown[] = [];
+    const eng = wired({ events, withReceipt: false, onStatus: (i) => seen.push(i) });
+    await eng.execute([TASKS], ".");
+    expect(seen).toHaveLength(0);
+  });
+
+  it("commit 不像 sha ⇒ 交给宿主判，跳过要说出来", async () => {
+    const events: string[] = [];
+    const eng = wired({
+      events,
+      commit: "oxcommander/delivery-x",
+      statusResult: { ok: true, context: "oxcommander/delivery", skipped: "bad-commit" },
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-status] 跳过：commit 号不像 sha"))).toBe(true);
+  });
+
+  it("导出成功但没给出 commit 号 ⇒ 不发（没有可挂的 sha，不能拿 undefined 去请求）", async () => {
+    // 变异锚点：`|| !commit` 那个 `||` → `&&`（orchestrator.ts 三连守卫）。换成 && 后
+    // "开关+实现都在、只差 commit"会漏过这道门，于是拿 undefined 去请求一个不存在的
+    // commit —— 这不是"少发一条"，是把判据交给网络错误去兜。
+    const events: string[] = [];
+    const seen: unknown[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      deliveryStatus: true,
+      onReceipt: () => {},
+      exportDelivery: async () => ({ ok: true, branch: "oxcommander/delivery-x", filesCommitted: 1 }),
+      publishRemote: async (input) => ({ ok: true, pushed: true, branch: input.branch }),
+      publishStatus: async (input) => {
+        seen.push(input);
+        return { ok: true, context: "oxcommander/delivery", state: "success" };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(seen).toHaveLength(0);
+    expect(events.filter((l) => l.includes("[git-status]"))).toHaveLength(0);
+  });
+
+  it("发 status 失败 ⇒ 只写日志且写明不影响交付，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = wired({
+      events,
+      statusResult: { ok: false, context: "oxcommander/delivery", reason: "gh api statuses 失败：not logged in" },
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-status] 失败（不影响交付）：gh api statuses 失败"))).toBe(true);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("宿主实现自己抛错：同一条失败日志接住，交付照常 DONE", async () => {
+    const events: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      deliveryStatus: true,
+      onReceipt: () => {},
+      exportDelivery: async () => exported(),
+      publishRemote: async (input) => ({ ok: true, pushed: true, branch: input.branch }),
+      publishStatus: async () => {
+        throw new Error("gh gone");
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(events.some((l) => l.includes("[git-status] 失败（不影响交付）：gh gone"))).toBe(true);
+    expect(events).toContain("stage:DONE");
+  });
+
+  it("发出去的 status 指向的是**这一份**凭据：description 里的指纹前 12 位与 onReceipt 收到的一致", async () => {
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const descriptions: string[] = [];
+    const eng = engine({
+      failFirstRound: false,
+      events,
+      exportDeliveryBranch: true,
+      deliveryRemote: { mode: "push" },
+      deliveryStatus: true,
+      onReceipt: (r) => receipts.push(r),
+      exportDelivery: async () => exported(),
+      publishRemote: async (input) => ({ ok: true, pushed: true, branch: input.branch }),
+      publishStatus: async (input) => {
+        descriptions.push(input.decision.description);
+        return { ok: true, context: input.decision.context, state: input.decision.state };
+      },
+    });
+    await eng.execute([TASKS], ".");
+    expect(receipts).toHaveLength(1);
+    // 引擎自己按 deliveryStatusFor 判，所以指纹不是我们喂的 —— 它必须来自同一份凭据。
+    expect(descriptions).toHaveLength(1);
+    expect(descriptions[0]).toContain(receipts[0]!.fingerprint!.slice(0, 12));
   });
 });
 
