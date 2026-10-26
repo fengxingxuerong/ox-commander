@@ -353,9 +353,22 @@ export async function startProjectRun(projectId: string): Promise<void> {
       ? { smoke, resume: resume.state }
       : { smoke };
     await engine.execute(batches, ensureWorkspace(projectId), opts);
-    // 跑完就把快照清掉：留着它，下一次启动会拿一份"已经全部完成"的旧快照再来一遍
-    // （execute 会跳过已完成任务、直接收尾 —— 看着像成功，其实这一轮什么都没做）。
-    if (resume) clearJournal(projectId);
+    // 跑完即清快照（2026-10-25 修正：**无条件**，不再只清续跑那条路）。
+    //
+    // 为什么必须无条件：`execute` 在执行中会写快照（每一批/每一轮 save 一次），所以
+    // **全新 run 也会留下快照**。只清续跑路径的话，"下一次启动是续跑还是全新"就取决于
+    // "上一次启动是不是续跑" —— 一个自相矛盾的状态机：首次启动成功后留下的快照会让
+    // 第二次启动变成续跑（全部任务已完成 ⇒ 跳过一切、只重跑验证），而它自己跑完又把
+    // 快照清掉，于是第三次又是全新。这正是上一行注释警告的"看着成功、其实空转"。
+    //
+    // 判据落在**返回 vs 抛出**上，而不是"有没有续过"：
+    //   · `execute` **正常返回** ⇒ 这轮跑到了终局（交付或带着失败结论收尾），
+    //     那份快照不再是"可续的现场"，清掉让下一次启动回到"点开始 = 全新跑"；
+    //   · `execute` **抛出** ⇒ 被取消 / 崩溃 / 预算耗尽，现场是合法的续跑点，保留。
+    // 注意 headless 刻意相反（`run-spec.ts` 从不清）：那边 `ox-run-journal.json` 是
+    // 同一份 spec 的续跑入口，由宿主脚本按退出码决定要不要重投。桌面是 GUI，
+    // "点开始就该从零开始"比"同一个需求永远续跑"更不容易被误读。
+    clearJournal(projectId);
   } finally {
     setRunningProjectId(null);
     setJournalRequirement(undefined);

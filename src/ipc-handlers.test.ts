@@ -1124,7 +1124,8 @@ describe("orchestration handlers", () => {
     expect((h.generatePrd as Mock).mock.calls.at(-1)![3]).toBe("");
   });
 
-  it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {    // 这条钉的是 `filter((r) => r.projectId === projectId)`：判反（`!==`）会把
+  it("plans: 落快照时按 projectId 过滤历史 —— 别的项目的规划不许被算成「上次」", async () => {
+    // 这条钉的是 `filter((r) => r.projectId === projectId)`：判反（`!==`）会把
     // 别的项目的拆法当成"上次"，于是差异会全部算错 —— 而提示看起来完全正常。
     const store = inst(h.projectInstances);
     const prd = { goal: "g", features: [], techStack: [], acceptanceCriteria: [] };
@@ -1533,8 +1534,11 @@ describe("orchestration handlers", () => {
 
       const [, , opts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
       expect(opts.resume).toBeUndefined();
-      // 旧快照留着（不清）：下一次如果需求改回去，还能续。
-      expect(readJournal("p-mismatch").kind).toBe("resumable");
+      // 跑完之后旧快照被清掉 —— 这**不是**丢东西，而是它已经不配当续跑点了：
+      // 工作区刚被另一份需求的 run 改过，再拿旧需求的批次去续，正是"错配"本身。
+      // （2026-10-25 修正前这里断言的是"留着"，那是 `clearJournal` 只清续跑路径的
+      // 副作用，而不是一个有理由的语义。）
+      expect(readJournal("p-mismatch").kind).toBe("absent");
       // 必须说破是"另一份需求"这一支 —— 2026-10-25 自查删掉了一个永远跑不到的
       // `mismatched` 分支（桌面 `readJournal` 不认识需求，比对只在调用方做）。
       // 这条断言钉住的是：那类情况仍然被**这一支**如实报告，没跟着一起丢。
@@ -1694,34 +1698,95 @@ describe("orchestration handlers", () => {
       expect(opts.resume).toBeUndefined();
     });
 
-    it("run 收尾后 journal 需求被清空（不把 A 项目的需求带进 B 项目的快照）", async () => {
+    it("run 进行中写下的快照带本项目的需求（收尾即清，所以要**在运行中**读）", async () => {
       const store = inst(h.projectInstances);
       (store.get as Mock).mockReturnValue({
         id: "p-clean",
         requirement: "需求甲",
         batchesJson: JSON.stringify(plan),
       });
+      let duringRequirement: string | undefined;
+      let duringKind = "";
       h.execute.mockImplementationOnce(async () => {
         // run 进行中写一笔快照 —— 外壳里应该是这个项目的需求。
         writeJournal("p-clean", realSnapshot as never);
+        // ⚠️ 必须在**这里**读：跑完就被 clearJournal 清了（见下一条用例）。
+        const read = readJournal("p-clean");
+        duringKind = read.kind;
+        duringRequirement = read.kind === "resumable" ? read.requirement : undefined;
       });
 
       await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-clean");
-      const during = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-clean.json"), "utf8")) as {
-        requirement?: string;
-      };
-      expect(during.requirement).toBe("需求甲");
 
-      // 收尾之后（run 已结束）再有一笔写入：外壳里不该再有"需求甲"。
-      writeJournal("p-clean", realSnapshot as never);
-      const after = JSON.parse(fs.readFileSync(path.join(tmp, "runs", "p-clean.json"), "utf8")) as {
-        requirement?: string;
-      };
-      expect("requirement" in after).toBe(false);
+      expect(duringKind).toBe("resumable");
+      expect(duringRequirement).toBe("需求甲");
+      // 收尾之后文件已经不在了。
+      expect(readJournal("p-clean").kind).toBe("absent");
+    });
+
+    it("**全新** run 正常跑完也要清快照（否则第二次启动会变成空转的续跑）", async () => {
+      // 这是 2026-10-25 自查修掉的一个真缺陷：`clearJournal` 原先只在**续跑**那条
+      // 路径上调用。而 `execute` 在执行中就会写快照（每批/每轮 save 一次），所以
+      // **全新 run 也会留下快照** —— 于是"下一次启动是续跑还是全新"取决于"上一次
+      // 是不是续跑"，一个自相矛盾的状态机：首次启动成功后留下的快照会让第二次启动
+      // 变成"全部任务已完成 ⇒ 跳过一切、只重跑验证"，而它自己跑完又清掉，第三次
+      // 又变回全新。判据必须落在「execute 正常返回」上，与"有没有续过"无关。
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-freshclear",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      h.execute.mockImplementationOnce(async () => {
+        // 模拟执行过程中的 save()：全新 run 也会写这一笔。
+        writeJournal("p-freshclear", realSnapshot as never);
+      });
+
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-freshclear");
+
+      // 第一次是全新跑（没有快照可续）。
+      const [, , firstOpts] = (h.execute as Mock).mock.calls[0] as [Task[][], string, { resume?: unknown }];
+      expect(firstOpts.resume).toBeUndefined();
+      // 跑完 ⇒ 快照必须没了。
+      expect(readJournal("p-freshclear").kind).toBe("absent");
+
+      // 第二次启动：不得因为上一轮留下的快照而变成续跑。
+      h.execute.mockResolvedValue(undefined);
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-freshclear");
+      const [, , secondOpts] = (h.execute as Mock).mock.calls[1] as [Task[][], string, { resume?: unknown }];
+      expect(secondOpts.resume).toBeUndefined();
+    });
+
+    it("execute 抛出（被取消/崩溃/预算耗尽）⇒ 保留快照，下一次仍可续", async () => {
+      // 与上一条成对：判据是"返回 vs 抛出"，不是"成功 vs 失败"。抛出意味着这一轮
+      // 没跑到终局，现场是合法的续跑点 —— 清掉它等于把长 run 的中断现场丢给用户重做。
+      const store = inst(h.projectInstances);
+      (store.get as Mock).mockReturnValue({
+        id: "p-thrown",
+        requirement: "需求甲",
+        batchesJson: JSON.stringify(plan),
+      });
+      h.execute.mockImplementationOnce(async () => {
+        writeJournal("p-thrown", realSnapshot as never);
+        throw new Error("cancelled mid-run");
+      });
+
+      await expect(
+        (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-thrown"),
+      ).rejects.toThrow(/cancelled mid-run/);
+
+      // 现场留着 —— 下一次启动会续上。
+      expect(readJournal("p-thrown").kind).toBe("resumable");
+
+      h.execute.mockResolvedValue(undefined);
+      await (h.ipcMain as FakeIpcMain).invoke("orchestration:start", "p-thrown");
+      const [, , opts] = (h.execute as Mock).mock.calls[1] as [Task[][], string, { resume?: unknown }];
+      expect(opts.resume).toBeDefined();
     });
   });
 
-  it("ensureWorkspace 幂等：脚手架已存在时不重写（重复 start 不冲掉手改内容）", () => {    // 二次调用走的是 `if (!fs.existsSync(pkg))` / `if (!fs.existsSync(file))`
+  it("ensureWorkspace 幂等：脚手架已存在时不重写（重复 start 不冲掉手改内容）", () => {
+    // 二次调用走的是 `if (!fs.existsSync(pkg))` / `if (!fs.existsSync(file))`
     // 的 **else 分支** —— 头一次 start 只验证"写出来了"，没验证"第二次别再动"。
     // 幂等不是礼貌：智能体在项目里手改的 build.js / package.json，重跑一轮就被
     // 冲回模板，验证判据就跟这次会话的实际约定脱钩了。
