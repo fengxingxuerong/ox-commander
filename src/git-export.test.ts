@@ -6,6 +6,7 @@ import { execFileSync } from "node:child_process";
 import {
   BRANCH_RE,
   deliveryStamp,
+  deliveryTrailers,
   exportDeliveryBranch,
   formatCommitMessage,
   parseStatusZ,
@@ -389,6 +390,22 @@ describe("git-export · skippedPaths 的缺席语义（三元互换的 mutant �
  * 只断言拼串等于把"git 到底认不认它"交给运气。
  */
 describe("git-export · commit trailer", () => {
+  it("[16a] 两个事实映射到两行：指纹进 Ox-Receipt、zone 进 Ox-Zones（不许对调）", () => {
+    const trailers = deliveryTrailers({
+      zones: ["src/engine", "shared"],
+      receiptFingerprint: "abc123",
+    });
+    expect(trailers).toEqual([
+      { key: "Ox-Receipt", value: "abc123" },
+      { key: "Ox-Zones", value: "src/engine, shared" },
+    ]);
+    // 没有凭据时那一格是 undefined（由 formatCommitMessage 跳掉），不是空串、也不是抄 zone。
+    expect(deliveryTrailers({ zones: ["src"] })).toEqual([
+      { key: "Ox-Receipt", value: undefined },
+      { key: "Ox-Zones", value: "src" },
+    ]);
+  });
+
   it("[16] 没有 trailer 时 commit 信息逐字不变（不做 trim、不补空行）", () => {
     expect(formatCommitMessage("OxCommander delivery", undefined)).toBe("OxCommander delivery");
     expect(formatCommitMessage("OxCommander delivery", [])).toBe("OxCommander delivery");
@@ -396,6 +413,21 @@ describe("git-export · commit trailer", () => {
     expect(formatCommitMessage("msg  ", [{ key: "Ox Receipt", value: "abc" }])).toBe("msg  ");
     expect(formatCommitMessage("msg", [{ key: "Ox-Receipt", value: undefined }])).toBe("msg");
     expect(formatCommitMessage("msg", [{ key: "Ox-Receipt", value: "   " }])).toBe("msg");
+  });
+
+  it("[16b] 空值那一条只是被跳过，不打断后面的 —— 没有凭据时 Ox-Zones 仍然要写出来", () => {
+    // 这是**生产路径本身**：交付时没有凭据（宿主没接 sink），`deliveryTrailers` 给出的第
+    // 一条值是 undefined，第二条（zone）必须照样落到 commit 上。把"跳过一个"实现成
+    // "中断整圈"，正是这条用例要挡的错。
+    expect(formatCommitMessage("m", deliveryTrailers({ zones: ["src", "shared"] }))).toBe(
+      "m\n\nOx-Zones: src, shared",
+    );
+    expect(
+      formatCommitMessage("m", [
+        { key: "Ox-Receipt", value: "   " },
+        { key: "Ox-Zones", value: "src" },
+      ]),
+    ).toBe("m\n\nOx-Zones: src");
   });
 
   it("[17] trailer 接在空行之后，一条一行；正文尾部的空白被收干净", () => {

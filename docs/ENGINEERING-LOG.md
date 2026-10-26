@@ -58,12 +58,29 @@
 读回 `Ox-Receipt: <64 位指纹>` / `Ox-Zones: src`；`[21]` 反向钉住"没有 trailer 时 git 里也读不出
 任何 trailer"。只断言 `git commit -m` 的参数等于把"git 到底认不认它"交给运气。
 
-**门禁账**：`npm test` **3129 passed / 8 skipped（3137）**、106 个有可执行用例的文件；
+**一条自己找出来的裂缝（收尾时才补的）**：映射"哪个事实写进哪一行"原本直接写在装配点
+`electron/platform.ts` 里，而**装配点没有测试** —— 把 `Ox-Receipt` 的值粘成 `zones`、把
+`Ox-Zones` 的值粘成指纹，typecheck 一个错都不报（两个值都是字符串），用例也全绿。于是把它收成
+`deliveryTrailers`（`git-export.ts` 里的纯函数），由 `[16a]` 钉住"指纹进 `Ox-Receipt`、zone 进
+`Ox-Zones`、没有凭据时那一格是 `undefined` 而不是抄 zone"。判据的位置比判据的强度更重要：
+一个没有测试的装配点，等于一条没人看管的映射。
+
+**门禁账**：`npm test` **3131 passed / 8 skipped（3139）**、106 个有可执行用例的文件；
 `typecheck` / `lint` EXIT 0；`check:doc-claims` 绿。
-逐位点审计（`--mode=site`，每次只改一处）：`electron/engine/git-export.ts` **44/44**（211.0s）、
-`electron/platform.ts` **38/38**（106.8s）、`electron/engine/orchestrator.ts` **91/91**（333.4s）——
+逐位点审计（`--mode=site`，每次只改一处）：`electron/engine/git-export.ts` **44/44**（212.9s）、
+`electron/platform.ts` **38/38**（106.8s；把映射抽成纯函数后**重审一次** 38/38、67.6s ——
+抽函数改了装配点正文，旧账不作数）、`electron/engine/orchestrator.ts` **91/91**（333.4s）——
 三个受影响目标全杀，无存活。
 SITE_BASELINE 3191 → **3195**（git-export 40 → 44，其余两个目标位点数未变）、TARGETS 119 不变。
+
+**第二条负结果（整链 verify 抓到的活口）**：`formatCommitMessage` 里两处 `continue` 的第一处
+（`value.length === 0` 那条）在第一轮 site 审计时**存活**了 —— 我的用例要么给"全是空值"的输入，
+要么给"合法值在前、空值在后"，从来没喂过**"空值在前、合法值在后"**。而这恰好是**生产路径本身**：
+交付时没有凭据，`deliveryTrailers` 给出的第一条是 `undefined`，第二条 zone 必须照样落上。
+把 `continue` 改成 `break` 之后 commit 会**静默丢掉 `Ox-Zones`** —— 归因缺一半，而所有用例全绿。
+补 `[16b]`（直接拿 `deliveryTrailers` 的组合当输入）后重审 44/44 全杀。
+这一条记给下一个写"跳过 vs 中断"的人：**只有"混合顺序"的输入才分得清这两者**，
+单一类型的输入永远放过它。
 
 **一条按流程走的负结果**：第一次跑 site 审计时，git-export 的位点数从基线 40 涨到 44，
 脚本按漂移守卫判 FAIL（"位点涨了却仍然 PASS 等于每个位点都验过了的假象"）。处置不是抬基线了事，

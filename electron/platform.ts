@@ -16,7 +16,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { writeFileAtomic } from "./atomic-file";
 import { OrchestratorEngine, Scheduler, VariantStore, verifyProject } from "./engine";
-import { exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
+import { deliveryTrailers, exportDeliveryBranch, deliveryStamp } from "./engine/git-export";
 import { deliveryRemoteArgs, publishDeliveryRemote, type GitRemoteResult } from "./engine/git-remote";
 import { fetchGithubContext } from "./context/github-readonly";
 import type { OrchestratorCallbacks, RunSnapshot } from "./engine";
@@ -613,8 +613,8 @@ export function createPlatform(config: PlatformConfig): Platform {
       //
       // trailer（2026-10-26）：`Ox-Receipt` 指向本次凭据，`Ox-Zones` 指向这次交付
       // 归属的目录 —— 于是 commit 自己说得清"我是哪份凭据保下来的、动了哪儿"。
-      // 两个值都可能为空（没有凭据 / zones 为空），**由 `formatCommitMessage` 逐条跳过**，
-      // 这里不做条件拼装：少一层分支，就少一处会漂的地方。
+      // 映射本身在 `deliveryTrailers`（纯函数、有用例）：装配点没有测试，把字段与行的
+      // 对应关系留在这儿等于交给一次复制粘贴。
       ...(settings.exportDeliveryBranch
         ? {
             exportDelivery: (input: {
@@ -626,10 +626,7 @@ export function createPlatform(config: PlatformConfig): Platform {
                 ...input,
                 branch: `oxcommander/delivery-${deliveryStamp()}`,
                 message: `OxCommander delivery ${deliveryStamp()}`,
-                trailers: [
-                  { key: "Ox-Receipt", value: input.receiptFingerprint },
-                  { key: "Ox-Zones", value: input.zones.join(", ") },
-                ],
+                trailers: deliveryTrailers(input),
               }),
           }
         : {}),

@@ -89,6 +89,23 @@ export interface CommitTrailer {
 export const TRAILER_KEY_RE = /^[A-Za-z][A-Za-z0-9-]{0,38}$/;
 
 /**
+ * 交付导出的 trailer 清单：**两个事实 → 两行文本**的唯一映射。
+ *
+ * 为什么放这里而不是装配点：装配点（`electron/platform.ts`）没有测试，把"哪个字段写进
+ * 哪一行"留在那里，等于把这条映射交给一次复制粘贴 —— 两个值都是字符串，粘错了 TS 不报。
+ * 收成纯函数之后，"交换字段"这类错由用例当场抓住。
+ */
+export function deliveryTrailers(input: {
+  zones: readonly string[];
+  receiptFingerprint?: string;
+}): CommitTrailer[] {
+  return [
+    { key: "Ox-Receipt", value: input.receiptFingerprint },
+    { key: "Ox-Zones", value: input.zones.join(", ") },
+  ];
+}
+
+/**
  * 把 trailer 拼到 commit 信息末尾（空行分隔，一条一行）。
  *
  * 三条纪律：
