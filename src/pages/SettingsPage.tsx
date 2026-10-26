@@ -445,6 +445,28 @@ export function SettingsPage() {
           已发生的那一次照常记录 —— 总量始终能和服务商账单对上。
         </p>
         <div className="form-row">
+          <label htmlFor="on-unpriced-usage">端点不回报用量时</label>
+          <select
+            id="on-unpriced-usage"
+            value={draft.onUnpricedUsage ?? ""}
+            onChange={(e) => {
+              // 三态：空串 = 用缺省（配了预算就拦住），不是"allow" —— 把"没表态"
+              // 与"明确放行"存成同一个值，界面就再也没法表达"改回默认"。
+              const v = e.target.value;
+              patch({ onUnpricedUsage: v === "" ? undefined : (v as "block" | "allow") });
+            }}
+          >
+            <option value="">缺省（配了预算就拦住）</option>
+            <option value="block">拦住后续调用</option>
+            <option value="allow">只说破，照常放行</option>
+          </select>
+        </div>
+        <p className="muted">
+          预算闸只能拿端点**上报**的用量做判断。有些端点不回报用量，那部分支出谁也看不见 ——
+          选「拦住」时，出现这种调用之后下一次调用会在发出前被拒（不估算、不猜）。
+          没配预算时这一项没有作用。
+        </p>
+        <div className="form-row">
           <label htmlFor="run-wall-clock">单次运行墙钟上限（分钟）</label>
           <input
             id="run-wall-clock"

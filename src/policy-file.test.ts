@@ -17,6 +17,7 @@ import {
   commandPolicyOverrides,
   describePolicy,
   effectiveTokenBudget,
+  effectiveUnpricedUsage,
   forbiddenReadOverrides,
   mergePolicies,
   normalizePolicyFile,
@@ -120,6 +121,55 @@ describe("normalizePolicyFile · 预算口径", () => {
     const r = normalizePolicyFile({ version: 1 });
     expect(r.issues).toEqual([]);
     expect(r.policy.maxTokensPerRun).toBeUndefined();
+  });
+});
+
+describe("normalizePolicyFile · 盲区档（onUnpricedUsage）", () => {
+  it("只认 block / allow 两个值", () => {
+    expect(normalizePolicyFile({ version: 1, onUnpricedUsage: "block" }).policy.onUnpricedUsage).toBe("block");
+    expect(normalizePolicyFile({ version: 1, onUnpricedUsage: "allow" }).policy.onUnpricedUsage).toBe("allow");
+  });
+
+  it("认不出的值 ⇒ 忽略并报问题（安全开关静默失效是最坏的失败）", () => {
+    for (const bad of ["Block", "deny", "", 1, true]) {
+      const r = normalizePolicyFile({ version: 1, onUnpricedUsage: bad });
+      expect(r.policy.onUnpricedUsage, String(bad)).toBeUndefined();
+      expect(r.issues.join(), String(bad)).toContain("onUnpricedUsage");
+    }
+  });
+
+  it("没写就不报问题", () => {
+    expect(normalizePolicyFile({ version: 1 }).issues).toEqual([]);
+  });
+
+  it("describePolicy 把它念出来（拦住/放行），没写就不念", () => {
+    expect(describePolicy({ version: 1, onUnpricedUsage: "block" })).toContain("拦住");
+    expect(describePolicy({ version: 1, onUnpricedUsage: "allow" })).toContain("放行");
+    expect(describePolicy({ version: 1 })).toBe("（空策略：规则一条不改）");
+  });
+});
+
+describe("mergePolicies · 盲区档取更严", () => {
+  it("任一来源要 block，合出来就是 block（allow 不能把它抵消）", () => {
+    expect(
+      mergePolicies([{ version: 1, onUnpricedUsage: "allow" }, { version: 1, onUnpricedUsage: "block" }])
+        .onUnpricedUsage,
+    ).toBe("block");
+  });
+
+  it("只有 allow 才得 allow；都没写就不出这个键", () => {
+    expect(mergePolicies([{ version: 1 }, { version: 1, onUnpricedUsage: "allow" }]).onUnpricedUsage).toBe("allow");
+    expect("onUnpricedUsage" in mergePolicies([{ version: 1 }])).toBe(false);
+  });
+});
+
+describe("effectiveUnpricedUsage · 策略与设置冲突时取更严", () => {
+  it("任一侧 block 就是 block；两侧都没表态才是 undefined（缺省由装配点定）", () => {
+    expect(effectiveUnpricedUsage("block", "allow")).toBe("block");
+    expect(effectiveUnpricedUsage("allow", "block")).toBe("block");
+    expect(effectiveUnpricedUsage("allow", undefined)).toBe("allow");
+    expect(effectiveUnpricedUsage(undefined, "block")).toBe("block");
+    expect(effectiveUnpricedUsage(undefined, undefined)).toBeUndefined();
   });
 });
 

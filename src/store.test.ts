@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_ESCALATION_POLICY, DEFAULT_SETTINGS } from "../shared/types";
-import { isFailureClass } from "../shared/types";
+import { isFailureClass, isUnpricedUsage } from "../shared/types";
 import { DEFAULT_LLM_POOL } from "../shared/providers";
 import { isEventForChat, useApp } from "./store";
 import { buildReceipt } from "../shared/delivery-receipt";
@@ -271,6 +271,24 @@ describe("handleEvent · taskOutcome", () => {
    * （`electron/audit-log.ts:218` 直接 `JSON.parse(line) as AuditRecord`），
    * 旧版本写下的、或被人手改过的一行都可能带出登记外的值。
    */
+  /**
+   * 盲区档的收窄（2026-10-26）。与 `errorClass` 同一条纪律：边界上的数据不信形状。
+   * 这里的失败方式更安静 —— 一个拼错的 `Block` 若被当成合法值，闸门会"看起来配上了、
+   * 实际按缺省跑"，而日志里一个字都不会说。
+   */
+  describe("onUnpricedUsage 的边界收窄", () => {
+    it("只认 block / allow 两个小写值", () => {
+      expect(isUnpricedUsage("block")).toBe(true);
+      expect(isUnpricedUsage("allow")).toBe(true);
+    });
+
+    it("大小写、拼写、非字符串一律 false（不许把 'Block' 当 block）", () => {
+      for (const bad of ["Block", "ALLOW", "deny", "", 1, true, null, undefined, ["block"]]) {
+        expect(isUnpricedUsage(bad), String(bad)).toBe(false);
+      }
+    });
+  });
+
   describe("errorClass 的边界收窄", () => {
     it("未登记的字符串类别归到 unknown，不原样透传", () => {
       emit({ type: "taskOutcome", taskId: "t1", ok: false, logDigest: "boom", errorClass: "quantum-flux" });

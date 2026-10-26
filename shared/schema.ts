@@ -5,7 +5,7 @@ import type {
   Task,
   VerificationKind,
 } from "./types";
-import { ARBITRATION_MODES, ESCALATION_POLICY_SETTINGS, isArbitrationMode, isEscalationPolicySetting } from "./types";
+import { ARBITRATION_MODES, ESCALATION_POLICY_SETTINGS, isArbitrationMode, isEscalationPolicySetting, isUnpricedUsage, UNPRICED_USAGE_MODES } from "./types";
 import { isLoopbackHttpUrl } from "./page-smoke";
 import { APPROVAL_POLICIES, SANDBOX_MODES, isApprovalPolicy, isSandboxMode } from "./tools/policy";
 
@@ -337,6 +337,7 @@ export function parseSettings(raw: unknown): ProjectSettings {
   stringArrayOpt(o, "llmPool", issues);
   stringArrayOpt(o, "disabledKeyVars", issues);
   enumOpt(o, "arbitration", isArbitrationMode, Object.keys(ARBITRATION_MODES).join("/"), issues);
+  enumOpt(o, "onUnpricedUsage", isUnpricedUsage, UNPRICED_USAGE_MODES.join("/"), issues);
   enumOpt(o, "sandboxMode", isSandboxMode, Object.keys(SANDBOX_MODES).join("/"), issues);
   enumOpt(o, "approvalPolicy", isApprovalPolicy, Object.keys(APPROVAL_POLICIES).join("/"), issues);
   stringArrayOpt(o, "approvalCommands", issues);

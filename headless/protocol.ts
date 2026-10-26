@@ -25,10 +25,13 @@ import {
   ARBITRATION_MODES,
   DEFAULT_SETTINGS,
   isArbitrationMode,
+  isUnpricedUsage,
+  UNPRICED_USAGE_MODES,
   type ArbitrationMode,
   type EscalationPolicySetting,
   type PrdDocument,
   type ProjectSettings,
+  type UnpricedUsage,
   type VerificationCommand,
   type VerificationKind,
 } from "../shared/types";
@@ -119,6 +122,12 @@ export interface HeadlessSpec {
    * (omit the field to express unlimited).
    */
   maxTokensPerRun?: number;
+  /**
+   * 预算闸撞上"端点没上报用量"时的处置（2026-10-26，第七轮竞品吸收 2）。
+   * `block`（配了预算时的缺省）：出现未上报用量之后，下一次调用在发出前被拒；
+   * `allow`：只说破、照常放行。不传 = 由装配点按"有没有预算"决定。
+   */
+  onUnpricedUsage?: UnpricedUsage;
   /**
    * 本次 run 的墙钟上限（毫秒）。只在批 / 轮边界生效，不掐断在途请求 ——
    * 那两件事分别归 agent 的 runDeadline 与单次 HTTP 超时管。省略或 `0` = 不限。
@@ -265,6 +274,7 @@ const KNOWN_FIELDS = new Set<string>([
   "arbitration",
   "maxParallelRuns",
   "maxTokensPerRun",
+  "onUnpricedUsage",
   "runWallClockMs",
   "brainTimeoutMs",
   "executorTimeoutMs",
@@ -468,6 +478,17 @@ export function parseSpec(rawText: string): ParseResult {
     }
   }
 
+  let onUnpricedUsage: UnpricedUsage | undefined;
+  if (raw.onUnpricedUsage !== undefined) {
+    // 协议层与设置页同一口径：认不出就**报 issue**，不静默当成缺省 ——
+    // "我以为拦住了"是安全开关最坏的失败方式（与 `maxTokensPerRun` 同一条）。
+    if (isUnpricedUsage(raw.onUnpricedUsage)) {
+      onUnpricedUsage = raw.onUnpricedUsage;
+    } else {
+      issues.push(`onUnpricedUsage 只能是 ${UNPRICED_USAGE_MODES.join(" / ")}`);
+    }
+  }
+
   let brainTimeoutMs: number | undefined;
   if (raw.brainTimeoutMs !== undefined) {
     // 与桌面端设置页的口径**刻意不同**：那里 0 与负数都按"用内置默认"处理
@@ -643,6 +664,7 @@ export function parseSpec(rawText: string): ParseResult {
     ...(agentRouter !== undefined ? { agentRouter } : {}),
     ...(arbitration ? { arbitration } : {}),
     ...(maxTokensPerRun !== undefined ? { maxTokensPerRun } : {}),
+    ...(onUnpricedUsage !== undefined ? { onUnpricedUsage } : {}),
     ...(typeof raw.runWallClockMs === "number" ? { runWallClockMs: raw.runWallClockMs } : {}),
     ...(brainTimeoutMs !== undefined ? { brainTimeoutMs } : {}),
     ...(executorTimeoutMs !== undefined ? { executorTimeoutMs } : {}),

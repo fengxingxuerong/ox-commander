@@ -1,5 +1,6 @@
 import type { ChatRequest, ChatResponse } from "./providers";
 import type { LlmClient } from "./llm-client";
+import type { UnpricedUsage } from "./types";
 
 /**
  * Token 用量的**采集、汇总与预算闸门**（纯逻辑，不碰 node/DOM）。
@@ -57,6 +58,32 @@ function validLimit(max: number | undefined): number | undefined {
 }
 
 /**
+ * 预算闸撞上"端点没上报用量"时的拒绝（2026-10-26，第七轮竞品吸收 2）。
+ *
+ * 与 `BudgetExceededError` 分开的理由是**处置不同**：那个说"你花超了，调大上限或分拆"，
+ * 这个说"我看不见你花了多少，所以不再放行"——前者加钱能解决，后者要换端点或显式放行。
+ * 合成一个类会让宿主把两种完全不同的补救办法混为一谈。
+ *
+ * 为什么不做成"估算后按估算值拦"：没有本机校准过的字符→token 分布，估出来的数会被
+ * 当成账单口径读，比不估更坏（与 `budgetBlindNote` 同一条理由）。
+ */
+export class UnpricedUsageError extends Error {
+  readonly unmeasuredCalls: number;
+  readonly limit: number;
+
+  constructor(unmeasuredCalls: number, limit: number) {
+    super(
+      `已有 ${unmeasuredCalls} 次调用端点未上报用量 ⇒ onUnpricedUsage=block：` +
+        `拒绝在看不见支出的情况下继续调用（maxTokensPerRun=${limit} 对它们无效）。` +
+        `改成 allow 可放行，或换一个在响应里回报 usage 的端点`,
+    );
+    this.name = "UnpricedUsageError";
+    this.unmeasuredCalls = unmeasuredCalls;
+    this.limit = limit;
+  }
+}
+
+/**
  * 预算闸"看不见"某些调用时的那句提示（不带前缀，方便并进另一行）。
  *
  * 为什么需要：闸门只能拿**端点上报的** `usage.total_tokens` 做判断，而有些端点
@@ -92,22 +119,39 @@ export class UsageMeter {
   private measured = 0;
   private readonly byModel = new Map<string, number>();
   private readonly limit: number | undefined;
+  private readonly unpriced: UnpricedUsage | undefined;
   private readonly onBudgetBlind: ((info: { limit: number; unmeasuredCalls: number }) => void) | undefined;
   /** 半盲提示只说一次：每跳都喊一遍会淹掉日志，而事实不会变。 */
   private blindAnnounced = false;
 
   constructor(opts?: {
     maxTokensPerRun?: number;
+    /**
+     * 盲区两档（见 `UnpricedUsage`）。缺省（`undefined`）= 只说不拦，与历史行为一致 ——
+     * **默认值由装配点决定**（`platform.ts` 在配了预算时给 `block`）：把默认值藏在
+     * 这个类里，会让"我什么都没配"与"宿主替我选了 block"两件事长得一模一样。
+     */
+    onUnpricedUsage?: UnpricedUsage;
     onBudgetBlind?: (info: { limit: number; unmeasuredCalls: number }) => void;
   }) {
     this.limit = validLimit(opts?.maxTokensPerRun);
+    this.unpriced = opts?.onUnpricedUsage;
     this.onBudgetBlind = opts?.onBudgetBlind;
   }
 
-  /** 已用 token 是否达到预算上限；达到则抛 `BudgetExceededError`。 */
+  /**
+   * 开闸前看一眼：超预算 / 或"看不见就不放行"档下有盲区，都抛。
+   *
+   * 顺序是承重的：先判**确定**超限（`total` 已达上限），再判**不确定**的盲区 ——
+   * 两条同时成立时报更确定的那条（"你确实花超了"比"我看不见"更可行动）。
+   */
   assertWithinBudget(): void {
-    if (this.limit !== undefined && this.total >= this.limit) {
+    if (this.limit === undefined) return;
+    if (this.total >= this.limit) {
       throw new BudgetExceededError(this.total, this.limit);
+    }
+    if (this.unpriced === "block" && this.calls > this.measured) {
+      throw new UnpricedUsageError(this.calls - this.measured, this.limit);
     }
   }
 

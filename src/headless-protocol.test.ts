@@ -444,6 +444,27 @@ describe("parseSpec · maxTokensPerRun", () => {
   });
 });
 
+describe("parseSpec · onUnpricedUsage", () => {
+  it("block / allow 流进 settings；省略时不出现该字段，也不产生警告（KNOWN_FIELDS 已注册）", () => {
+    for (const mode of ["block", "allow"] as const) {
+      const spec = parse(JSON.stringify({ ...LEGACY_SPEC, onUnpricedUsage: mode }));
+      expect(spec.settings.onUnpricedUsage).toBe(mode);
+      expect(spec.warnings).toEqual([]);
+    }
+    const bare = parse(JSON.stringify(LEGACY_SPEC));
+    expect(bare.settings.onUnpricedUsage).toBeUndefined();
+    expect(bare.warnings).toEqual([]);
+  });
+
+  it("认不出的值被拒绝（安全开关不能静默退化成本档的缺省行为）", () => {
+    for (const bad of ["Block", "deny", "", 1, true]) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, onUnpricedUsage: bad }));
+      expect(r.ok, `onUnpricedUsage=${String(bad)}`).toBe(false);
+      if (!r.ok) expect(r.message).toContain("onUnpricedUsage");
+    }
+  });
+});
+
 describe("parseSpec · brainTimeoutMs", () => {
   it("合法正数流进 settings；省略时不出现该字段，也不产生警告（KNOWN_FIELDS 已注册）", () => {
     const spec = parse(JSON.stringify({ ...LEGACY_SPEC, brainTimeoutMs: 45_000 }));

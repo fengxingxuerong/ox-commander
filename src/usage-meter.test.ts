@@ -3,6 +3,7 @@ import {
   BudgetExceededError,
   formatUsageLine,
   meteredLlm,
+  UnpricedUsageError,
   usageFact,
   UsageMeter,
   type UsageSnapshot,
@@ -194,6 +195,89 @@ describe("UsageMeter · maxTokensPerRun 预算闸门", () => {
     const limited = new UsageMeter({ maxTokensPerRun: 500 });
     expect(limited.snapshot().limit).toBe(500);
     expect("limit" in new UsageMeter().snapshot()).toBe(false);
+  });
+});
+
+/**
+ * 盲区档（2026-10-26，第七轮竞品吸收 2）。
+ *
+ * 这一组守的是**"看不见就别继续花"**：副本防线不是把估算值当真，而是拒绝在
+ * 看不见支出时继续调用。三档的关系不能串：没配预算 → 没有闸可盲；配了预算但没表态 →
+ * 只说不拦；明确 block → 拒；明确 allow → 放行。
+ */
+describe("UsageMeter · 盲区档 onUnpricedUsage", () => {
+  it("block：出现过未上报用量的调用之后，下一次调用前就被拒（不估算、不猜）", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 1000, onUnpricedUsage: "block" });
+    meter.record(sample({ usageTokens: 10 })); // 看得见的一次：不该拒
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+    meter.record(sample({ usageTokens: undefined })); // 端点没回报用量
+    expect(() => meter.assertWithinBudget()).toThrow(UnpricedUsageError);
+  });
+
+  it("block 的报错要可行动：说出几次、哪道闸、怎么放行", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 1000, onUnpricedUsage: "block" });
+    meter.record(sample({ usageTokens: undefined }));
+    try {
+      meter.assertWithinBudget();
+      expect.unreachable("应当抛出 UnpricedUsageError");
+    } catch (err) {
+      const e = err as UnpricedUsageError;
+      expect(e.unmeasuredCalls).toBe(1);
+      expect(e.limit).toBe(1000);
+      expect(e.message).toContain("onUnpricedUsage=block");
+      expect(e.message).toContain("allow");
+      expect(e.message).toContain("1000");
+    }
+  });
+
+  it("allow：盲区只进账、不拒（与历史行为逐字相同）", () => {
+    const fired: number[] = [];
+    const meter = new UsageMeter({
+      maxTokensPerRun: 1000,
+      onUnpricedUsage: "allow",
+      onBudgetBlind: (info) => fired.push(info.unmeasuredCalls),
+    });
+    meter.record(sample({ usageTokens: undefined }));
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+    // 说破的那一条仍然只喊一次（放行不等于闭嘴，安静放行才是坏的失败方式）
+    expect(fired).toEqual([1]);
+    const s = meter.snapshot();
+    expect(s.calls - s.measuredCalls).toBe(1);
+  });
+
+  it("没表态（undefined）：只说不拦 —— 缺省值由装配点决定，不藏在 meter 里", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 1000 });
+    meter.record(sample({ usageTokens: undefined }));
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+  });
+
+  it("没配预算时 block 也无从拦：没有闸可盲，拒了只会无缘无故停跑", () => {
+    const meter = new UsageMeter({ onUnpricedUsage: "block" });
+    meter.record(sample({ usageTokens: undefined }));
+    expect(() => meter.assertWithinBudget()).not.toThrow();
+  });
+
+  it("两条同时成立时报更确定的那个：确实超限优先于「看不见」", () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 100, onUnpricedUsage: "block" });
+    meter.record(sample({ usageTokens: undefined }));
+    meter.record(sample({ usageTokens: 150 }));
+    expect(() => meter.assertWithinBudget()).toThrow(BudgetExceededError);
+  });
+
+  it("meteredLlm：block 档下第二次调用根本到不了内层（闸门在转发之前）", async () => {
+    const meter = new UsageMeter({ maxTokensPerRun: 10_000, onUnpricedUsage: "block" });
+    let innerCalls = 0;
+    const inner: LlmClient = {
+      async chat() {
+        innerCalls += 1;
+        // 第一次不回报用量（模拟不报 usage 的端点），第二次本该正常
+        return { content: "x", provider: "p", model: "m", ...(innerCalls === 1 ? {} : { usageTokens: 5 }) };
+      },
+    };
+    const wrapped = meteredLlm(inner, meter);
+    await wrapped.chat({ messages: [] });
+    await expect(wrapped.chat({ messages: [] })).rejects.toBeInstanceOf(UnpricedUsageError);
+    expect(innerCalls).toBe(1);
   });
 });
 

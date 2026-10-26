@@ -1821,6 +1821,29 @@ describe("SettingsPage", () => {
     expect(saved.maxTokensPerRun).toBe(250000);
   });
 
+  it("盲区档三态：选「拦住」存 block，改回「缺省」存的是 undefined（不是 allow）", async () => {
+    render(<SettingsPage />);
+    const save = await screen.findByRole("button", { name: "保存设置" });
+    const select = await screen.findByLabelText("端点不回报用量时");
+
+    fireEvent.change(select, { target: { value: "block" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0].onUnpricedUsage).toBe("block");
+
+    fireEvent.change(select, { target: { value: "allow" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.length).toBeGreaterThanOrEqual(2));
+    expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0].onUnpricedUsage).toBe("allow");
+
+    // 改回缺省：存 undefined —— 存成 "allow" 会让"我没表态"与"我明确放行"永远分不开。
+    fireEvent.change(select, { target: { value: "" } });
+    fireEvent.click(save);
+    await waitFor(() => expect(vi.mocked(window.oxCommander.saveSettings).mock.calls.length).toBeGreaterThanOrEqual(3));
+    const back = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0];
+    expect("onUnpricedUsage" in back ? back.onUnpricedUsage : undefined).toBeUndefined();
+  });
+
   it("大脑层超时按秒填、按毫秒存；填 0 是『用默认』而不是 0 毫秒", async () => {
     render(<SettingsPage />);
     const input = await screen.findByLabelText("大脑层单次调用超时（秒）");

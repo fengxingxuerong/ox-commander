@@ -14,6 +14,8 @@
  *   · 只能加严不能放宽 —— 见 `policyCommandOptions` 的注释。
  */
 
+import { isUnpricedUsage, type UnpricedUsage } from "./types";
+
 /** 当前认识的策略版本。 */
 export const POLICY_VERSION = 1;
 
@@ -54,6 +56,12 @@ export interface PolicyFile {
   forbidRead?: string[];
   /** token 软上限；与 `ProjectSettings.maxTokensPerRun` 冲突时取**更小**的那个。 */
   maxTokensPerRun?: number;
+  /**
+   * 预算闸撞上"端点没上报用量"时的处置（2026-10-26，与 `ProjectSettings.onUnpricedUsage`
+   * 同一档）。与预算取更小的方向一致：这里的取舍也是**取更严**——任何一份策略写了
+   * `block`，合成结果就是 `block`（放宽需要显式写 `allow` 且没有任何一份要求 block）。
+   */
+  onUnpricedUsage?: UnpricedUsage;
 }
 
 export interface NormalizedPolicy {
@@ -130,6 +138,16 @@ export function normalizePolicyFile(raw: unknown): NormalizedPolicy {
       issues.push(`maxTokensPerRun 无效（${String(budget)}）：必须是正数，已忽略`);
     }
   }
+
+  const unpriced = obj.onUnpricedUsage;
+  if (unpriced !== undefined) {
+    if (isUnpricedUsage(unpriced)) {
+      policy.onUnpricedUsage = unpriced;
+    } else {
+      // 静默丢掉会让"我以为拦住了"变成假的 —— 说破，然后按缺省走。
+      issues.push(`onUnpricedUsage 无效（${String(unpriced)}）：只能是 block / allow，已忽略`);
+    }
+  }
   return { policy, issues };
 }
 
@@ -143,6 +161,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   const forbid = new Set<string>();
   const forbidRead = new Set<string>();
   let budget: number | undefined;
+  let unpriced: UnpricedUsage | undefined;
   for (const f of files) {
     for (const c of f.denyCommands ?? []) deny.add(c);
     for (const c of f.denyGitSubcommands ?? []) denyGit.add(c);
@@ -155,6 +174,10 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
     if (f.maxTokensPerRun !== undefined) {
       budget = budget === undefined ? f.maxTokensPerRun : Math.min(budget, f.maxTokensPerRun);
     }
+    // 盲区档取**更严**：任何一份说 block 就 block。与预算"取更小"同一方向 ——
+    // 一条更宽的规则不该把别人写下的"拦住"抹掉。
+    if (f.onUnpricedUsage === "block") unpriced = "block";
+    else if (unpriced === undefined) unpriced = f.onUnpricedUsage;
   }
   if (deny.size > 0) out.denyCommands = [...deny].sort();
   if (denyGit.size > 0) out.denyGitSubcommands = [...denyGit].sort();
@@ -163,6 +186,7 @@ export function mergePolicies(files: readonly PolicyFile[]): PolicyFile {
   if (forbid.size > 0) out.forbidWrite = [...forbid].sort();
   if (forbidRead.size > 0) out.forbidRead = [...forbidRead].sort();
   if (budget !== undefined) out.maxTokensPerRun = budget;
+  if (unpriced !== undefined) out.onUnpricedUsage = unpriced;
   return out;
 }
 
@@ -259,8 +283,22 @@ export function effectiveTokenBudget(
   return Math.min(a, b);
 }
 
-/** 一行人话，给设置页/日志说"这份策略加了什么"。 */
-export function describePolicy(policy: PolicyFile): string {
+/**
+ * 策略 → 盲区档（与 `effectiveTokenBudget` 同一方向：**取更严**）。
+ *
+ * `block` 胜出：任一来源要求"看不见就别放行"，另一来源的 `allow` 不能把它抵消。
+ * 都写 `allow` 才是 allow；都没写时返回 undefined —— 缺省值由装配点决定
+ * （`platform.ts`：配了预算就给 `block`），不藏在这里。
+ */
+export function effectiveUnpricedUsage(
+  policyValue: UnpricedUsage | undefined,
+  settingsValue: UnpricedUsage | undefined,
+): UnpricedUsage | undefined {
+  if (policyValue === "block" || settingsValue === "block") return "block";
+  return policyValue ?? settingsValue;
+}
+
+/** 一行人话，给设置页/日志说"这份策略加了什么"。 */export function describePolicy(policy: PolicyFile): string {
   const parts: string[] = [];
   if (policy.denyCommands?.length) parts.push(`禁用命令 ${policy.denyCommands.join("、")}`);
   if (policy.denyGitSubcommands?.length) parts.push(`禁用 git 子命令 ${policy.denyGitSubcommands.join("、")}`);
@@ -269,5 +307,8 @@ export function describePolicy(policy: PolicyFile): string {
   if (policy.forbidWrite?.length) parts.push(`禁止写入 ${policy.forbidWrite.join("、")}`);
   if (policy.forbidRead?.length) parts.push(`禁止读取 ${policy.forbidRead.join("、")}`);
   if (policy.maxTokensPerRun !== undefined) parts.push(`token 上限 ${policy.maxTokensPerRun}`);
+  if (policy.onUnpricedUsage !== undefined) {
+    parts.push(`未上报用量 ${policy.onUnpricedUsage === "block" ? "拦住" : "放行"}`);
+  }
   return parts.length > 0 ? parts.join("；") : "（空策略：规则一条不改）";
 }

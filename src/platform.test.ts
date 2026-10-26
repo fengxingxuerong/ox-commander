@@ -25,7 +25,7 @@ import {
   type VerificationKind,
   type VerificationReport,
 } from "../shared/types";
-import { BudgetExceededError, UsageMeter } from "../shared/usage-meter";
+import { BudgetExceededError, UnpricedUsageError, UsageMeter } from "../shared/usage-meter";
 
 /**
  * 透传式 spy：保留真实实现（现有用例依赖它），只多一层调用记录，
@@ -283,8 +283,7 @@ describe("createPlatform · brain client grade", () => {
     expect(platform.usage().calls).toBe(2);
   });
 
-  it("配了预算而端点不回报用量 ⇒ 日志当场说出这道闸看不见它", async () => {
-    const lines: string[] = [];
+  it("配了预算而端点不回报用量 ⇒ 日志当场说出这道闸看不见它", async () => {    const lines: string[] = [];
     const fake = {
       async chat() {
         return { content: "{}", provider: "injected", model: "m" }; // 没有 usageTokens
@@ -301,6 +300,98 @@ describe("createPlatform · brain client grade", () => {
     // 总量仍然是 0：没上报就是没上报，这里不拿估算冒充账单口径。
     expect(platform.usage().totalTokens).toBe(0);
     expect(platform.usage().calls).toBe(1);
+  });
+
+  it("配了预算且没表态 ⇒ 默认 block：出现未上报用量后下一次调用被拒（不是只写一行日志）", async () => {
+    const lines: string[] = [];
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "injected", model: "m" }; // 端点不回报用量
+      },
+    };
+    const platform = createPlatform({
+      settings: { ...settings(), maxTokensPerRun: 500 },
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: (l: string) => lines.push(l) },
+    });
+    // 启动横幅必须说清"按哪一档在拦"，并标出这是**缺省**而不是我配的。
+    const banner = lines.find((l) => l.startsWith("[budget] 上限"));
+    expect(banner).toContain("拦住后续调用");
+    expect(banner).toContain("（缺省）");
+    await platform.buildLlm().chat({ messages: [] });
+    await expect(platform.buildLlm().chat({ messages: [] })).rejects.toBeInstanceOf(UnpricedUsageError);
+  });
+
+  it("没配预算 ⇒ 连横幅都不打（没有闸可盲，别写一句废话）", () => {
+    const lines: string[] = [];
+    createPlatform({
+      settings: { ...settings(), onUnpricedUsage: "block" },
+      promptDir: tempDir(),
+      host: { log: (l: string) => lines.push(l) },
+    });
+    expect(lines.filter((l) => l.startsWith("[budget] 上限"))).toEqual([]);
+  });
+
+  it("设置里写 allow ⇒ 照常放行（盲区只说破）", async () => {
+    const lines: string[] = [];
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "injected", model: "m" };
+      },
+    };
+    const platform = createPlatform({
+      settings: { ...settings(), maxTokensPerRun: 500, onUnpricedUsage: "allow" },
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: (l: string) => lines.push(l) },
+    });
+    // 横幅说的是"放行"，且**不带**缺省标记（这一档是我自己配的）。
+    const banner = lines.find((l) => l.startsWith("[budget] 上限"));
+    expect(banner).toContain("只说破不放行处理");
+    expect(banner).not.toContain("（缺省）");
+    await platform.buildLlm().chat({ messages: [] });
+    await expect(platform.buildLlm().chat({ messages: [] })).resolves.toBeTruthy();
+  });
+
+  it("策略写 block、设置写 allow ⇒ 取更严（block）：一份更宽的设置不能架空策略", async () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, "p.json"), JSON.stringify({ version: 1, onUnpricedUsage: "block" }));
+    const lines: string[] = [];
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "injected", model: "m" };
+      },
+    };
+    const platform = createPlatform({
+      settings: { ...settings(), maxTokensPerRun: 500, onUnpricedUsage: "allow" },
+      promptDir: tempDir(),
+      policyDir: dir,
+      llm: fake as never,
+      host: { log: (l: string) => lines.push(l) },
+    });
+    // 策略盖过设置：横幅说"拦住"，且不是缺省（是策略写的）。
+    const banner = lines.find((l) => l.startsWith("[budget] 上限"));
+    expect(banner).toContain("拦住后续调用");
+    expect(banner).not.toContain("（缺省）");
+    await platform.buildLlm().chat({ messages: [] });
+    await expect(platform.buildLlm().chat({ messages: [] })).rejects.toBeInstanceOf(UnpricedUsageError);
+  });
+
+  it("没配预算 ⇒ 盲区档不生效：没有闸可盲，不能无缘无故停跑", async () => {
+    const fake = {
+      async chat() {
+        return { content: "{}", provider: "injected", model: "m" };
+      },
+    };
+    const platform = createPlatform({
+      settings: { ...settings(), onUnpricedUsage: "block" },
+      promptDir: tempDir(),
+      llm: fake as never,
+      host: { log: () => undefined },
+    });
+    await platform.buildLlm().chat({ messages: [] });
+    await expect(platform.buildLlm().chat({ messages: [] })).resolves.toBeTruthy();
   });
 
   it("可以自带 meter：宿主想复用同一个计数器时，platform.usage() 就是它的快照", async () => {

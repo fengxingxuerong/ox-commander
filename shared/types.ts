@@ -115,6 +115,21 @@ export function isFailureClass(value: unknown): value is FailureClass {
   return typeof value === "string" && (FAILURE_CLASSES as readonly string[]).includes(value);
 }
 
+/**
+ * 预算闸撞上"端点没上报用量"时的两档处置（2026-10-26）。
+ *
+ * 只有两档，因为这是一个**要不要继续花**的问题，不是程度问题：
+ * `block` = 看不见就不放行；`allow` = 看得见的算数、看不见的说破但放行。
+ */
+export type UnpricedUsage = "block" | "allow";
+
+/** `UnpricedUsage` 的运行时值域（边界数据不信形状，与 `FAILURE_CLASSES` 同一条纪律）。 */
+export const UNPRICED_USAGE_MODES = ["block", "allow"] as const satisfies readonly UnpricedUsage[];
+
+export function isUnpricedUsage(value: unknown): value is UnpricedUsage {
+  return typeof value === "string" && (UNPRICED_USAGE_MODES as readonly string[]).includes(value);
+}
+
 export interface PrdDocument {
   goal: string;
   features: string[];
@@ -452,6 +467,20 @@ export interface ProjectSettings {
    * 想禁用调用应走能力路由，而不是把预算设为 0。
    */
   maxTokensPerRun?: number;
+  /**
+   * 预算闸遇到"端点没上报用量"时的处置（2026-10-26，第七轮竞品吸收 2）。
+   *
+   * 背景：闸门只拿端点**上报**的 `usage.total_tokens` 判断，而有些端点根本不回报 ——
+   * 那些调用永远进不了 `totalTokens`，于是 `maxTokensPerRun` 对它们形同虚设。
+   *
+   * - `"block"`：已经出现过未上报用量的调用之后，**下一次调用在发出前被拒**
+   *   （`UnpricedUsageError`）—— 不猜、不估算，就是不让你在看不见支出的情况下继续花；
+   * - `"allow"`：只把盲区说破（`budgetBlindNote`），照常放行。
+   *
+   * 缺省：**配了预算时按 `block`**（设了上限就是想让它真拦住），没配预算时这个开关
+   * 没有意义（没有闸可盲）。策略文件里也能写，冲突时 `block` 胜出。
+   */
+  onUnpricedUsage?: UnpricedUsage;
   /**
    * 交付后把本次 run 的 zone 内改动导出成 `git 分支 + commit`（5.7 本地半边，
    * 2026-10-11）。缺省 = 关。分支名 `oxcommander/delivery-<时间戳>`；commit 只收

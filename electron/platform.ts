@@ -35,6 +35,7 @@ import {
   describePolicy,
   approvalGateOf,
   effectiveTokenBudget,
+  effectiveUnpricedUsage,
   pathPolicyOverrides,
 } from "../shared/policy-file";
 import { loadPolicyDirs } from "./sandbox/policy-dir";
@@ -46,6 +47,7 @@ import type {
   ArbitrationMode,
   EscalationAction,
   ProjectSettings,
+  UnpricedUsage,
   VerificationCommand,
   VerificationReport,
 } from "../shared/types";
@@ -367,6 +369,24 @@ export function createPlatform(config: PlatformConfig): Platform {
   }
 
   /**
+   * 盲区档（2026-10-26，第七轮竞品吸收 2）：端点不回报用量时，"看得见的那部分"之外
+   * 还有多少支出没人知道。`block` = 出现一次未上报就不再放行，`allow` = 说破但放行。
+   *
+   * **缺省取 `block`**（只在配了预算时）：设了上限就是想让它真拦住 —— 一个"看不见支出"
+   * 的闸报绿，比没配预算更坏（它让人以为有保护）。没配预算时这条无意义（没有闸可盲），
+   * 返回 undefined，不往日志里写一句废话。
+   */
+  const configuredUnpriced = effectiveUnpricedUsage(policy?.onUnpricedUsage, settings.onUnpricedUsage);
+  const unpricedMode: UnpricedUsage | undefined =
+    tokenBudget === undefined ? undefined : (configuredUnpriced ?? "block");
+  if (tokenBudget !== undefined) {
+    log(
+      `[budget] 上限 ${tokenBudget}；未上报用量处置：${unpricedMode === "block" ? "拦住后续调用" : "只说破不放行处理"}` +
+        (configuredUnpriced === undefined ? "（缺省）" : ""),
+    );
+  }
+
+  /**
    * 路径面（P2-2）：策略的 `forbidWrite` 与内置地板取**并集**。
    *
    * 必须在这里算好再传，不能把 `policy.forbidWrite` 直接交给 `PathPolicy` ——
@@ -392,6 +412,8 @@ export function createPlatform(config: PlatformConfig): Platform {
             maxTokensPerRun: tokenBudget,
             // 第一跳没上报用量就说，而不是等 run 结束才对着一行"总量 0"困惑。
             onBudgetBlind: (info) => log(`[budget] ${budgetBlindNote(info)}`),
+            // 盲区档随预算一起进 meter：它是闸门自己的语义，不是宿主的策略拼装。
+            ...(unpricedMode !== undefined ? { onUnpricedUsage: unpricedMode } : {}),
           }
         : undefined,
     );
