@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
 import { AgentsPanel } from "../components/AgentsPanel";
+import { AcceptanceEditor } from "../components/AcceptanceEditor";
+import { normalizeAcceptanceChecks } from "../../shared/acceptance";
 import { getProvider, PROVIDER_CATALOG, SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../../shared/providers";
 import {
   DEFAULT_ESCALATION_POLICY,
@@ -41,6 +43,8 @@ export function SettingsPage() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<string>("");
   const [keySecurity, setKeySecurity] = useState<{ encryptedAtRest: boolean; plaintextCount: number } | null>(null);
+  /** 验收判据在保存那一刻才归一化；这里只摆出问题清单（编辑期不打断输入）。 */
+  const [acceptanceIssues, setAcceptanceIssues] = useState<string[]>([]);
 
   // 挂载时异步拉一次设置：主进程在启动时已把 settings 塞进 store（首帧即准），
   // 这里只为"启动晚于设置变更/失败重载"兜底，不阻塞首帧渲染。
@@ -346,6 +350,32 @@ export function SettingsPage() {
             />
           </div>
         ))}
+      </section>
+
+      <section className="card">
+        <h2>操作者验收判据</h2>
+        <p className="card-sub">
+          跑<strong>交付物本身</strong>的机械验收：命令退出 0、输出含全部期望片段、产物真的在盘上，三条都满足才算过。
+          这些判据<strong>不进任务描述、不进规划提示</strong> —— 执行器看不到自己要被怎么验，所以它没法靠"改测试"
+          让验收变绿。留空 = 不跑这一层。
+        </p>
+        <AcceptanceEditor
+          checks={draft.acceptanceChecks ?? []}
+          onChange={(checks) => {
+            setAcceptanceIssues([]);
+            patch({ acceptanceChecks: checks.length > 0 ? checks : undefined });
+          }}
+        />
+        {acceptanceIssues.length > 0 && (
+          <div className="inline-error" role="alert">
+            <strong>验收判据还不能保存：</strong>
+            <ul className="plain-list">
+              {acceptanceIssues.map((issue, i) => (
+                <li key={i}>{issue}</li>
+              ))}
+            </ul>
+          </div>
+        )}
       </section>
 
       <section className="card">
@@ -656,9 +686,21 @@ export function SettingsPage() {
   );
 
   async function handleSave() {
+    // 验收判据的形状由共享归一化器判定（与 headless 协议、引擎边界同一套口径）：
+    // 有 issue 就不落盘 —— 一条被半解析的判据在凭据上看起来"通过了"，比没有更坏。
+    const acceptance = normalizeAcceptanceChecks(draft.acceptanceChecks);
+    if (acceptance.issues.length > 0) {
+      setAcceptanceIssues(acceptance.issues);
+      return;
+    }
+    setAcceptanceIssues([]);
     setSaving(true);
     try {
-      await saveSettings(draft);
+      await saveSettings({
+        ...draft,
+        // 空列表 = 没配：写成 undefined 而不是 []，让存储里"这次没配"与"配了空"不混。
+        acceptanceChecks: acceptance.checks.length > 0 ? acceptance.checks : undefined,
+      });
       // The store records failures instead of throwing, so navigate only when
       // the write actually landed — otherwise a failed save looks successful.
       if (!useApp.getState().settingsError) setPage("projects");

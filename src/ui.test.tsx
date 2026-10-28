@@ -25,6 +25,7 @@ import { PrdReviewPage } from "./pages/PrdReviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useApp } from "./store";
 import { DEFAULT_SETTINGS, type PrdDocument, type ProjectSettings, type Task, type VerificationReport } from "../shared/types";
+import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { AgentListResult, AgentSummary, AuditRecordView } from "./types";
 
 type Bridge = Window["oxCommander"];
@@ -259,6 +260,11 @@ function resetStore() {
     logs: [],
     tasks: {},
     verification: undefined,
+    // 上一轮的凭据/裁决同样属于"上一次运行"：夹具不清它，一个用例种下的凭据
+    // 会漏进后面的用例（实测：DeliveryPanel 用例种了 receipt，下一条 Board 用例
+    // 就渲染出多余卡片，点错了按钮）。
+    receipt: undefined,
+    receiptVerdict: undefined,
     escalations: [],
     conflicts: [],
     prd: undefined,
@@ -871,6 +877,42 @@ describe("BoardPage", () => {
         expect(window.oxCommander.readDeliveryFile).toHaveBeenCalledWith("p-1", "src/a.js"),
       );
       expect(await screen.findByText(/export const a = 1/)).toBeTruthy();
+    });
+
+    it("凭据里有操作者验收判据时单列结果（与自测命令分开）（B7）", async () => {
+      (window.oxCommander.deliveryGuide as ReturnType<typeof vi.fn>).mockResolvedValue(guide);
+      seedBoard();
+      const receipt: DeliveryReceipt = {
+        outcome: "blocked",
+        verified: true,
+        rounds: 0,
+        checks: [
+          { kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "" },
+          {
+            kind: "smoke",
+            ok: false,
+            exitCode: 1,
+            preexisting: false,
+            headline: "rows 对不上",
+            origin: "operator",
+            title: "CLI 报数",
+            command: "node",
+            args: ["src/cli.js", "a.csv"],
+          },
+        ],
+        tasks: [],
+        conflicts: [],
+        counts: { total: 0, done: 0, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 1, preexisting: 0 },
+        acceptance: { total: 1, passed: 0, failed: 1 },
+        headline: "未交付：0/0 个任务完成，1 条验证命令未通过；其中 1 条是操作者验收判据。",
+      };
+      useApp.setState({ receipt });
+      render(<BoardPage />);
+
+      expect(await screen.findByText(/操作者验收判据：0\/1 通过/)).toBeTruthy();
+      expect(screen.getAllByText("CLI 报数").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("node src/cli.js a.csv").length).toBeGreaterThan(0);
+      expect(screen.getAllByText("❌").length).toBeGreaterThan(0);
     });
 
     it("凭据已收束但本次没有改动时也出卡，并说清没有产物", async () => {
@@ -1528,6 +1570,58 @@ describe("PrdReviewPage", () => {
     const patch = vi.mocked(window.oxCommander.updatePrd).mock.calls[0]![1] as PrdDocument;
     expect(patch.goal).toBe("做一个更好的待办应用");
   });
+
+  it("确认页展示并保存操作者验收判据；批准开工前先把未保存的判据落盘（B7）", async () => {
+    useApp.setState({
+      prd: PRD,
+      batches: BATCHES,
+      activeProjectId: "p-1",
+      settings: { ...DEFAULT_SETTINGS },
+    });
+    render(<PrdReviewPage />);
+    expect(screen.getByText(/操作者验收判据（0 条/)).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加验收判据" }));
+    fireEvent.change(screen.getByLabelText("命令"), { target: { value: "node" } });
+    fireEvent.change(screen.getByLabelText("参数（空格分隔）"), { target: { value: "src/cli.js samples/a.csv" } });
+    fireEvent.change(screen.getByLabelText("输出必须包含（每行一条）"), {
+      target: { value: "rows=3\n\nrows=3" },
+    });
+    fireEvent.change(screen.getByLabelText("产物必须存在（每行一条，相对项目根）"), {
+      target: { value: "dist/index.js" },
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: /批准开工/ }));
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    // 归一化在保存那一刻发生：空行被剔、重复去掉，命令与两个期望都在。
+    expect(saved.acceptanceChecks).toEqual([
+      {
+        command: "node",
+        args: ["src/cli.js", "samples/a.csv"],
+        expectContains: ["rows=3"],
+        expectFiles: ["dist/index.js"],
+      },
+    ]);
+    await waitFor(() => expect(window.oxCommander.startOrchestration).toHaveBeenCalledWith("p-1"));
+  });
+
+  it("判据没保存成功就不开工（否则这一轮用的还是旧判据）", async () => {
+    useApp.setState({
+      prd: PRD,
+      batches: BATCHES,
+      activeProjectId: "p-1",
+      settings: { ...DEFAULT_SETTINGS },
+    });
+    vi.mocked(window.oxCommander.saveSettings).mockRejectedValue(new Error("磁盘满"));
+    render(<PrdReviewPage />);
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加验收判据" }));
+    fireEvent.change(screen.getByLabelText("命令"), { target: { value: "node" } });
+    fireEvent.click(screen.getByRole("button", { name: /批准开工/ }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("保存失败");
+    expect(window.oxCommander.startOrchestration).not.toHaveBeenCalled();
+  });
 });
 
 describe("AgentsPanel interactions", () => {
@@ -1910,6 +2004,51 @@ describe("SettingsPage", () => {
     const back = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
     expect(back.snapshotRoot).toBeUndefined();
     expect(back.escalationPolicy).toBe("redispatch_once"); // 其他控件的状态不被清空
+  });
+
+  it("操作者验收判据：编辑并保存进 settings（B7）", async () => {
+    render(<SettingsPage />);
+    const save = (await screen.findByRole("button", { name: "保存设置" })) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加验收判据" }));
+    fireEvent.change(screen.getByLabelText("名称（可选）"), { target: { value: "CLI 报数" } });
+    fireEvent.change(screen.getByLabelText("命令"), { target: { value: "node" } });
+    fireEvent.change(screen.getByLabelText("参数（空格分隔）"), {
+      target: { value: "src/cli.js samples/a.csv" },
+    });
+    fireEvent.change(screen.getByLabelText("输出必须包含（每行一条）"), {
+      target: { value: "rows=3\n rows=3 \n" },
+    });
+    fireEvent.change(screen.getByLabelText("产物必须存在（每行一条，相对项目根）"), {
+      target: { value: "dist/index.js" },
+    });
+    fireEvent.click(save);
+
+    await waitFor(() => expect(window.oxCommander.saveSettings).toHaveBeenCalled());
+    const saved = vi.mocked(window.oxCommander.saveSettings).mock.calls.at(-1)![0] as ProjectSettings;
+    expect(saved.acceptanceChecks).toEqual([
+      {
+        title: "CLI 报数",
+        command: "node",
+        args: ["src/cli.js", "samples/a.csv"],
+        expectContains: ["rows=3"],
+        expectFiles: ["dist/index.js"],
+      },
+    ]);
+  });
+
+  it("验收判据形状不合法时不落盘，并把问题逐条摆出来（B7）", async () => {
+    render(<SettingsPage />);
+    const save = (await screen.findByRole("button", { name: "保存设置" })) as HTMLButtonElement;
+    await waitFor(() => expect(save.disabled).toBe(false));
+
+    // 加了一条但命令是空的 —— 这是最普通的手滑，不能静默存成一条永真判据。
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加验收判据" }));
+    fireEvent.click(save);
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("command 必须是非空字符串");
+    expect(window.oxCommander.saveSettings).not.toHaveBeenCalled();
   });
 });
 

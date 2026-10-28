@@ -37,6 +37,16 @@ ok 翻成 `failed`（`errorClass=contract`）并摘出 `allDone`，让重修轮�
 - 顺序是承重的：放在 VERIFICATION 之后，它会表现成一条不归属任何 zone 的测试红。
 - 探针经 `OrchestratorDeps.fileExists` 注入；**没注入 = 没检查**，日志会明说，不会静默给绿。
 
+**操作者验收判据（B7，2026-10-28）**：规划期冒烟之后再跑一层**由操作者给定**的机械判据
+（`ProjectSettings.acceptanceChecks`：命令 + `expectContains` + `expectFiles`）。
+与冒烟共用 `runSmokeChecks` 那一套执行器（同沙箱门 / 超时 / 输出预算 / R1 判定），
+但**出处不同**：判据只活在 settings 里，不进任务描述、不进规划提示，执行器看不到。
+失败与冒烟同样硬拦交付、进重修（提示里明写"不要改判据"）；凭据里以 `origin: "operator"`
+单列，`counts` 不并入（判据账不是任务账）。没有 `fileExists` 探针时 `expectFiles` **按未通过处理**。
+入口只有一个来源 `settings.acceptanceChecks`：桌面端设置页与 PRD 确认页共用
+`components/AcceptanceEditor`（PRD 页「批准开工」在有未保存改动时先落盘、存失败不开工），
+看板凭据区按 `origin` 单列结果；headless 走 spec 字段。
+
 **重修循环**：`while (round <= maxRounds + extraRounds)`，默认 3 轮。循环**之前**先跑一次基线验证
 （只在全新 run 上，断点续跑不跑）：目标项目本来就红的命令会标 `[本次运行前就已失败]`，避免智能体
 去修与自己无关的历史失败。代价是每次运行多一轮验证命令（首败即停，基线只报第一条红）。

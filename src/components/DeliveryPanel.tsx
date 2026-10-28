@@ -158,6 +158,27 @@ export function DeliveryPanel() {
 
       <h4 className="delivery-subhead">怎么验收</h4>
       <p className="card-sub">在工作区根目录执行；凭据里的命令按原样列出，可独立复跑。</p>
+      {/* 操作者验收判据（B7）：这一块回答"别人给的判据过了没" ——
+          它和下面的自测命令刻意分开列：一个是执行器看不到的黑盒检查，一个是项目自己的门禁。 */}
+      {receipt?.acceptance ? (
+        <div className="acceptance-summary">
+          <p className="task-meta">
+            操作者验收判据：{receipt.acceptance.passed}/{receipt.acceptance.total} 通过
+            {receipt.acceptance.failed > 0 ? `（${receipt.acceptance.failed} 条未过）` : ""}
+          </p>
+          <ul className="acceptance-commands">
+            {receipt.checks
+              .filter((c) => c.origin === "operator")
+              .map((c, i) => (
+                <li key={`acc-${i}`} className="task-meta">
+                  <span className="acceptance-label">{c.ok ? "✅" : "❌"}</span>
+                  {c.title ?? "验收判据"}
+                  {c.command ? <code>{[c.command, ...(c.args ?? [])].join(" ")}</code> : null}
+                </li>
+              ))}
+          </ul>
+        </div>
+      ) : null}
       {guide.commands.length === 0 ? (
         <p className="muted">
           本次没有记录可复跑的命令（凭据为空，package.json 也没有 dev/start/preview/serve）。

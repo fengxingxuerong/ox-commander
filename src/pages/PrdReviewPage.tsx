@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useApp } from "../store";
-import type { PrdDocument, Task } from "../../shared/types";
+import { AcceptanceEditor } from "../components/AcceptanceEditor";
+import { normalizeAcceptanceChecks } from "../../shared/acceptance";
+import type { AcceptanceCheck, PrdDocument, Task } from "../../shared/types";
 
 type EditState = {
   goal: string;
@@ -83,10 +85,33 @@ export function PrdReviewPage() {
   const backToProjects = useApp((s) => s.backToProjects);
   const retryPlanning = useApp((s) => s.retryPlanning);
   const updatePrd = useApp((s) => s.updatePrd);
+  const settings = useApp((s) => s.settings);
+  const loadSettings = useApp((s) => s.loadSettings);
+  const saveSettings = useApp((s) => s.saveSettings);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState<EditState | null>(null);
   const [saving, setSaving] = useState(false);
+  /**
+   * 操作者验收判据（B7）：PRD 确认页是它**被看见**的地方 —— 判据与 PRD 的
+   * 自然语言验收标准并排摆着，操作者在批准开工前确认"机器到底要跑哪几条黑盒检查"。
+   * 它是项目设置的一部分（存进 `settings.acceptanceChecks`），不是 PRD 文档的字段：
+   * PRD 会被重新分解覆盖，判据不该跟着丢。
+   */
+  const [accDraft, setAccDraft] = useState<AcceptanceCheck[]>(settings?.acceptanceChecks ?? []);
+  const [accIssues, setAccIssues] = useState<string[]>([]);
+  const [accDirty, setAccDirty] = useState(false);
+  const [accSaving, setAccSaving] = useState(false);
+  const [accSaved, setAccSaved] = useState(false);
+
+  useEffect(() => {
+    if (!settings) void loadSettings();
+  }, [settings, loadSettings]);
+
+  // 设置异步到达时填进草稿；用户已经在编辑（dirty）就不覆盖 —— 那是他的输入。
+  useEffect(() => {
+    if (!accDirty) setAccDraft(settings?.acceptanceChecks ?? []);
+  }, [settings, accDirty]);
   // 规划日志自动跟随新输出（终端行为）
   const logRef = useRef<HTMLPreElement>(null);
   useEffect(() => {
@@ -147,6 +172,47 @@ export function PrdReviewPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  /**
+   * 保存验收判据到项目设置。返回是否真的落盘 —— 调用方（批准开工）据此决定
+   * 要不要继续：判据没存成功就开工，这一轮用的还是旧判据，而界面已经显示过新的。
+   */
+  const saveAcceptance = async (): Promise<boolean> => {
+    const normalized = normalizeAcceptanceChecks(accDraft);
+    if (normalized.issues.length > 0) {
+      setAccIssues(normalized.issues);
+      return false;
+    }
+    setAccIssues([]);
+    const current = useApp.getState().settings;
+    if (!current) {
+      setAccIssues(["设置还没读取成功（可能是设置文件损坏）—— 先修好它再保存判据。"]);
+      return false;
+    }
+    setAccSaving(true);
+    try {
+      await saveSettings({
+        ...current,
+        acceptanceChecks: normalized.checks.length > 0 ? normalized.checks : undefined,
+      });
+      const failure = useApp.getState().settingsError;
+      if (failure) {
+        setAccIssues([`保存失败：${failure}`]);
+        return false;
+      }
+      setAccDirty(false);
+      setAccSaved(true);
+      return true;
+    } finally {
+      setAccSaving(false);
+    }
+  };
+
+  /** 批准开工：先确保判据落盘（有未保存改动才写），再启动。 */
+  const approve = async () => {
+    if (accDirty && !(await saveAcceptance())) return;
+    await confirmAndExecute();
   };
 
   return (
@@ -236,6 +302,43 @@ export function PrdReviewPage() {
           </section>
 
           <section className="card">
+            <h2>🧪 操作者验收判据（{accDraft.length} 条，机械可判）</h2>
+            <p className="card-sub">
+              上面是 PRD 的<strong>自然语言</strong>验收标准；这里是机器真正会跑的黑盒检查：
+              命令退出 0、输出含全部期望片段、产物真在盘上，三条都满足才算过。
+              它们<strong>不进任务描述、不进规划提示</strong> —— 执行器看不到，也就没法靠改自测让验收变绿。
+              留空 = 本轮不跑这一层。
+            </p>
+            <AcceptanceEditor
+              checks={accDraft}
+              disabled={accSaving}
+              onChange={(checks) => {
+                setAccDraft(checks);
+                setAccDirty(true);
+                setAccSaved(false);
+                setAccIssues([]);
+              }}
+            />
+            {accIssues.length > 0 && (
+              <div className="inline-error" role="alert">
+                <strong>验收判据还不能保存：</strong>
+                <ul className="plain-list">
+                  {accIssues.map((issue, i) => (
+                    <li key={i}>{issue}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            <div className="btn-row">
+              <button disabled={accSaving || !accDirty} onClick={() => void saveAcceptance()}>
+                {accSaving ? "保存中…" : "保存验收判据"}
+              </button>
+              {accSaved && <span className="ok-text">已保存：本轮按这些判据验收。</span>}
+              {accDirty && <span className="muted">有未保存的改动 ——「批准开工」前会自动保存。</span>}
+            </div>
+          </section>
+
+          <section className="card">
             <h2>
               📦 批次规划（{totalTasks} 个任务 · {batches?.length ?? 0} 个批次）
             </h2>
@@ -252,7 +355,7 @@ export function PrdReviewPage() {
           </section>
 
           <section className="card btn-row">
-            <button className="primary" disabled={!batches} onClick={() => void confirmAndExecute()}>
+            <button className="primary" disabled={!batches || accSaving} onClick={() => void approve()}>
               ✅ 批准开工
             </button>
             <button onClick={() => void retryPlanning()}>🔄 重新规划</button>
