@@ -216,6 +216,40 @@ export interface VerificationCommand {
   args: string[];
 }
 
+/**
+ * 操作者验收判据（B7，2026-10-28）：**机械可判的那一半**验收。
+ *
+ * 它回答的是硬门禁回答不了的那个问题：项目自己的 build/test 通过，说明的是
+ * "**它写的测试认为它做对了**"——判据的输入由被判定方提供（R1 的失效面）。
+ * 一份 `npm test` 绿而 CLI 输出错口径的交付，会一路绿到凭据上。
+ *
+ * 与 `SmokeCheck` 的分工：冒烟检查由规划大脑生成、跟着计划走；验收判据由
+ * **操作者/宿主**给定，只活在 `settings.acceptanceChecks` 里 —— 它不进任务
+ * 描述、不进规划提示，因此执行器**看不到**自己要被怎么验。
+ *
+ * 执行机制刻意复用独立样本冒烟那一套（同一沙箱门、同一超时、同一输出截断）：
+ * 两者都是"跑交付物本身并断言输出"，差别只在**出处**与凭据里的记账。
+ */
+export interface AcceptanceCheck {
+  /** 一句话说明这条判据在验什么；缺省由 command + args 派生出可读名字。 */
+  title?: string;
+  /** 在 projectRoot 下执行的程序（同样过 CommandPolicy 沙箱门）。 */
+  command: string;
+  args: string[];
+  /** 可选：通过 stdin 喂给程序的样例数据。 */
+  stdin?: string;
+  /** stdout 必须包含的片段（空/缺席 = 只看退出码）。 */
+  expectContains?: string[];
+  /**
+   * 命令跑完后必须存在的产物（相对 projectRoot 的路径）。
+   *
+   * 为什么单独要有它：退出码 0 + 输出片段对不上"东西真的交到了那个路径"——
+   * 2026-10-06 那次负结果里，交付物落在 `src/core/csv/index.js`、契约点名的是
+   * `src/core/csv.js`，语法检查全过而 `node src/cli.js` 直接找不到模块。
+   */
+  expectFiles?: string[];
+}
+
 export interface VerificationReport {
   passed: boolean;
   results: Array<{
@@ -224,6 +258,14 @@ export interface VerificationReport {
     exitCode: number | null;
     logDigest: string;
     durationMs: number;
+    /**
+     * 这条检查的出处：`"operator"` = 操作者验收判据（不在任务描述里，执行器
+     * 看不到它）；缺席 = 项目自己的验证命令或规划期冒烟。凭据据此把"谁定的
+     * 判据"摆出来 —— 混在一起读，会把"自测通过"当成"外部验过"。
+     */
+    origin?: "operator";
+    /** 人类可读的一句话（操作者验收判据用它说明在验什么）。 */
+    title?: string;
     /**
      * 环境裁决类别（P2-3 失败类别细分）：失败不是代码造成的，而是沙箱/审批
      * **拒绝执行**造成的。重修循环读它来区分"验证失败（改代码有用）"与
@@ -392,6 +434,11 @@ export const DEFAULT_ESCALATION_POLICY: EscalationPolicySetting = "ask";
 export interface ProjectSettings {
   maxRepairRounds: number;
   verificationCommands: VerificationCommand[];
+  /**
+   * 操作者验收判据（B7）：机械可判、且**执行器看不到**的验收条件。
+   * 缺席 = 不跑这一层（与 `verificationCommands: []` 同义：不假装验过）。
+   */
+  acceptanceChecks?: AcceptanceCheck[];
   enabledAgents: string[];
   llmProvider: string;
   /**

@@ -40,6 +40,17 @@ export interface ReceiptCheck {
   ok: boolean;
   exitCode: number | null;
   /**
+   * 这条检查的出处：`"operator"` = 操作者验收判据。
+   *
+   * 为什么凭据里必须能分开读：项目自己的 `npm test` 与操作者的黑盒验收，
+   * 读起来的可信度不是一回事 —— 前者的测试由被判定方写（可以被改成通过），
+   * 后者执行器从未见过。混在 `checks[]` 里不标出处，读者只能默认"都是门禁"。
+   * 缺席 = 项目验证命令或规划期冒烟（历史凭据也长这样，语义不变）。
+   */
+  origin?: "operator";
+  /** 一句话说明这条检查在验什么（操作者验收判据用；其余检查缺席）。 */
+  title?: string;
+  /**
    * 这条命令在**本次运行开始前**就是红的（基线验证发现的）。
    *
    * 标出来的意义是归因：它不属于任何智能体的账。没有这个标记时，
@@ -194,6 +205,14 @@ export interface DeliveryReceipt {
   tasks: ReceiptTask[];
   conflicts: ReceiptConflict[];
   usage?: ReceiptUsage;
+  /**
+   * 操作者验收判据的汇总（B7）。缺席的两种含义：这次没有配判据，或凭据来自
+   * 这个字段落地之前 —— 聚合侧把缺席说破，**不装作成 0 条**。
+   *
+   * 它不并入 `counts`：`counts` 是任务账，验收判据是判据账；混进去会让
+   * "0 个失败任务"与"0 条失败的验收"两个概念在同一个数里打架。
+   */
+  acceptance?: { total: number; passed: number; failed: number };
   counts: ReceiptCounts;
   /** 一行人类可读结论，供看板日志与审计直接落。 */
   headline: string;
@@ -336,11 +355,23 @@ export function receiptHeadlineFor(input: {
   rounds: number;
   counts: ReceiptCounts;
   checks: number;
+  /** 操作者验收判据的汇总；缺席 = 这次没配（结论里也不该凭空提到它）。 */
+  acceptance?: { total: number; passed: number; failed: number };
 }): string {
   const c = input.counts;
   const taskPart = `${c.done}/${c.total} 个任务完成`;
   const skipPart = c.skipped > 0 ? `（跳过 ${c.skipped} 个）` : "";
   const roundPart = input.rounds > 0 ? `，重修 ${input.rounds} 轮` : "";
+  // 验收判据单独说：它是**别人给的**判据，不能和自测成绩并成一句"验证通过"。
+  // 只在失败时往"为什么没交付"里加一句；通过时它是一条正面事实。
+  const accPart =
+    input.acceptance === undefined
+      ? ""
+      : input.outcome === "blocked" && input.acceptance.failed > 0
+        ? `；其中 ${input.acceptance.failed} 条是操作者验收判据`
+        : input.acceptance.passed > 0
+          ? `；${input.acceptance.passed}/${input.acceptance.total} 条操作者验收判据通过`
+          : "";
   // 越权在**每一条出口**上都要说（2026-10-05 conflict 账审计）。
   //
   // 旧写法只挂在 delivered 那条尾巴上，于是 blocked 时一次
@@ -380,7 +411,7 @@ export function receiptHeadlineFor(input: {
     // 三处都为 0 时才算真的说不出原因（例如凭据被外部改写），那才留兜底话术 ——
     // 但此时它说的是"任务账上什么都没记"，与前面 2/2 完成并不矛盾。
     const tail = why || "凭据里没有记录任何失败项";
-    return `未交付：${taskPart}${skipPart}，${tail}${conflictPart}${roundPart}。改动已留在工作区，未通过门禁`;
+    return `未交付：${taskPart}${skipPart}，${tail}${accPart}${conflictPart}${roundPart}。改动已留在工作区，未通过门禁`;
   }
   if (!input.verified) {
     // 这条出口此前同样漏了越权（第十五轮补 blocked、这轮补它）——
@@ -389,7 +420,7 @@ export function receiptHeadlineFor(input: {
   }
   const checkPart = `${input.checks} 条验证命令通过`;
   const prePart = c.preexisting > 0 ? `（其中 ${c.preexisting} 条本次运行前就是红的）` : "";
-  return `已交付：${taskPart}${skipPart}${roundPart}；${checkPart}${prePart}${conflictPart}`;
+  return `已交付：${taskPart}${skipPart}${roundPart}；${checkPart}${prePart}${accPart}${conflictPart}`;
 }
 
 /**
@@ -403,6 +434,17 @@ export function buildReceipt(input: ReceiptInput): DeliveryReceipt {
   const conflicts = input.conflicts.map((c) => ({ ...c, paths: [...new Set(c.paths)].sort() }));
   const checksFailed = input.checks.filter((c) => !c.ok).length;
   const preexisting = input.checks.filter((c) => c.preexisting).length;
+  // 判据账与任务账分开算：验收判据的"通过数"不是任务完成度，混进 counts 会让
+  // 两个概念共用同一个数。缺席（一条都没配）= 键不出现，不装作成 0。
+  const operatorChecks = input.checks.filter((c) => c.origin === "operator");
+  const acceptance =
+    operatorChecks.length === 0
+      ? undefined
+      : {
+          total: operatorChecks.length,
+          passed: operatorChecks.filter((c) => c.ok).length,
+          failed: operatorChecks.filter((c) => !c.ok).length,
+        };
   const counts: ReceiptCounts = {
     ...countTasks(input.tasks),
     conflicts: conflicts.length,
@@ -425,6 +467,7 @@ export function buildReceipt(input: ReceiptInput): DeliveryReceipt {
     rounds: input.rounds,
     counts,
     checks: input.checks.length,
+    ...(acceptance !== undefined ? { acceptance } : {}),
   });
   return {
     outcome: input.outcome,
@@ -435,6 +478,7 @@ export function buildReceipt(input: ReceiptInput): DeliveryReceipt {
     tasks: input.tasks,
     conflicts,
     ...(usage ? { usage } : {}),
+    ...(acceptance !== undefined ? { acceptance } : {}),
     counts,
     headline,
   };

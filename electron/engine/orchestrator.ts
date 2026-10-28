@@ -18,6 +18,13 @@ import type {
 } from "../../shared/delivery-receipt";
 import { deliveryStatusFor } from "./git-status";
 import { runSmokeChecks } from "./verifier";
+import {
+  acceptanceTitle,
+  missingAcceptanceFiles,
+  missingFilesMessage,
+  normalizeAcceptanceChecks,
+  toSmokeCheck,
+} from "../../shared/acceptance";
 import type { ActionGateLike } from "../sandbox/action-gate";
 import type { RepairRecord, SmokeCheck } from "../../shared/types";
 import { planBatches, skippedDescendants } from "../../shared/graph";
@@ -799,6 +806,10 @@ export class OrchestratorEngine {
       // 而不是只能相信我们。缺席照传缺席 —— 条件展开与直传在可选字段上等价。
       command: r.command,
       args: r.args,
+      // 出处与标题照传：凭据据此把"操作者定的判据"与"项目自己的验证"分开读。
+      // 缺席 = 项目验证/规划冒烟（历史凭据也长这样，语义不变）。
+      origin: r.origin,
+      title: r.title,
     }));
     const sealed = sealReceipt(
       buildReceipt({
@@ -935,6 +946,16 @@ export class OrchestratorEngine {
     const maxRounds = this.deps.settings.maxRepairRounds;
     const resume = opts?.resume;
     const smoke = opts?.smoke ?? resume?.smoke ?? [];
+    /**
+     * 操作者验收判据（B7）：入口只有 `settings.acceptanceChecks` 一个 —— 它不进
+     * 任务描述、不进规划提示，所以执行器从头到尾看不见自己要被怎么验。
+     *
+     * 在引擎边界**再归一化一次**：桌面端的 settings 来自项目存储（可能由旧版本
+     * 写入），而"半条判据被当成验过"是最坏的失败形态。坏条目当场说破，合法条目照跑。
+     */
+    const acceptanceNorm = normalizeAcceptanceChecks(this.deps.settings.acceptanceChecks);
+    const acceptanceChecks = acceptanceNorm.checks;
+    for (const issue of acceptanceNorm.issues) this.cb.onLog(`[验收判据] ${issue}`);
     const attempts = new Map<string, number>(
       Object.entries(resume?.attempts ?? {}).map(([k, v]) => [k, v]),
     );
@@ -1246,6 +1267,60 @@ export class OrchestratorEngine {
           results: [...report.results, ...smokeResults],
         };
       }
+      /*
+       * 操作者验收判据（B7）：机械可判的那一半。
+       *
+       * 与上面那段的差别只有**出处**：判据不进任务描述/规划提示，执行器看不到；
+       * 跑的是交付物本身（黑盒），不是执行器自己写的测试。执行机制刻意复用冒烟
+       * 那一套（同一沙箱门、同一超时、同一 R1 判定），不另造一套。
+       *
+       * 失败同样是硬伤：不许带病交付，进重修；重修上下文里会点明"判据不是可改的测试"。
+       */
+      if (!anyDevFailure && report.passed && acceptanceChecks.length > 0) {
+        this.cb.onLog(
+          `── 操作者验收判据（${acceptanceChecks.length} 项）：跑交付物本身，判据从未进入执行器上下文 ──`,
+        );
+        const accResults = await runSmokeChecks(acceptanceChecks.map(toSmokeCheck), {
+          cwd: projectRoot,
+          onEvent: (text) => this.cb.onLog(text),
+          actionGate: this.deps.actionGate,
+        });
+        // 结果按**执行顺序**与判据一一对应（执行器首败即停，所以只会是前缀）。
+        const tagged = accResults.map((r, i) => ({
+          ...r,
+          origin: "operator" as const,
+          title: acceptanceTitle(acceptanceChecks[i]),
+        }));
+        // 产物存在性：命令退了 0 不代表东西交到了那个路径（2026-10-06 负结果的形态）。
+        // 已因命令失败被判过的判据不再重复报 —— 同一件事两个来源就是两条账。
+        const commandFailed = new Set(tagged.filter((r) => !r.ok).map((r) => r.title));
+        const fileGaps = acceptanceChecks.some((c) => (c.expectFiles ?? []).length > 0)
+          ? missingAcceptanceFiles(
+              acceptanceChecks.filter((c) => !commandFailed.has(acceptanceTitle(c))),
+              (rel) => (this.deps.fileExists ? this.deps.fileExists(projectRoot, rel) : false),
+            )
+          : [];
+        if (fileGaps.length > 0 && !this.deps.fileExists) {
+          // 没有探针 = 没核过。宁可判红，也不把"没核"报成"核过了"。
+          this.cb.onLog("⚠️ 宿主没有接 fileExists 探针 ⇒ expectFiles 无法核对，按未通过处理。");
+        }
+        const fileResults = fileGaps.map((gap) => ({
+          kind: "smoke" as const,
+          ok: false,
+          exitCode: null,
+          logDigest: missingFilesMessage(gap.check, gap.missing),
+          durationMs: 0,
+          origin: "operator" as const,
+          title: acceptanceTitle(gap.check),
+        }));
+        // 缺产物也要进日志：这是操作者最需要当场看到的那一行（凭据里是摘要，
+        // 日志是"现在就知道"）。不加它的话，用户只看到"未交付"，得去翻凭据。
+        for (const gap of fileGaps) this.cb.onLog(missingFilesMessage(gap.check, gap.missing));
+        report = {
+          passed: report.passed && tagged.every((r) => r.ok) && fileResults.length === 0,
+          results: [...report.results, ...tagged, ...fileResults],
+        };
+      }
       this.cb.onVerification(report);
       if (!anyDevFailure && report.passed) {
         this.cb.onStage("DELIVERY");
@@ -1292,6 +1367,16 @@ export class OrchestratorEngine {
         lastDigest =
           [...lastFailedLogs.values()].join("\n\n") ||
           "开发任务执行失败（无验证错误，可能是 API 调用失败）";
+      }
+      // 验收判据未过（B7）：重修提示必须先说清"判据不是你能改的测试" —— 否则
+      // 最自然的修复动作会滑向"改一个能通过的断言"，而那正是这条判据要防的事。
+      // 只加在未归属的那份 digest 上：有自己归属错误的执行器仍然先看自己那份，
+      // 但它们同样会在下一轮看到整体摘要以外的这条提示（通过 lastFailedLogs 之上）。
+      if (report.results.some((r) => r.origin === "operator" && !r.ok)) {
+        lastDigest =
+          "[操作者验收判据未通过]\n这些判据由操作者给定、从未出现在任务描述里：请改代码让它们成立，" +
+          "**不要修改或绕过判据**（改测试不算修好）。\n\n" +
+          lastDigest;
       }
       // 环境裁决（P2-3 失败类别细分）：沙箱/审批拒绝不是代码问题，重修提示里
       // 必须先说破 —— 否则 agent 会把"审批拒绝"当成"项目本来就坏"白修一轮。

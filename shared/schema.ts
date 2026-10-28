@@ -7,6 +7,7 @@ import type {
 } from "./types";
 import { ARBITRATION_MODES, ESCALATION_POLICY_SETTINGS, isArbitrationMode, isEscalationPolicySetting, isUnpricedUsage, UNPRICED_USAGE_MODES } from "./types";
 import { isLoopbackHttpUrl } from "./page-smoke";
+import { normalizeAcceptanceChecks } from "./acceptance";
 import { APPROVAL_POLICIES, SANDBOX_MODES, isApprovalPolicy, isSandboxMode } from "./tools/policy";
 
 type JsonValue = string | number | boolean | null | JsonValue[] | { [k: string]: JsonValue };
@@ -372,6 +373,13 @@ export function parseSettings(raw: unknown): ProjectSettings {
         }
       }
     }
+  }
+
+  // 验收判据（B7）：只校验形状，不在这里补默认值 —— 缺席就是缺席（与
+  // verificationCommands 同一纪律：save 不该把"这次没配"改写成"配了一个空的"）。
+  const acceptance = o["acceptanceChecks"];
+  if (acceptance !== undefined) {
+    for (const issue of normalizeAcceptanceChecks(acceptance).issues) issues.push(issue);
   }
 
   const sources = o["contextSources"];

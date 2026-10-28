@@ -287,6 +287,66 @@ describe("parseCommands · smoke 是合法 kind（CLI 与桌面的能力差）",
   });
 });
 
+describe("parseSpec · acceptanceChecks（B7 操作者验收判据）", () => {
+  it("合法判据进 settings，值被归一化（trim / 去重）", () => {
+    const r = parseSpec(
+      JSON.stringify({
+        ...LEGACY_SPEC,
+        acceptanceChecks: [
+          {
+            title: "  CLI 报数  ",
+            command: " node ",
+            args: ["src/cli.js", "sample.csv"],
+            expectContains: ["rows=3", " rows=3 "],
+            expectFiles: ["dist/index.js"],
+          },
+        ],
+      }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      expect(r.spec.settings.acceptanceChecks).toEqual([
+        {
+          title: "CLI 报数",
+          command: "node",
+          args: ["src/cli.js", "sample.csv"],
+          expectContains: ["rows=3"],
+          expectFiles: ["dist/index.js"],
+        },
+      ]);
+    }
+  });
+
+  it("空数组 = 没配（settings 不带这个键）", () => {
+    const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, acceptanceChecks: [] }));
+    expect(r.ok).toBe(true);
+    if (r.ok) expect("acceptanceChecks" in r.spec.settings).toBe(false);
+  });
+
+  it("坏形状拒绝开跑（半条判据被当成验过是最坏的失败）", () => {
+    const cases: Array<[unknown, string]> = [
+      [{ command: "node" }, "acceptanceChecks 必须是数组"],
+      [[{ command: "" }], "command 必须是非空字符串"],
+      [[{ command: "node", expectContain: ["x"] }], "不认识的字段"],
+      [[{ command: "node", expectFiles: ["../x"] }], "只收项目内相对路径"],
+      [[{ command: "node", expectContains: "rows=3" }], "expectContains 必须是字符串数组"],
+    ];
+    for (const [value, fragment] of cases) {
+      const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, acceptanceChecks: value }));
+      expect(r.ok, JSON.stringify(value)).toBe(false);
+      if (!r.ok) expect(r.message).toContain(fragment);
+    }
+  });
+
+  it("不再当未知字段警告（进了 KNOWN_FIELDS）", () => {
+    const r = parseSpec(
+      JSON.stringify({ ...LEGACY_SPEC, acceptanceChecks: [{ command: "node", args: [] }] }),
+    );
+    expect(r.ok).toBe(true);
+    if (r.ok) expect(r.spec.warnings.join("\n")).not.toContain("acceptanceChecks");
+  });
+});
+
 describe("parseCommands · 逐项校验不中途放弃（变异测试发现的缺口）", () => {
   function issueLines(commands: unknown[]): string {
     const r = parseSpec(JSON.stringify({ ...LEGACY_SPEC, verificationCommands: commands }));

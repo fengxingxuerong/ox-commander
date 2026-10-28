@@ -21,12 +21,14 @@ import { REPO_RE } from "../electron/context/github-readonly";
 import type { AgentManifest } from "../shared/agent-contract";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
 import type { DeliveryGuide } from "../shared/delivery-guide";
+import { normalizeAcceptanceChecks } from "../shared/acceptance";
 import {
   ARBITRATION_MODES,
   DEFAULT_SETTINGS,
   isArbitrationMode,
   isUnpricedUsage,
   UNPRICED_USAGE_MODES,
+  type AcceptanceCheck,
   type ArbitrationMode,
   type EscalationPolicySetting,
   type PrdDocument,
@@ -101,6 +103,8 @@ export interface HeadlessSpec {
   maxRepairRounds?: number;
   /** Hard verification commands, default npm build/typecheck/test. */
   verificationCommands?: VerificationCommand[];
+  /** 操作者验收判据（B7）：机械可判、且**执行器看不到**的验收条件。 */
+  acceptanceChecks?: AcceptanceCheck[];
   escalationPolicy?: EscalationPolicy;
   /** Extra agent declarations (cli / http-bridge). */
   agents?: AgentManifest[];
@@ -266,6 +270,7 @@ const KNOWN_FIELDS = new Set<string>([
   "llmPool",
   "maxRepairRounds",
   "verificationCommands",
+  "acceptanceChecks",
   "escalationPolicy",
   "agents",
   "manifestDir",
@@ -602,6 +607,10 @@ export function parseSpec(rawText: string): ParseResult {
   }
 
   const verificationCommands = parseCommands(raw.verificationCommands, issues);
+  // 验收判据的坏形状一律**拒绝开跑**（与 verificationCommands 同一口径）：
+  // 一条被半解析的判据会在凭据上显示成"通过/没通过"，而它到底验了什么没人知道。
+  const acceptance = normalizeAcceptanceChecks(raw.acceptanceChecks);
+  for (const issue of acceptance.issues) issues.push(issue);
 
   let agents: AgentManifest[] = [];
   // `agents` 显式给空数组 = 没给。本函数的**输出**永远带这个键（缺省就是空数组），
@@ -656,6 +665,7 @@ export function parseSpec(rawText: string): ParseResult {
     llmProvider: brainProvider,
     ...(maxRepairRounds !== undefined ? { maxRepairRounds } : {}),
     ...(verificationCommands ? { verificationCommands } : {}),
+    ...(acceptance.checks.length > 0 ? { acceptanceChecks: acceptance.checks } : {}),
     // 只需一个条件：`agentRouter` 只在上面 `if (raw.agentRouter !== undefined)`
     // 的 else 分支里被赋值，所以 `agentRouter !== undefined ⟺ raw.agentRouter !== undefined`。
     // 原先写成 `raw.agentRouter !== undefined && agentRouter !== undefined`，

@@ -275,6 +275,20 @@ describe("parseSettings（settings:save 的入参校验，2026-10-13）", () => 
     expect(partial).toEqual({ llmProvider: "sensenova" });
   });
 
+  it("验收判据（B7）：合法形状原样放行，坏形状拒存", () => {
+    const checks = [{ command: "node", args: ["src/cli.js"], expectContains: ["rows=3"] }];
+    expect(parseSettings({ ...valid, acceptanceChecks: checks }).acceptanceChecks).toEqual(checks);
+    for (const bad of [[{ command: "" }], [{ command: "node", expectContain: ["x"] }], [{ command: "node", args: [1] }]]) {
+      expect(() => parseSettings({ ...valid, acceptanceChecks: bad }), JSON.stringify(bad)).toThrow(
+        SchemaValidationError,
+      );
+    }
+    // 不是数组也拒（不是"当成没配"：那会让一份坏配置静默变成零判据）
+    expect(() => parseSettings({ ...valid, acceptanceChecks: { command: "node" } })).toThrow(
+      SchemaValidationError,
+    );
+  });
+
   it("非对象（null / 数组 / 标量）拒绝", () => {
     for (const bad of [null, [], "x", 42, true]) {
       expect(() => parseSettings(bad), JSON.stringify(bad)).toThrow(SchemaValidationError);

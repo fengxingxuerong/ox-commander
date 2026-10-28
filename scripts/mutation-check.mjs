@@ -720,7 +720,7 @@ const TARGETS = [
   // 异常也不会有红 —— 正是变异门禁该盯的形状。tier 1：整份测试 8ms。
   {
     file: "shared/delivery-receipt.ts",
-    tests: ["src/delivery-receipt.test.ts", "src/store.test.ts"],
+    tests: ["src/delivery-receipt.test.ts", "src/store.test.ts", "src/acceptance.test.ts"],
     tier: 1,
   },
   // zone-cost.ts 是「少数派隔离路线」的**对外证据生成器**：越权次数、处置分布、
@@ -775,6 +775,11 @@ const TARGETS = [
     tests: ["src/ipc-handlers.test.ts", "src/ipc.test.ts"],
     tier: 2,
   },
+  // 2026-10-28（B7）：操作者验收判据的归一化与判定（形状收窄 / 未知字段整条拒收 /
+  // 产物存在性 / 判据账）。入表理由：这些判据错了**不抛异常**——它们会静默退化成
+  // "只看退出码"或"少核一个产物"，而凭据上显示的是"验收通过"。这正是本仓
+  // 「判据的输入不能被判定方影响／判据自己不能被静默放宽」两件事的落点。
+  { file: "shared/acceptance.ts", tests: ["src/acceptance.test.ts"], tier: 1 },
 ];
 
 /**
@@ -990,7 +995,7 @@ const SITE_BASELINE = {
   "electron/engine/git-export.ts": 44,
   "electron/engine/git-remote.ts": 39,
   "electron/engine/git-status.ts": 9,
-  "electron/engine/orchestrator.ts": 95,
+  "electron/engine/orchestrator.ts": 105,
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,
@@ -1031,12 +1036,13 @@ const SITE_BASELINE = {
   "electron/zone-cost.ts": 9,
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
-  "headless/protocol.ts": 123,
+  "headless/protocol.ts": 124,
   "headless/receipt-regress-main.ts": 19,
   "headless/receipt-verify-main.ts": 4,
   "headless/run-spec.ts": 33,
   "headless/serve-main.ts": 47,
   "headless/serve.ts": 73,
+  "shared/acceptance.ts": 50,
   "shared/agent-contract.ts": 5,
   "shared/automation.ts": 47,
   "shared/build-llm.ts": 12,
@@ -1048,7 +1054,7 @@ const SITE_BASELINE = {
   "shared/cli-detect.ts": 5,
   "shared/deliverable-format.ts": 23,
   "shared/delivery-guide.ts": 31,
-  "shared/delivery-receipt.ts": 44,
+  "shared/delivery-receipt.ts": 55,
   "shared/github-issue.ts": 1,
   "shared/glob.ts": 25,
   "shared/graph.ts": 8,
@@ -1070,7 +1076,7 @@ const SITE_BASELINE = {
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schedule-core.ts": 21,
-  "shared/schema.ts": 77,
+  "shared/schema.ts": 78,
   "shared/skills.ts": 38,
   "shared/sse.ts": 51,
   "shared/text-diff.ts": 38,

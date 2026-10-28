@@ -4281,3 +4281,286 @@ describe("操作者附言（C2：运行中追加指令，2026-10-17）", () => {
     expect(rounds[0]![0]!.operatorNote).toBeUndefined();
   });
 });
+
+/**
+ * 操作者验收判据（B7）：判据由操作者给定、执行器看不到；跑交付物本身，
+ * 失败硬拦交付、进重修，凭据里单列判据账。
+ */
+describe("操作者验收判据（B7）", () => {
+  interface SeenBatch {
+    tasks: Task[];
+    repairOf?: Map<string, { round: number; errorLogDigest: string }>;
+  }
+
+  function recordingScheduler(seen: SeenBatch[], ok = true): Scheduler {
+    return {
+      async abortInFlight() {
+        return 0;
+      },
+      async runBatch(tasks: Task[], _root: string, opts?: { repairOf?: Map<string, { round: number; errorLogDigest: string }> }) {
+        seen.push({
+          tasks: tasks.map((t) => ({ ...t })),
+          ...(opts?.repairOf !== undefined ? { repairOf: opts.repairOf } : {}),
+        });
+        return tasks.map((t) => ({ taskId: t.id, ok, logDigest: ok ? "log" : "boom", events: [] }));
+      },
+    } as unknown as Scheduler;
+  }
+
+  function accEngine(opts: {
+    root: string;
+    checks: NonNullable<ProjectSettings["acceptanceChecks"]>;
+    maxRounds?: number;
+    fileExists?: (root: string, rel: string) => boolean;
+    seen: SeenBatch[];
+    events: string[];
+    receipts: DeliveryReceipt[];
+  }): OrchestratorEngine {
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(opts.seen),
+      verify: async () => makeReport(true),
+      settings: {
+        ...DEFAULT_SETTINGS,
+        maxRepairRounds: opts.maxRounds ?? 0,
+        acceptanceChecks: opts.checks,
+      },
+      ...(opts.fileExists ? { fileExists: opts.fileExists } : {}),
+    };
+    return new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (l) => opts.events.push(`log:${l}`),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+      onReceipt: (r) => opts.receipts.push(r),
+    });
+  }
+
+  /** 一个真实跑得起来的小脚本：打印厂商输出并按需落一个产物文件。 */
+  function writeScript(root: string, name: string, body: string): void {
+    fs.writeFileSync(path.join(root, name), body, "utf8");
+  }
+
+  /**
+   * 跑一轮 run。未交付时引擎会**抛** `VerificationExhaustedError`（这是它在
+   * 真实宿主里的契约），而凭据在抛之前已经交给 sink —— 这几条用例关心的是
+   * 那份凭据，所以把"预算耗尽"这个预期结局收在这一层。
+   */
+  async function run(eng: OrchestratorEngine, smoke?: SmokeCheck[]): Promise<void> {
+    try {
+      await eng.execute([[TASKS[0]]], root, smoke ? { smoke } : undefined);
+    } catch (err) {
+      if (!(err instanceof VerificationExhaustedError)) throw err;
+    }
+  }
+
+  let root = "";
+  beforeEach(() => {
+    root = fs.mkdtempSync(path.join(os.tmpdir(), "ox-acceptance-"));
+  });
+  afterEach(() => {
+    fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+
+  it("判据通过：交付成功，凭据单列判据账并标出处，命令可复跑", async () => {
+    writeScript(
+      root,
+      "check.js",
+      'const fs = require("node:fs");\nconsole.log("rows=3 cols=2");\nfs.writeFileSync("out.txt", "x");\n',
+    );
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [
+        {
+          title: "CLI 报数",
+          command: "node",
+          args: ["check.js"],
+          expectContains: ["rows=3"],
+          expectFiles: ["out.txt"],
+        },
+      ],
+      seen,
+      events,
+      receipts,
+      fileExists: (r, rel) => fs.existsSync(path.join(r, rel)),
+    });
+    await run(eng);
+
+    expect(receipts).toHaveLength(1);
+    const r = receipts[0]!;
+    expect(r.outcome).toBe("delivered");
+    expect(r.acceptance).toEqual({ total: 1, passed: 1, failed: 0 });
+    const op = r.checks.filter((c) => c.origin === "operator");
+    expect(op).toHaveLength(1);
+    expect(op[0]!.title).toBe("CLI 报数");
+    // 命令进了凭据 = 拿到凭据的人能在自己环境里复跑同一条判据。
+    expect(op[0]!.command).toBe("node");
+    expect(op[0]!.args).toEqual(["check.js"]);
+    expect(r.headline).toContain("1/1 条操作者验收判据通过");
+    expect(events.join("\n")).toContain("操作者验收判据（1 项）");
+  });
+
+  it("判据失败：不交付，重修上下文点明「判据不是你能改的测试」", async () => {
+    writeScript(root, "check.js", 'console.log("rows=9");\n');
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ command: "node", args: ["check.js"], expectContains: ["rows=3"] }],
+      maxRounds: 1,
+      seen,
+      events,
+      receipts,
+    });
+    await run(eng);
+
+    const r = receipts[0]!;
+    expect(r.outcome).toBe("blocked");
+    expect(r.acceptance).toEqual({ total: 1, passed: 0, failed: 1 });
+    expect(r.headline).toContain("其中 1 条是操作者验收判据");
+    // 重修轮真的带着这条提示去重派（否则模型最自然的动作是去改断言）。
+    const repair = seen[1]?.repairOf?.get("t1")?.errorLogDigest ?? "";
+    expect(repair).toContain("不要修改或绕过判据");
+  });
+
+  it("命令失败且产物也缺：同一条判据只记一次（两个来源不记两条账）", async () => {
+    writeScript(root, "check.js", 'console.error("boom");\nprocess.exit(1);\n');
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ command: "node", args: ["check.js"], expectFiles: ["missing.txt"] }],
+      seen,
+      events,
+      receipts,
+      fileExists: (r, rel) => fs.existsSync(path.join(r, rel)),
+    });
+    await run(eng);
+
+    const r = receipts[0]!;
+    expect(r.acceptance).toEqual({ total: 1, passed: 0, failed: 1 });
+    expect(r.checks.filter((c) => c.origin === "operator")).toHaveLength(1);
+  });
+
+  it("只缺产物、命令通过：仍然不交付（退出码 0 不等于东西交到了）", async () => {
+    writeScript(root, "check.js", 'console.log("done");\n');
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ command: "node", args: ["check.js"], expectFiles: ["dist/index.js"] }],
+      seen,
+      events,
+      receipts,
+      fileExists: (r, rel) => fs.existsSync(path.join(r, rel)),
+    });
+    await run(eng);
+
+    const r = receipts[0]!;
+    expect(r.outcome).toBe("blocked");
+    expect(r.acceptance?.failed).toBe(1);
+    expect(events.join("\n")).toContain("期望的产物不在盘上");
+    // 探针在的时候不能报"没接探针"（那条警告是给"没核过"的现场用的）。
+    expect(events.join("\n")).not.toContain("没有接 fileExists 探针");
+  });
+
+  it("普通验证失败的重修上下文不带「不要修改判据」提示（那条只属于操作者判据）", async () => {
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    let calls = 0;
+    const deps: OrchestratorDeps = {
+      llm: fakeLlm(),
+      scheduler: recordingScheduler(seen),
+      // 基线绿 → 第一轮验证红 → 重修轮绿（普通验证失败，与验收判据无关）。
+      verify: async () => {
+        calls += 1;
+        return makeReport(calls !== 2);
+      },
+      settings: { ...DEFAULT_SETTINGS, maxRepairRounds: 1 },
+    };
+    const eng = new OrchestratorEngine(deps, {
+      onStage: () => undefined,
+      onLog: (l) => events.push(`log:${l}`),
+      onTaskStatus: () => undefined,
+      onVerification: () => undefined,
+      onEscalation: () => undefined,
+      onReceipt: (r) => receipts.push(r),
+    });
+    await run(eng);
+
+    const repair = seen[1]?.repairOf?.get("t1")?.errorLogDigest ?? "";
+    expect(repair).toContain("[build]");
+    expect(repair).toContain("err");
+    expect(repair).not.toContain("不要修改或绕过判据");
+    expect(receipts[0]!.acceptance).toBeUndefined();
+  });
+
+  it("宿主没有 fileExists 探针：expectFiles 按未通过处理（不把「没核」报成「核过」）", async () => {
+    writeScript(root, "check.js", 'console.log("done");\n');
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ command: "node", args: ["check.js"], expectFiles: ["dist/index.js"] }],
+      seen,
+      events,
+      receipts,
+    });
+    await run(eng);
+
+    expect(receipts[0]!.outcome).toBe("blocked");
+    expect(events.join("\n")).toContain("没有接 fileExists 探针");
+  });
+
+  it("规划期冒烟已经红了：验收判据不再跑（不在已红的门上再叠一层）", async () => {
+    writeScript(root, "check.js", 'console.log("rows=3");\n');
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ command: "node", args: ["check.js"], expectContains: ["rows=3"] }],
+      seen,
+      events,
+      receipts,
+    });
+    const failingSmoke: SmokeCheck[] = [{ title: "冒烟", command: "node", args: ["check.js"], expectContains: ["nope"] }];
+    await run(eng, failingSmoke);
+
+    expect(receipts[0]!.outcome).toBe("blocked");
+    expect(receipts[0]!.checks.some((c) => c.origin === "operator")).toBe(false);
+    expect(events.join("\n")).not.toContain("操作者验收判据（1 项）");
+  });
+
+  it("判据不进任务描述：执行器收到的任务里查不到判据命令与期望", async () => {
+    const sentinel = "ACCEPTANCE-SENTINEL-7f3a";
+    writeScript(root, "check.js", `console.log("${sentinel}");\n`);
+    const seen: SeenBatch[] = [];
+    const events: string[] = [];
+    const receipts: DeliveryReceipt[] = [];
+    const eng = accEngine({
+      root,
+      checks: [{ title: "黑盒判据", command: "node", args: ["check.js"], expectContains: [sentinel] }],
+      seen,
+      events,
+      receipts,
+    });
+    await run(eng);
+
+    // 判据确实跑了（凭据里有它，且期望片段真的匹配上了）
+    expect(receipts[0]!.acceptance).toEqual({ total: 1, passed: 1, failed: 0 });
+    // 但派发给执行器的任务里一个字都没有 —— 判据的入口只有 settings。
+    expect(JSON.stringify(seen[0]!.tasks)).not.toContain(sentinel);
+    expect(JSON.stringify(seen[0]!.tasks)).not.toContain("check.js");
+  });
+});
+
