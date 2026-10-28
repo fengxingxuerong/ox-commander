@@ -44,6 +44,7 @@ import {
   type CheckObservation,
   type DeliveryReceipt,
 } from "../shared/delivery-receipt";
+import { verdictExitCode } from "../shared/receipt-lib";
 import { verifyProject } from "../electron/engine/verifier";
 
 const sha256 = (s: string): string => createHash("sha256").update(s).digest("hex");
@@ -116,13 +117,9 @@ async function main(argv: string[]): Promise<number> {
       process.stdout.write(`\n要复跑：加 --replay --cwd=<项目目录>（会真的执行上面的命令）\n`);
     }
   }
-  // 五档裁决 → 五个退出码（见文件头的表）。顺序敏感：先判"结论被推翻"，
-  // 因为它比"没复跑"更严重，两者同时出现时要报更严重的那档。
-  if (audit.verdict === "verified") return 0;
-  if (audit.verdict === "contradicted") return 2;
-  if (audit.verdict === "tampered") return 3;
-  if (audit.verdict === "unsigned") return 4;
-  return 5; // not-replayed
+  // 五档裁决 → 五个退出码。**表在 shared/receipt-lib**（与 receipt:regress 共用一张）：
+  // 单份与一批同义，CI 不必学两套；两处各写一遍的话，漂开时没有任何测试会红。
+  return verdictExitCode(audit.verdict);
 }
 
 void main(process.argv).then((code) => {

@@ -41,8 +41,12 @@ import {
   type PlanSnapshot,
 } from "../../shared/plan-history";
 import { collectPlanFacts, formatPlanFactsBlock } from "../../shared/plan-facts";
+import { RECEIPTS_DIR, receiptFilename } from "../../shared/receipt-lib";
+import { writeFileAtomic } from "../atomic-file";
+import { deliveryStamp } from "../engine/git-export";
 import { deriveBoardView } from "../board-derive";
 import { stopPreview } from "../preview-manager";
+import type { DeliveryReceipt } from "../../shared/delivery-receipt";
 
 /**
  * Scaffold scripts written into each project workspace. The workspace is a plain
@@ -109,6 +113,35 @@ export function ensureWorkspace(projectId: string): string {
 }
 
 /**
+ * 把一份凭据落进**凭据库**（`<workspace>/.ox/receipts/`）。
+ *
+ * 与 `projectStore.receiptJson` 的分工：那里是"最新一份"（看板与凭据卡要用），
+ * 这里是"一叠"（回归要跑的历史现场）。两者都留下，因为它们的消费方不同 ——
+ * 索引（`shared/receipt-lib`）只负责命名，落盘在这里。
+ *
+ * 三条纪律：
+ * 1. **永不 throw**：凭据库是旁路账本，写不进去只写一行日志，绝不追认门禁为假；
+ * 2. **原子写**（`writeFileAtomic`）：半截 JSON 会被 `receipt:regress` 读成"读不动"，
+ *    一份被写坏的凭据比少一份更坏（它看起来像证据）；
+ * 3. **命名只用真事实**（stamp 取落盘时刻、前缀取凭据自己的指纹）—— 凭据没指纹时
+ *    `receiptFilename` 抛错，这里接住并**跳过着落**：一份没盖章的凭据进库，
+ *    只会在回归时每次都报 unsigned 噪音。
+ */
+export function saveReceiptToCorpus(root: string, receipt: DeliveryReceipt): string | undefined {
+  try {
+    const name = receiptFilename(deliveryStamp(), receipt.fingerprint);
+    const dir = path.join(root, RECEIPTS_DIR);
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, name);
+    writeFileAtomic(file, `${JSON.stringify(receipt, null, 2)}\n`);
+    return file;
+  } catch (err) {
+    logLine(`[receipt] 凭据库跳过着落（不影响交付）：${(err as Error).message}`);
+    return undefined;
+  }
+}
+
+/**
  * Builds a fresh engine bound to one project and records it as the project's
  * live engine (for cancel/pause/resume). Always rebuilt from current settings,
  * so settings changes take effect on the next planning/start; re-entry while
@@ -157,6 +190,11 @@ export function buildEngine(projectId: string): OrchestratorEngine {
       // 同时 projectStore 存一份，重载窗口后仍看得到上次交付的结论。
       onReceipt: (receipt) => {
         projectStore.update(projectId, { receiptJson: JSON.stringify(receipt) });
+        // 凭据库（2026-10-26，第七轮竞品吸收）：**累积**落一份到
+        // `<workspace>/.ox/receipts/<stamp>-<指纹前 8 位>.json`。
+        // 为什么不是只留最新那份：`receiptJson` 每次覆盖，而"上次在这里红过"需要实物 ——
+        // `receipt:regress` 跑的就是这一叠。失败只写日志：凭据库坏掉不影响交付结论。
+        saveReceiptToCorpus(workspaceRoot(projectId), receipt);
         // Durable fact: the receipt also lands in the audit trail so board
         // recovery can show the last delivery verdict after a full restart.
         // Audit JSONL is durable: redact before it hits disk. The receipt is

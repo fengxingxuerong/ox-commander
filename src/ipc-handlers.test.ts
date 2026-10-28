@@ -1987,6 +1987,63 @@ describe("orchestration handlers", () => {
     }));
   });
 
+  it("凭据库：每一份凭据按 stamp-指纹前8位 落进 <workspace>/.ox/receipts（累积，不是覆盖）", () => {
+    // 第七轮竞品吸收：`receiptJson` 只留最新一份，而回归要的是"上次在这里红过"的实物。
+    // 这条钉住"落进库"这件事本身（命名口径由 shared/receipt-lib 的用例逐点钉）。
+    buildEngine("p-corpus");
+    const callbacks = lastPlatformConfig().host.callbacks;
+    const mk = (outcome: "delivered" | "blocked") =>
+      sealReceipt(
+        buildReceipt({
+          outcome,
+          verified: true,
+          rounds: 0,
+          checks: [{ kind: "build", ok: outcome === "delivered", exitCode: outcome === "delivered" ? 0 : 1, preexisting: false, headline: "" }],
+          tasks: [],
+          conflicts: [],
+        }),
+        (s: string) => createHash("sha256").update(s).digest("hex"),
+      );
+
+    const first = mk("delivered");
+    const second = mk("blocked");
+    callbacks.onReceipt(first);
+    callbacks.onReceipt(second);
+
+    const dir = path.join(workspaceRoot("p-corpus"), ".ox", "receipts");
+    const files = fs.readdirSync(dir).sort();
+    // 两份都在：第二份**没有**把第一份顶掉（这正是"库"与"最新一份"的区别）
+    expect(files).toHaveLength(2);
+    for (const f of files) {
+      expect(f).toMatch(/^\d{8}-\d{6}-[0-9a-f]{8}\.json$/);
+    }
+    // 内容确实写进去了，且不是空壳
+    const bodies = files.map((f) => JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")) as { outcome: string; fingerprint?: string });
+    expect(bodies.map((b) => b.outcome).sort()).toEqual(["blocked", "delivered"]);
+    expect(bodies.every((b) => typeof b.fingerprint === "string")).toBe(true);
+  });
+
+  it("凭据库：没盖章的凭据跳过着落（进库只会每次回归都报 unsigned 噪音）", () => {
+    buildEngine("p-corpus-nofp");
+    const callbacks = lastPlatformConfig().host.callbacks;
+    const bare = buildReceipt({
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+    });
+    delete (bare as { fingerprint?: string }).fingerprint;
+    callbacks.onReceipt(bare);
+
+    const dir = path.join(workspaceRoot("p-corpus-nofp"), ".ox", "receipts");
+    expect(fs.existsSync(dir) ? fs.readdirSync(dir) : []).toEqual([]);
+    // 而项目记录里那一份照常更新（旁路失败不影响主路）
+    const store = h.projectInstances[h.projectInstances.length - 1] as { update: Mock };
+    expect(store.update).toHaveBeenCalledWith("p-corpus-nofp", expect.objectContaining({ receiptJson: expect.any(String) }));
+  });
+
   it("pushes line health (cooldown + rate-limit tally) to the board", () => {
     // 冷却表此前只活在故障转移客户端内部，界面没有出口 —— 这条钉住平台把
     // 它推给宿主这件事（字段，不是一行给人看的话）。

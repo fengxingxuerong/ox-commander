@@ -362,6 +362,14 @@ const TARGETS = [
   // 由 scripts/check-mutation-targets.mjs 查出来：那道门禁比对 git diff 与本表，
   // 漏挂的文件根本不参与变异统计，门禁照样报 PASS 而那个 PASS 对它是空的。
   { file: "headless/receipt-verify-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
+  // 2026-10-26（第七轮竞品吸收 · 凭据回放门）：凭据库的索引与归并。
+  // 命名只写真事实（stamp + 指纹前 8 位，凑不出就抛）、整批取最严重的一档
+  // （定义必须唯一，否则同一叠凭据两次跑给两个结论）、退出码表与 receipt:verify 共用。
+  { file: "shared/receipt-lib.ts", test: "src/receipt-lib.test.ts", tier: 1 },
+  // 同批：回放门的 CLI 入口（扫目录 / 挑文件 / 逐份审计 / 归并成一档）。
+  // 与 receipt-verify-main 同一种挂法：胶水在 src/headless-entries.test.ts，
+  // 端到端的退出码判定在 scripts/receipt-regress-smoke.mjs（真子进程）。
+  { file: "headless/receipt-regress-main.ts", test: "src/headless-entries.test.ts", tier: 1 },
   // manifest-loader 与 manifest-schema 共用 src/manifest.test.ts —— 同一个测试
   // 文件挂两个目标是对的，不要为了"去重"只挂一个。
   { file: "electron/agents/manifest-loader.ts", test: "src/manifest.test.ts", tier: 2 },
@@ -1024,7 +1032,8 @@ const SITE_BASELINE = {
   "headless/mcp-main.ts": 10,
   "headless/mcp.ts": 78,
   "headless/protocol.ts": 123,
-  "headless/receipt-verify-main.ts": 8,
+  "headless/receipt-regress-main.ts": 19,
+  "headless/receipt-verify-main.ts": 4,
   "headless/run-spec.ts": 33,
   "headless/serve-main.ts": 47,
   "headless/serve.ts": 73,
@@ -1057,6 +1066,7 @@ const SITE_BASELINE = {
   "shared/prompt-text.ts": 1,
   "shared/prompts.ts": 10,
   "shared/providers.ts": 7,
+  "shared/receipt-lib.ts": 14,
   "shared/redact.ts": 1,
   "shared/routing.ts": 9,
   "shared/schedule-core.ts": 21,

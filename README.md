@@ -11,7 +11,7 @@
 
 > **别的编排器给你 N 份 diff 让你挑；OxCommander 交付一份过了门禁的。**
 >
-> 判错逻辑本身被**逐位点**证明过：当前在册 **120 个目标** / 基线 **3233 处位点**。
+> 判错逻辑本身被**逐位点**证明过：当前在册 **122 个目标** / 基线 **3262 处位点**。
 > **全量** site 审计由 CI 的 `mutation (site, tier …)` 三个分片 job 每次 push 跑（Linux，片内 `--jobs=1` 串行）：
 > tier 1 单片 + tier 2 轮转两片。2026-10-16 修掉一处**分片假象** —— `--tier` 此前实现为 `t.tier <= N`，
 > 于是 `--tier=2` 那片实际跑的是**全部「73」个目标（该次当时的在册数）**（含 33 个 tier 1），run #153 的 tier1 23.4 min / tier2 54.8 min
@@ -49,7 +49,7 @@ Electron 桌面端 + headless CLI 双入口。
 >
 > | 特征 | OxCommander |
 > | --- | --- |
-> | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染 |
+> | 交付凭据 | 每次运行产一份 **delivery receipt**：验证结论 + 逐任务账 + 越权处置 + token 用量，桌面落盘并**把外部可验证性的两半摆出来**（`checks[].command` 原样可见、`fingerprint` 整串可选），headless 发 `receipt` 事件、serve 状态页整份渲染。**凭据库**：每份凭据按 `<时间戳>-<指纹前 8 位>.json` 累积落 `<workspace>/.ox/receipts/`（`receiptJson` 只留最新那份，库留的是一叠），`npm run receipt:regress --dir=… [--replay]` 把一叠当回归清单跑 —— **整批取最严重的那一档**（有一份被改过/被推翻，这批就不算过），默认只审计指纹、`--replay` 才真复跑，退出码与 `receipt:verify` 同一张表 |
 > | 改动可见 | 看板「改动文件」卡：每批改动（含干净批）落 `batch-changes` 审计，按批次折叠展示 op/字节数 —— 「交付一份过了门禁的」之外，再回答"它动了什么"。**逐行 diff + 单文件回滚**（B1 第二半）：批次成功后备份转**存档**（容量策略只保留最近 8 批），diff 是"存档旧内容 × 盘上现状"；回滚从该批存档恢复，新建文件须有审计里的 `create` 证据才肯删（没证据宁可留一个脏文件）；存档过期或未配置快照存储时按钮不出现，边界写在卡片上。**本次产物 + 怎么验收**（最后一米）：run 收束后按任务分组列出产物路径，点开即读只读全文（不用开工作目录）；同时给出凭据里的复跑命令与 `package.json` 的 `dev/start/preview/serve` 启动命令，一键复制。同一份结构（`shared/delivery-guide`）经 `acceptance` 事件进 serve 状态页，两端不会各说各的 |
 > | 项目约定 | 项目根的 **`OX.md` / `AGENTS.md`** 自动进上下文：规划（PRD 提示）与每个任务的派发描述都带，顺序是 **任务描述 → 约定 → 平台契约 → 操作者附言**。约定块自己声明"不覆盖契约"；单文件上限 256KB、总注入上限 8000 字符，截断时**说破**原长度；读不动的文件只报不抛 |
 > | 执行器自动探测 | 智能体页「扫描本机执行器」：扫 `PATH` 找已装的编码 CLI（Claude Code / Codex / Aider / Gemini / Goose / Qwen Code），命中即可**一键接入** —— 参数取仓内带实测参数的模板，不用手写 JSON manifest。扫描**只读 PATH、不执行任何命令**（候选 CLI 不会因为"被扫了一下"就启动一次）；没装的那条给安装命令，且**不显示"接入"**（派发与扫描用同一个 PATH，扫不到 = 接进来也必红） |
@@ -238,9 +238,10 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**35 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**36 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 16 个静态段
-+ `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0）：
++ `npm test` + `build` + `build:headless` + `smoke:receipt-verify` + `smoke:receipt-regress` +
+`smoke:demo` 全 EXIT 0）：
 
 ```
 check:residue（首段，卫生预检：上一次变异运行被强杀时，活体变异体会留在源码里 ——
@@ -283,7 +284,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   同批还校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点**（`(算子, 行号)` 逐条比对，复用门禁
   自己的 `findSites`）：失效条目豁免的是空气，而漂到新行的那个位点无人认领 —— 2026-10-23 一天内
   因此红了两轮 CI（`context.ts` 221→225、`path-policy.ts` 92→94，后者直接拦住发布）
-→ vitest（2026-10-26 现跑 3178 通过 + 8 跳过，合计 3186 条，分布在 107 个有可执行用例的文件；
+→ vitest（2026-10-26 现跑 3206 通过 + 8 跳过，合计 3214 条，分布在 108 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -300,6 +301,10 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → smoke:receipt-verify（交付凭据复核工具 `receipt-verify-main.js` 的端到端冒烟：
    8 例覆盖五档裁决与五个退出码，含"复跑的命令真的执行了"与
    "指纹不符时即使给了 --replay 也不复跑"两条非空转证据）
+→ smoke:receipt-regress（凭据库回放门 `receipt-regress-main.js` 的端到端冒烟：
+   10 例覆盖整批语义 —— 一批里只要有一份被改过/被推翻，整批就不算过（取最严重那一档）、
+   默认模式**绝不**偷偷复跑、`--limit` 按文件名时间戳挑最新而非 mtime、
+   读不动的那份如实报坏而不被"其余的都好"糊过去）
 → smoke:demo（对外可复现样例 `demo-deliver.mjs`：零凭据零网络的**一次完整交付**，
    顺带把凭据闭环走通 —— 产出凭据 → 独立复核默认模式判 not-replayed（指纹一致
    ≠ 结论为真）→ `--replay` 复跑判 verified。它同时是 README 的演示与回归基线）

@@ -384,6 +384,134 @@ describe("receipt-verify-main · 退出码契约", () => {
   });
 });
 
+describe("receipt-regress-main · 整批的裁决契约", () => {
+  // 与单份入口同一条理由：这个入口的退出码就是 CI 的判定。
+  // 但它多一层承判 —— **一批里怎么归并成一档**。归并错了（取第一份/最后一份、
+  // 或者把读不动的当成没事）在单份用例里一律看不见。
+
+  /** 按约定命名写一份真封过指纹的凭据，返回目录。 */
+  function corpus(
+    entries: Array<{ stamp: string; receipt: DeliveryReceipt }>,
+  ): string {
+    const dir = fs.mkdtempSync(path.join(tmpdir(), "ox-regress-"));
+    for (const e of entries) {
+      const name = `${e.stamp}-${e.receipt.fingerprint!.slice(0, 8)}.json`;
+      fs.writeFileSync(path.join(dir, name), JSON.stringify(e.receipt), "utf8");
+    }
+    return dir;
+  }
+
+  function regress(over: Partial<DeliveryReceipt> = {}, mutate?: (r: DeliveryReceipt) => DeliveryReceipt) {
+    const base: DeliveryReceipt = {
+      outcome: "delivered",
+      verified: true,
+      rounds: 0,
+      checks: [],
+      tasks: [],
+      conflicts: [],
+      counts: { total: 0, done: 0, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 0, preexisting: 0 },
+      headline: "ok",
+      ...over,
+    };
+    const sealedR = sealReceipt(base, (s) => createHash("sha256").update(s).digest("hex"));
+    return mutate ? mutate(sealedR) : sealedR;
+  }
+
+  it("目录不存在 → exit 1，并说清约定路径", () => {
+    const r = runEntry("receipt-regress-main.js", [`--dir=${path.join(tmpdir(), "ox-no-such-corpus-xyz")}`]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("凭据库目录不存在");
+    expect(r.stderr).toContain(".ox/receipts");
+  });
+
+  it("空目录（含不认得的文件名）→ exit 1：没有凭据不等于通过", () => {
+    const dir = fs.mkdtempSync(path.join(tmpdir(), "ox-regress-empty-"));
+    fs.writeFileSync(path.join(dir, "README.md"), "not a receipt\n", "utf8");
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("没有可解析的凭据");
+    expect(r.stdout).toContain("README.md");
+  });
+
+  it("没盖章的一份 → 整批 exit 4（unsigned）", () => {
+    // 没指纹的凭据**进不了库**（命名要指纹前 8 位，`saveReceiptToCorpus` 会跳过它）。
+    // 所以这种文件只可能来自"别人拷进来 / 手工改名" —— 用一个占位前缀模拟它，
+    // 断言的是"读进来之后按内容判 unsigned"，而不是"库里会有这种名字"。
+    const dir = fs.mkdtempSync(path.join(tmpdir(), "ox-regress-unsigned-"));
+    const bare = regress({}, (x) => ({ ...x, fingerprint: undefined }));
+    fs.writeFileSync(path.join(dir, "20261026-100000-00000000.json"), JSON.stringify(bare), "utf8");
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`]);
+    expect(r.code).toBe(4);
+  });
+
+  it("被改过的一份 → exit 3（tampered）", () => {
+    const dir = corpus([{ stamp: "20261026-100000", receipt: regress({ headline: "原始" }, (x) => ({ ...x, headline: "偷改过的" })) }]);
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`]);
+    expect(r.code).toBe(3);
+  });
+
+  it("混合：一份被改过 + 一份完好 → 取**最严重**的那档（exit 3），且两份都被点名", () => {
+    // 这条是整批语义的核心：一批里只要有一份不成立，这一批就不能算过。
+    // 归并写成"取第一份/最后一份"时，这条会红。
+    const dir = corpus([
+      { stamp: "20261026-100000", receipt: regress({ checks: [replayableCheck(replayScript, true)] }) },
+      { stamp: "20261026-110000", receipt: regress({ headline: "原始" }, (x) => ({ ...x, headline: "偷改过的" })) },
+    ]);
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`, "--replay", `--cwd=${tmpdir()}`]);
+    expect(r.code).toBe(3);
+    expect(r.stdout).toContain("tampered");
+    expect(r.stdout).toContain("verified");
+    expect(r.stdout).toContain("整批裁决：tampered");
+  });
+
+  it("默认模式（不给 --replay）→ exit 5，且提示怎么让结论为真", () => {
+    const dir = corpus([{ stamp: "20261026-100000", receipt: regress({ checks: [replayableCheck(replayScript, true)] }) }]);
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`]);
+    expect(r.code).toBe(5);
+    expect(r.stdout).toContain("--replay");
+  });
+
+  it("--replay 复跑复现 → exit 0（唯一可以采信的一档）", () => {
+    const dir = corpus([{ stamp: "20261026-100000", receipt: regress({ checks: [replayableCheck(replayScript, true)] }) }]);
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`, "--replay", `--cwd=${tmpdir()}`]);
+    expect(r.code).toBe(0);
+  });
+
+  it("--replay 复跑矛盾 → exit 2（contradicted）", () => {
+    const dir = corpus([{ stamp: "20261026-100000", receipt: regress({ checks: [replayableCheck(failScript, true)] }) }]);
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`, "--replay", `--cwd=${tmpdir()}`]);
+    expect(r.code).toBe(2);
+  });
+
+  it("目录里混进一份读不动的 → exit 1，且统计里点名（不被别的好糊过去）", () => {
+    const dir = corpus([{ stamp: "20261026-100000", receipt: regress() }]);
+    fs.writeFileSync(path.join(dir, "20261026-110000-aaaaaaaa.json"), "{ 不是 JSON", "utf8");
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`]);
+    expect(r.code).toBe(1);
+    expect(r.stdout).toContain("读不动");
+    expect(r.stdout).toContain("unreadable=1");
+  });
+
+  it("--limit=abc → exit 1（用不了，不是「没复跑」）", () => {
+    const r = runEntry("receipt-regress-main.js", ["--limit=abc"]);
+    expect(r.code).toBe(1);
+    expect(r.stderr).toContain("--limit=abc");
+  });
+
+  it("--limit=1 只挑最新那一份（按文件名时间戳，不看 mtime）", () => {
+    const dir = corpus([
+      { stamp: "20261026-100000", receipt: regress({ checks: [replayableCheck(replayScript, true)] }) },
+      // 较新的那份**声称过了、实际会失败** ⇒ 复跑出 contradicted（2）
+      { stamp: "20261026-110000", receipt: regress({ checks: [replayableCheck(failScript, true)] }) },
+    ]);
+    // 只有最新那份参与 ⇒ 矛盾的那份被选中 ⇒ exit 2。
+    // 若 limit 挑成最旧的，跑的会是"全绿那份"而得到 0。
+    const r = runEntry("receipt-regress-main.js", [`--dir=${dir}`, "--limit=1", "--replay", `--cwd=${tmpdir()}`]);
+    expect(r.stdout).toContain("共 1 份");
+    expect(r.code).toBe(2);
+  });
+});
+
 describe("serve-main · 非法端口不启动服务（D11 端到端）", () => {
   it("--port=99999 → exit 1，且不打印启动成功那行", () => {
     const r = runEntry("serve-main.js", ["--port=99999"], 15_000);

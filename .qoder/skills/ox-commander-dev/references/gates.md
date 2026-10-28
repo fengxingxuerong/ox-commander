@@ -1,14 +1,15 @@
-# `npm run verify` 的逐段机制（35 段）
+# `npm run verify` 的逐段机制（36 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、35 段、
-3178 通过 + 8 跳过，合计 3186 条，分布在 107 个有可执行用例的文件（2026-10-26 现跑：链首到
-`mutation:baseline` 的 16 个静态段 + `npm test` + `build` + `build:headless` + `smoke:demo` 全 EXIT 0；
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、36 段、
+3206 通过 + 8 跳过，合计 3214 条，分布在 108 个有可执行用例的文件（2026-10-26 现跑：链首到
+`mutation:baseline` 的 16 个静态段 + `npm test` + `build` + `build:headless` +
+`smoke:receipt-verify` + `smoke:receipt-regress` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
 ⚠️ 本机（WorkBuddy 宿主）一个调用跑整链时，`build` 段会红在
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**120 个目标** / 基线 **3233 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**122 个目标** / 基线 **3262 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。
@@ -62,6 +63,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 19a | `smoke:chat-agent` | `scripts/chat-agent-it.mjs`：假 HTTP 大脑 + **真 `ChatSession`/`ToolRunner`**，覆盖工具循环、补丁落盘、审批拒绝理由回灌、会话中止 | 零配额、随机端口。任一断言不符 ⇒ 红；工具结果必须真的回到下一轮请求（不是"模型假装读过"） |
 | 19b | `smoke:chat-cli` | `scripts/chat-cli-it.mjs`：**真子进程**跑 `dist-headless/headless/chat-main.js`，覆盖 `exec --json`、第二个进程 `--session` 恢复、项目 `policy.d` 拦命令、非交互 untrusted fail-closed、REPL `/help` | 零配额、随机端口。恢复用例断言第二个进程的请求里带着上一轮助手答复；拒绝用例断言盘上无产物 |
 | 20 | `smoke:receipt-verify` | `scripts/receipt-verify-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-verify-main.js`（真 argv / 真退出码），8 例覆盖五档裁决：verified / contradicted / tampered / unsigned / not-replayed + 用法错与读不到 | 任一例的退出码或断言不符 ⇒ 红。两条**非空转证据**：复跑类用例断言命令留下的标记文件存在（证明真执行）；`tampered + --replay` 用例断言标记**不存在**（证明指纹不符时确实没复跑）。只对退出码断言是可以被"什么都不做、只返回预期码"的实现骗过的 |
+| 20b | `smoke:receipt-regress` | `scripts/receipt-regress-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-regress-main.js`，10 例覆盖**一整叠**凭据的裁决语义 | 整批取**最严重**那一档（`tampered > contradicted > unsigned > not-replayed > verified`）；默认模式**绝不**偷偷复跑（标记文件不存在）；`--limit` 按**文件名时间戳**挑最新而不是 mtime；读不动的那份单独计数并让整批 exit 1；同一批换个顺序给，结论必须一样 |
 | 21 | `smoke:demo` | `scripts/demo-deliver.mjs`：**对外可复现样例**。临时目标项目 + 本进程起的假大脑（**随机端口**，经 `OX_LLM_BASE_URL_OLLAMA` 接入）+ 假 http-bridge 执行器 + 真 `dist-headless` 子进程 + 真 `node --test` 验证，然后把产出的交付凭据交给 `receipt-verify-main.js` 复核（默认模式 + `--replay`） | 零凭据、零网络、零固定端口。17 条断言任一不符 ⇒ 红。**非空转证据**：断言 `brainCalls >= 1`（大脑请求真打到了覆盖后的端点——若端点覆盖失效，`brainCalls=0` 且 PLANNING 阶段就 exit 1）；断言复核默认模式退出码为 **5**（not-replayed，即"指纹一致 ≠ 结论为真"）而 `--replay` 为 0。反向注入实测：去掉 env 里的端点覆盖后 14 条断言变红 |
 | 22-25 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
 | 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
@@ -335,7 +337,7 @@ async 门面（`text()` / `json()` / `chat()`）。
   这个 job 证明的是 `npx oxcommander` 这条**纯 Node 分发通路**在 mac 上真的通。
   零凭据零网络零固定端口，失败即该通路坏，与 verify 两格互为补充而非重复。
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 35 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 36 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 

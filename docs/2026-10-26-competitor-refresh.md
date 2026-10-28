@@ -146,11 +146,19 @@ Ox-Zones: src/engine, shared
 
 ## 五、排期（本轮不动）
 
-1. **凭据库 + 回放门**（中）：每次 run 把凭据累积落 `.ox/receipts/<runId>.json`，新入口
-   `receipt:regress --dir=.ox/receipts [--replay]` 聚合出 `{case, verdict}`，任一 `contradicted` 即非零。
-   裁决**不许重写**，一律调 `auditReceipt` / `compareChecks`（理由见 `electron/ipc/receipt.ts` 头注：
-   判据分叉是这个仓最难被发现的漂移）。**诚实边界**：回放的是**门禁命令**，不是整次 agent 运行 ——
-   Tracely 能录 fixture 复现 LLM 调用，我们只复现"同一批命令在同一环境下重新观察"，别吹成 trace 级。
+1. ~~**凭据库 + 回放门**（中）~~ —— **已于 2026-10-26 落地**：凭据按
+   `<时间戳>-<指纹前 8 位>.json` 累积落 `<workspace>/.ox/receipts/`，新入口
+   `npm run receipt:regress --dir=.ox/receipts [--replay] [--limit=N]`。
+   落地时改掉/拍板的三格：
+   - **文件名里不放 `runId`**（这一仓没有 run 级标识，见吸收 1 的落地注）：改成"落盘时刻 +
+     凭据自己的指纹前 8 位"—— 两样都是可核的；没指纹的凭据干脆**进不了库**。
+   - **整批裁决取最严重那一档**（`tampered > contradicted > unsigned > not-replayed > verified`）：
+     定义必须唯一，否则同一叠凭据两次跑能给两个结论。
+   - **退出码表收成一处**（`shared/receipt-lib.verdictExitCode`），单份工具改读它 ——
+     "CI 只学一套"得靠一处定义保证，而不是靠两处恰好一致。
+   判据**没有**重写：一律调 `auditReceipt` / `compareChecks`。
+   **诚实边界不变**：回放的是**门禁命令**，不是整次 agent 运行 —— Tracely 能录 fixture 复现
+   LLM 调用，我们只复现"同一批命令在同一环境下重新观察"，别吹成 trace 级。
 2. **PRD 一致性观察**（中，advisory）：门禁回答"能不能跑"，不回答"是不是要的那个"。若做，结论进
    凭据一个 `advisory` 段，**永不参与 delivered/blocked 判定**（模型判断不可复现，不能当闸门）。
 
