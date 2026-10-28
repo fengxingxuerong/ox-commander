@@ -10,6 +10,29 @@
 
 ## [Unreleased]
 
+### 新增（`npx oxcommander demo`：分发面最后缺的那一格 · 2026-10-28）
+
+- **`demo` 成为 CLI 的第六个子命令**：`npm run demo` 那个"零凭据、零网络、看完整一次交付"的
+  对外样例，此前只在仓库里可跑 —— 它按脚本位置找 `dist-headless/`，而 npm 包不带 `scripts/`。
+  于是 README 里最有说服力的那条路径，恰好只有**clone 过仓库的人**走得到。
+  现在构建 CLI 包时把 `scripts/demo-deliver.mjs` 收进 `demo/`，`ox demo` 从包根解析同一套路径、
+  跑同一份断言，约 2 秒跑完（规划 → 派单 → 门禁 → 交付凭据 → 独立复核）。
+- **包内形态不撒谎**：复核提示从 `npm run receipt:verify` 换成 `npx oxcommander receipt`
+  （包内没有那个 script，照抄会得到 "Missing script"）；缺编译产物时报"这个安装包不完整，
+  重装一次"，而不是让用户去跑一条包里不存在的构建命令；并说破"现场结束即清掉，想照着复跑加 `--keep`"。
+- **发布通道接上**：`release` 工作流新增 `publish-cli`（tag 触发、`needs: verify`）——
+  先跑 `smoke:cli-pkg`、校 tag 与包版本一致、拦"同版本已存在于 npm"，再 `npm publish`；
+  缺 `NPM_TOKEN` 时第一步就点名，不让 npm 在最后一步吐 ENEEDAUTH（读起来像网络问题）。
+- **冒烟扩一格（这一格才是重点）**：`smoke:cli-pkg` 现在**从 dist-cli 里真跑一次 `ox demo`**。
+  此前它只断言"文件都在、路由都对"—— 而"包能装"与"包里的 dist-headless 真能交付"是两件事；
+  npm `files` 白名单漏登记 `demo/` 这类坏法，也只有真从包里启动才现形。
+- 已知边界：这一笔把**发布通道**做好，包本身要等下一次 `v*` tag 才会出现在 npm 上
+  （本机已用 `npm pack` + `npm install <tgz>` + `npx oxcommander demo` 真装一遍验证过，
+  没验的只有 registry 侧的权限与命名）；桌面端安装包与 CLI 包是两条独立产物
+  （mac 桌面仍不产出，理由未变）。
+- 规模：本笔不加 vitest 用例（判据落在 `smoke:cli-pkg` 那一段里）；
+  TARGETS / SITE_BASELINE 不动（没有生产 TS 改动）。
+
 ### 新增（凭据库 + 回放门：一叠历史凭据当回归清单跑 · 第七轮竞品吸收排期项 · 2026-10-26）
 
 - **凭据从"最新一份"变成"一叠"**：桌面每跑完一轮，凭据除了覆盖项目记录里的 `receiptJson`

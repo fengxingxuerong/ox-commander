@@ -17,6 +17,70 @@
 
 ---
 
+## [Unreleased · `npx oxcommander demo`：分发面最后缺的那一格 · 2026-10-28]
+
+**起因是上一轮排期自报的"已落地"与实测对不上**。10-17 缺口盘点的 A2 写的是"发 `@oxcommander/cli`、
+`npx` 可达"，此后 `build:cli` + `dist-cli/` + `smoke:cli-pkg` 都做出来了，README 也把它当成已补。
+但两条事实叠在一起才是真相：`npm view oxcommander` **404**（包从未发布），而包里**没有 demo** ——
+`scripts/demo-deliver.mjs` 按脚本位置解析根目录，npm 包的 `files` 白名单里根本没有 `scripts/`。
+于是"一条命令零凭据看完整一次交付"这条最有效的路径，只对 clone 过仓库的人存在。
+分发面缺的从来不是产物，是**产物里那条能让人 2 秒内看见价值的路**。
+
+**为什么把 demo 进包当作这一笔的核心，而不是先去点 publish**：发布是一个动作，demo 是一个判据。
+没有 demo 的包里，陌生人只看到一个要 key、要 projectRoot 的黑盒；有 demo 的包里，
+他能在 2 秒内看到六阶段、真验证、真凭据、以及"指纹一致 ≠ 结论为真"这个最容易被吹掉的点。
+而且 demo 自带断言，它进包之后同时成为**包的回归基线** —— 发布通道坏掉时它会先红。
+
+**实现上刻意只做一件事：复制，不改写**。`scripts/` 与 `demo/` 都距包根一级，
+`path.resolve(dirname(import.meta.url), "..")` 在两边指向同一个相对位置，
+所以那 581 行断言**一行都不用改**就能在包里跑。这不是巧合而是选位置时的判据：
+换个目录深度（比如 `demo/x/`）就得改路径解析，而"同一份断言、两个入口"的前提正是零改动。
+复制前先核过依赖面 —— 只有 `dist-headless/` 的两个入口与 `os.tmpdir()`，不碰 `scripts/` 里的别的东西，
+所以不存在"复制即漂移"。
+
+**包内差异只限提示语，靠根 `package.json` 的 `name` 判**。包内没有 `npm run receipt:verify`
+这个 script，照抄会得到 "Missing script"；缺编译产物时也不该让人去跑一条包里不存在的构建命令。
+判定用 `name === "oxcommander"` 而不新增 `--packaged` 开关：多一个开关就多一条没人走的路径，
+而 `name` 是构造这个包时就定了的、可读的事实。差异被压到三条文案内，行为路径完全一致。
+
+**白名单必须显式加 `demo`，而且冒烟直接断言它**。npm 的默认行为会静默排除未登记的目录，
+而 `dist-cli/` 是构建产物、本地永远看得见 —— 这类缺陷的形态是"本机全绿、用户装了没有"。
+所以判据分两层：`files.includes("demo")`（防白名单漏登记）与 `demo/demo-deliver.mjs` 真在盘上
+（防拷贝步骤被删）。
+
+**冒烟为什么真跑一次 demo，而不是只查文件存在**（本笔最贵也最值的一条）：
+`smoke:cli-pkg` 原先只回答"bin 指向的文件在、入口齐、路由对"，这全是**静态事实**；
+而"包里那份 `dist-headless` 真能规划/派单/门禁/出凭据/被复核"是**运行事实**。
+实测成本 1.7 s（零凭据零网络、随机端口），换来的是把"包能装 vs 包里的东西能跑"这条缝堵上。
+断言取 `exit 0` + 签名行 `一次真实交付完成` + 无 `FAIL:` —— 只看退出码的话，
+一个 `process.exit(0)` 的空壳也能过。
+
+**发布 job 复用同一个闸**：`publish-cli` 挂在 `release` 工作流的 tag 触发上、`needs: verify`。
+理由是 npm 版本发出去撤不回来（unpublish 只有 72 小时窗口且镜像会留），而 tag 可以在任何一次提交上打 ——
+这正是"发布前先过完整门禁"那条纪律的同一个理由。另加两道前置：tag 与 `dist-cli` 版本不一致直接红；
+`npm view oxcommander@<ver>` 已存在就红（不让"忘了升版本"变成一次 403）。
+缺 `NPM_TOKEN` 在第一步点名，不让 npm 在最后一步吐 ENEEDAUTH —— 那个报错读起来像网络问题。
+
+**实测（2026-10-28 本机 win32）**：`smoke:cli-pkg` **24 条断言全 PASS**、包内 110 个文件；
+`npm pack --dry-run` 的清单里 `demo/demo-deliver.mjs` 在列；
+包内形态的 `ox demo` 打印的是 `npx oxcommander receipt <凭据>`（不是仓库里的 `npm run receipt:verify`）；
+仓库形态 `npm run demo` 仍 1.7 s 全 PASS。
+
+另外做了一次**真装一遍**（比冒烟更靠近用户的那条路）：`npm pack` 出 `oxcommander-0.3.0.tgz`
+→ 空目录 `npm install ./oxcommander-0.3.0.tgz` → `npx --no-install oxcommander --version` 与
+`... demo --quiet` 全过。它走的是 `files` 白名单 + bin 链接 + 包内路径解析这三处真实路径，
+与 registry 无关；唯一没验的是 registry 侧的署名/权限/命名冲突。
+
+**未做 / 诚实边界**：
+- `npm publish` 本身在本机**无法验证**（没有凭据，也不该由 agent 代为登录）。job 的首次真跑才是它的第一次执行；
+  它的失败面（401 / 403 / 网络、包名被占）都留在 CI 上，本笔不假装验证过。
+- Windows 上 demo 打印的凭据路径是 `os.tmpdir()` 给的 8.3 短名（`ADMIN~1`），能用但不好看。
+  修改要碰平台分支（`realpath` 会引入另一套判据），成本大于收益，记账不修。
+- 这一笔没有新增 vitest 用例：路由与包自洽的判据在 `smoke:cli-pkg` 那一段里，
+  给生成出来的 `bin/ox.js` 写单测只能复制它的文本，测不到"包真的装起来是什么样"。
+
+
+
 ## [Unreleased · 凭据库 + 回放门：一叠历史凭据当回归清单跑（第七轮竞品吸收排期项）· 2026-10-26]
 
 **这一格补的是证据链的最后一段**：前三笔把凭据变成了"能挂到 commit 上、能被分支保护要求"的东西，

@@ -7,7 +7,8 @@ name: release
 # 塞进去会把门禁拖慢到没人愿意等。
 #
 # 触发方式两种：
-#   - 打 tag（v*）：打包并**建 GitHub Release**、把安装包挂上去
+#   - 打 tag（v*）：打包并**建 GitHub Release**、把安装包挂上去；
+#     同时把 `npx oxcommander` 的 CLI 包发到 npm（publish-cli job，同样等 verify 绿）
 #   - workflow_dispatch：只打包、上传为 workflow artifact
 #     用途是在不打 tag 的前提下**验证打包配置本身**（新配置第一次就该这么试）
 #
@@ -283,3 +284,69 @@ jobs:
         run: |
           echo "::error::gh release create 失败，诊断已写入 check run 'release-create-diagnostics (${{ matrix.os }})'"
           exit 1
+
+  # `npx oxcommander` 这一格：把 CLI 包发到 npm。
+  #
+  # 为什么也挂在 tag 上、且 needs verify：npm 上的版本发出去就撤不回来（unpublish 有 72 小时
+  # 窗口且会被镜像），而 tag 可以在任何一次提交上打。所以复用同一个 verify 闸，
+  # 而不是让"发布包"这条路径自己判断够不够格。
+  #
+  # 为什么不在 workflow_dispatch 上发：那是"验证打包配置"的入口，不该产出真实版本。
+  # 为什么先跑 smoke:cli-pkg：它会自己构建 dist-cli 并从包里**真跑**一次 ox demo ——
+  # "包能装"与"包里的东西能跑"是两件事，后者只有从包里启动才能看见。
+  publish-cli:
+    name: publish-cli (npm)
+    needs: verify
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # 这个 job 不启动 Electron，也不需要它的二进制。
+      ELECTRON_SKIP_BINARY_DOWNLOAD: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install
+        run: npm ci
+
+      # 缺 secret 时在第一步就点名，而不是让 npm 在最后一步吐 ENEEDAUTH
+      # （那样读起来像"网络坏了"）。
+      - name: Require NPM_TOKEN
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::缺 NPM_TOKEN secret（repo Settings → Secrets → Actions）"
+            exit 1
+          fi
+
+      - name: Build headless
+        run: npm run build:headless
+
+      - name: Smoke the CLI package (builds dist-cli + runs ox demo from inside it)
+        run: npm run smoke:cli-pkg
+
+      - name: Guard tag/version drift and republish
+        run: |
+          pkg_version=$(node -p "require('./dist-cli/package.json').version")
+          tag_version="${GITHUB_REF_NAME#v}"
+          echo "tag=$tag_version package=$pkg_version"
+          if [ "$pkg_version" != "$tag_version" ]; then
+            echo "::error::tag 版本 ($tag_version) 与 dist-cli/package.json ($pkg_version) 不一致"
+            exit 1
+          fi
+          if npm view "oxcommander@${pkg_version}" version >/dev/null 2>&1; then
+            echo "::error::oxcommander@${pkg_version} 已存在于 npm —— 先升版本再打 tag"
+            exit 1
+          fi
+
+      - name: Publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish dist-cli
+

@@ -6,9 +6,14 @@
  * 这一格是竞品对位里最便宜的一格（cezar `npx cezar-run`、superset `brew install`），
  * 缺了它，1723 处逐点验证过的判据对陌生人来说等于不存在（没人会为了试一下先装 Electron）。
  *
- * 产出形态刻意极小：只有 `bin/ox.js` + `dist-headless/`（不含 sourceMap）+ 一份英文 README。
+ * 产出形态刻意极小：`bin/ox.js` + `dist-headless/`（不含 sourceMap）+ `demo/` + 一份英文 README。
  * 不含 Electron、不含 React、不含 devDependencies —— `files` 白名单是唯一把关的地方，
  * 所以新增产物目录要显式登记，别指望 npm 的默认行为。
+ *
+ * `demo/` 收的是 `scripts/demo-deliver.mjs`：它按**脚本位置**解析根目录（再上一级就够到
+ * `dist-headless/`），所以从 `scripts/` 挪到 `demo/` 之后不需要改一行路径解析。
+ * 不收这一份的话，`npm run demo` 这条"零凭据看完整一次交付"的路径只对 clone 过仓库的人存在 ——
+ * 而那恰好是与分发面最相关的一类人之外的全部人。
  *
  * 用法：
  *   node scripts/build-cli-pkg.mjs            # 构建 dist-cli/
@@ -25,6 +30,9 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SRC = path.join(ROOT, "dist-headless");
 const OUT = path.join(ROOT, "dist-cli");
 const ENTRY_DIR = path.join(SRC, "headless");
+/** 随包发布的对外样例：源在 scripts/，包内落在 demo/（两者都距根一级，路径解析同一套）。 */
+const DEMO_SOURCE = path.join(ROOT, "scripts", "demo-deliver.mjs");
+const DEMO_DEST = path.join(OUT, "demo", "demo-deliver.mjs");
 
 /** 发布时排除：sourceMap 只是体积，.tsbuildinfo 是本机增量状态。 */
 const EXCLUDE_SUFFIX = [".map", ".tsbuildinfo"];
@@ -43,12 +51,14 @@ const BIN_SOURCE = [
   ' *   ox mcp                 MCP stdio server（接进 agent 生态）',
   ' *   ox receipt <file>      独立复核一份交付凭据',
   ' *   ox chat [exec|resume]  交互式编码智能体（REPL / 单发 / 恢复）',
+  ' *   ox demo                零凭据零网络跑一次完整交付（本包自带的样例）',
   ' */',
   'const fs = require("node:fs");',
   'const path = require("node:path");',
   'const { spawn } = require("node:child_process");',
   '',
   'const DIST = path.join(__dirname, "..", "dist-headless", "headless");',
+  'const DEMO = path.join(__dirname, "..", "demo", "demo-deliver.mjs");',
   'const ENTRIES = {',
   '  run: "headless-main.js",',
   '  serve: "serve-main.js",',
@@ -62,11 +72,12 @@ const BIN_SOURCE = [
   '  "",',
   '  "  ox                     run a delivery from a spec on stdin (JSONL events on stdout)",',
   '  "  ox serve --port=8787   long-running server: status page + SSE events + POST /run",',
-  '  "  ox mcp                 MCP stdio server (ox_status / ox_receipt / ox_events / ox_run / ox_control)",',
+  '  "  ox mcp                 MCP stdio server (ox_status / ox_receipt / ox_events / ox_run / ox_control / ox_approve)",',
   '  "  ox receipt <file>      verify a delivery receipt independently (--replay re-runs its checks)",',
   '  "  ox chat                interactive coding agent (REPL; /help for commands)",',
   '  "  ox chat exec \\"<prompt>\\" run one prompt (--json for JSONL events)",',
   '  "  ox chat resume [id]    continue the latest or a named session",',
+  '  "  ox demo                run the bundled zero-credential demo (plan -> dispatch -> gate -> receipt -> verify)",',
   '  "",',
   '  "  --version, -V          print version",',
   '  "  --help, -h             print this help",',
@@ -105,11 +116,18 @@ const BIN_SOURCE = [
   '',
   '/** 子命令只在首参数精确匹配时才吞掉它：其余一切原样转发给 run 入口。 */',
   'const head = argv.length > 0 ? argv[0] : "run";',
-  'const isSubcommand = Object.prototype.hasOwnProperty.call(ENTRIES, head);',
-  'const entry = ENTRIES[head] !== undefined ? ENTRIES[head] : ENTRIES.run;',
+  '// demo 是包内第二处入口（demo/），其余子命令都在 dist-headless/headless/ 下。',
+  'const isDemo = head === "demo";',
+  'const isSubcommand = isDemo || Object.prototype.hasOwnProperty.call(ENTRIES, head);',
   'const rest = isSubcommand ? argv.slice(1) : argv;',
   '',
-  'const child = spawn(process.execPath, [path.join(DIST, entry)].concat(rest), { stdio: "inherit" });',
+  'if (isDemo && !fs.existsSync(DEMO)) {',
+  '  bail("bundled demo not found at " + DEMO + " — this install is incomplete.");',
+  '}',
+  'const entry = ENTRIES[head] !== undefined ? ENTRIES[head] : ENTRIES.run;',
+  'const script = isDemo ? DEMO : path.join(DIST, entry);',
+  '',
+  'const child = spawn(process.execPath, [script].concat(rest), { stdio: "inherit" });',
   'child.on("error", function (err) { bail(String(err && err.message)); });',
   'child.on("exit", function (code, signal) {',
   '  if (signal !== null && signal !== undefined) { process.exit(1); }',
@@ -127,6 +145,7 @@ const PACKAGE_README = [
   "",
   "```bash",
   "npx oxcommander --help",
+  "npx oxcommander demo                 # zero credentials, zero network: one full delivery",
   "echo '{\"requirement\":\"...\",\"projectRoot\":\".\"}' | npx oxcommander",
   "npx oxcommander serve --port=8787    # status page + SSE + POST /run",
   "npx oxcommander mcp                  # MCP stdio server for agent hosts",
@@ -186,7 +205,7 @@ function writePackage(dir, version) {
     author: "fengxingxuerong",
     bin: { ox: "bin/ox.js" },
     // 白名单即把关：新增随包发布的目录必须显式登记在这里。
-    files: ["bin", "dist-headless", "README.md"],
+    files: ["bin", "demo", "dist-headless", "README.md"],
     engines: { node: ">=20.19" },
     keywords: ["agent", "orchestrator", "multi-agent", "coding-agent", "ade", "headless", "mcp"],
     repository: { type: "git", url: "git+https://github.com/fengxingxuerong/ox-commander.git" },
@@ -205,6 +224,15 @@ function main() {
     );
     process.exit(2);
   }
+  // demo 与 dist-headless 同级重要：缺了它包照样能装能跑，只是少了"零凭据看完整一次交付"这条路。
+  // 那种半成品最难发现（--version / --help 全绿），所以在清空 OUT **之前**就判。
+  if (!fs.existsSync(DEMO_SOURCE)) {
+    process.stderr.write(
+      `demo source not found — 缺 ${path.relative(ROOT, DEMO_SOURCE)}。\n` +
+        `  包里的 \`ox demo\` 就是它，缺了不要产出半个包。\n`,
+    );
+    process.exit(2);
+  }
 
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
@@ -213,6 +241,8 @@ function main() {
   const manifest = writePackage(OUT, version);
   const binPath = writeBin(OUT);
   const copied = copyTree(SRC, path.join(OUT, "dist-headless"));
+  fs.mkdirSync(path.dirname(DEMO_DEST), { recursive: true });
+  fs.copyFileSync(DEMO_SOURCE, DEMO_DEST);
   fs.writeFileSync(path.join(OUT, "README.md"), PACKAGE_README, "utf8");
 
   const summary = {
@@ -220,9 +250,10 @@ function main() {
     name: manifest.name,
     version: manifest.version,
     bin: path.relative(ROOT, binPath),
+    demo: path.relative(ROOT, DEMO_DEST),
     copiedFiles: copied.files,
     copiedBytes: copied.bytes,
-    entries: ["run", "serve", "mcp", "receipt", "chat"],
+    entries: ["run", "serve", "mcp", "receipt", "chat", "demo"],
   };
 
   if (process.argv.includes("--json")) {
@@ -234,6 +265,7 @@ function main() {
     `CLI package ready: ${OUT}\n` +
       `  ${manifest.name}@${manifest.version} · bin ox → ${summary.bin}\n` +
       `  dist-headless: ${copied.files} files, ${kb} KiB (sourceMap excluded)\n` +
+      `  demo: ${summary.demo}\n` +
       `  subcommands: ${summary.entries.join(" / ")}\n` +
       `  publish: cd dist-cli && npm publish\n`,
   );

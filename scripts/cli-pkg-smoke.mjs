@@ -7,10 +7,12 @@
  * 这些在仓库里跑测试时全看不见（没人从 dist-cli 里启动过它）。
  *
  * 冒烟盯的是**包本身**，不是 headless 的协议行为（后者由 `smoke:artifact` / `smoke:demo` 管）：
- *   · 包是自洽的：bin 指向的文件真在盘上，五个入口都在；
+ *   · 包是自洽的：bin 指向的文件真在盘上，五个协议入口 + 随包的 demo 都在；
  *   · 版本与仓库一致（不与根 package.json 漂移）；
  *   · 转发真的工作：非法 spec 走 run 入口拿到协议层的 `error` 事件 + 退出码 1；
  *   · 子命令路由真的工作：`receipt` 拿到的是复核工具的报错，而不是 run 的报错；
+ *   · **demo 真的能从包里跑完一次交付**（零凭据零网络，1–2 秒）—— 这一条才回答
+ *     "装了这个包的人能不能看见它到底在干什么"，而不只是"文件都在"；
  *   · 发布面干净：不带 sourceMap、不带 electron / devDependencies。
  *
  * 用法：node scripts/cli-pkg-smoke.mjs
@@ -28,6 +30,7 @@ const BUILDER = path.join(ROOT, "scripts", "build-cli-pkg.mjs");
 const OUT = path.join(ROOT, "dist-cli");
 const BIN = path.join(OUT, "bin", "ox.js");
 const ENTRY_DIR = path.join(OUT, "dist-headless", "headless");
+const DEMO = path.join(OUT, "demo", "demo-deliver.mjs");
 const ENTRIES = ["headless-main.js", "serve-main.js", "mcp-main.js", "receipt-verify-main.js", "chat-main.js"];
 
 let failures = 0;
@@ -42,12 +45,13 @@ function check(label, ok, detail) {
   if (detail) console.log(`      ${detail}`);
 }
 
-function runBin(args, input) {
+function runBin(args, input, timeout) {
   return spawnSync(process.execPath, [BIN, ...args], {
     cwd: OUT,
     shell: false,
     input: input === undefined ? undefined : input,
     encoding: "utf8",
+    timeout: timeout === undefined ? undefined : timeout,
   });
 }
 
@@ -83,12 +87,16 @@ function main() {
   check("engines.node 与仓库一致", manifest.engines && manifest.engines.node === ">=20.19", JSON.stringify(manifest.engines));
   const files = manifest.files || [];
   check("files 白名单含 bin 与 dist-headless", files.includes("bin") && files.includes("dist-headless"), JSON.stringify(files));
+  // demo 是 whitelist 的第二个消费者：漏登记时 npm pack 会静默不打包（本地 dist-cli/ 里还在），
+  // 于是"本机全绿、用户装了没有"—— 只在真装一遍才现形的那类坏法。
+  check("files 白名单含 demo", files.includes("demo"), JSON.stringify(files));
   check("不带 devDependencies", manifest.devDependencies === undefined, "发布包不该带 electron/ vitest 等");
 
   // ③ 五个入口都在（少一个 = 那个子命令一按就崩）
   for (const entry of ENTRIES) {
     check(`入口存在 ${entry}`, fs.existsSync(path.join(ENTRY_DIR, entry)), path.join(ENTRY_DIR, entry));
   }
+  check("demo 随包发布", fs.existsSync(DEMO), DEMO);
 
   // ④ 版本与帮助：CLI 自身
   const version = runBin(["--version"]);
@@ -97,7 +105,7 @@ function main() {
   const help = runBin(["--help"]);
   const helpText = help.stdout || "";
   check("--help 列出子命令", help.status === 0
-    && ["serve", "mcp", "receipt", "chat"].every((word) => helpText.includes(word)),
+    && ["serve", "mcp", "receipt", "chat", "demo"].every((word) => helpText.includes(word)),
     `exit=${help.status}`);
 
   // ⑤ 转发非空转：非法 spec 必须走 run 入口、拿到协议层的 error 事件（不是 CLI 自己编的错）
@@ -117,6 +125,15 @@ function main() {
   check("chat 子命令路由到 chat 入口", chatHelp.status === 0
     && `${chatHelp.stdout || ""}`.includes("ox chat - interactive coding agent"),
     `exit=${chatHelp.status} out=${(chatHelp.stdout || chatHelp.stderr || "").slice(0, 160)}`);
+
+  // ⑦.5 demo 子命令从包里真跑一次完整交付：入口齐、路由对还不够 —— 包里那份
+  //      dist-headless 要真能规划/派单/门禁/出凭据/被复核。零凭据零网络，1–2 秒。
+  //      这也是"文件都在但装上去是残的"那类坏法唯一能被门禁看见的地方。
+  const demo = runBin(["demo", "--quiet"], undefined, 120_000);
+  const demoOut = `${demo.stdout || ""}${demo.stderr || ""}`;
+  check("demo 子命令从包内跑完一次真实交付", demo.status === 0
+    && demoOut.includes("一次真实交付完成") && !demoOut.includes("FAIL:"),
+    `exit=${demo.status} out=${demoOut.slice(-200)}`);
 
   // ⑧ 发布面干净：不带 sourceMap、不带 node_modules
   const packed = walk(OUT);

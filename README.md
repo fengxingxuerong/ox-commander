@@ -75,6 +75,7 @@ Electron 桌面端 + headless CLI 双入口。
 
 ```bash
 npx oxcommander --help
+npx oxcommander demo                 # 零凭据、零网络：2 秒看完整一次交付（规划 → 派单 → 门禁 → 凭据 → 复核）
 echo '{"requirement":"...","projectRoot":"."}' | npx oxcommander   # 一次交付，stdout 出 JSONL 事件
 npx oxcommander serve --port=8787    # 常驻服务：状态页 + SSE + POST /run
 npx oxcommander mcp                  # MCP stdio server，接进 agent 生态
@@ -84,8 +85,11 @@ npx oxcommander receipt receipt.json --replay   # 独立复核一份交付凭据
 ```
 
 > CLI 包由 `npm run build:cli` 从 `dist-headless/` 产出（`dist-cli/`，git 忽略），
-> `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、五个入口齐全、转发真的到达协议层。
-> 发布：`cd dist-cli && npm publish`。桌面安装包见下方「获取与安装」。
+> `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、五个协议入口 + 随包的 `demo/` 齐全、
+> 并且**从包里真跑一次 `ox demo`**（"包能装"与"包里的东西能跑"是两件事）、
+> 转发真的到达协议层。发布：打 `v*` tag 时 `release` 工作流的 `publish-cli` job 在 verify 绿后
+> `npm publish`（需 `NPM_TOKEN` secret）；本机手工发是 `cd dist-cli && npm publish`。
+> 桌面安装包见下方「获取与安装」。
 
 ## 快速开始
 
@@ -98,6 +102,12 @@ npm start             # 运行已构建的桌面端
 ```
 
 ### 先跑一遍看看（零凭据、零网络）
+
+```bash
+npx oxcommander demo        # 装了包的人：一条命令；不需要 clone，也没有任何前置构建
+```
+
+或者从源码跑：
 
 ```bash
 npm run build:headless
@@ -185,6 +195,16 @@ node dist-headless/headless/receipt-verify-main.js receipt.json --replay --cwd=<
 > 全部理由（详见 `docs/headless-protocol.md` 第 9 节）。
 
 ## 获取与安装
+
+**方式零：`npx`（先看一眼，不装任何东西）**
+
+```bash
+npx oxcommander demo      # 零凭据、零网络、约 2 秒：完整一次交付 + 凭据复核
+npx oxcommander --help
+```
+
+> 适合"我只想知道它到底在干什么"。真要拿它跑自己的项目，再按方式一/二装并配 key
+> （`demo` 用本进程的假端点，不花任何配额）。
 
 **方式一：下载安装包**（推荐，不用装 Node）
 
@@ -314,10 +334,12 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
    真起 dist-headless，由测试扮演"人"读写 inbox/outbox，6 场景钉住协议字段、越权整批拒、
    失败终态映射、deadline 收口与队列清理；随机端口、零配额）
 → smoke:cli-pkg（`npx oxcommander` 那一格的分发包冒烟：自己构建 `dist-cli/`，再断言
-  bin 指向的文件真在盘上、五个入口（含 `chat-main.js`）齐全、版本不与仓库漂移、非法 spec 真转发到协议层、
+  bin 指向的文件真在盘上、五个协议入口（含 `chat-main.js`）齐全、`demo/` 随包发布且
+  **真的从包里跑完一次 `ox demo`**、版本不与仓库漂移、非法 spec 真转发到协议层、
   `receipt` 子命令真路由到复核入口、包内不带 sourceMap 与 node_modules。
   它盯的是「包自洽」这一类**表面正常**的坏法：`--version` 照样打印、包照样能 pack，
-  但 `dist-headless` 少拷一个入口时只有真从 dist-cli 里启动才现形）
+  但 `dist-headless` 少拷一个入口、或 npm 的 `files` 白名单漏了 `demo/` 时，
+  只有真从 dist-cli 里启动才现形）
 → check:test-side-effects（测试文件的**顶层副作用**：顶层建目录却没人清、或清理写在
    `skipIf` 门控的块里而门控没开 —— 两种都必漏。判据见下，自检 6 例）
 ```

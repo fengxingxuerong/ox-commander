@@ -31,9 +31,10 @@
  *
  * ── 用法 ────────────────────────────────────────────────────────────────────
  *   npm run demo                     # 跑一遍，打印 transcript 与结论
+ *   npx oxcommander demo             # 同一份脚本的包内形态（本文件随 CLI 包发布在 demo/）
  *   node scripts/demo-deliver.mjs --keep     # 保留现场（临时项目 / 凭据 / 事件流）
  *   node scripts/demo-deliver.mjs --quiet    # 只打印结论与断言
- *   前置：npm run build:headless
+ *   前置：npm run build:headless（包内形态自带 dist-headless，无需前置）
  *   exit 0 = 交付成功且凭据复核通过；exit 1 = 有 FAIL
  */
 import fs from "node:fs";
@@ -51,10 +52,28 @@ const VERIFIER = path.join(ROOT, "dist-headless", "headless", "receipt-verify-ma
 const KEEP = process.argv.includes("--keep");
 const QUIET = process.argv.includes("--quiet");
 
+/**
+ * 同一份脚本有两种落地位置：仓库 `scripts/`（根 package.json 是 private 的 ox-commander）
+ * 与 npm 包 `demo/`（包根的 name 是 oxcommander）。差别只在**提示语**：包内没有
+ * `npm run receipt:verify` 这个 script，照着抄会得到 "Missing script"。
+ */
+const PACKAGED = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(ROOT, "package.json"), "utf8")).name === "oxcommander";
+  } catch {
+    return false;
+  }
+})();
+
+const receiptHint = (file, extra = "") =>
+  PACKAGED ? `npx oxcommander receipt ${file}${extra}` : `npm run receipt:verify -- ${file}${extra}`;
+
 if (!fs.existsSync(RUNNER) || !fs.existsSync(VERIFIER)) {
   console.error(
     `FAIL: 找不到编译产物（${path.relative(ROOT, RUNNER)} / ${path.relative(ROOT, VERIFIER)}）。\n` +
-      "      先跑：npm run build:headless",
+      (PACKAGED
+        ? "      这个安装包不完整 —— 重新安装一次：npm i -g oxcommander（或 npx oxcommander@latest demo）"
+        : "      先跑：npm run build:headless"),
   );
   process.exit(1);
 }
@@ -370,13 +389,15 @@ async function run() {
   let verifyReplay = { code: null, stdout: "", stderr: "" };
   if (receipt) {
     head("⑤ 用独立复核工具核这份凭据（任何拿到它的人都能自己跑）");
-    say(`   $ npm run receipt:verify -- ${path.relative(ROOT, receiptFile)}`);
+    say(`   $ ${receiptHint(receiptFile)}`);
     verifyDefault = await runVerifier([receiptFile]);
     say(`   → 退出码 ${verifyDefault.code}（${verdictOf(verifyDefault.stdout) ?? "?"}）` +
       `  —— 指纹一致只说明"没被改过"，不等于结论为真`);
-    say(`   $ npm run receipt:verify -- ${path.relative(ROOT, receiptFile)} --replay --cwd=<项目>   # 真的重跑那两条命令`);
+    say(`   $ ${receiptHint(receiptFile, " --replay --cwd=<项目>")}   # 真的重跑那两条命令`);
     verifyReplay = await runVerifier([receiptFile, "--replay", `--cwd=${proj}`]);
     say(`   → 退出码 ${verifyReplay.code}（${verdictOf(verifyReplay.stdout) ?? "?"}）`);
+    // 上面两条命令指向的文件在收尾时会被删掉 —— 不说破的话，照着抄的人会撞"读不了凭据"。
+    if (!KEEP) say("   提示：现场在结束时会被清掉；想照着上面的命令自己再跑一遍，加 --keep。");
   }
 
   /* ------------------------------------------------------------------ 断言 */
