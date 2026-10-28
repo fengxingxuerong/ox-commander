@@ -77,6 +77,12 @@ const EXEMPT = [
       "行为由 mcp-ipc.test.ts（字段投影/坏清单/problem）与 ipc.test.ts（通道接线）覆盖。",
   },
   {
+    file: "electron/chat/focus.ts",
+    reason:
+      "25 行纯派生，没有可变异算子（mutation-check 实测 0 位点，2026-10-29 清扫时入表被门禁拒绝）。" +
+      "行为由 notify-rules.test.ts（升级卡已覆盖的失败任务不双报）覆盖。",
+  },
+  {
     file: "headless/chat-main.ts",
     reason:
       "CLI 入口胶水：参数解析、readline 与事件打印，没有可单测的纯分支；" +

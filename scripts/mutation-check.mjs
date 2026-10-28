@@ -336,7 +336,11 @@ const TARGETS = [
     tests: ["src/cli-agent.test.ts", "src/cli-agent-env.test.ts"],
     tier: 2,
   },
-  { file: "electron/agents/sensenova-api.ts", test: "src/sensenova-api.test.ts", tier: 2 },
+  // 2026-10-29：补挂第二份测试。isSecretLikeFile 的**匹配契约表**（.env 族 /
+  // 密钥证书 / 凭据命名 / 不过度匹配）只写在 src/snapshot-secrets.test.ts 里，
+  // sensenova-api.test.ts 只测 walk 的"跳过但不中断"行为 —— 契约表此前从未
+  // 参与过该目标的位点审计。挂法同 manifest-loader 共用 manifest.test.ts 的先例。
+  { file: "electron/agents/sensenova-api.ts", tests: ["src/sensenova-api.test.ts", "src/snapshot-secrets.test.ts"], tier: 2 },
   { file: "electron/agents/http-bridge.ts", test: "src/http-bridge.test.ts", tier: 2 },
   // 2026-10-05（D11/D12）：两个 headless 入口的参数解析。它们的逻辑只有十几行，
   // 但**全是分支**（给错 / 不给 / 拼错 / 越界 / 协议不对），而这类代码的缺陷
@@ -780,6 +784,19 @@ const TARGETS = [
   // "只看退出码"或"少核一个产物"，而凭据上显示的是"验收通过"。这正是本仓
   // 「判据的输入不能被判定方影响／判据自己不能被静默放宽」两件事的落点。
   { file: "shared/acceptance.ts", tests: ["src/acceptance.test.ts"], tier: 1 },
+  // ---- 2026-10-29（工程质量清扫）：全量清点暴露的漏登记目标 ----
+  // check-mutation-targets 只对 git-touched 文件比对 TARGETS —— 历史未登记的
+  // 文件从未被任何一轮变异跑过，"PASS"对它们是空的。清点口径：全部生产文件
+  // 逐一比对 在册/豁免 两张表。ipc/skills 有测试但从未挂表；variant-store 的
+  // 测试（B4 变体隔离）同样从未挂表。tier：variant-store 动真实临时目录，挂
+  // tier 2；skills 的测试家在 ipc-handlers（tier 2）。chat/focus 实测 0 位点，
+  // 走豁免表（见 check-mutation-targets.mjs）。
+  { file: "electron/engine/variant-store.ts", test: "src/variant-store.test.ts", tier: 2 },
+  { file: "electron/ipc/skills.ts", test: "src/ipc-handlers.test.ts", tier: 2 },
+  // src/chat-mention.ts：src/** 整体豁免的理由是"UI 的判据是渲染结果"，但这个
+  // 文件是纯解析逻辑（@ 提及），同目录的 attention.ts / store.ts 都在册 ——
+  // 纯逻辑没有理由豁免。
+  { file: "src/chat-mention.ts", test: "src/chat-mention.test.ts", tier: 1 },
 ];
 
 /**
@@ -999,6 +1016,7 @@ const SITE_BASELINE = {
   "electron/engine/router.ts": 25,
   "electron/engine/scheduler.ts": 64,
   "electron/engine/skills.ts": 6,
+  "electron/engine/variant-store.ts": 4,
   "electron/engine/verifier.ts": 32,
   "electron/engine/zone-guard.ts": 6,
   "electron/ipc/agents.ts": 42,
@@ -1010,6 +1028,7 @@ const SITE_BASELINE = {
   "electron/ipc/orchestration.ts": 34,
   "electron/ipc/projects.ts": 12,
   "electron/ipc/receipt.ts": 4,
+  "electron/ipc/skills.ts": 5,
   "electron/keys-store.ts": 21,
   "electron/main.ts": 7,
   "electron/mcp/client.ts": 44,
@@ -1088,6 +1107,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 19,
   "shared/zone-coverage.ts": 36,
   "src/attention.ts": 10,
+  "src/chat-mention.ts": 13,
   "src/store.ts": 99,
 };
 

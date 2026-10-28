@@ -9,7 +9,7 @@
 `safe-delete][SAFE_DELETE_BULK_CONFIRM_REQUIRED]`（宿主按单次调用累计删除数、阈值 50，
 变异阶段清台账 + vite 清 `dist/assets` 一起超线）—— 环境噪音，不是项目缺陷。
 分段跑，或对该命令加 `CODEBUDDY_SAFE_DELETE_ENABLED=0`（只关这一条命令，不动全局）。
-变异规模实物：**123 个目标** / 基线 **3335 处位点**（`node scripts/site-baseline.mjs --json` 现算，
+变异规模实物：**126 个目标** / 基线 **3357 处位点**（`node scripts/site-baseline.mjs --json` 现算，
 与 `mutation-check.mjs` 里的 `TARGETS` 与 `SITE_BASELINE` 同一口径 —— 本文件与 README 里这两个数
 都由 `check:doc-claims` 对实物核，不再靠手抄）。
 注意这个头条数此前被"测试文件互相 import"**虚报过 28 条**（见 `check:tests-collected` 一节）：2026-09-25 同日出现的 1020 / 1033 都是虚高，别拿它们当基线。

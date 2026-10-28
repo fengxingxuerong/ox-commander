@@ -8,6 +8,20 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
+## [Unreleased]
+
+### 变更（变异门禁补漏登记：4 个从未被审计过的目标 · 2026-10-29）
+
+- **全量清点生产文件 × 在册/豁免 两张表**，暴露 4 个漏网：`electron/engine/variant-store.ts`（B4
+  变体隔离，scheduler 在用）、`electron/ipc/skills.ts`、`src/chat-mention.ts`（src/ 整体豁免下的
+  纯解析逻辑，同目录 attention/store 都在册）从未进过变异门禁；`sensenova-api` 的
+  **isSecretLikeFile 匹配契约表**（.env 族 / 密钥证书 / 凭据命名 / 不过度匹配）只写在
+  `snapshot-secrets.test.ts`，从未参与该目标的位点审计 —— 补挂为第二测试文件。
+- 三处登记后逐位点审计**零存活**（chat-mention 13/13 · skills 5/5 · variant-store 4/4）——
+  杀死它们的测试早就在，缺的只是登记。TARGETS 123 → **126** · SITE_BASELINE 3335 → **3357**。
+- `electron/chat/focus.ts` 实测 0 可变异位点，登记会被门禁自己拒绝（"零贡献却算 PASS"），
+  改入豁免表并写明理由（同 ipc/mcp.ts 先例）。本笔未改任何生产代码，用例数不变。
+
 ## [0.4.0] — 2026-10-28
 
 ### 新增（验收判据进桌面：PRD 确认页可改、看板单列结果 · 2026-10-28）
