@@ -1107,7 +1107,7 @@ const SITE_BASELINE = {
   "shared/usage-meter.ts": 19,
   "shared/zone-coverage.ts": 36,
   "src/attention.ts": 10,
-  "src/chat-mention.ts": 13,
+  "src/chat-mention.ts": 12,
   "src/store.ts": 99,
 };
 

@@ -10,7 +10,8 @@ export interface MentionInsertion {
 }
 
 export function mentionTokenAt(text: string, caret: number): MentionToken | null {
-  if (!Number.isInteger(caret) || caret < 0 || caret > text.length) return null;
+  if (!Number.isInteger(caret)) return null;
+  if (caret < 0 || caret > text.length) return null;
   let start = -1;
   for (let i = caret - 1; i >= 0; i -= 1) {
     const ch = text[i];

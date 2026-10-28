@@ -17,8 +17,11 @@
   纯解析逻辑，同目录 attention/store 都在册）从未进过变异门禁；`sensenova-api` 的
   **isSecretLikeFile 匹配契约表**（.env 族 / 密钥证书 / 凭据命名 / 不过度匹配）只写在
   `snapshot-secrets.test.ts`，从未参与该目标的位点审计 —— 补挂为第二测试文件。
-- 三处登记后逐位点审计**零存活**（chat-mention 13/13 · skills 5/5 · variant-store 4/4）——
-  杀死它们的测试早就在，缺的只是登记。TARGETS 123 → **126** · SITE_BASELINE 3335 → **3357**。
+- 另两处登记后逐位点审计**零存活**（skills 5/5 · variant-store 4/4）——杀死它们的测试
+  早就在，缺的只是登记。chat-mention 首审 **11/13**：两个 `|| → &&` 存活，一个是等价变异、
+  一个是真缺口（caret 越界会扫到 `@` 返回假 token）—— 守卫拆行让等价变异随结构消失，
+  真缺口补断言杀死，终态 **12/12**。TARGETS 123 → **126** · SITE_BASELINE 3335 → **3356**
+  （过程曾到 3357，拆行后 chat-mention 13 → 12 位点）。
 - `electron/chat/focus.ts` 实测 0 可变异位点，登记会被门禁自己拒绝（"零贡献却算 PASS"），
   改入豁免表并写明理由（同 ipc/mcp.ts 先例）。本笔未改任何生产代码，用例数不变。
 

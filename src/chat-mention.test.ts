@@ -11,6 +11,15 @@ describe("chat mention", () => {
     expect(mentionTokenAt("mail a@b.com", 12)).toBeNull();
   });
 
+  it("caret 超出文本长度必须返回 null —— 即使文本里有可命中的 @", () => {
+    // 没有长度守卫时，越界 caret 的回扫会扫进真实字符并命中 "@"，
+    // 返回一个 end 超出文本长度的假 token（"@a"、caret=5 实测如此）。
+    expect(mentionTokenAt("@a", 5)).toBeNull();
+    expect(mentionTokenAt("看看 @src", 20)).toBeNull();
+    // 边界：caret 恰好等于长度是合法位置（光标停在末尾）
+    expect(mentionTokenAt("@src", 4)).toEqual({ start: 0, end: 4, query: "src" });
+  });
+
   it("候选先按文件名前缀，再按路径前缀与长度排序", () => {
     const files = ["src/utils.ts", "src/feature/alpha.ts", "docs/alpha.md", "alpha.test.ts", "src/beta.ts"];
     expect(mentionCandidates(files, "alpha")).toEqual(["alpha.test.ts", "docs/alpha.md", "src/feature/alpha.ts"]);
