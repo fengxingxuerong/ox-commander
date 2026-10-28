@@ -8,7 +8,7 @@
 [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) —— 两边按日期一一对应，
 新条目的完整版同批写进工程日志（规则见 [CONTRIBUTING.md](CONTRIBUTING.md)）。
 
-## [Unreleased]
+## [0.4.0] — 2026-10-28
 
 ### 新增（验收判据进桌面：PRD 确认页可改、看板单列结果 · 2026-10-28）
 
