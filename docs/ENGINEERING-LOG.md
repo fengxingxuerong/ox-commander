@@ -17,6 +17,48 @@
 
 ---
 
+## [0.4.1 · 全链在本机跑不动：vitest 并发按虚高核数开 19 个 worker · 2026-11-09]
+
+**起因**：0.4.1 定版后跑 `npm run verify` 做收尾判据，连红两轮，症状彼此不像：
+
+- 第一轮（1 min 12 s，EXIT 1）：8 条红 —— `spawn UNKNOWN`（`git-export` 真 git 导出）、
+  `0xC0000142`（DLL 初始化失败，`mcp-client` 的 fixture 子进程）、
+  `MCP server fixture 进程已退出（code=3221225794）`、4 条 `Test timed out in 20000ms`。
+- 第二轮（1 min 12 s，EXIT 134）：跑到第 15 段 `check:doc-claims`，`vitest list` 子进程
+  `FATAL ERROR: Committing semi space failed. Allocation failed` —— **连 9 MB 都申请不到**。
+
+**误判与更正**：第一轮看形态像代码回归（4 个文件红），但同一份代码单跑
+`git-export.test.ts` 29/29 全绿、`--maxWorkers=2` 全量 3278 全绿。所以不是代码问题。
+再往下查，`os.cpus().length` 在本机报 **20**（i7-10750H 实为 6 核 12 线程）——
+vitest 默认 worker 数按它算 = 19。每个 worker 还会 spawn 真子进程
+（git / node / 执行器 fixture），叠加宿主注入的 `node-language-shim.cjs` 预载，
+16 GB 机器上把 Windows 的提交限额打穿。桌面上的旁证：同一时刻我的 shell 也返回
+`0xC0000142`，PowerShell 直接报 `0x800705AF`（页面文件太小），`tasklist` 显示
+合计 12.5 GB / 541 进程。
+
+**处置**：`vite.config.mts` 加 `test.maxWorkers: 4`；`defineConfig` 从 `vitest/config`
+导入（vite 的 `defineConfig` 类型里没有 `test` 字段，`tsconfig.node.json` 会红）。
+
+**实测三组**（同一份代码、同一台机器）：
+
+| 并发 | 结果 | 耗时 |
+| --- | --- | --- |
+| 默认（19） | 8 红 / 崩溃 | 1 min 12 s |
+| 2 | 3278 全绿 | 78 s |
+| 4 | 3278 全绿 | **23 s** |
+
+并发降下来反而快了一个数量级 —— 默认并发全程在换页，进程创建本身就失败。
+
+**同时被门禁抓到的第二处**：升 0.4.1 后 `src/mcp.test.ts:43` 立刻红 ——
+`headless/mcp.ts:301` 的 `serverInfo.version` 是字面量 `"0.4.0"`。那条测试刻意用
+`PKG_VERSION`（读 `package.json`）对齐，注释写的就是"发版漏改这里就红"，**它按设计生效了**。
+处置：同步字面量为 0.4.1，不改成动态读取（动态读会让"发版漏改"变成静默通过）。
+
+**边界**：改的是并发度与一处版本字面量；用例数 3278、变异规模 126/3356、`verify` 37 段
+全不变。CI 的 runner 4 核、默认只开 3 个 worker，本来就在限额内。
+
+---
+
 ## [0.4.1 · 渲染层零覆盖组件补齐 · 2026-11-02]
 
 **动机**：用户视角测试的第二刀。渲染层 106 个测试文件里，5 个组件此前**零直接覆盖**——
