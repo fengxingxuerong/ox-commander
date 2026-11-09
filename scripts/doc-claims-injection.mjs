@@ -1,7 +1,7 @@
 /**
  * 判据体检：把 `check-doc-claims.mjs` 的每种失败模式**真的造出来**，确认它会红。
  *
- * 当前 9 条注入 + 1 条正向对照（条数由脚本自己打印，别在别处再抄一份 ——
+ * 当前 10 条注入 + 1 条正向对照（条数由脚本自己打印，别在别处再抄一份 ——
  * 本脚本自己的锚点就漂过一次，见下面 SEGMENTS 那段注释）。
  *
  * 为什么留成脚本而不是"跑过一次就写进文档"：门禁的 PASS 本身需要证据，而
@@ -87,6 +87,16 @@ const CASES = [
     f: GATES,
     from: `（${SEGMENTS} 段）`,
     to: `（${SEGMENTS} 段）与旧数 ${STALE_SEGMENTS} 段的对比`,
+    want: "【段数】",
+  },
+  {
+    // 2026-10-31 补的一条：`CONTRIBUTING.md` 是那天才进 SEGMENT_DOCS 的第四份文档，
+    // 它此前停在旧段数漂了三个版本。这条注入证明那张表**真的在管它** ——
+    // 不加这一条，把 CONTRIBUTING.md 从表里删掉也不会有任何用例红（门禁的判据自己没人看着）。
+    n: "段数漂在 CONTRIBUTING.md（第四份文档也归这张表管）",
+    f: "CONTRIBUTING.md",
+    from: `${SEGMENTS} 段串联`,
+    to: `${STALE_SEGMENTS} 段串联`,
     want: "【段数】",
   },
   {

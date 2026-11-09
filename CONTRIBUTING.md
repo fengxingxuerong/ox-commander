@@ -23,7 +23,7 @@ npm test               # vitest 全量
 
 ## 提交前：唯一验收入口是 `npm run verify`
 
-33 段串联，首段失败即中断，只认退出码。改动以它全绿为准。
+37 段串联，首段失败即中断，只认退出码。改动以它全绿为准。
 迭代时用快档省时间，**但 PR 合并前必须在干净树上跑过整链**：
 
 ```bash
@@ -39,9 +39,11 @@ npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <�
 - **新写的变异目标要自己登记**：`scripts/mutation-check.mjs` 的 `TARGETS` 是手工挂的，
   漏挂的文件不参与变异统计，那个 PASS 对它没有含义。
 - **新 `scripts/*.mjs|.cjs` 必须接线**：入口只认 package.json 里引用的脚本。
-- **动 `verify` 链（加/删/换序步骤）必须同批改四处**：README 门禁索引节、
+- **动 `verify` 链（加/删/换序步骤）必须同批改五处**：README 门禁索引节、
   CHANGELOG（简洁记账；逐段数字等工程细节进 `docs/ENGINEERING-LOG.md` 的同名条目）、
-  SKILL.md、`references/gates.md` —— 漏一处的后果由 `check:doc-claims` 判红。
+  SKILL.md、`references/gates.md`、以及本文件的「N 段串联」那一行 —— 漏一处的后果由
+  `check:doc-claims` 判红（本文件 2026-10-31 才进这张判据表：此前它停在「33」这个旧数
+  三个版本没人发现，因为判据没在看它）。
 - **别在注释里留裸算子字面量**（`&&`、`||`、`===` 等）—— 它们会被当作位点统计，
   位点总数会变，跨版本数字不可比。
 - **别用 shell 的正则批量改写含中文的 UTF-8 文档**（`README.md` / `docs/**` / `CHANGELOG.md`）。
@@ -57,7 +59,7 @@ npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <�
    已知缺口，不写营销话）；完整工程过程（门禁数字、变异位点账、事故勘查与负结果）同批写进
    `docs/ENGINEERING-LOG.md` 的同名条目。本项目的历史记录风格是"诚实的负面事实也写进去"。
 2. 跑过 `npm run verify` 整链并在 PR 里给出退出码（或说明卡在哪一段、为什么）。
-3. 动 verify 链时确认四处文档已同步；动了 `TARGETS` / 白名单时说明登记理由。
+3. 动 verify 链时确认五处文档已同步；动了 `TARGETS` / 白名单时说明登记理由。
 4. 一个 PR 一件事。跨多个不相关改动的 PR 会被要求拆分 —— 归因是这条仓库的
    一切机制（repair loop、mutation:touched、zone:cost）的地基。
 

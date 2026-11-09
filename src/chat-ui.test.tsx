@@ -4,9 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ChatPage } from "./pages/ChatPage";
 import { ThreadRail } from "./components/ThreadRail";
+import { SessionList } from "./components/SessionList";
 import { ReviewRail } from "./components/ReviewRail";
 import { useApp } from "./store";
-import type { ChatApprovalRequest, ChatEntry } from "../shared/chat-events";
+import type { ChatApprovalRequest, ChatEntry, ChatSessionSummary } from "../shared/chat-events";
+import type { ThreadStatusView } from "../shared/chat-thread-status";
 
 /**
  * 会话页的界面测试。
@@ -774,5 +776,83 @@ describe("左栏状态位（M4b）", () => {
     expect(buttons).toContain("分叉");
     expect(buttons).toContain("删除");
     expect((row.querySelector("button.small") as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+/**
+ * SessionList 的直接组件测试。经 ThreadRail 的页面级测试已钉住运行时状态、
+ * 未读数、切换/自锁三件事；这里补的是左栏搬动后从未被断言过的分支：
+ * 删除二次确认的完整回路、分叉/删除回调的指向、99+ 截断、空标题与未知状态回落。
+ */
+describe("SessionList（线程列表 · 直接测组件）", () => {
+  const summary = (sessionId: string, over: Partial<ChatSessionSummary> = {}): ChatSessionSummary => ({
+    sessionId,
+    projectId: "p-1",
+    title: `线 ${sessionId}`,
+    startedAt: 1,
+    updatedAt: 2,
+    status: "idle",
+    turns: 3,
+    usageTokens: 0,
+    ...over,
+  });
+
+  function renderList(threads: Record<string, ThreadStatusView> = {}) {
+    const onResume = vi.fn();
+    const onFork = vi.fn();
+    const onDelete = vi.fn();
+    const view = render(
+      <SessionList
+        sessions={[summary("chat-a", { title: "前台的线" }), summary("chat-b", { title: "后台的线" })]}
+        activeSessionId="chat-a"
+        threads={threads}
+        onResume={onResume}
+        onFork={onFork}
+        onDelete={onDelete}
+      />,
+    );
+    return { onResume, onFork, onDelete, view };
+  }
+
+  it("删除必须二次确认：先亮确认/取消，取消回到原样，确认才把那一条交出去", () => {
+    const { onDelete } = renderList();
+    // 每行都有 分叉/删除 —— 行级动作一律按行作用域取，别用全局查询。
+    const row = () => screen.getAllByTestId("chat-session")[1];
+    const btn = (name: string) => within(row()).getByRole("button", { name });
+    expect(within(row()).queryByRole("button", { name: "确认删除" })).toBeNull();
+    fireEvent.click(btn("删除"));
+    expect(within(row()).getByRole("button", { name: "确认删除" })).toBeTruthy();
+    // 取消 = 什么都没发生，回到 分叉/删除。
+    fireEvent.click(btn("取消"));
+    expect(within(row()).queryByRole("button", { name: "确认删除" })).toBeNull();
+    // 确认 = onDelete 只带走这一行自己的 sessionId。
+    fireEvent.click(btn("删除"));
+    fireEvent.click(btn("确认删除"));
+    expect(onDelete).toHaveBeenCalledTimes(1);
+    expect(onDelete).toHaveBeenCalledWith("chat-b");
+  });
+
+  it("分叉带上被点那一行的 sessionId（不是当前活跃线程的）", () => {
+    const { onFork } = renderList();
+    const row = screen.getAllByTestId("chat-session")[1];
+    fireEvent.click(within(row).getByRole("button", { name: "分叉" }));
+    expect(onFork).toHaveBeenCalledWith("chat-b");
+  });
+
+  it("未读超过 99 显示 99+（不把三位数挤进行内）", () => {
+    renderList({ "chat-b": { status: "idle", turns: 1, unread: 120, awaiting: false } });
+    expect(screen.getAllByTestId("thread-unread")[0].textContent).toBe("99+");
+  });
+
+  it("空标题回落成「新会话」（标题是可选的，落不了盘不等于不渲染）", () => {
+    render(<SessionList sessions={[summary("chat-a", { title: "" })]} activeSessionId="chat-x" threads={{}} onResume={vi.fn()} onFork={vi.fn()} onDelete={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "新会话" })).toBeTruthy();
+  });
+
+  it("词表外的状态原样显示（宁可露原始值，不假装成六态之一）", () => {
+    renderList({ "chat-b": { status: "paused" as never, turns: 1, unread: 0, awaiting: false } });
+    const dot = screen.getAllByTestId("thread-dot")[1];
+    expect(dot.getAttribute("aria-label")).toBe("paused");
+    expect(dot.className).toContain("status-paused");
   });
 });

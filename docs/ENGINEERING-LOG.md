@@ -17,6 +17,142 @@
 
 ---
 
+## [Unreleased · 渲染层零覆盖组件补齐 · 2026-11-02]
+
+**动机**：用户视角测试的第二刀。渲染层 106 个测试文件里，5 个组件此前**零直接覆盖**——
+页面级测试渲染它们时只走常驻路径，编辑器交互、产物查看、预览管理、issue 摄入、
+删除二次确认这些分支从未被断言过。其中 `AcceptanceEditor` 与 `DeliveryPanel` 的
+operator 判据块恰好是 B7 桌面侧的两个入口。
+
+**探查修正**：`App.tsx` 曾被记为零覆盖 —— 实测 `ui.test.tsx` 有 `describe("App")` 三条
+（默认页是会话 / 切页不崩 / 左栏只在会话页）。`SessionList` 经 `ThreadRail` 已被间接覆盖
+大半（运行时状态/未读/自锁），本批只补真缺口。
+
+**放置策略**：不建新测试文件。新用例挂进**既有已登记**文件（组件 → `ui.test.tsx`，
+SessionList → `chat-ui.test.tsx`），`src/store.ts` 的 TARGETS 测试清单不动 ——
+新建文件会触发"多一份测试必须全挂 TARGETS"的登记义务，而这个义务对组件测试没有增量价值。
+
+**踩到的三个坑（都在测试侧，不在生产侧）**：
+
+1. **React 受控值跟踪**：受控值为空串的 `<textarea>`，第二次 `fireEvent.change` 输入空串
+   会被 React 的 valueTracker 判定"没变"而**吞掉**（探针实锤 `onChange` 只收到一次调用）。
+   对照组：`<input>` 双改写能过，因为它的受控值非空、第二次输入有差异。
+   处置：清空路径单独渲染（初始 `expectContains: ["rows=3"]` → 清空才有差异）。
+2. **行级动作的查询歧义**：`SessionList` 每行都有分叉/删除、`DeliveryPanel` 分组行与
+   未归属行都有「查看」—— 全局 `getByRole` 报 multiple。处置：`within(row)` 按行作用域。
+3. **没装 jest-dom**：`toBeEmptyDOMElement` 不存在。处置：`container.innerHTML).toBe("")`。
+
+**自证**：把 DeliveryPanel"operator 判据单列"的 `toHaveLength(2)` 临时倒置成 3 ——
+当场红（`expected … to have a length of 3 but got 2`），还原后绿。这条测试真的在区分
+`origin === "operator"` 的条目与项目自己的验证。
+
+**账目**：用例 3249 → **3278**（+29），文件数 109 不变；`check:doc-claims` 同批改
+README 与 gates.md 两处声明后 PASS。零生产代码改动，变异规模不变。
+
+---
+
+## [Unreleased · 用户视角测试补强：npm 真安装链冒烟 + 验收判据失败旅程 E2E · 2026-11-02]
+
+**动机**：发布收尾视角的最后一问不是"还缺什么功能"，而是"陌生人拿到 0.4.0 的两条主路
+（`npm i oxcommander` 与一次真实 run）真的通吗"。探出的两个缺口都砸在 0.4.0 的头牌交付声明上：
+
+1. `smoke:cli-pkg` 只在手工拼出的 `dist-cli/` 目录上做静态断言 + 从该目录直接 `node` 启动，
+   **从未真 `npm pack`、从未安装**。`cli-pkg-smoke.mjs:90` 的注释自己写明了那类坏法
+   （"漏登记时 npm pack 会静默不打包……只在真装一遍才现形"）—— 门禁只做了对白名单的推断，
+   没做那个"真装一遍"。
+2. `smoke:offline-e2e` 四场景（clean/rogue/prebroken/interrupt）全是"判据通过"的形状；
+   B7 操作者验收判据的失败旅程（构建全绿仍不放行 → 硬拦交付 → 凭据 operator 单列）
+   没有 e2e 罩着。按仓库自己的哲学，"半条判据被当成验过"是最坏的失败形态，那恰是最该红的地方。
+
+**改动一 `smoke:cli-install`（新段，36 → 37 段）**：
+
+- 步骤：builder 造 `dist-cli/` → 在该目录 `npm pack --json --pack-destination <临时目录>` →
+  断言白名单罩住的 8 个文件真在 tarball 条目里（`bin/ox.js`、五个协议入口、`demo/`、`package.json`）
+  且无 `.map`/`node_modules` → `npm install -g --prefix <临时前缀> <tarball> --no-audit --no-fund`
+  （发布包零 dependencies ⇒ 离线可装）→ 把临时前缀放进子进程 PATH，从**安装位**跑
+  `ox --version` / `ox receipt no-such-file.json`（认复核工具的报错）/
+  `ox demo --quiet`（完整一次真交付），shim 三件套（`ox.cmd`/`ox`/`ox.ps1`）存在性一并断言。
+- **关键实测**（先探针后落笔）：`npm pack --json` 返回 `files[].path`（无 `package/` 前缀），
+  npm 10 缺 `files` 时退回 `tar -tzf` 兜底；`npm i -g --prefix` 在 Windows 产出 shim 于前缀根；
+  `.cmd` shim 不经 shell 直接 spawn 会被 Node 拒 ⇒ 统一 `shell: true` 单串命令。
+- **win32 陷阱自踩一次**：`REQUIRED_ENTRIES` 最初用 `path.join` 拼路径，Windows 产出反斜杠，
+  而 tarball 条目永远是 POSIX 分隔符 ⇒ 首跑红在五个协议入口（安装链本身全绿）。
+  修复：条目一律写死正斜杠。这个红是好的 —— 它证明断言真的在比对实物。
+- **反向注入**：把 `build-cli-pkg.mjs` 生成的 `files` 白名单摘掉 `demo`，冒烟红在
+  "tarball 含 demo/demo-deliver.mjs"与下游"安装位 demo 跑完一次真实交付"两处，然后还原。
+- tarball 落在临时目录而非 `dist-cli/`：不污染后续 `smoke:cli-pkg` 对包内文件的 walk 断言；
+  临时前缀 `finally` 里 `rmSync`（`check:test-side-effects` 的纪律同样适用脚本）。
+
+**改动二 `offline-e2e` 第五场景 `acceptance`**（win32 39 → 50 项断言）：
+
+- spec 顶层加 `acceptanceChecks` 两条：一条真过（`node src/add.js` 期望 stdout 含 `rows=3`，
+  桥端为该场景写 `IMPL_WITH_MAIN` 变体提供靶子）、一条必败（`node run-report.js`，不存在的文件）。
+  **必败判据故意指向 zone 外**：`shared/routing.ts` 按报错里的文件路径归 zone，归不上的失败走
+  `unattributed` digest ⇒ `orchestrator.ts` 在其上**前置**"判据不是你能改的测试"提示
+  （归到 zone 的失败走的是另一条路，没有这句）—— 于是断言"提示进了重修上下文"需要这个形状。
+- 断言 11 条：exit 2；两轮 verification 全 false；日志里"操作者验收判据（2 项）"被说出来；
+  交付物本身落盘（不放行 ≠ 没干活）；最后一轮验证形状 `["test:ok","smoke:ok","smoke:fail"]`
+  （首败即停 ⇒ 判据按执行顺序出前缀）；重修载荷含"操作者验收判据未通过"+"不要修改或绕过判据"
+  且首轮派单没有（判据从未进执行器上下文）；凭据 `outcome: "blocked"`；`origin: "operator"`
+  恰 2 条 1 真 1 假；失败条目 headline = `[smoke] 汇总报告生成`（`digest()` 是截断不是哈希，
+  headline 即原文首行）；终态 error + exhausted。
+- **协议层事实先行**：headless JSONL 的 `verification` 事件只带 `kind/ok/exitCode/logDigest`
+  —— `origin` 在协议层被丢，所以 `origin: "operator"` 的断言挂在 `receipt` 事件上
+  （`emitReceipt` 的 blocked 路径也发凭据，`ReceiptCheck` 照传 origin/title）。
+- **反向注入**：把 spec 的 `acceptanceChecks` 摘掉（mode 条件临时改成永假），run 直接交付
+  （exit 0 / `outcome: "delivered"` / 判据相关 11 条断言红 9 条），然后还原 ——
+  这条测试真能抓"判据被静默忽略"。
+
+**文档同批**（五处规则接上电后第一次真加段）：README 门禁节与冒烟清单箭头行、CONTRIBUTING、
+SKILL.md 五处、gates.md（标题/基线/段 26 改五场景 50 项/新行 29a —— 沿用 19a/20b 先例不重排序号）。
+`check:doc-claims` PASS（37 段在 4 份文档每一处相等，每段在 README 与 gates.md 都被提到）。
+
+**零生产代码改动**：本批只动 `scripts/cli-install-smoke.mjs`（新）、
+`scripts/offline-e2e-it.mjs`、`package.json`（接线）与文档；用例数 3249 与变异规模
+126 目标 / 3356 位点不变。
+
+---
+
+## [Unreleased · 发布收尾：CONTRIBUTING 的段数漂了三个版本 · 2026-10-31]
+
+**这次是"发布收尾全方面体检"里最值钱的一个发现，而它不是代码缺陷**：`CONTRIBUTING.md` 第 26 行写着
+「33 段串联」，而 `package.json` 的 `verify` 串当时已经是 **36 段** —— 用 `git log -S` 追到的
+落地点是链只有 33 段的那一版，之后 `smoke:receipt-regress`、`smoke:demo`、`smoke:cli-pkg`、
+`check:test-side-effects` 陆续进串，**没有一次回头改过这一行**。
+
+**为什么三道判据都没拦住它**：`check-doc-claims` 的判据本身很严（任一处不等即红、读不到声明也红、
+token 边界匹配不让短名被长名洗白），但它的 `SEGMENT_DOCS` 表里只有三份文档 —— README、
+`references/gates.md`、`SKILL.md`。`CONTRIBUTING.md` 不在表里，于是"这道门禁的存在"反而让这套
+数字**看起来**是有人管的：读 README 的人看到 36 段是对的，读 CONTRIBUTING 的人看到 33 段，
+而"哪些文档归它管"这件事本身没有任何判据 —— **门禁的覆盖面是整套机制里唯一没人看的那一格**。
+
+**处置不是改一个数字，是把那一格接上电**：
+
+1. `CONTRIBUTING.md` 33 → 36（它是最常被新贡献者读到的那一份，PR 模板第 12 行也指向它 ——
+   漂在这里的代价比漂在 gates.md 更高）。
+2. `check-doc-claims.mjs` 的 `SEGMENT_DOCS` 补入 `"CONTRIBUTING.md"`（三份 → 四份），
+   并把 PASS 与文件头注释里写死"三份文档"的措辞改成 `SEGMENT_DOCS.length` 现算 —— 否则下一个
+   加进表里的文档会让这句话又变成一句谎。
+3. **给判据体检补一条注入用例**（`doc-claims-injection.mjs`：9 → 10 条）：把 CONTRIBUTING 的
+   段数改回旧值 → 门禁必须红。这条是刻意加的：**没有它，把 `CONTRIBUTING.md` 从表里删掉
+   也不会有任何用例红**（判据的覆盖面自己没人看着，正是这次漂移的同一根因）。
+   实测 10/10 按预期变红，最后逐文件哈希核对还原。
+4. 四处同步规则**改写为五处**：动 `verify` 链时，`CONTRIBUTING.md` 自己也在同步清单里了
+   （README 门禁节 / SKILL.md 铁律 / `references/gates.md` 的 `check:doc-claims` 一节 /
+   PR 模板 / 本条目，同批改齐）。
+
+**踩到一次判据的"讲历史也会被抓"**：第一版 gates.md 补的说明里我写了「它当时写着「33 段串联」」，
+`check:doc-claims` 当场报 `gates.md 声明 33 段` —— 判据分不清"陈述实物"与"回顾历史"，这正是它
+文件头与 README 里都写过的那条陷阱（「停在 23 段」会被读成一处声明）。按本仓既定写法改成
+「它当时停在「33」这个旧数」后即绿。**这条陷阱不是理论：它在补判据的过程中又咬了一次。**
+
+**门禁账（2026-10-31 本机 win32）**：`verify` **EXIT 0 / 36 段 / 393s**（整链实跑，含 mutation:quick
+与 mutation:touched）；用例 **3249 通过 + 8 跳过 = 3257 条**（109 个文件）不变；变异规模
+**126 个目标 / 基线 3356 处位点**不变（本笔未改任何生产代码）；`check:doc-claims` PASS
+（36 段在 4 份文档的每一处声明都相等）；注入体检 10/10。**改的是判据覆盖面，不是链。**
+
+---
+
 ## [Unreleased · 误读与修正：chat-mention 的两个存活位点 · 2026-10-29]
 
 **上一节（同日）写错了数字，CI 把它揪了出来**。登记 chat-mention 时本地跑 `--file=… --audit`

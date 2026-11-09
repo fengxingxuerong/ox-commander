@@ -12,6 +12,10 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { SENSENOVA_KEY_VARS, SENSENOVA_MODELS } from "../shared/providers";
 import { App } from "./App";
 import { ErrorBoundary } from "./components/ErrorBoundary";
+import { AcceptanceEditor } from "./components/AcceptanceEditor";
+import { DeliveryPanel } from "./components/DeliveryPanel";
+import { PreviewPanel } from "./components/PreviewPanel";
+import { IssuePicker } from "./components/IssuePicker";
 import { AgentsPanel } from "./components/AgentsPanel";
 import { AuditPanel } from "./components/AuditPanel";
 import { ThreadRail } from "./components/ThreadRail";
@@ -24,8 +28,10 @@ import { BoardPage } from "./pages/BoardPage";
 import { PrdReviewPage } from "./pages/PrdReviewPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { useApp } from "./store";
-import { DEFAULT_SETTINGS, type PrdDocument, type ProjectSettings, type Task, type VerificationReport } from "../shared/types";
+import { DEFAULT_SETTINGS, type AcceptanceCheck, type PrdDocument, type ProjectSettings, type Task, type VerificationReport } from "../shared/types";
 import type { DeliveryReceipt } from "../shared/delivery-receipt";
+import type { DeliveryGuide, PreviewState } from "../shared/delivery-guide";
+import type { GithubIssue } from "../shared/github-issue";
 import type { AgentListResult, AgentSummary, AuditRecordView } from "./types";
 
 type Bridge = Window["oxCommander"];
@@ -2266,5 +2272,376 @@ describe("SkillsPage（M6a/M7）", () => {
     render(<SkillsPage />);
     await waitFor(() => expect(screen.getByTestId("mcp-empty")).toBeTruthy());
     expect(screen.getByTestId("mcp-empty").textContent).toContain("mcp__<server>__<tool>");
+  });
+});
+
+
+/**
+ * 此前零直接覆盖的四个组件（B7 收尾清扫）。页面级测试渲染它们时只走到
+ * 常驻路径，编辑器交互、产物查看、预览管理、issue 摄入的分支此前从未被断言过。
+ */
+describe("AcceptanceEditor（B7 判据编辑器）", () => {
+  const CHECK: AcceptanceCheck = {
+    title: "CLI 报数",
+    command: "node",
+    args: ["src/cli.js", "samples/a.csv"],
+    expectContains: ["rows=3", "cols=2"],
+  };
+
+  it("回显一条判据的全部字段", () => {
+    render(<AcceptanceEditor checks={[CHECK]} onChange={vi.fn()} />);
+    expect((screen.getByLabelText("名称（可选）") as HTMLInputElement).value).toBe("CLI 报数");
+    expect((screen.getByLabelText("命令") as HTMLInputElement).value).toBe("node");
+    expect((screen.getByLabelText("参数（空格分隔）") as HTMLInputElement).value).toBe("src/cli.js samples/a.csv");
+    expect((screen.getByLabelText("输出必须包含（每行一条）") as HTMLTextAreaElement).value).toBe("rows=3\ncols=2");
+    expect(screen.getByText("1/10 条")).toBeTruthy();
+  });
+
+  it("编辑命令/参数/标题把补丁送进 onChange（参数按空白切分，标题清空变 undefined）", () => {
+    const onChange = vi.fn();
+    render(<AcceptanceEditor checks={[CHECK]} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("命令"), { target: { value: "python" } });
+    expect(onChange.mock.calls.at(-1)?.[0][0].command).toBe("python");
+    fireEvent.change(screen.getByLabelText("参数（空格分隔）"), { target: { value: "  a   b  " } });
+    expect(onChange.mock.calls.at(-1)?.[0][0].args).toEqual(["a", "b"]);
+    fireEvent.change(screen.getByLabelText("参数（空格分隔）"), { target: { value: "" } });
+    expect(onChange.mock.calls.at(-1)?.[0][0].args).toEqual([]);
+    fireEvent.change(screen.getByLabelText("名称（可选）"), { target: { value: "" } });
+    expect(onChange.mock.calls.at(-1)?.[0][0].title).toBeUndefined();
+    // 其余字段原样保留 —— patch 是按条合并，不是整条替换。
+    expect(onChange.mock.calls.at(-1)?.[0][0].command).toBe("node");
+  });
+
+  it("expectContains 多行 ⇄ 数组（空行被丢、条目被 trim）", () => {
+    const onChange = vi.fn();
+    render(<AcceptanceEditor checks={[{ command: "node", args: [] }]} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("输出必须包含（每行一条）"), {
+      target: { value: "rows=3\n\n cols=2 \n" },
+    });
+    // 正在敲回车的中间态不该生成空期望。
+    expect(onChange.mock.calls.at(-1)?.[0][0].expectContains).toEqual(["rows=3", "cols=2"]);
+  });
+
+  it("expectContains 清空变 undefined（那一项退出判定，而不是留一条空期望）", () => {
+    const onChange = vi.fn();
+    // 初始必须有值：受控值为空串时再输空串会被 React 的值跟踪吞掉（不触发 onChange）。
+    render(<AcceptanceEditor checks={[{ command: "node", args: [], expectContains: ["rows=3"] }]} onChange={onChange} />);
+    fireEvent.change(screen.getByLabelText("输出必须包含（每行一条）"), { target: { value: "" } });
+    expect(onChange.mock.calls.at(-1)?.[0][0].expectContains).toBeUndefined();
+  });
+
+  it("删除按序号精确摘条；添加追加空判据", () => {
+    const onChange = vi.fn();
+    render(<AcceptanceEditor checks={[CHECK, { command: "python", args: [] }]} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "删除判据 1" }));
+    expect(onChange.mock.calls.at(-1)?.[0]).toEqual([{ command: "python", args: [] }]);
+    fireEvent.click(screen.getByRole("button", { name: "删除判据 2" }));
+    expect(onChange.mock.calls.at(-1)?.[0]).toEqual([CHECK]);
+    fireEvent.click(screen.getByRole("button", { name: "＋ 添加验收判据" }));
+    expect(onChange.mock.calls.at(-1)?.[0]).toEqual([
+      CHECK,
+      { command: "python", args: [] },
+      { command: "", args: [] },
+    ]);
+  });
+
+  it("判据是承诺不是清单：到 10 条上限就不再加", () => {
+    const onChange = vi.fn();
+    const ten: AcceptanceCheck[] = Array.from({ length: 10 }, (_, i) => ({ command: `cmd-${i}`, args: [] }));
+    render(<AcceptanceEditor checks={ten} onChange={onChange} />);
+    expect(screen.getByText("10/10 条")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "＋ 添加验收判据" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("disabled 时一切控件只读（run 进行中的 PRD 确认页挂只读模式）", () => {
+    render(<AcceptanceEditor checks={[CHECK]} onChange={vi.fn()} disabled />);
+    for (const label of ["名称（可选）", "命令", "参数（空格分隔）", "输出必须包含（每行一条）", "产物必须存在（每行一条，相对项目根）"]) {
+      const el = screen.getByLabelText(label) as HTMLInputElement;
+      expect(el.disabled).toBe(true);
+    }
+    expect((screen.getByRole("button", { name: "删除判据 1" }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: "＋ 添加验收判据" }) as HTMLButtonElement).disabled).toBe(true);
+  });
+});
+
+describe("DeliveryPanel（本次产物）", () => {
+  function guide(over: Partial<DeliveryGuide> = {}): DeliveryGuide {
+    return { artifacts: [], commands: [], totalFiles: 0, hasReceipt: false, ...over };
+  }
+
+  it("没有活动项目就不渲染、也不打桥", () => {
+    const { container } = render(<DeliveryPanel />);
+    expect(container.innerHTML).toBe("");
+    expect(window.oxCommander.deliveryGuide).not.toHaveBeenCalled();
+  });
+
+  it("读取中与读取失败是两句话，不混成一句", async () => {
+    (window.oxCommander.deliveryGuide as Mock).mockReturnValueOnce(new Promise(() => undefined));
+    const { rerender } = render(<DeliveryPanel />);
+    useApp.setState({ activeProjectId: "p-1" });
+    rerender(<DeliveryPanel />);
+    expect(await screen.findByText("正在读取本次运行的产物…")).toBeTruthy();
+    (window.oxCommander.deliveryGuide as Mock).mockRejectedValueOnce(new Error("项目目录没了"));
+    useApp.setState({ activeProjectId: "p-2" });
+    rerender(<DeliveryPanel />);
+    expect(await screen.findByText(/读不到交付成果：项目目录没了/)).toBeTruthy();
+  });
+
+  it("空成果面且无凭据 → 整卡不出现（没东西可看不是一条消息）", async () => {
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<DeliveryPanel />);
+    await waitFor(() => expect(window.oxCommander.deliveryGuide).toHaveBeenCalled());
+    expect(screen.queryByText("本次产物")).toBeNull();
+  });
+
+  it("按任务分组列产物；delete 行没有「查看」；点查看把只读全文读出来", async () => {
+    (window.oxCommander.deliveryGuide as Mock).mockResolvedValueOnce(
+      guide({
+        artifacts: [
+          {
+            taskId: "t1",
+            title: "实现任务列表",
+            zone: "src/todo",
+            files: [
+              { path: "src/todo/app.js", op: "write", bytes: 120 },
+              { path: "src/todo/old.js", op: "delete" },
+            ],
+          },
+        ],
+        unassigned: [{ path: "README.md", op: "write" }],
+        totalFiles: 3,
+        hasReceipt: true,
+      }),
+    );
+    (window.oxCommander.readDeliveryFile as Mock).mockResolvedValueOnce({
+      ok: true as const,
+      content: "export const app = 1;",
+      bytes: 22,
+      truncated: false,
+      binary: false,
+    });
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<DeliveryPanel />);
+    expect(await screen.findByText(/实现任务列表 · src\/todo · 2 个文件/)).toBeTruthy();
+    expect(screen.getByText(/未归属任务 · 1 个文件/)).toBeTruthy();
+    expect(screen.getByText(/3 个文件/)).toBeTruthy();
+    // delete 行只有（已删除），没有查看按钮 —— 没内容可读。
+    const delRow = screen.getByText("src/todo/old.js").closest(".change-row") as HTMLElement;
+    expect(delRow.textContent).toContain("（已删除）");
+    expect(Array.from(delRow.querySelectorAll("button")).map((b) => b.textContent)).not.toContain("查看");
+    // 正常行点查看 → 桥上拿到 (projectId, path)，全文出现在 pre 里。
+    // （「查看」在分组行与未归属行各有一个 —— 按行作用域取。）
+    const appRow = screen.getByText("src/todo/app.js").closest(".change-row") as HTMLElement;
+    fireEvent.click(within(appRow).getByRole("button", { name: "查看" }));
+    await waitFor(() => expect(window.oxCommander.readDeliveryFile).toHaveBeenCalledWith("p-1", "src/todo/app.js"));
+    expect(await screen.findByText("export const app = 1;")).toBeTruthy();
+  });
+
+  it("读取失败的原因要摆出来（result.ok=false 分支）", async () => {
+    (window.oxCommander.deliveryGuide as Mock).mockResolvedValueOnce(
+      guide({
+        artifacts: [{ taskId: "t1", title: "T", zone: "src", files: [{ path: "src/a.js", op: "write" }] }],
+        totalFiles: 1,
+        hasReceipt: true,
+      }),
+    );
+    (window.oxCommander.readDeliveryFile as Mock).mockResolvedValueOnce({ ok: false as const, reason: "路径不在工作区内" });
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<DeliveryPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看" }));
+    expect(await screen.findByText("路径不在工作区内")).toBeTruthy();
+  });
+
+  it("操作者验收判据单独成块（1/2 通过），项目自己的验证不混进来", async () => {
+    useApp.setState({
+      activeProjectId: "p-1",
+      receipt: {
+        outcome: "blocked",
+        verified: false,
+        rounds: 1,
+        headline: "未交付",
+        counts: { total: 2, done: 2, failed: 0, skipped: 0, pending: 0, conflicts: 0, checksFailed: 1, preexisting: 0 },
+        checks: [
+          { kind: "test", ok: true, exitCode: 0, preexisting: false, headline: "" },
+          { kind: "smoke", ok: true, exitCode: 0, preexisting: false, headline: "", origin: "operator", title: "统计行打印", command: "node", args: ["src/add.js"] },
+          { kind: "smoke", ok: false, exitCode: 1, preexisting: false, headline: "[smoke] 汇总报告生成", origin: "operator", title: "汇总报告生成", command: "node", args: ["run-report.js"] },
+        ],
+        tasks: [],
+        conflicts: [],
+        acceptance: { total: 2, passed: 1, failed: 1 },
+      },
+    });
+    (window.oxCommander.deliveryGuide as Mock).mockResolvedValueOnce(guide({ hasReceipt: true, totalFiles: 0 }));
+    render(<DeliveryPanel />);
+    expect(await screen.findByText(/操作者验收判据：1\/2 通过（1 条未过）/)).toBeTruthy();
+    const block = document.querySelector(".acceptance-summary") as HTMLElement;
+    const items = Array.from(block.querySelectorAll("li")).map((li) => li.textContent ?? "");
+    // 只有 origin=operator 的两条进列表：✅ 一条带命令，❌ 一条 —— 项目的 npm test 不算判据。
+    expect(items).toHaveLength(2);
+    expect(items[0]).toContain("✅");
+    expect(items[0]).toContain("统计行打印");
+    expect(items[0]).toContain("node src/add.js");
+    expect(items[1]).toContain("❌");
+    expect(items[1]).toContain("汇总报告生成");
+    expect(items.join("")).not.toContain("test");
+  });
+
+  it("可复跑命令逐条列出 + 复制按钮真的写剪贴板", async () => {
+    (window.oxCommander.deliveryGuide as Mock).mockResolvedValueOnce(
+      guide({
+        hasReceipt: true,
+        totalFiles: 0,
+        commands: [{ kind: "verify", label: "复跑", command: "node", args: ["--test", "tests/add.test.js"] }],
+      }),
+    );
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, "clipboard", { value: { writeText }, configurable: true });
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<DeliveryPanel />);
+    expect(await screen.findByText("node --test tests/add.test.js")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "复制" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("node --test tests/add.test.js"));
+    expect(await screen.findByText("已复制")).toBeTruthy();
+  });
+
+  it("没有任何可复跑命令时直说（凭据空 + package.json 也没有）", async () => {
+    (window.oxCommander.deliveryGuide as Mock).mockResolvedValueOnce(guide({ hasReceipt: true, totalFiles: 0 }));
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<DeliveryPanel />);
+    expect(await screen.findByText("本次没有文件改动。")).toBeTruthy();
+    expect(await screen.findByText(/本次没有记录可复跑的命令/)).toBeTruthy();
+  });
+});
+
+describe("PreviewPanel（保活预览卡）", () => {
+  function previewState(over: Partial<PreviewState> = {}): PreviewState {
+    return {
+      title: "dev server",
+      url: "http://127.0.0.1:5173",
+      command: "npm",
+      args: ["run", "dev"],
+      cwd: "/tmp/p-1",
+      startedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      running: true,
+      log: "",
+      ...over,
+    };
+  }
+
+  it("没有活动项目 → 不渲染；状态为空且无错 → 也不渲染", async () => {
+    const view = render(<PreviewPanel />);
+    expect(view.container.innerHTML).toBe("");
+    useApp.setState({ activeProjectId: "p-1" });
+    view.rerender(<PreviewPanel />);
+    await waitFor(() => expect(window.oxCommander.previewStatus).toHaveBeenCalled());
+    expect(view.container.innerHTML).toBe("");
+  });
+
+  it("运行中的预览：URL/命令/到期齐活，「打开预览」亮着并带项目 ID 打桥", async () => {
+    (window.oxCommander.previewStatus as Mock).mockResolvedValueOnce(previewState({ pid: 4321 }));
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<PreviewPanel />);
+    expect(await screen.findByText("http://127.0.0.1:5173")).toBeTruthy();
+    expect(screen.getByText("运行中")).toBeTruthy();
+    expect(screen.getByText(/pid 4321/)).toBeTruthy();
+    const open = screen.getByRole("button", { name: "打开预览" }) as HTMLButtonElement;
+    expect(open.disabled).toBe(false);
+    fireEvent.click(open);
+    await waitFor(() => expect(window.oxCommander.previewOpen).toHaveBeenCalledWith("p-1"));
+  });
+
+  it("已退出的预览：打开禁用（退出码可见），停止后只留一句去向", async () => {
+    (window.oxCommander.previewStatus as Mock).mockResolvedValueOnce(previewState({ running: false, exitCode: 1 }));
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<PreviewPanel />);
+    expect(await screen.findByText("已退出")).toBeTruthy();
+    expect(screen.getByText(/退出码 1/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: "打开预览" }) as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: "停止预览" }));
+    await waitFor(() => expect(window.oxCommander.previewStop).toHaveBeenCalled());
+    expect(await screen.findByText("已停止预览。")).toBeTruthy();
+  });
+
+  it("打开被拒与清除数据的结果都落在 note 上（不是悄悄吞掉）", async () => {
+    (window.oxCommander.previewStatus as Mock).mockResolvedValueOnce(previewState());
+    (window.oxCommander.previewOpen as Mock).mockResolvedValueOnce({ ok: false as const, reason: "本机回环地址之外，拒绝导航" });
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<PreviewPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "打开预览" }));
+    expect(await screen.findByText("本机回环地址之外，拒绝导航")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "清除预览数据" }));
+    expect(await screen.findByText("已清除这个项目的预览数据。")).toBeTruthy();
+    await waitFor(() => expect(window.oxCommander.previewReset).toHaveBeenCalledWith("p-1"));
+  });
+
+  it("读不到预览状态时说原因，不出一张空卡", async () => {
+    (window.oxCommander.previewStatus as Mock).mockRejectedValueOnce(new Error("桥断了"));
+    useApp.setState({ activeProjectId: "p-1" });
+    render(<PreviewPanel />);
+    expect(await screen.findByText(/读不到预览状态：桥断了/)).toBeTruthy();
+  });
+});
+
+describe("IssuePicker（从 GitHub Issue 创建）", () => {
+  const ISSUE: GithubIssue = { number: 7, title: "导出功能坏了", body: "点导出没反应", state: "OPEN" };
+
+  it("拉取动作把仓库与搜索条件（trim 后）送进桥；空输入不带字段", async () => {
+    render(<IssuePicker />);
+    fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+    await waitFor(() => expect(window.oxCommander.listGithubIssues).toHaveBeenCalledWith({}));
+    fireEvent.change(screen.getByLabelText("仓库"), { target: { value: " o/r " } });
+    fireEvent.change(screen.getByLabelText("搜索条件"), { target: { value: " 导出 " } });
+    fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+    await waitFor(() =>
+      expect(window.oxCommander.listGithubIssues).toHaveBeenLastCalledWith({ repo: "o/r", search: "导出" }),
+    );
+  });
+
+  it("失败与空结果是两件事：gh 侧失败显示 reason，空列表另有话", async () => {
+    (window.oxCommander.listGithubIssues as Mock).mockResolvedValueOnce({ ok: false as const, reason: "gh 未登录" });
+    render(<IssuePicker />);
+    fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+    expect(await screen.findByRole("alert")).toBeTruthy();
+    expect(screen.getByRole("alert").textContent).toContain("拉取失败：gh 未登录");
+    expect(screen.queryByText("没有符合条件的 issue。")).toBeNull();
+
+    (window.oxCommander.listGithubIssues as Mock).mockResolvedValueOnce({ ok: true as const, issues: [] });
+    fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+    expect(await screen.findByText("没有符合条件的 issue。")).toBeTruthy();
+  });
+
+  it("选中才点亮创建按钮，点击把整条 issue 交给 createFromIssue", async () => {
+    const spy = vi.fn(async () => undefined);
+    useApp.setState({ createFromIssue: spy } as never);
+    (window.oxCommander.listGithubIssues as Mock).mockResolvedValueOnce({
+      ok: true as const,
+      issues: [ISSUE, { number: 9, title: "另一条", body: "b", state: "OPEN" }],
+    });
+    render(<IssuePicker />);
+    fireEvent.click(screen.getByRole("button", { name: "拉取 issue" }));
+    const create = () => screen.getByRole("button", { name: "用这条 issue 创建" }) as HTMLButtonElement;
+    expect((await screen.findByText(/#7 \[OPEN\] 导出功能坏了/))).toBeTruthy();
+    expect(create().disabled).toBe(true); // 没选中 = 没法创建
+    fireEvent.click(screen.getByLabelText("#7 [OPEN] 导出功能坏了"));
+    expect(create().disabled).toBe(false);
+    fireEvent.click(create());
+    await waitFor(() => expect(spy).toHaveBeenCalledWith(ISSUE));
+  });
+
+  it("拉取中按钮自锁（连点不会叠出两次请求）", async () => {
+    let release: (v: { ok: true; issues: GithubIssue[] }) => void = () => undefined;
+    (window.oxCommander.listGithubIssues as Mock).mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<IssuePicker />);
+    const pull = screen.getByRole("button", { name: "拉取 issue" }) as HTMLButtonElement;
+    fireEvent.click(pull);
+    expect(await screen.findByText("拉取中…")).toBeTruthy();
+    expect(pull.disabled).toBe(true);
+    release({ ok: true, issues: [] });
+    await waitFor(() => expect((screen.getByRole("button", { name: "拉取 issue" }) as HTMLButtonElement).disabled).toBe(false));
   });
 });

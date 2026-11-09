@@ -13,11 +13,12 @@
  *   · 重修轮是否只重派越权的那个任务，而不是整批；
  *   · 退出码 0 / 2 的分野。
  *
- * 四个场景：
+ * 五个场景：
  *   clean     —— 两个任务都在自己 zone 内写 → 交付，exit 0；
  *   rogue      —— 实现任务顺手写 zone 外的 README.md → 判越权、回滚、重修一轮仍越权 → exit 2；
  *   prebroken —— 动手前就有一条验证命令是红的 → 基线归因必须出现在日志与每一份重修上下文里；
- *   interrupt —— 第一次派单刚落地就把进程杀掉 → journal 可续跑、遗留备份保留、到期才回收。
+ *   interrupt —— 第一次派单刚落地就把进程杀掉 → journal 可续跑、遗留备份保留、到期才回收；
+ *   acceptance —— 构建全绿、操作者验收判据不放行 → 硬拦交付，凭据 operator 单列，exit 2。
  *
  * 大脑层冒充方式：`ollama` 是 providers 表里唯一 `apiKeyEnvVar: ""` 的条目，
  * baseUrl 写死 `http://localhost:11434/v1`。本脚本**不再去占 11434**（本机真跑着
@@ -75,6 +76,9 @@ const TASKS = {
 };
 
 const IMPL = "module.exports.add = (a, b) => a + b;\nmodule.exports.sub = (a, b) => a - b;\n";
+/** acceptance 场景专用：直接运行时打印一行统计，给"命令真过"的那条判据当靶子。 */
+const IMPL_WITH_MAIN =
+  IMPL + 'if (require.main === module) process.stdout.write("rows=3 cols=2\\n");\n';
 const TEST_FILE =
   'const { test } = require("node:test");\nconst assert = require("node:assert");\n' +
   'const { add, sub } = require("../src/add.js");\n' +
@@ -166,7 +170,7 @@ async function runOnce({ mode, reuse = null, interrupt = false }) {
         // 而这一批的产物还没写完整 —— 正是"被中断的一批"的形状。
         if (interrupt) stopChild();
         if (/impl/.test(String(task.taskId))) {
-          write("src/add.js", IMPL);
+          write("src/add.js", mode === "acceptance" ? IMPL_WITH_MAIN : IMPL);
           // 越权场景：声明的 zone 只有 src 与 tests，README.md 在两者之外。
           if (mode === "rogue") write("README.md", "# written outside the declared zone\n");
         } else {
@@ -214,6 +218,27 @@ async function runOnce({ mode, reuse = null, interrupt = false }) {
               { kind: "build", command: "node", args: ["src/broken.js"] },
             ]
           : [{ kind: "test", command: "node", args: ["--test", "tests/add.test.js"] }],
+      // 操作者验收判据（B7）：一条真过、一条必败。用户旅程里最要紧的形状是
+      // "构建全绿、判据不放行"。必败的判据故意指向 zone 外的不存在文件：
+      // 路由不归属到任何任务 ⇒ "判据不是你能改的测试"这句提示走全局 digest
+      // 送进重修上下文（归到 zone 的失败走的是另一条路，见 shared/routing.ts）。
+      ...(mode === "acceptance"
+        ? {
+            acceptanceChecks: [
+              {
+                title: "统计行打印",
+                command: "node",
+                args: ["src/add.js"],
+                expectContains: ["rows=3"],
+              },
+              {
+                title: "汇总报告生成",
+                command: "node",
+                args: ["run-report.js"],
+              },
+            ],
+          }
+        : {}),
       arbitration: "revert-batch",
       // 备份目录钉在本次的 tmp 里：断点续跑那组用例要看它留没留、什么时候被回收。
       snapshotRoot,
@@ -492,6 +517,65 @@ async function main() {
     fs.rmSync(tmpD, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   }
 
+  console.log("\n=== 场景 E：构建全绿、操作者验收判据不放行 → 硬拦交付，凭据 operator 单列 ===");
+  // 这条盯的是 B7 的用户旅程：执行器自测全绿不算数 —— 判据是操作者的，构建/测试
+  // 全绿后它不放行，交付照样被拦。四个子事实只有穿过进程边界才成立：
+  // "判据不是你能改的测试"真的进了重修上下文、被拦的 run 也有凭据、
+  // 判据结果在凭据里按 origin 单列（不是混进项目验证里），以及项目产出本身在盘上
+  // （不放行的形状是"干得不错但没过验收"，不是"没干活"）。
+  const acc = await runOnce({ mode: "acceptance" });
+  const accLogs = acc.events.filter((e) => e.type === "log").map((e) => e.text);
+  check("重修耗尽 → 退出码 2", acc.code === 2, `实际 ${acc.code}`);
+  check(
+    "两轮 verification 都是 false（首轮不放行，重修后仍不放行）",
+    JSON.stringify(acc.events.filter((e) => e.type === "verification").map((e) => e.passed)) === "[false,false]",
+    JSON.stringify(acc.events.filter((e) => e.type === "verification").map((e) => e.passed)),
+  );
+  check(
+    "验收判据段在日志里被说出来（2 项）",
+    accLogs.some((t) => t.includes("操作者验收判据（2 项）")),
+    JSON.stringify(accLogs.filter((t) => t.includes("操作者验收判据")).map((t) => t.slice(0, 60))),
+  );
+  check("交付物本身落盘了（不放行 ≠ 没干活）", !!acc.impl && acc.impl.includes("sub"));
+  const accLastVer = acc.events.filter((e) => e.type === "verification").at(-1);
+  check(
+    "最后一轮验证：项目测试 + 判据 1/2（smoke 一真一假，按执行顺序）",
+    JSON.stringify((accLastVer?.results ?? []).map((r) => `${r.kind}:${r.ok ? "ok" : "fail"}`))
+      === '["test:ok","smoke:ok","smoke:fail"]',
+    JSON.stringify((accLastVer?.results ?? []).map((r) => [r.kind, r.ok])),
+  );
+  check(
+    "重修上下文先说清判据不可动（首败即停 ⇒ 失败判据未归到 zone，提示走全局 digest）",
+    acc.payloads.some((p) => p.includes("操作者验收判据未通过") && p.includes("不要修改或绕过判据")),
+    JSON.stringify(acc.payloads.map((p) => p.slice(0, 50))),
+  );
+  check(
+    "首轮派单没有这句话（判据从未进入执行器上下文）",
+    !acc.payloads[0]?.includes("操作者验收判据未通过"),
+    JSON.stringify(acc.payloads[0]?.slice(0, 60)),
+  );
+  const accReceipt = acc.events.find((e) => e.type === "receipt")?.receipt;
+  check(
+    "被拦的 run 也有凭据且 outcome=blocked",
+    accReceipt?.outcome === "blocked",
+    JSON.stringify({ outcome: accReceipt?.outcome, checks: accReceipt?.checks?.length }),
+  );
+  const opChecks = (accReceipt?.checks ?? []).filter((c) => c.origin === "operator");
+  check(
+    "凭据里 operator 判据单列：恰 2 条、1 真 1 假",
+    opChecks.length === 2 && opChecks.filter((c) => c.ok).length === 1,
+    JSON.stringify(opChecks.map((c) => [c.title, c.ok])),
+  );
+  check(
+    "失败判据的 headline 指向自己（拿到凭据的人不用解析正文就知道哪条没过）",
+    String(opChecks.find((c) => !c.ok)?.headline ?? "").includes("汇总报告生成"),
+    JSON.stringify(opChecks.filter((c) => !c.ok).map((c) => c.headline)),
+  );
+  check(
+    "终态是 error 且 exhausted 为真",
+    acc.events.at(-1)?.type === "error" && acc.events.at(-1)?.exhausted === true,
+    JSON.stringify(acc.events.at(-1)),
+  );
 
   console.log(failures === 0 ? "\n=== 判定：IT PASS ✓（离线全链路，零配额）===" : `\n=== 判定：IT FAIL ✗（${failures} 项）===`);
   process.exit(failures === 0 ? 0 : 1);

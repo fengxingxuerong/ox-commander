@@ -88,7 +88,9 @@ npx oxcommander receipt receipt.json --replay   # 独立复核一份交付凭据
 > CLI 包由 `npm run build:cli` 从 `dist-headless/` 产出（`dist-cli/`，git 忽略），
 > `smoke:cli-pkg` 负责把关：bin 指向的文件真的在盘上、五个协议入口 + 随包的 `demo/` 齐全、
 > 并且**从包里真跑一次 `ox demo`**（"包能装"与"包里的东西能跑"是两件事）、
-> 转发真的到达协议层。发布：打 `v*` tag 时 `release` 工作流的 `publish-cli` job 在 verify 绿后
+> 转发真的到达协议层。`smoke:cli-install` 再把关**安装链**：真 `npm pack` 出 tarball、
+> 真装进临时全局前缀、从安装位真跑一遍（`files` 白名单漏登记那类"npm 静默不打包"只有这一步现形）。
+> 发布：打 `v*` tag 时 `release` 工作流的 `publish-cli` job 在 verify 绿后
 > `npm publish`（需 `NPM_TOKEN` secret）；本机手工发是 `cd dist-cli && npm publish`。
 > 桌面安装包见下方「获取与安装」。
 
@@ -259,7 +261,7 @@ npm run build:dist    # → release/，只打**当前平台**的原生目标
 
 ## 质量门禁
 
-`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**36 段**，3–11 min —— 时长几乎全挂在
+`npm run verify` 是唯一验收入口，任何改动以它全绿为准（**37 段**，3–11 min —— 时长几乎全挂在
 `mutation:touched` 上，改动面越大越久。2026-10-06 逐段实测：链首到 `mutation:baseline` 的 16 个静态段
 + `npm test` + `build` + `build:headless` + `smoke:receipt-verify` + `smoke:receipt-regress` +
 `smoke:demo` 全 EXIT 0）：
@@ -293,7 +295,10 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
 → check:mutation-targets（改过的生产文件既不在变异 `TARGETS` 也不在显式豁免里 → FAIL。
   漏挂的文件根本不参与统计，那个 PASS 对它没有任何含义）
 → check:doc-claims（本节这几个数字**由命令现算**：段数、每段在文档里有没有行、
-  用例数是否等于 `vitest list` 的收集结果、变异规模是否等于 `site-baseline --json`）
+  用例数是否等于 `vitest list` 的收集结果、变异规模是否等于 `site-baseline --json`。
+  段数那一条对**四份**文档逐处核：本文件、`references/gates.md`、`SKILL.md`、
+  `CONTRIBUTING.md` —— 最后一份是 2026-10-31 发布收尾时补进去的，它此前停在
+  「33」这个旧数漂了三个版本，判据没在看它）
 → mutation:baseline（约 1s，不跑变异：把 TARGETS 的逐目标位点数与 `SITE_BASELINE` 对一遍。
   **变异正在跑时它拒绝算**（检测到 `scripts/.mutation-pending` 里有 `.orig` 就 exit 2）：那一刻读到的是
   变异中的源码，报出的"漂移"是假象 —— 而照着假象去 `--write` 会把变异体的位点写进基线，污染得很安静。
@@ -305,7 +310,7 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   同批还校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点**（`(算子, 行号)` 逐条比对，复用门禁
   自己的 `findSites`）：失效条目豁免的是空气，而漂到新行的那个位点无人认领 —— 2026-10-23 一天内
   因此红了两轮 CI（`context.ts` 221→225、`path-policy.ts` 92→94，后者直接拦住发布）
-→ vitest（2026-10-29 现跑 3249 通过 + 8 跳过，合计 3257 条，分布在 109 个有可执行用例的文件；
+→ vitest（2026-11-02 现跑 3278 通过 + 8 跳过，合计 3286 条，分布在 109 个有可执行用例的文件；
   同一条 `npm test` 由 CI 在 ubuntu + windows 两个 job 各跑一次，本文件不复制它的结论。
   ⚠️ 本机 win32 上**间歇**出现真进程用例红，集中在 git-export / headless-entries /
   mutation-residue 三个文件，原因是宿主阻断子进程 stdio 管道（`spawnSync EBUSY`）而不是判据坏；
@@ -341,6 +346,11 @@ check:residue（首段，卫生预检：上一次变异运行被强杀时，活�
   它盯的是「包自洽」这一类**表面正常**的坏法：`--version` 照样打印、包照样能 pack，
   但 `dist-headless` 少拷一个入口、或 npm 的 `files` 白名单漏了 `demo/` 时，
   只有真从 dist-cli 里启动才现形）
+→ smoke:cli-install（**真安装链**：`npm pack` 出真 tarball → `npm install -g --prefix <临时前缀>`
+  离线装上 → 从**安装位**跑 `ox --version` / `ox receipt` / `ox demo --quiet`，shim 三件套
+  一并断言。它接住 `smoke:cli-pkg` 够不到的那一类坏法：`files` 白名单漏登记时 `npm pack`
+  **静默不打包**（本地目录里还在）、bin 字段坏时 shim 指不通 ——
+  "本机全绿、用户装了没有"只有真装一遍才现形）
 → check:test-side-effects（测试文件的**顶层副作用**：顶层建目录却没人清、或清理写在
    `skipIf` 门控的块里而门控没开 —— 两种都必漏。判据见下，自检 6 例）
 ```

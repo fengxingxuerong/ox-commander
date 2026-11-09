@@ -31,3 +31,6 @@ scripts/.mutation-pending/
 # 陈旧变异台账留证（2026-10-17：被宿主杀掉的运行残留 + pid 复用误判 foreign-live，
 # 10 份 .orig 已逐份与源码核内容一致，工作区干净；留证不删，但不进版本库）
 scripts/.mutation-pending.stale-*/
+
+# 外部编辑器（ZCode）的计划草稿目录：会话级工作稿，非项目内容。
+.zcode/

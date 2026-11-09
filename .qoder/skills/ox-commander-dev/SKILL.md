@@ -1,6 +1,6 @@
 ---
 name: ox-commander-dev
-description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（36 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
+description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面端 + headless JSONL CLI，TypeScript / React18 / Zustand / vitest）内改代码、修缺陷、加功能或做验收时使用。凡触及 electron/、shared/、headless/、src/、scripts/、agents.d/ 或 package.json 的改动，以及涉及 npm run verify、变异测试白名单、check:unwired 接线、zone 互斥、沙箱路径判定、线路池的判定，先加载本 skill。它给出唯一门禁的逐段机制（37 段）、会让门禁静默变红的行号锚点、win32 与 POSIX 分支差异，以及 README 与代码不一致的已知口径。
 ---
 
 # OxCommander 开发
@@ -13,8 +13,8 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 
 三条最容易踩的硬事实：
 
-1. **唯一验收入口是 `npm run verify`，只认退出码**（36 段串联，首段失败即中断）。
-   本机实测基线：EXIT 0 / 36 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-10-06 实测 1726 通过 + 9 跳过。
+1. **唯一验收入口是 `npm run verify`，只认退出码**（37 段串联，首段失败即中断）。
+   本机实测基线：EXIT 0 / 37 段 / 用例数**现查**（`npm test` 末尾那行 `Tests`；2026-10-06 实测 1726 通过 + 9 跳过。
    2026-09-25 同日曾报 1020/1033 —— 那是"测试文件互相 import"把一份夹具的用例注册了两次，`check:tests-collected` 现在会拦它）。
    **第 1 段是 `check:residue`**（强杀自愈）：工作区留着活体变异体时，它还原并 exit 2 —— 别跳过它，
    残留不会让门禁红在相关处，而是把 `npm test` 砸成 4.6GB 堆 OOM 后挂住。
@@ -49,12 +49,15 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
   （桌面端 mac 产物仍刻意不出，见 `references/gates.md` 的 CI 节与 electron-builder.yml 顶部论证）。
   Windows 本地全绿不代表 Linux 绿（POSIX 上"不可达分支""pid 复用误杀"两类缺陷都真出现过）。
   平台条件用例本仓库的写法是**用例内早退** `if (process.platform === "win32") return;`，不是 `skipIf`。
-- **碰 `verify` 链（加/删/换序步骤）必须同批改四处**：`README.md` 的门禁索引节、`CHANGELOG.md`
+- **碰 `verify` 链（加/删/换序步骤）必须同批改五处**：`README.md` 的门禁索引节、`CHANGELOG.md`
   （简洁记账；逐段数字与事故细节进 `docs/ENGINEERING-LOG.md` 的同名条目）、
-  `.qoder/skills/ox-commander-dev/SKILL.md`（本节）、`references/gates.md` 的逐段表与段数。
+  `.qoder/skills/ox-commander-dev/SKILL.md`（本节）、`references/gates.md` 的逐段表与段数，
+  以及 `CONTRIBUTING.md` 的「N 段串联」（2026-10-31 起也进判据：它此前停在「33」这个旧数
+  三个版本没人发现，因为它不在这张表里）。
   **原始口令只说"两处"，就是它导致 `smoke:target-range` 进了串却在 gates.md 里没有行**（2026-10-03 才发现）。
   只改一处等于没改：下一个人照旧会漏。**这条纪律 2026-10-06 起有判据了**：`check:doc-claims` 会把
-  README / gates.md / SKILL.md 里每一处「N 段」对 `package.json` 核，并拦住「进了串但清单没行」的段。
+  README / gates.md / SKILL.md / `CONTRIBUTING.md` 里每一处「N 段」对 `package.json` 核，
+  并拦住「进了串但清单没行」的段。
 - **构建产物门禁**：`smoke:artifact` 与读 `dist*/` 的各条 smoke（`smoke:receipt-verify` / `snapshot-secrets` /
   `gateway` / `coze` / `import`）**单独跑它们之前必须先 `npm run build && npm run build:headless`**。
   两个 IT 用固定端口（8941 / 8933 / 8934）+ 固定 sleep，**别并发跑、别在别的流水线占端口时跑**。
@@ -66,7 +69,7 @@ description: 在 OxCommander 仓库（多智能体编排平台：Electron 桌面
 | 迭代快档 | `npm run typecheck && npm run lint && npm run check:unwired && npx vitest run <改动的测试文件>` | ~20s |
 | 中档（脚本层/测试文件改动） | 再加 `npm run check:scripts && npm run check:scripts-wired && npm run check:packaged-paths && npm run check:masker && npm run check:tests-collected` | +11s（最后一步会 spawn 一次 vitest，约 6s） |
 | 改文档数字/动 verify 链 | `npm run check:doc-claims` | +5s（会 spawn 一次 `vitest list`，收集不执行用例） |
-| **验收** | `npm run verify` | 36 段（2026-10-15 逐段实测：干净树上整链 6–7 min，其中 `mutation:touched` 最重，历史上到过 ~20min） |
+| **验收** | `npm run verify` | 37 段（2026-10-15 逐段实测：干净树上整链 6–7 min，其中 `mutation:touched` 最重，历史上到过 ~20min） |
 | 变异 site 口径 | `npm run mutation:site`（limit 8）/ `npm run mutation:audit`（全位点，慢） | 分钟~16min |
 | 真实链路 | `OX_SMOKE=1 npx vitest run src/sensenova.smoke.test.ts`、`node scripts/smoke-fullchain.mjs` | 花钱、不进门禁 |
 
@@ -116,6 +119,6 @@ README/docs 与代码的口径差异**大部分已修**，当前仍存在的陷�
 
 ## Resources
 
-- [references/gates.md](references/gates.md) — 逐段机制（36 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
+- [references/gates.md](references/gates.md) — 逐段机制（37 段：每段扫哪些目录、判据、豁免表、失败语义）与门禁维护规则
 - [../../../docs/ARCHITECTURE.md](../../../docs/ARCHITECTURE.md) — 面向人的架构与不变量：一次 run 的数据流、
   分层红线、三类适配器契约、沙箱实际判据、平台分支、口径陷阱（`references/architecture.md` 现为指向它的指针）

@@ -1,7 +1,7 @@
-# `npm run verify` 的逐段机制（36 段）
+# `npm run verify` 的逐段机制（37 段）
 
-顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、36 段、
-3249 通过 + 8 跳过，合计 3257 条，分布在 109 个有可执行用例的文件（2026-10-28 现跑：链首到
+顺序即 `package.json` 的 `verify` 串（`&&` 串联，**首段失败即中断**）。本机实测基线：EXIT 0、37 段、
+3278 通过 + 8 跳过，合计 3286 条，分布在 109 个有可执行用例的文件（2026-11-02 现跑：链首到
 `mutation:baseline` 的 16 个静态段 + `npm test` + `build` + `build:headless` +
 `smoke:receipt-verify` + `smoke:receipt-regress` + `smoke:demo` 全 EXIT 0；
 整链 3–11 min，`mutation:touched` 重时历史上到过 ~20 min）；
@@ -44,7 +44,7 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 9 | `check:tests-collected` | `scripts/check-tests-collected.mjs` | 盘上有但 vitest 不收集的测试文件 → 红；**收集不到任何文件也红**；**测试文件互相 import 也红**（被 import 的那份会连带执行 ⇒ 同一批用例注册两次，`Tests N` 虚报。2026-09-25 实测虚高 28：1033 报成、真值 1005。共享夹具住 `src/__fakes__/`） |
 | 10 | `check:ipc-channels` | `scripts/check-ipc-channels.mjs`：preload 引用的通道 ⇔ `ipcMain.handle` 注册的通道 | 悬空通道（一调就 reject）→ 红；注册了但没暴露（**静默不可用**）→ 红；同通道 invoke/handle 两次 → 红；**任一侧解析为空也红**（解析失配当通过 = 永远绿的摆设）。反向注入 6/6 |
 | 11 | `check:mutation-targets` | `scripts/check-mutation-targets.mjs`：本次改动的生产文件必须已在 `TARGETS` 或显式豁免里 | 漏挂 → 红。漏挂的文件**不参与**变异统计，那个 PASS 对它没有含义（2026-10-05 三个漏挂文件入表后一次暴露 9 处存活位点）。反向注入 4/4 |
-| 12 | `check:doc-claims` | `scripts/check-doc-claims.mjs --selftest`：本表 / README / SKILL.md 里那几个数字对**实物**（`package.json` 的段数、`vitest list` 的收集数） | 段数任一处不等 → 红；链里某段在两处清单都没行 → 红；声明的用例数 ≠ 现跑收集数 → 红；**读不到声明也红**（措辞改了却不匹配 = 门禁空转）。36 例判据自测 |
+| 12 | `check:doc-claims` | `scripts/check-doc-claims.mjs --selftest`：本表 / README / SKILL.md / `CONTRIBUTING.md`（2026-10-31 补入）里那几个数字对**实物**（`package.json` 的段数、`vitest list` 的收集数） | 段数任一处不等 → 红；链里某段在两处清单都没行 → 红；声明的用例数 ≠ 现跑收集数 → 红；**读不到声明也红**（措辞改了却不匹配 = 门禁空转）。36 例判据自测 |
 | 13 | `mutation:baseline` | `scripts/site-baseline.mjs --selftest`：逐目标重算位点数并与 `SITE_BASELINE` 比（**不跑变异**，约 1s）；同批校验 **`EQUIVALENT_SITES` 每一条都还能匹配到真实位点** —— 逐条比 `(算子, 行号)`，复用门禁自己的 `findSites`，不另写"哪儿有位点" | 漂移 → 红。**等价条目失效 → 红**（豁免的是空气，而漂到新行的位点无人认领：2026-10-23 一天内因此红了两轮 CI）。为什么现在进链：漂移判定此前**只写在 site 口径里**，而 site 口径本机 verify 从不跑
  ⇒「全部 N 处位点已逐点验证」这句话在本机绿的时候，N 可能已经不是现在那个 N 了（2026-10-05 才把
  这个常量从注释里的承诺变成真判据，见 `mutation-check.mjs` 文件头）。
@@ -66,10 +66,11 @@ SKILL.md 里同时存在 20 / 19 / 23 三种声明）。从今起这件事由 `c
 | 20b | `smoke:receipt-regress` | `scripts/receipt-regress-smoke.mjs`：以**子进程**跑 `dist-headless/headless/receipt-regress-main.js`，10 例覆盖**一整叠**凭据的裁决语义 | 整批取**最严重**那一档（`tampered > contradicted > unsigned > not-replayed > verified`）；默认模式**绝不**偷偷复跑（标记文件不存在）；`--limit` 按**文件名时间戳**挑最新而不是 mtime；读不动的那份单独计数并让整批 exit 1；同一批换个顺序给，结论必须一样 |
 | 21 | `smoke:demo` | `scripts/demo-deliver.mjs`：**对外可复现样例**。临时目标项目 + 本进程起的假大脑（**随机端口**，经 `OX_LLM_BASE_URL_OLLAMA` 接入）+ 假 http-bridge 执行器 + 真 `dist-headless` 子进程 + 真 `node --test` 验证，然后把产出的交付凭据交给 `receipt-verify-main.js` 复核（默认模式 + `--replay`） | 零凭据、零网络、零固定端口。17 条断言任一不符 ⇒ 红。**非空转证据**：断言 `brainCalls >= 1`（大脑请求真打到了覆盖后的端点——若端点覆盖失效，`brainCalls=0` 且 PLANNING 阶段就 exit 1）；断言复核默认模式退出码为 **5**（not-replayed，即"指纹一致 ≠ 结论为真"）而 `--replay` 为 0。反向注入实测：去掉 env 里的端点覆盖后 14 条断言变红 |
 | 22-25 | `smoke:snapshot-secrets` / `smoke:gateway` / `smoke:coze` / `smoke:import` | 四个集成 IT | 读产物 + 占固定端口 |
-| 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**四个场景**（win32 39 项 / POSIX 41 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
+| 26 | `smoke:offline-e2e` | `offline-e2e-it.mjs`：本地假大脑（**随机端口** + `OX_LLM_BASE_URL_OLLAMA` 指向它，冒充 ollama）+ 假 http-bridge 智能体，经真 `dist-headless` 跑**五个场景**（win32 50 项 / POSIX 52 项断言，差的 2 项是 SIGTERM 投递） | 零配额；交付路径 / 越权回滚与重修范围 / 基线归因 / 中断-续跑 / **构建全绿但操作者验收判据不放行**（exit 2；重修上下文首行明写"判据不可动"；被拦的 run 也有凭据且 `outcome: "blocked"`；判据结果按 `origin: "operator"` 单列 1 真 1 假）；退出码 0、2 与被杀的 `null`。**不再与本机 Ollama 抢 11434**（2026-10-04 改） |
 | 27 | `smoke:target-range` | `llm-target-range-it.mjs`：本地故障注入端点矩阵（真 `node:http` + 生产 `FailoverLlmClient`），18 场景走真实 HTTP | 任一场景不符 ⇒ 红；无外网、零配额 |
 | 28 | `smoke:workbuddy-bridge` | `workbuddy-bridge-it.mjs`：**真进程 × 真 `dist-headless` 进程**（假大脑随机端口 + 测试扮演"人"读写 inbox/outbox），6 场景 36 项断言（实测 `^PASS` 计数：`check()` 30 条 + 每场景一条桥健康检查）| 零配额、随机端口。钉的是只有跨进程才成立的六件事：平台发的 TaskRequest 字段真桥认不认、completed/failed 终态映射（不能把人的拒绝当成功交付）、越权/受保护文件的**整批**拒且盘上零产物、outbox 坏 JSON 判失败而不卡死（现场改名 `.bad` 不留在待消费队列）、deadline 到点自己收口、三条退出路径都删任务书。与段 26 的分工：那里的桥是内联假件，一行真桥代码都没碰过 |
 | 29 | `smoke:cli-pkg` | `scripts/cli-pkg-smoke.mjs`：先 spawn `build-cli-pkg.mjs --json` 造出 `dist-cli/`（`npx oxcommander` 的发布形态），再对**包**断言 | bin 指向的文件不在盘上 / 五个入口（`headless-main` `serve-main` `mcp-main` `receipt-verify-main` `chat-main`）少一个 / 版本与根 `package.json` 漂移 / `files` 白名单漏目录 / 带了 devDependencies → 红。**demo 随包**：`files` 白名单含 `demo` 且 `demo/demo-deliver.mjs` 在盘上，并**真从包里跑一次 `ox demo --quiet`**（exit 0 + 签名行 + 无 FAIL）—— "包能装"与"包里的 dist-headless 真能交付"是两件事。**转发非空转**：非法 spec 必须拿到协议层的 `error` 事件且退出码 1（CLI 自己编一条错也算 exit 1，所以要认事件类型）；`receipt` 子命令必须拿到复核工具的报错（`读不了凭据`）而不是 run 的报错——证明子命令没被当成 run 转发。发布面：包内无 `.map`、无 `node_modules`。**它盯的是"表面正常"那一类坏法**：`--version` 照样打印、包照样能 `npm pack`，而少拷一个入口只有真从 `dist-cli` 里启动才现形 |
+| 29a | `smoke:cli-install` | `scripts/cli-install-smoke.mjs`：**真安装链**。spawn `build-cli-pkg.mjs` 造出 `dist-cli/` 后真跑 `npm pack --json` 出 tarball（落临时目录，dist-cli 保持干净），断言白名单罩住的 8 个文件真被打进包（`bin/ox.js`、五个协议入口、`demo/demo-deliver.mjs`、`package.json`）且无 `.map` / `node_modules`；再 `npm install -g --prefix <临时前缀> <tarball>`（发布包零 dependencies ⇒ 离线可装）；最后**从安装位**跑 `ox --version` / `ox receipt`（路由到复核入口）/ `ox demo --quiet`（完整一次真交付），子进程 PATH 指向临时前缀，shim 三件套（`ox.cmd`/`ox`/`ox.ps1`）存在性一并断言 | `files` 白名单漏登记 ⇒ tarball 缺文件 → 红 —— **这是白名单的第一个真消费者**（段 29 只能对本地目录静态推断；`npm pack` 静默不打包只有真装一遍才现形）；bin 字段坏 ⇒ shim 缺失或装完敲不动；版本漂移 / 子命令被当 run 转发 / 安装位 demo 跑不完 ⇒ 红。与段 29 的分工：29 盯**包自洽**（`dist-cli/` 目录本身），29a 盯**安装链**（npm 的三道真手续：pack 白名单 → shim 生成 → 安装位布局）。单跑前置同段 19（先 `build:headless`，builder 没料就不出包） |
 | 30 | `check:test-side-effects` | `scripts/check-test-side-effects.mjs`：扫描 `src/` `shared/` `electron/` `headless/` 下的测试文件，找**模块顶层**（缩进 0，导入即执行）的建目录 / 写文件 / spawn 类调用 | 两条都红：**A** 顶层建了东西而全文件**没有任何** `rmSync` —— 每次导入泄漏一份（`vitest list` 只导入不执行，`afterAll` 不会被调度）；**B** 顶层有副作用而文件带 `skipIf`/`skip` 门控 —— 门控跳过时 `afterAll` 不调度，清理不发生而副作用照常发生。**不禁止**「顶层建 + `afterAll` 清」这个既有写法（cli-agent / cli-agent-env / sandbox-path / mutation-residue 四处的残留实测已归零）。自检 6 例（含「注释里的调用不算」「缩进的调用不算」两个反向样本） |
 
 **`smoke:artifact` 与读 `dist*/` 的那几条 smoke（含 `smoke:receipt-verify`、`smoke:demo`）**：手工单跑任何一条之前先 `npm run build && npm run build:headless`，否则红的是环境不是代码。
@@ -300,9 +301,12 @@ async 门面（`text()` / `json()` / `chat()`）。
 （2026-09-28 序号漂、2026-10-03 `smoke:target-range` 进串没进行、2026-10-06 三个新段进了串而 README
 与本表停在「23」这个旧数）。所以这次不是再写一遍规则，而是给它加判据：
 
-- **段数**：真值 = `package.json` 里 `verify` 按 `&&` 切出的段数。README / 本表 / SKILL.md 里
-  **每一处**「N 段」声明都要等于它；「第 N 段」这种序数引用与「B-1 段」这种名字碎片被显式排除
-  （两个排除项都是实测踩出来的，不是想象中的）。
+- **段数**：真值 = `package.json` 里 `verify` 按 `&&` 切出的段数。README / 本表 / SKILL.md /
+  `CONTRIBUTING.md` 里**每一处**「N 段」声明都要等于它；「第 N 段」这种序数引用与「B-1 段」这种
+  名字碎片被显式排除（两个排除项都是实测踩出来的，不是想象中的）。
+  ⚠️ `CONTRIBUTING.md` 是 **2026-10-31** 发布收尾时补进这张表的：它当时停在「33」这个旧数，
+  而链早已是「36」—— **漂了三个版本没人发现**，正因为它不在这张表里；而它是最常被新贡献者
+  读到的那一份（PR 模板也指向它）。这条补齐本身就是「纪律没有判据就会漂」的第四次复发。
 - **逐段有名**：链里每一段的 npm script 名必须在 README 与本表都被提到 —— 抓的就是「进了串却没写行」。
   段名按 **token 边界**匹配：`build` 是 `build:headless` 的前缀，纯 `includes` 会让只写了后者的文档
   被判成两段都有行（与 `check-script-wiring.mjs` 2026-10-05 那次改严同族）。
@@ -318,7 +322,7 @@ async 门面（`text()` / `json()` / `chat()`）。
 那一轮，三条写死旧值的用例锚点同时 0 命中，报的是「构造没成立」而不是「判据失效」）。派生失败时脚本 exit 1，
 而不是把没跑成的用例算进通过数。
 
-**判据体检怎么复跑**：`node scripts/doc-claims-injection.mjs` —— 正向对照 + 9 条注入（段数漂 / 历史数字紧贴「段」字 / 用例数漂 / 算术漂 / 清单漏行 / 措辞漂到读不到 / 串里重复段 / 在册目标数漂 / 基线位点数漂），逐条断言会红并在 `finally` 里按内存原文还原，最后逐文件哈希核对。它**刻意不进 verify**：它会临时改写 README / gates.md / package.json，接进门禁链等于让门禁自己制造脏文档现场；被强杀后留下的现场由它的正向对照抓（不注入必须绿）。
+**判据体检怎么复跑**：`node scripts/doc-claims-injection.mjs` —— 正向对照 + 10 条注入（段数漂 / 历史数字紧贴「段」字 / **段数漂在 `CONTRIBUTING.md`**（2026-10-31 补，证明第四份文档真的归这张表管）/ 用例数漂 / 算术漂 / 清单漏行 / 措辞漂到读不到 / 串里重复段 / 在册目标数漂 / 基线位点数漂），逐条断言会红并在 `finally` 里按内存原文还原，最后逐文件哈希核对。它**刻意不进 verify**：它会临时改写 README / gates.md / `CONTRIBUTING.md` / package.json，接进门禁链等于让门禁自己制造脏文档现场；被强杀后留下的现场由它的正向对照抓（不注入必须绿）。
 
 **它管不到的**：只查数字与段名，不评价某一段的判据好不好；`CHANGELOG.md` 与 `docs/*.md` 里的历史数字
 **刻意不查** —— 那是 dated 记录，改它们等于伪造历史。`--list` 是维护视图（它自己不判红，否则没法用来诊断）。
@@ -337,7 +341,7 @@ async 门面（`text()` / `json()` / `chat()`）。
   这个 job 证明的是 `npx oxcommander` 这条**纯 Node 分发通路**在 mac 上真的通。
   零凭据零网络零固定端口，失败即该通路坏，与 verify 两格互为补充而非重复。
 - 两个 job 的 checkout 都是 `fetch-depth: 0`。**这不是可选的**：`actions/checkout@v4` 默认 depth=1，
-  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 36 段的链里）定不出基线 —— 2026-09-25 就是这样让
+  那种仓库没有 `HEAD~1`，`mutation:touched`（按现在的 `package.json` 排在 `mutation:baseline` 之后、共 37 段的链里）定不出基线 —— 2026-09-25 就是这样让
   两个 verify job 从 `2afd002`（引入这一步的那笔）起连红了几笔，而本机（全历史）一直绿。
   当场可复跑的复现（10 秒，造出"干净树 + 无父提交"的 CI 原形）：
 

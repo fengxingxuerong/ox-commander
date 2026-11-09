@@ -111,8 +111,9 @@ SSH tunnel. Set `OX_SERVE_TOKEN` to opt into Bearer checking.
 
 ## Quality gate
 
-`npm run verify` is the single acceptance entry — a chain of static checks, ~2.8k tests, a mutation
-round, two builds, and a set of integration smokes including an offline end-to-end that spends no quota.
+`npm run verify` is the single acceptance entry — a chain of static checks, the full test suite,
+a mutation round, two builds, and a set of integration smokes including an offline end-to-end that
+spends no quota.
 The strongest claim is the site-granularity mutation audit (run in CI on every push): **every** decision
 site is mutated individually and must be killed. Aggregate mutation scores ("100% killed") are weaker
 and are reported separately on purpose — they can hide uncovered sites.

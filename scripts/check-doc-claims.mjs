@@ -13,7 +13,8 @@
  * 而且漂的方向特别坏：数字看起来比实际强，读文档的人以为门禁比代码严。
  *
  * 判定（三条，全部以命令输出为真值，不以人抄的数为真值）：
- *   1. 段数：`package.json` 里 verify 切出的段数，必须等于三份文档里**每一处**段数声明
+ *   1. 段数：`package.json` 里 verify 切出的段数，必须等于 `SEGMENT_DOCS` 里每一份文档的
+ *      **每一处**段数声明（现为 4 份：README / gates.md / SKILL.md / CONTRIBUTING.md）
  *      （排除「第 N 段」这种序数引用与「B-1 段」这种名字碎片）
  *   2. 逐段有名：verify 链里每一段的 npm script 名，必须在 README 与 gates.md 里都被提到
  *      —— 这条抓的是「进了串但清单漏行」，比第 1 条更常犯
@@ -50,11 +51,18 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-/** 声明段数的文档。SKILL.md 也在内：它是给 agent 的工作手册，同样会漂。 */
+/**
+ * 声明段数的文档。SKILL.md 也在内：它是给 agent 的工作手册，同样会漂。
+ *
+ * `CONTRIBUTING.md` 是 2026-10-31 补进来的（发布收尾实测）：它写着「33 段串联」，
+ * 而链早已是 36 段 —— 漂了三个版本没人发现，正因为它不在这张表里。它是最常被
+ * 新贡献者读的那一份（PR 模板也指向它），漂在这里的代价比漂在 gates.md 还高。
+ */
 const SEGMENT_DOCS = [
   "README.md",
   ".qoder/skills/ox-commander-dev/references/gates.md",
   ".qoder/skills/ox-commander-dev/SKILL.md",
+  "CONTRIBUTING.md",
 ];
 
 /** 承载逐段清单的文档 —— 每一段都得在这里有行。 */
@@ -301,7 +309,7 @@ if (selfTest) {
   );
 }
 
-// ---- ① 段数：package.json 是真值，三份文档的每一处声明都要相等 ---------------
+// ---- ① 段数：package.json 是真值，SEGMENT_DOCS 每一份的每一处声明都要相等 ---------
 const chain = verifyChain();
 const names = chain.map(segmentName);
 const dupes = names.filter((n, i) => names.indexOf(n) !== i);
@@ -416,7 +424,7 @@ for (const rel of mutDocs) {
   mutClaims.push({ rel, targets: t, sites: s });
 }
 
-// 三份文档里**任何一处**这类数字都要等于实物（和段数同一口径）：
+// `SEGMENT_DOCS` 里**任何一处**这类数字都要等于实物（和段数同一口径）：
 // 否则「历史数字」与「当前声明」在语法上分不清，而漂的总是前者。
 const mutEverywhere = [];
 for (const rel of SEGMENT_DOCS) {
@@ -523,7 +531,7 @@ if (problems.length > 0) {
 }
 
 console.log(
-  `PASS: 门禁数字与实物一致 —— ${chain.length} 段在三份文档的每一处声明都相等，` +
+  `PASS: 门禁数字与实物一致 —— ${chain.length} 段在 ${SEGMENT_DOCS.length} 份文档的每一处声明都相等，` +
     `每段在 README 与 gates.md 都被提到，用例数 ${live.tests}（${live.files} 个文件有可执行用例），` +
     `变异规模 ${scale.targets} 个目标 / 基线 ${scale.baselineSites} 处位点`,
 );
