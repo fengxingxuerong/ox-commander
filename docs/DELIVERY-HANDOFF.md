@@ -77,6 +77,10 @@ npm run mutation:audit         # 完整 site 口径逐位点审计（本机不�
 
 - `vite.config.mts` 固定 `test.maxWorkers: 4`：`os.cpus()` 在本机虚报 20 核，默认 19 worker
   会打穿 Windows 提交限额，症状伪装成代码回归。
+- **全量单测在本机偶发假红**：同一份代码连跑 3 次 `npm test`（4 并发）为 1 红 2 绿，
+  三次红的用例各不相同（真 spawn / 真 git / 本地 HTTP），对应文件单跑均绿；
+  `--maxWorkers=2` 连跑 2 次全绿。这是本机沙箱的资源调度问题，不是代码缺陷。
+  本机要稳定复跑：`VITEST_MAX_WORKERS=2 npm run verify`（环境变量覆盖配置，不改仓库）。
 - 宿主 safe-delete bulk guard（`CODEBUDDY_SAFE_DELETE_BULK_THRESHOLD=50`，按 turn 累计）
   会拦 vite 的 `emptyOutDir`，表现为 `build` 段假红。处置：先把 `dist/` / `dist-cli/`
   `mv` 出仓库（重命名不算删除），或只对本次命令提高阈值；**不改系统配置、不禁用 guard**。

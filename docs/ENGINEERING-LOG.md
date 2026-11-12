@@ -51,6 +51,18 @@
 另一次 `check:scripts` 曾单独被 SIGTERM，原样复跑即 `54/54 通过` —— 宿主偶发，
 不是判据失配。
 
+**验收链的偶发假红（量化，别读成代码回归）**：同一份代码连跑三次全量 `npm test`
+（配置 `maxWorkers: 4`），**1 红 2 绿**，且每次红的用例都不同：
+① `verifier.test.ts` 的 1MB stdin 真 spawn（断言 `exitCode === 0` 收到 `null`）；
+② `git-export.test.ts` 的真 git 导出（20 s vitest 超时）；
+③ `headless-serve.test.ts` 的本地 HTTP POST（`fetch failed`）。
+三个文件各自单跑全绿；`npx vitest run --maxWorkers=2` 连跑两次 109/109 全绿。
+判据：本机 Windows 沙箱在连续高负载下的真进程 / 端口调度问题，不是产品缺陷 ——
+**不改仓库配置**（CI runner 不受影响，0.4.1 已把默认从 19 压到 4）；
+本机要稳定复跑用 `VITEST_MAX_WORKERS=2 npm run verify`（vitest 4 的
+`dist/chunks/coverage.*.js` 实测有 `if (process.env.VITEST_MAX_WORKERS) resolved.maxWorkers = ...`，
+环境变量优先级高于 `vite.config.mts`）。
+
 **边界**：本轮收尾零生产 TS 改动；只动文档、`.gitattributes`、`package.json` 一个字段、
 `electron-builder.yml` 一行配置与一处测试断言。新增 [DELIVERY-HANDOFF.md](DELIVERY-HANDOFF.md)
 记「交了什么 / 怎么自己验 / 还差什么」，CHANGELOG 把 `[Unreleased]` 三条并入 0.4.1
