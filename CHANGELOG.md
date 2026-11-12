@@ -10,6 +10,15 @@
 
 ## [Unreleased]
 
+（暂无未发布改动；2026-11-12 的三处交付收尾已并入下面的 0.4.1，随同一个 tag 发布。）
+
+## [0.4.1] — 2026-11-09
+
+> 主题：**陌生人视角收尾** —— 0.4.0 之后不再加功能，只补"拿到包的人真的能用吗"。
+> 三批测试补强零生产代码改动；另有两处门禁修正（并发度 + 一处版本字面量）。
+> 2026-11-12 定版前又补进三处交付收尾（EOL / 测试稳定性 / Linux 打包配置），
+> 同样零功能新增，故不另开版本号 —— `v0.4.1` tag 尚未打，这些改动随它一起发。
+
 ### 修复（killTree 升级用例的固定 30ms 睡眠在全量并发下竞态 · 2026-11-12）
 - `src/cli-agent.test.ts` 的「子进程忽略 SIGTERM → 升级 SIGKILL」用例原来睡 30ms 就断言。win32 分支先 spawn 真 `taskkill`（假 pid → 非零退出才走 fallback），SIGTERM/SIGKILL 的落点绑在 taskkill 的真实 spawn/exit 延迟上 —— 全量并发跑实测抓到 `[SIGTERM] only`（该文件单跑 28/28 全绿，不是产品缺陷）。改 `vi.waitFor` 条件等待（timeout 4000，与 kill-tree.test.ts 的同型断言同一约定），契约不变：先 SIGTERM 后 SIGKILL、顺序断言保留。用例数、verify 段数、变异规模全不变。
 
@@ -18,11 +27,6 @@
 
 ### 变更（补 .gitattributes 钉死 EOL，Windows 机器上的纯行尾假改动根治 · 2026-11-12）
 - 此前仓库没有 `.gitattributes`，而 Git for Windows 默认系统级 `core.autocrlf=true`：检出 CRLF、变异恢复/编辑器按各自读到的 EOL 写回，工作区长期 CRLF/LF 混合，`git status` 会报出**纯行尾的假改动**（本轮实测一轮 verify 后 48 个文件被标 modified，`--ignore-cr-at-eol` 证实零内容漂移）。现在 `* text=auto` + 源码/文档逐类 `eol=lf`、`*.cmd/*.bat eol=crlf`、显式 binary 排除。仓库 index 本来就是全 LF，本文件只把这件事从「碰运气」变成「有判据」。
-
-## [0.4.1] — 2026-11-09
-
-> 主题：**陌生人视角收尾** —— 0.4.0 之后不再加功能，只补"拿到包的人真的能用吗"。
-> 三批测试补强零生产代码改动；另有两处门禁修正（并发度 + 一处版本字面量）。
 
 ### 修复（全链在本机跑不动：vitest 按虚高核数开 19 个 worker · 2026-11-09）
 

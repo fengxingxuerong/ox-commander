@@ -491,6 +491,8 @@ node scripts/probe-endpoints.cjs                        # 端点/模型探测（
   三处 zone 判据为什么故意不同、三条承重不变量、平台分支、当前的口径陷阱
 - [docs/ENGINEERING-LOG.md](docs/ENGINEERING-LOG.md) — 对内工程日志：门禁逐段数字、变异位点账、
   事故勘查与负结果全程（CHANGELOG 的历史档案版）
+- [docs/DELIVERY-HANDOFF.md](docs/DELIVERY-HANDOFF.md) — **交付收尾清单**（0.4.1 快照）：
+  版本与仓库状态、交付物、复跑命令、已知缺口、发布前置与本机环境注意
 - [.qoder/skills/ox-commander-dev/SKILL.md](.qoder/skills/ox-commander-dev/SKILL.md) — **给 agent 的仓库工作手册**：
   门禁逐条机制、会让门禁静默变红的行号锚点与豁免表规则、分层与放置约定、win32/POSIX 分支差异
   （`references/gates.md` 是它的门禁详表；原 `references/architecture.md` 已提升为上面的 docs/ARCHITECTURE.md）
