@@ -10,7 +10,7 @@
 | 项 | 值 | 怎么核对 |
 | --- | --- | --- |
 | 版本 | `0.4.1`（`package.json` / `dist-cli/package.json` / `headless/mcp.ts` 的 `serverInfo.version` 三处一致，后者由 `src/mcp.test.ts` 钉住） | `node -p "require('./package.json').version"` |
-| 分支 | `main`，本地领先 `origin/main` **4** 个提交 | `git rev-list --count origin/main..HEAD` |
+| 分支 | `main`，本地提交待推（数量随收尾/推送变化，以命令为准） | `git rev-list --count origin/main..HEAD` |
 | 最新 tag / Release | `v0.4.0`（2026-10-28，带 Windows + Linux 安装包）；**`v0.4.1` 未打** | `git tag -l`、GitHub `/releases` |
 | npm 包 `oxcommander` | **404 —— 从未发布** | `curl -o /dev/null -w '%{http_code}' https://registry.npmjs.org/oxcommander` |
 | CI 最近一次成功 verify | `bf5d09b`（run #201），即未推的提交之前 | GitHub `/actions/runs` |
