@@ -17,6 +17,116 @@
 
 ---
 
+## [0.4.1 · 一轮 verify 弄出 48 个纯 EOL 假改动：补 .gitattributes 根治 · 2026-11-12]
+
+**起因**：全链 verify（EXIT 0）之后 `git status` 冒出 53 个改动文件 —— 其中 48 个
+生产文件本轮**没人动过**。`git diff --stat` 全是 ±行数完全相等的整文件改写
+（scheduler 2394、store 2452、tool-runner 1560……），第一反应是变异恢复路径把源码写坏了。
+
+**勘查链**（每一步都实测，不猜）：
+
+1. `git diff --ignore-cr-at-eol --stat` → 只剩本批 5 个真改动。48 个文件的差异**全部**
+   是行尾 CR —— 不是内容损坏。
+2. 字节级对照（cmd 重定向绕开 PowerShell 管道的重编码 —— `git show | pwsh 管道` 会把
+   UTF-8 按 GBK 解码再编码，第一次量出 5410 字节是**管子撒谎**）：
+   HEAD blob `policy-dir.ts` = 3360 B / 0 CR；工作区 = 3443 B / 83 CR，差值恰 = 每行 1 CR。
+3. Node fs 实测写 `\n` 落盘 0 CR —— `fs.writeFileSync` 从不转行尾；变异机
+   `mutation-check.mjs` 全链路是 utf8 字符串读写（2131/2170/2675 行），**保真往返**。
+   变异恢复无辜。
+4. 真根因：`core.autocrlf=true` 在**系统级**（Git for Windows 默认，`git config --system`
+   才看得见，merged 查询一度漏判），而仓库**没有 `.gitattributes`**。于是：
+   检出 → CRLF（110 个文件）；变异恢复/编辑器按读到的 EOL 原样写回（82 个文件 LF）；
+   git 在部分文件上做归一化、在另一些上不 —— `git status` 就会报出纯 EOL 的假改动，
+   且哪些文件报、哪些不报取决于工具历史，**每台机器不一样**。
+   证据：`git ls-files --eol` = 110 `i/lf w/crlf` + 82 `i/lf w/lf`，index 全 LF；
+   `electron/ipc.ts` 工作区 45 个 CR 却算 clean，同态的目标文件却算 modified。
+5. `git update-index --really-refresh` 对 48 个文件报 needs update —— 不是 stat 缓存，
+   是归一化在这些路径上确实不生效。
+
+**处置**：新增 `.gitattributes`：`* text=auto` + 源码/文档逐类 `eol=lf` +
+`*.cmd/*.bat eol=crlf` + 显式 binary 排除。文件一落盘，48 个假改动**当场归零**
+（attributes 生效于比较，无需还原任何文件）；index 本来就是全 LF，无需 renormalize 提交。
+工作区既有 CRLF 由 git 在下次触碰时收敛（有警告提示），不做任何 `reset --hard` 类
+危险操作。
+
+**边界**：`.gitattributes` 不进 verify 链的任何判据（doc-claims 四文档、TARGETS、
+SITE_BASELINE 都不读它）；CI（Linux、无 autocrlf）行为不变。仓库 HEAD blob 字节
+未被动过 —— `--ignore-cr-at-eol` 与字节计数双证。
+
+**教训**：`git config core.autocrlf` 返回空 ≠ 没设 —— 系统级配置要 `--system` 单查；
+PowerShell 管道量字节会撒谎，二进制事实只能 `cmd /c "... > file"` 后 `ReadAllBytes`。
+
+---
+
+## [0.4.1 · killTree 升级用例 30ms 固定睡眠在并发下竞态 · 2026-11-12]
+
+**起因**：交付收尾跑 `npm run verify`，两轮红、两段症状彼此不像：
+
+- 第一轮红在**第 1 段** `check:residue`：变异备份台账损坏（「JSON 损坏或备份文件缺失」），
+  脚本清掉台账但要求人工自查工作区。`git diff` 为空（无残留变异体），
+  `scripts/.mutation-pending.stale-20261017-pidreuse/` 里 20 个文件全是 `.orig/.orig.json`
+  —— 2026-10-17 一次死 run 留下的原件副本，原件都在盘上（diff 为空），备份无保留价值。
+  删除后 `check:residue` 单独复跑 EXIT 0。
+- 第二轮全链推进到 `npm test`，**唯一一条红**：
+  `cli-agent.test.ts > killTree > escalates to SIGKILL when the child ignores SIGTERM`，
+  `expected [ 'SIGTERM' ] to include 'SIGKILL'`。
+
+**诊断链**：
+
+1. 读 `electron/sandbox/kill-tree.ts` —— win32 分支先 spawn **真** `taskkill /F /T /PID 4242`
+   （假 pid 必然非零退出 → `fallback()` → `portableKill`），另有 graceMs 后的 verify
+   定时器兜底（unref）；`portableKill` 里 SIGTERM 之后再 `setTimeout(graceMs=5)` 才 SIGKILL。
+   即：SIGTERM/SIGKILL 的落点绑在 **taskkill 的真实 spawn/exit 延迟**上。
+2. 该文件单跑 `npx vitest run src/cli-agent.test.ts` → 28/28 全绿（3.5s）。
+   不是确定性缺陷，是「断言窗口 vs 真 taskkill 延迟」的竞态：全量并发下
+   taskkill 走完 spawn+exit 超过 30ms，断言落在 SIGTERM 已到、SIGKILL（其 5ms 后）未到之间。
+3. 仓库已有同型断言的成熟约定：`kill-tree.test.ts:251/267` 用
+   `vi.waitFor(..., { timeout: 4000 })` 等条件成立而不是睡固定毫秒。
+
+**处置**：用例改 `vi.waitFor(() => expect(signals).toContain("SIGKILL"), { timeout: 4000 })`，
+保留 `signals[0]` 为 SIGTERM 与 SIGKILL 晚于 SIGTERM 的顺序断言；import 补 `vi`。
+契约一字未松：先 SIGTERM、后 SIGKILL、顺序不变，只是把「真进程延迟」从断言对象里摘掉。
+
+**边界**：只动测试文件一处；用例数 3278 不变、TARGETS / SITE_BASELINE 不动、
+verify 37 段不动。生产代码零改动 —— win32 分支的「taskkill + verify 兜底」设计本身是对的，
+红的是测法不是产品。
+
+---
+
+## [0.4.1 · Linux 窗口关联：desktopName + syncDesktopName · 2026-11-12]
+
+**起因**：electron-builder.yml 尾部 2026-10-14 挂账：未设 desktopName 时，桌面环境
+无法把运行中的窗口关联到 .desktop 条目（任务栏图标通用、窗口分组错乱）。当时结论是
+「要修得往 package.json 加 desktopName 再配 syncDesktopName: true」，留到下轮 —— 本轮交付收尾清掉。
+
+**证据链**（都在本仓 `node_modules`，版本即随包的 26.15.3 一系）：
+
+1. `app-builder-lib/scheme.json` 的 `LinuxConfiguration.syncDesktopName`：
+   「the installed .desktop filename is derived from desktopName in package.json
+   (minus the .desktop suffix) so that it matches StartupWMClass and Electron's app_id.
+   Falls back to executableName when desktopName is absent.」
+2. `LinuxTargetHelper.js` `getDesktopFileName`（203-219）：syncDesktopName 为真时
+   .desktop 文件名取 `metadata.desktopName` 去后缀，带路径穿越防护；否则 fallback executableName。
+3. 同文件 `computeDesktopEntry`（250-274）：StartupWMClass 同词根（fallback productName），
+   无 desktopName 时**主动 warn** 提示的正是这套修法 —— 挂账修法与上游引导一致。
+4. Electron 侧 `init.ts`（builder 注释所引 commit）：`app.setDesktopName(packageJson.desktopName)`，
+   缺省退 `${app.name}.desktop`。
+
+**选值**：`"desktopName": "oxcommander.desktop"`，全小写是刻意的 —— 无论 Electron 的
+Linux app_id 对 desktopName 做不做小写化，.desktop 文件名 / StartupWMClass / app_id
+三方都收敛到同一个词根，不赌大小写行为。
+
+**边界**：本机只打 win（无 wine/Docker），Linux 打包真跑在 release CI ——
+win 打包会先过 electron-builder 的全量 config schema 校验，字段名/块位写错当场红；
+Linux 运行时行为（窗口关联真的成立）由 CI 侧产物验证。另核过：
+CLI 包 manifest 是手工白名单（`build-cli-pkg.mjs` 的 `writePackage`），根 package.json
+新字段不流入 npm 包；`check:doc-claims` 的四份判据文档不含 package.json / yml，无连带。
+
+**规模**：package.json +1 字段；yml +1 行、注释块改写为已修记录。生产 TS 零改动，
+TARGETS / SITE_BASELINE / 用例数全不动。
+
+---
+
 ## [0.4.1 · 全链在本机跑不动：vitest 并发按虚高核数开 19 个 worker · 2026-11-09]
 
 **起因**：0.4.1 定版后跑 `npm run verify` 做收尾判据，连红两轮，症状彼此不像：

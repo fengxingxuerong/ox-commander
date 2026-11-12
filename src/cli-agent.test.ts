@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it, vi } from "vitest";
 import { CliAgentAdapter, killTree } from "../electron/agents/cli-agent";
 import { createDefaultCommandPolicy } from "../electron/sandbox/command-policy";
 import { parseDecompose } from "../shared/schema";
@@ -331,9 +331,13 @@ describe("killTree", () => {
       },
     };
     killTree(child as never, { graceMs: 5 });
-    await new Promise((r) => setTimeout(r, 30));
+    // 2026-11-12：win32 分支先 spawn 真 taskkill（假 pid → 非零退出才走 fallback），
+    // SIGTERM/SIGKILL 的落点绑在 taskkill 的真实 spawn/exit 延迟上 —— 全量并发跑时
+    // 固定 30ms 睡眠实测会错过升级（抓到 [SIGTERM] only）。改条件等待，契约不变：
+    // 先 SIGTERM 后 SIGKILL；与 kill-tree.test.ts 的同型断言同一约定（timeout: 4000）。
+    await vi.waitFor(() => expect(signals).toContain("SIGKILL"), { timeout: 4000 });
     expect(signals[0]).toBe("SIGTERM");
-    expect(signals).toContain("SIGKILL");
+    expect(signals.indexOf("SIGKILL")).toBeGreaterThan(signals.indexOf("SIGTERM"));
   });
 });
 

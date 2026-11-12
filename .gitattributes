@@ -1,0 +1,36 @@
+# 2026-11-12：钉死 EOL。背景：系统级 core.autocrlf=true（Git for Windows 默认）
+# 且仓库此前无本文件 → 检出 CRLF、变异恢复/编辑工具按读到的 EOL 写回，
+# 工作区长期处于 CRLF/LF 混合态，status/diff 会报出纯 EOL 的假改动。
+# 仓库 index 本来就是全 LF（git ls-files --eol 实测 192/192 i/lf），
+# 本文件只把这件事从「碰运气」变成「有判据」。
+* text=auto
+
+# 源码与文本一律 LF（检出、写回、add 三处都钉死，覆盖 autocrlf=true 的机器）
+*.ts   text eol=lf
+*.tsx  text eol=lf
+*.mts  text eol=lf
+*.mjs  text eol=lf
+*.cjs  text eol=lf
+*.js   text eol=lf
+*.json text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.html text eol=lf
+*.css  text eol=lf
+*.svg  text eol=lf
+*.gitattributes text eol=lf
+.gitignore      text eol=lf
+
+# Windows 批处理必须 CRLF
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 二进制明确排除，不让 text=auto 碰
+*.png  binary
+*.gif  binary
+*.jpg  binary
+*.ico  binary
+*.asar binary
+*.exe  binary
+*.dll  binary

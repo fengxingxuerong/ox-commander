@@ -62,8 +62,12 @@ linux:
   # 这里用 linux.maintainer 显式给出，就不必为了打包去改 package.json 的 author 语义。
   # 邮箱用 GitHub 的 noreply 地址：公开可查、不承载真实联系方式。
   maintainer: "fengxingxuerong <fengxingxuerong@users.noreply.github.com>"
-  # ⚠️ 仍未处理的另一条警告：未设 desktopName 时，桌面环境无法把运行中的窗口关联到
-  # .desktop 条目（任务栏图标显示为通用图标、窗口分组错乱）。
-  # 它不是 build config 的字段（scheme.json 里只有 linux.syncDesktopName，且那个读的是
-  # **package.json 的 desktopName**），要修得往 package.json 加 `desktopName` 再配
-  # `syncDesktopName: true`。非阻塞，留到下轮。
+  # 2026-11-12 已修上一条警告：desktopName 进了 package.json（`oxcommander.desktop`，
+  # 全小写是刻意选的 —— 无论 Electron 的 Linux app_id 对它做不做小写化，
+  # .desktop 文件名 / StartupWMClass / app_id 三方都收敛到同一个词根）。
+  # 这里的 syncDesktopName: true 让安装出的 .desktop 文件名与 StartupWMClass 同步到它
+  # （依据：app-builder-lib scheme.json 的 LinuxConfiguration.syncDesktopName 说明与
+  # LinuxTargetHelper.js 的 getDesktopFileName / computeDesktopEntry 实现）。
+  # 边界：本机只打 win（无 wine/Docker），Linux 打包真跑在 release CI ——
+  # 配置 schema 在 win 打包时全量校验，运行时行为由 CI 侧验证。
+  syncDesktopName: true
